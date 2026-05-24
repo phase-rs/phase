@@ -31,6 +31,7 @@ import {
   type MultiplayerDraftPhase,
 } from "../stores/multiplayerDraftStore";
 import { useGameStore, saveActiveGame } from "../stores/gameStore";
+import { useCardDataStore } from "../stores/cardDataStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
 
 type ConnectionMode = "server" | "p2p";
@@ -62,6 +63,12 @@ export function MultiplayerPage() {
   useAudioContext("lobby");
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Warm the shared card DB so host-setup deck legality checks are instant.
+  // Idempotent; closes the deep-link hole when opening /multiplayer directly.
+  useEffect(() => {
+    void useCardDataStore.getState().warm();
+  }, []);
 
   const startHosting = useMultiplayerStore((s) => s.startHosting);
   const startP2PHostingSession = useMultiplayerStore((s) => s.startP2PHostingSession);
@@ -703,16 +710,24 @@ export function MultiplayerPage() {
               </div>
               <div className="truncate text-sm font-medium text-white">{activeDeckName}</div>
             </div>
-            <button
-              onClick={() => {
-                setDeckSelectReturn(view as MultiplayerView);
-                setPendingAction(null);
-                setView("deck-select");
-              }}
-              className="shrink-0 text-xs text-slate-400 transition-colors hover:text-white"
-            >
-              Change
-            </button>
+            <div className="flex shrink-0 items-center gap-3">
+              <button
+                onClick={() => handleEditDeck(activeDeckName)}
+                className="text-xs text-slate-400 transition-colors hover:text-white"
+              >
+                Edit
+              </button>
+              <button
+                onClick={() => {
+                  setDeckSelectReturn(view as MultiplayerView);
+                  setPendingAction(null);
+                  setView("deck-select");
+                }}
+                className="text-xs text-slate-400 transition-colors hover:text-white"
+              >
+                Change
+              </button>
+            </div>
           </div>
         )}
 

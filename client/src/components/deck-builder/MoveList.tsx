@@ -28,6 +28,11 @@ export interface MoveListProps {
   /** Forwarded to each row. See `CardEntryRowProps.onSetAsCommander`. */
   onSetAsCommander?: (name: string) => void;
   isCommanderEligible?: (name: string) => boolean;
+  /** Forwarded to each row. Defaults to "compact" so the BO3 sideboard modal
+   *  (which renders MoveList directly) is unchanged. See `CardEntryRowProps`. */
+  density?: "comfortable" | "compact";
+  /** Forwarded to each row's alternate-art badge. See `CardEntryRowProps`. */
+  onOpenArtPicker?: (name: string) => void;
 }
 
 export function MoveList({
@@ -44,6 +49,8 @@ export function MoveList({
   onChooseArt,
   onSetAsCommander,
   isCommanderEligible,
+  density = "compact",
+  onOpenArtPicker,
 }: MoveListProps) {
   if (entries.length === 0 && !alwaysShow) return null;
   const count = totalCards(entries);
@@ -79,6 +86,8 @@ export function MoveList({
             onChooseArt={onChooseArt}
             onSetAsCommander={onSetAsCommander}
             isCommanderEligible={isCommanderEligible}
+            density={density}
+            onOpenArtPicker={onOpenArtPicker}
           />
         ))
       )}

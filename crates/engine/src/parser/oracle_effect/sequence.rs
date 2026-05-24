@@ -843,6 +843,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("conjure ")),
         value((), tag("target ")),
         value((), tag("transform ")),
+        value((), tag("unattach ")),
         value((), tag("untap ")),
         value((), tag("you may ")),
         value((), tag("you ")),
@@ -1083,9 +1084,9 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
 /// requirement> ... if able". Returns `Some(prepend)` — the subject text to
 /// seed conjunct 2 with — only when BOTH halves match:
 ///
-/// - `before_and` is a gain-keyword clause (contains the gain verb), and
+/// - `before_and` is a continuous clause (contains a gain/get predicate), and
 /// - `remainder_trimmed` is a recognized standalone combat requirement
-///   ("attack(s) ... if able" / "must be blocked ...").
+///   ("attack(s) ... if able" / "must be blocked ..." / "can block ...").
 ///
 /// The prepend keeps conjunct 2's `affected` correct: for a *targeted* subject
 /// ("target creature ...") it returns the anaphor `"it "` so the chunk loop's
@@ -1098,11 +1099,13 @@ fn combat_requirement_conjunct_prepend(
     remainder_trimmed: &str,
 ) -> Option<String> {
     let remainder_lower = remainder_trimmed.to_ascii_lowercase();
-    if !super::imperative::is_standalone_combat_requirement(&remainder_lower) {
+    if !super::imperative::is_standalone_combat_requirement(&remainder_lower)
+        && !super::subject::is_can_block_extra_predicate(&remainder_lower)
+    {
         return None;
     }
     let before_lower = before_and.to_ascii_lowercase();
-    // Conjunct 1 must be a gain-keyword clause: locate the gain verb.
+    // Conjunct 1 must be a continuous predicate: locate the gain/get verb.
     let subject_text = take_until::<_, _, OracleError<'_>>(" gain")
         .parse(before_lower.as_str())
         .ok()
@@ -1114,6 +1117,20 @@ fn combat_requirement_conjunct_prepend(
             // Map the verb position back onto the original-case slice.
             let subject = before_and[..before_verb.len()].trim();
             (!subject.is_empty()).then_some(subject)
+        })
+        .or_else(|| {
+            take_until::<_, _, OracleError<'_>>(" get")
+                .parse(before_lower.as_str())
+                .ok()
+                .and_then(|(after, before_verb)| {
+                    // Confirm a real " get " / " gets " verb boundary.
+                    alt((tag::<_, _, OracleError<'_>>(" gets "), tag(" get ")))
+                        .parse(after)
+                        .ok()?;
+                    // Map the verb position back onto the original-case slice.
+                    let subject = before_and[..before_verb.len()].trim();
+                    (!subject.is_empty()).then_some(subject)
+                })
         })?;
     // Targeted subject → anaphor; non-targeted set subject → literal subject.
     let subject_lower = subject_text.to_ascii_lowercase();
@@ -2253,6 +2270,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GainControl { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }

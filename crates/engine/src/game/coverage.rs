@@ -1506,6 +1506,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Fight { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::BecomeCopy { target, .. }
@@ -5362,6 +5363,34 @@ fn ability_places_counter(def: &AbilityDefinition, counter_type: &CounterType) -
     }
 }
 
+fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) -> bool {
+    match counter_type {
+        CounterType::Plus1Plus1 => lower.contains("+1/+1 counter"),
+        CounterType::Minus1Minus1 => lower.contains("-1/-1 counter"),
+        CounterType::PowerToughness { power, toughness } => lower.contains(&format!(
+            "{}{}/{}{} counter",
+            if *power >= 0 { "+" } else { "" },
+            power,
+            if *toughness >= 0 { "+" } else { "" },
+            toughness
+        )),
+        CounterType::Keyword(kind) => {
+            let needle = format!("{kind:?} counter").to_lowercase();
+            lower.contains(&needle)
+        }
+        CounterType::Loyalty
+        | CounterType::Defense
+        | CounterType::Stun
+        | CounterType::Lore
+        | CounterType::Time
+        | CounterType::Age
+        | CounterType::Generic(_) => {
+            let needle = format!("{} counter", counter_type.as_str()).to_lowercase();
+            lower.contains(&needle)
+        }
+    }
+}
+
 /// A semantic finding detected during audit of a card's parsed data vs Oracle text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -5552,10 +5581,10 @@ fn static_has_pump_modification(
     false
 }
 
-/// Extract a +N/+M or -N/-M modifier from Oracle text. Returns (power, toughness) as i32.
-/// Finds the first positional occurrence in the string so that "+2/+2 ... +1/+1 counter"
-/// correctly identifies +2/+2 as the primary modifier (not +1/+1 which is a counter).
-fn extract_pt_modifier(lower: &str) -> Option<(i32, i32)> {
+/// Extract the first +N/+M or -N/-M occurrence from Oracle text with its byte span.
+/// The span lets the audit classify that same occurrence as pump or counter text,
+/// instead of accidentally inspecting a later P/T counter on the same line.
+fn extract_pt_modifier_span(lower: &str) -> Option<(i32, i32, usize, usize)> {
     // Find the earliest +N/ or -N/ pattern by scanning for sign+digits+slash
     let idx = lower.char_indices().find_map(|(i, c)| {
         if c != '+' && c != '-' {
@@ -5577,21 +5606,32 @@ fn extract_pt_modifier(lower: &str) -> Option<(i32, i32)> {
     })?;
 
     let rest = &lower[idx..];
-    let mut chars = rest.chars();
-    let sign1 = chars.next()?;
-    let power_str: String = chars.by_ref().take_while(|c| c.is_ascii_digit()).collect();
+    let mut chars = rest.char_indices();
+    let (_, sign1) = chars.next()?;
+    let power_str: String = chars
+        .by_ref()
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .map(|(_, c)| c)
+        .collect();
     let power: i32 = power_str.parse().ok()?;
     let power = if sign1 == '-' { -power } else { power };
 
-    let sign2 = chars.next()?;
+    let (_, sign2) = chars.next()?;
     if sign2 != '+' && sign2 != '-' {
         return None;
     }
-    let tough_str: String = chars.take_while(|c| c.is_ascii_digit()).collect();
+    let mut end = idx;
+    let tough_str: String = chars
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .map(|(i, c)| {
+            end = idx + i + c.len_utf8();
+            c
+        })
+        .collect();
     let toughness: i32 = tough_str.parse().ok()?;
     let toughness = if sign2 == '-' { -toughness } else { toughness };
 
-    Some((power, toughness))
+    Some((power, toughness, idx, end))
 }
 
 /// Returns true when the +N/+M counter mention in the Oracle line is NOT a counter-placement
@@ -5746,25 +5786,11 @@ fn is_non_effect_counter_context(lower: &str) -> bool {
     false
 }
 
-/// Returns true if the Oracle line's +N/+M pattern refers to counters rather than a pump effect.
-fn is_counter_reference(lower: &str) -> bool {
-    if lower.contains("counter") {
-        if let Some(idx) = lower.find('+').or_else(|| lower.find('-')) {
-            let rest = &lower[idx..];
-            let after_pattern = rest.find('/').map(|slash| {
-                let after_slash = &rest[slash + 1..];
-                let digits_end = after_slash
-                    .find(|c: char| !c.is_ascii_digit() && c != '+' && c != '-')
-                    .unwrap_or(after_slash.len());
-                &after_slash[digits_end..]
-            });
-            if let Some(after) = after_pattern {
-                let trimmed = after.trim_start();
-                if trimmed.starts_with("counter") {
-                    return true;
-                }
-            }
-        }
+/// Returns true if the extracted Oracle +N/+M pattern refers to counters rather than a pump effect.
+fn is_counter_reference(lower: &str, pt_end: usize) -> bool {
+    let after = lower[pt_end..].trim_start();
+    if after.starts_with("counter") {
+        return true;
     }
     if lower.contains("in the form of ") {
         return true;
@@ -6466,7 +6492,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // Covers "damage can't be prevented" (AddRestriction/DamagePreventionDisabled),
         // "you may cast ... from" (CastFromZone), and similar patterns where the parser
         // produces the correct effect but doesn't attach a description string.
-        let ability_effect_type_matches: Vec<&AbilityDefinition> = {
+        let (ability_effect_type_matches, trigger_effect_type_matches): (
+            Vec<&AbilityDefinition>,
+            Vec<&AbilityDefinition>,
+        ) = {
             let line_matches_effect_type = |d: &AbilityDefinition| match &*d.effect {
                 Effect::AddRestriction { restriction, .. } => {
                     matches!(
@@ -6489,6 +6518,39 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("don't lose the game")
                         || effective_lower.contains("can't lose the game")
                 }
+                Effect::Mana { .. } => effective_lower.contains("add "),
+                Effect::PutCounter {
+                    counter_type: ct, ..
+                }
+                | Effect::PutCounterAll {
+                    counter_type: ct, ..
+                } => {
+                    effective_lower.contains("put")
+                        && effective_lower.contains("counter")
+                        && oracle_line_mentions_counter_type(&effective_lower, ct)
+                }
+                Effect::RemoveCounter {
+                    counter_type: Some(ct),
+                    ..
+                } => {
+                    effective_lower.contains("remove")
+                        && effective_lower.contains("counter")
+                        && oracle_line_mentions_counter_type(&effective_lower, ct)
+                }
+                Effect::RemoveCounter {
+                    counter_type: None, ..
+                } => effective_lower.contains("remove") && effective_lower.contains("counter"),
+                Effect::MoveCounters {
+                    counter_type: Some(ct),
+                    ..
+                } => {
+                    effective_lower.contains("move")
+                        && effective_lower.contains("counter")
+                        && oracle_line_mentions_counter_type(&effective_lower, ct)
+                }
+                Effect::MoveCounters {
+                    counter_type: None, ..
+                } => effective_lower.contains("move") && effective_lower.contains("counter"),
                 Effect::PayCost { .. } => {
                     // "You may pay {X} rather than pay ..." — alternative cost patterns
                     effective_lower.contains("rather than pay")
@@ -6524,12 +6586,22 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 }
                 _ => false,
             };
-            face.abilities
+            let ability_matches = face
+                .abilities
                 .iter()
                 .filter(|a| ability_tree_any(a, &line_matches_effect_type))
-                .collect()
+                .collect();
+            let trigger_matches = face
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_ref())
+                .map(Box::as_ref)
+                .filter(|a| ability_tree_any(a, &line_matches_effect_type))
+                .collect();
+            (ability_matches, trigger_matches)
         };
-        let covered_by_ability_effect_type = !ability_effect_type_matches.is_empty();
+        let covered_by_ability_effect_type =
+            !ability_effect_type_matches.is_empty() || !trigger_effect_type_matches.is_empty();
 
         // Replacement effects matched by event type when description doesn't align.
         // Covers "prevent ... damage", "enters with ... counter", damage redirection,
@@ -6679,6 +6751,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         let covered_ability_effect_type_any = |pred: &dyn Fn(&AbilityDefinition) -> bool| -> bool {
             ability_effect_type_matches
                 .iter()
+                .chain(trigger_effect_type_matches.iter())
                 .any(|a| ability_tree_any(a, &|d| pred(d)))
         };
         // 1. Condition check: does Oracle text contain condition language?
@@ -6739,27 +6812,23 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // 3. P/T parameter check: does Oracle text contain +N/+M that should be a pump or counter?
         let stripped_for_pt = strip_parenthesized_reminder(line);
         let lower_for_pt = stripped_for_pt.to_lowercase();
-        if let Some((power, toughness)) = extract_pt_modifier(&lower_for_pt) {
+        if let Some((power, toughness, pt_start, pt_end)) = extract_pt_modifier_span(&lower_for_pt)
+        {
             // Skip if the +N/+M pattern is inside a quoted sub-ability
             let pt_in_quotes = lower_for_pt
                 .find('"')
-                .zip(lower_for_pt.find(&format!("{}{}/", if power >= 0 { "+" } else { "" }, power)))
-                .is_some_and(|(quote_pos, pt_pos)| pt_pos > quote_pos);
+                .is_some_and(|quote_pos| pt_start > quote_pos);
 
             // Check if the +N/+M is preceded by "additional" — this is a conditional
             // addendum to a base pump on the same line, not independently checkable.
-            let pt_is_additional = {
-                let pt_str = format!("{}{}/", if power >= 0 { "+" } else { "" }, power);
-                lower_for_pt
-                    .find(&pt_str)
-                    .is_some_and(|pos| pos >= 11 && lower_for_pt[..pos].contains("additional"))
-            };
+            let pt_is_additional =
+                pt_start >= 11 && lower_for_pt[..pt_start].contains("additional");
 
             if power == 0 && toughness == 0 {
                 // +0/+0 is meaningless, skip
             } else if pt_in_quotes || pt_is_additional {
                 // +N/+M is inside a quoted sub-ability — not a property of this line's element
-            } else if is_counter_reference(&lower_for_pt) {
+            } else if is_counter_reference(&lower_for_pt, pt_end) {
                 // Skip false positives: counter mentioned in filter, condition, cost,
                 // quantity reference, replacement, or quoted sub-ability context
                 if !is_non_effect_counter_context(&lower_for_pt) {
@@ -6776,6 +6845,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     } else {
                         matched.iter().any(|e| e.has_counter_effect(&normalized))
                             || modal_any(&|d: &AbilityDefinition| {
+                                ability_places_counter(d, &normalized)
+                            })
+                            || covered_ability_effect_type_any(&|d: &AbilityDefinition| {
                                 ability_places_counter(d, &normalized)
                             })
                     };
@@ -8995,6 +9067,63 @@ mod tests {
     }
 
     #[test]
+    fn test_audit_accepts_descriptionless_counter_trigger_and_mana_sub_ability() {
+        let mut face = make_face();
+        let oracle =
+            "At the beginning of your upkeep, remove a depletion counter from this land.\n\
+            {T}: Add {W} or {U}. Put a depletion counter on this land.";
+        face.name = "Land Cap".to_string();
+        face.oracle_text = Some(oracle.to_string());
+
+        let remove_counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Generic("depletion".to_string())),
+                count: 1,
+                target: TargetFilter::SelfRef,
+            },
+        );
+        face.triggers.push(
+            TriggerDefinition::new(TriggerMode::Phase)
+                .execute(remove_counter)
+                .description("At the beginning of your upkeep".to_string()),
+        );
+
+        let mut mana = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::White, ManaColor::Blue],
+                    contribution: crate::types::ability::ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        mana.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("depletion".to_string()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )));
+        face.abilities.push(mana);
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "Descriptionless counter trigger and mana sub-ability should be covered: {findings:?}"
+        );
+    }
+
+    #[test]
     fn test_audit_per_line_no_false_positive_when_condition_present() {
         let mut face = make_face();
         let oracle = "Draw a card if you control an artifact.";
@@ -9031,10 +9160,84 @@ mod tests {
 
     #[test]
     fn test_extract_pt_modifier() {
-        assert_eq!(extract_pt_modifier("gets +2/+1 until"), Some((2, 1)));
-        assert_eq!(extract_pt_modifier("gets -1/-1"), Some((-1, -1)));
-        assert_eq!(extract_pt_modifier("gets +0/+3"), Some((0, 3)));
-        assert_eq!(extract_pt_modifier("no modifier here"), None);
+        assert_eq!(
+            extract_pt_modifier_span("gets +2/+1 until").map(|(p, t, _, _)| (p, t)),
+            Some((2, 1))
+        );
+        assert_eq!(
+            extract_pt_modifier_span("gets -1/-1").map(|(p, t, _, _)| (p, t)),
+            Some((-1, -1))
+        );
+        assert_eq!(
+            extract_pt_modifier_span("gets +0/+3").map(|(p, t, _, _)| (p, t)),
+            Some((0, 3))
+        );
+        assert_eq!(extract_pt_modifier_span("no modifier here"), None);
+    }
+
+    #[test]
+    fn test_audit_classifies_same_pt_occurrence_as_pump_or_counter() {
+        let mut face = make_face();
+        let oracle = "{2}{B}{B}: Target creature gets -1/-1 until end of turn. Put a +1/+1 counter on this creature.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Pump {
+                    power: PtValue::Fixed(-1),
+                    toughness: PtValue::Fixed(-1),
+                    target: TargetFilter::Any,
+                },
+            )
+            .duration(Duration::UntilEndOfTurn)
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .description(oracle.to_string()),
+        );
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::WrongParameter { .. })),
+            "Pump and later counter occurrence should both be accepted: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_ignores_pt_counter_in_activation_cost() {
+        let mut face = make_face();
+        let oracle =
+            "{B/G}, Remove a -1/-1 counter from a creature you control: This creature gets +3/+3 until end of turn.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Pump {
+                    power: PtValue::Fixed(3),
+                    toughness: PtValue::Fixed(3),
+                    target: TargetFilter::SelfRef,
+                },
+            )
+            .duration(Duration::UntilEndOfTurn)
+            .description(oracle.to_string()),
+        );
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::WrongParameter { .. })),
+            "P/T counter in an activation cost should not be audited as a pump: {findings:?}"
+        );
     }
 
     #[test]

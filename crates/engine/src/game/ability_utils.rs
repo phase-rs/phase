@@ -1221,7 +1221,9 @@ fn effect_references_target_player(effect: &Effect) -> bool {
         return true;
     }
 
-    if let Effect::Attach { attachment, target } = effect {
+    if let Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } =
+        effect
+    {
         return filter_references_target_player(attachment)
             || filter_references_target_player(target);
     }

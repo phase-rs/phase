@@ -1,58 +1,22 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import type { ScryfallCard } from "../../services/scryfall";
+import { useIsMobile } from "../../hooks/useIsMobile";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
-import { usePreferencesStore } from "../../stores/preferencesStore";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
-import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
-import { deduplicateEntries, resolveCommander } from "../../services/deckParser";
-import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
-import {
-  ACTIVE_DECK_KEY,
-  STORAGE_KEY_PREFIX,
-  loadSavedDeck,
-  loadSavedDeckBracket,
-  removeDeckMeta,
-  stampDeckMeta,
-} from "../../constants/storage";
-import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
-import { loadPreconDeckMap } from "../../hooks/useDecks";
-import { preconDeckEntryToParsedDeck } from "../../services/preconDecks";
-import { useDeckCardData } from "../../hooks/useDeckCardData";
 import { CardSearch } from "./CardSearch";
 import type { CardSearchFilters } from "./CardSearch";
+import { hasSearchCriteria } from "./searchFilters";
 import { CardGrid } from "./CardGrid";
 import { DeckStack } from "./DeckStack";
 import { DeckList } from "./DeckList";
-import { ManaCurve } from "./ManaCurve";
+import { StatsPanel } from "./StatsPanel";
 import type { GameFormat } from "../../adapter/types";
-import { FORMAT_REGISTRY, formatMetadata } from "../../data/formatRegistry";
-import { FormatFilter } from "./FormatFilter";
 import { CommanderPanel } from "./CommanderPanel";
-import { BracketPicker } from "./BracketPicker";
-import { BracketAuditPanel } from "./BracketAuditPanel";
-import type { CommanderBracket } from "../../types/bracket";
-import { getPreconBracket } from "../../data/preconBrackets";
-import { getSharedAdapter } from "../../adapter/wasm-adapter";
-import { useBracketEstimate } from "../../hooks/useBracketEstimate";
-import {
-  getColorIdentityViolations,
-  getSingletonViolations,
-  canAddPartner,
-} from "./commanderUtils";
-import { isCardCommanderEligibleForFormat } from "../../services/engineRuntime";
-
-function listSavedDecks(): string[] {
-  const keys: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key?.startsWith(STORAGE_KEY_PREFIX)) {
-      keys.push(key.slice(STORAGE_KEY_PREFIX.length));
-    }
-  }
-  return keys.sort();
-}
+import { DeckBuilderToolbar } from "./DeckBuilderToolbar";
+import { DeckBuilderTabBar } from "./DeckBuilderTabBar";
+import { panelId, tabId } from "./deckBuilderTabs";
+import { useDeckBuilder } from "./useDeckBuilder";
 
 interface DeckBuilderProps {
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
@@ -65,18 +29,6 @@ interface DeckBuilderProps {
   onResetSearch: () => void;
 }
 
-const PRECON_PREFIX = "[Pre-built] ";
-
-function hasSearchCriteria(filters: CardSearchFilters): boolean {
-  return Boolean(
-    filters.text
-      || filters.colors.length > 0
-      || filters.type
-      || filters.cmcMax !== undefined
-      || filters.sets.length > 0,
-  );
-}
-
 export function DeckBuilder({
   onCardHover,
   format,
@@ -87,611 +39,409 @@ export function DeckBuilder({
   onSearchFiltersChange,
   onResetSearch,
 }: DeckBuilderProps) {
-  const navigate = useNavigate();
-  const [deck, setDeck] = useState<ParsedDeck>({ main: [], sideboard: [] });
-  const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
-  const [deckName, setDeckName] = useState("");
-  const [bracket, setBracket] = useState<CommanderBracket | null>(null);
-  const [savedDecks, setSavedDecks] = useState(listSavedDecks);
-  const [savedDeckName, setSavedDeckName] = useState<string | null>(null);
-  const [justSaved, setJustSaved] = useState(false);
-  const [commanders, setCommanders] = useState<string[]>([]);
-  const [isDeckViewExpanded, setIsDeckViewExpanded] = useState(initialDeckName !== null);
-  const { cardDataCache, cacheCards } = useDeckCardData([
-    ...deck.main.map((entry) => entry.name),
-    ...deck.sideboard.map((entry) => entry.name),
-    ...commanders,
-  ]);
-
-  const [compatibility, setCompatibility] = useState<DeckCompatibilityResult | null>(null);
-  const [commanderEligibleNames, setCommanderEligibleNames] = useState<Set<string>>(new Set());
-
-  const artOverrides = usePreferencesStore((s) => s.artOverrides);
-  const clearArtOverride = usePreferencesStore((s) => s.clearArtOverride);
-  const [listContextMenu, setListContextMenu] = useState<{ cardName: string; x: number; y: number } | null>(null);
-  const [listPickerCard, setListPickerCard] = useState<{ cardName: string; oracleId: string } | null>(null);
-
-  const handleListContextMenu = useCallback((cardName: string, x: number, y: number) => {
-    setListContextMenu({ cardName, x, y });
-  }, []);
-
-  const handleListChooseArt = useCallback(() => {
-    if (!listContextMenu) return;
-    const oracleId = resolveOracleIdSync(listContextMenu.cardName);
-    if (oracleId) {
-      setListPickerCard({ cardName: listContextMenu.cardName, oracleId });
-    }
-  }, [listContextMenu]);
-
-  const handleListClearOverride = useCallback(() => {
-    if (!listContextMenu) return;
-    const oracleId = resolveOracleIdSync(listContextMenu.cardName);
-    if (oracleId) clearArtOverride(oracleId);
-  }, [listContextMenu, clearArtOverride]);
-  const currentDeck = useMemo<ParsedDeck>(() => ({
-    ...deck,
-    commander: commanders.length > 0 ? commanders : undefined,
-  }), [deck, commanders]);
-
-  // Stable key for deck contents to debounce compatibility evaluation
-  const deckKey = useMemo(
-    () => [
-      ...deck.main.map((e) => `${e.count}x${e.name}`),
-      "//",
-      ...deck.sideboard.map((e) => `${e.count}x${e.name}`),
-      "//",
-      ...commanders,
-    ].join("|"),
-    [deck, commanders],
-  );
-
-  useEffect(() => {
-    if (currentDeck.main.length === 0 && currentDeck.sideboard.length === 0) {
-      setCompatibility(null);
-      return;
-    }
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      evaluateDeckCompatibility(currentDeck).then((result) => {
-        if (!cancelled) setCompatibility(result);
-      }).catch(() => {
-        // WASM may not be loaded yet; silently ignore
-      });
-    }, 300);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [currentDeck, deckKey]);
-
-  const formatConfig = formatMetadata(format)?.default_config;
-  const isCommander = formatConfig?.command_zone ?? false;
-  const expectedDeckSize = formatConfig?.deck_size ?? 60;
-  const maxCopies = formatConfig?.singleton ? 1 : 4;
-
-  useEffect(() => {
-    if (!isCommander) {
-      setCommanderEligibleNames(new Set());
-      return;
-    }
-    const names = deck.main.map((entry) => entry.name);
-    if (names.length === 0) {
-      setCommanderEligibleNames(new Set());
-      return;
-    }
-    let cancelled = false;
-    Promise.all(
-      names.map(async (name) => [
-        name,
-        await isCardCommanderEligibleForFormat(name, format),
-      ] as const),
-    ).then((results) => {
-      if (cancelled) return;
-      setCommanderEligibleNames(
-        new Set(results.filter(([, eligible]) => eligible).map(([name]) => name)),
-      );
-    }).catch(() => {
-      if (!cancelled) setCommanderEligibleNames(new Set());
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [deck.main, format, isCommander]);
-
-  const { estimate, unsupported: bracketUnsupported } = useBracketEstimate({
+  const {
     deck,
+    searchResults,
+    deckName,
+    setDeckName,
+    bracket,
+    setBracket,
+    savedDecks,
+    justSaved,
+    setJustSaved,
     commanders,
-    format,
-    adapter: getSharedAdapter(),
-  });
+    activeSurface,
+    setActiveSurface,
+    deckView,
+    setDeckView,
+    dirty,
+    cardDataCache,
+    compatibility,
+    artOverrides,
+    listContextMenu,
+    setListContextMenu,
+    listPickerCard,
+    setListPickerCard,
+    currentDeck,
+    isCommander,
+    expectedDeckSize,
+    estimate,
+    auditEmptyReason,
+    cmcValues,
+    colorValues,
+    cardCounts,
+    warnings,
+    handleListContextMenu,
+    handleListChooseArt,
+    handleListClearOverride,
+    handleOpenArtPicker,
+    handleScrollToCard,
+    handleSearchResults,
+    handleSearchTrigger,
+    handleAddCard,
+    handleAddCardByName,
+    handleRemoveCard,
+    handleMoveCard,
+    handleImport,
+    handleSave,
+    handleClone,
+    handleLoad,
+    handleSetCommander,
+    isCommanderEligible,
+    handleRemoveCommander,
+  } = useDeckBuilder({ format, onFormatChange, initialDeckName, searchFilters });
 
-  const auditEmptyReason: "not-commander" | "no-commander" | "unsupported" | undefined =
-    !isCommander
-      ? "not-commander"
-      : commanders.length === 0
-        ? "no-commander"
-        : bracketUnsupported
-          ? "unsupported"
-          : undefined;
+  // Deck-first: the main canvas shows the deck unless a search is active, in
+  // which case it shows the results grid (cleared via "Back to deck").
+  const searchActive = hasSearchCriteria(searchFilters);
+  const deckCount = deck.main.reduce((sum, e) => sum + e.count, 0) + commanders.length;
 
-  const handleScrollToCard = useCallback((cardName: string) => {
-    const node = document.querySelector<HTMLElement>(
-      `[data-card-name="${cardName.toLowerCase()}"]`,
-    );
-    node?.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, []);
-
-  const handleSearchResults = useCallback(
-    (cards: ScryfallCard[], total: number) => {
-      if (!initialDeckName || total > 0 || hasSearchCriteria(searchFilters)) {
-        setIsDeckViewExpanded(false);
-      }
-      setSearchResults(cards);
-      cacheCards(cards);
-    },
-    [cacheCards, initialDeckName, searchFilters],
-  );
-
-  const handleSearchTrigger = useCallback(() => {
-    setIsDeckViewExpanded(false);
-  }, []);
-
-  const handleAddCard = useCallback((card: ScryfallCard) => {
-    cacheCards([card]);
-
-    setDeck((prev) => {
-      const existing = prev.main.find((e) => e.name === card.name);
-      if (existing && existing.count >= maxCopies && !BASIC_LAND_NAMES.has(card.name) && !hasUnlimitedCopies(card.oracle_text)) {
-        return prev;
-      }
-
-      if (existing) {
-        return {
-          ...prev,
-          main: prev.main.map((e) =>
-            e.name === card.name ? { ...e, count: e.count + 1 } : e,
-          ),
-        };
-      }
-      return {
-        ...prev,
-        main: [...prev.main, { count: 1, name: card.name }],
-      };
-    });
-  }, [cacheCards, maxCopies]);
-
-  const handleAddCardByName = useCallback((name: string) => {
-    const card = cardDataCache.get(name);
-    if (!card) return;
-    handleAddCard(card);
-  }, [cardDataCache, handleAddCard]);
-
-  const handleRemoveCard = useCallback(
-    (name: string, section: "main" | "sideboard") => {
-      setDeck((prev) => {
-        const entries = prev[section];
-        const existing = entries.find((e) => e.name === name);
-        if (!existing) return prev;
-
-        if (existing.count <= 1) {
-          return {
-            ...prev,
-            [section]: entries.filter((e) => e.name !== name),
-          };
-        }
-        return {
-          ...prev,
-          [section]: entries.map((e) =>
-            e.name === name ? { ...e, count: e.count - 1 } : e,
-          ),
-        };
-      });
-    },
-    [],
-  );
-
-  const handleMoveCard = useCallback(
-    (name: string, from: "main" | "sideboard") => {
-      const to: "main" | "sideboard" = from === "main" ? "sideboard" : "main";
-      setDeck((prev) => {
-        const source = prev[from];
-        const target = prev[to];
-        const sourceEntry = source.find((e) => e.name === name);
-        if (!sourceEntry) return prev;
-
-        const targetEntry = target.find((e) => e.name === name);
-        if (
-          to === "main" &&
-          targetEntry &&
-          targetEntry.count >= maxCopies &&
-          !BASIC_LAND_NAMES.has(name) &&
-          !hasUnlimitedCopies(cardDataCache.get(name)?.oracle_text)
-        ) {
-          return prev;
-        }
-
-        const nextSource =
-          sourceEntry.count <= 1
-            ? source.filter((e) => e.name !== name)
-            : source.map((e) =>
-                e.name === name ? { ...e, count: e.count - 1 } : e,
-              );
-
-        const nextTarget = targetEntry
-          ? target.map((e) =>
-              e.name === name ? { ...e, count: e.count + 1 } : e,
-            )
-          : [...target, { count: 1, name }];
-
-        return {
-          ...prev,
-          [from]: nextSource,
-          [to]: nextTarget,
-        };
-      });
-    },
-    [maxCopies, cardDataCache],
-  );
-
-  const applyDeckToEditor = useCallback((next: ParsedDeck) => {
-    setDeck({
-      main: deduplicateEntries(next.main ?? []),
-      sideboard: deduplicateEntries(next.sideboard ?? []),
-      companion: next.companion,
-    });
-    setCommanders(next.commander ?? []);
-    if (next.commander?.length && !isCommander) onFormatChange("Commander");
-  }, [isCommander, onFormatChange]);
-
-  const handleImport = useCallback((imported: ParsedDeck) => {
-    applyDeckToEditor(imported);
-  }, [applyDeckToEditor]);
-
-  const handleSave = async () => {
-    if (!deckName.trim()) return;
-    // Save-time commander inference: when a Commander-format deck is shaped
-    // like a 100-singleton list with no explicit commander, ask the engine
-    // (via resolveCommander → WASM isCardCommanderEligible) to pick one. This
-    // is the architectural successor to the deleted reactive auto-resolve
-    // effect — running here means the user is never surprised mid-edit, and
-    // every persisted record has a commander when one is derivable.
-    const resolved = isCommander ? await resolveCommander(currentDeck) : currentDeck;
-    const inferred =
-      (resolved.commander?.length ?? 0) > (currentDeck.commander?.length ?? 0);
-    if (inferred) {
-      // Reflect the engine's choice in the editor so the displayed state
-      // matches what we're about to persist.
-      applyDeckToEditor(resolved);
-    }
-    const payload: Record<string, unknown> = { ...resolved, format };
-    if (bracket !== null) payload.bracket = bracket;
-    const data = JSON.stringify(payload);
-    const nextName = deckName.trim();
-    if (
-      savedDeckName
-      && savedDeckName !== nextName
-      && localStorage.getItem(STORAGE_KEY_PREFIX + savedDeckName) !== null
-    ) {
-      localStorage.removeItem(STORAGE_KEY_PREFIX + savedDeckName);
-      removeDeckMeta(savedDeckName);
-      if (localStorage.getItem(ACTIVE_DECK_KEY) === savedDeckName) {
-        localStorage.setItem(ACTIVE_DECK_KEY, nextName);
-      }
-    }
-    localStorage.setItem(STORAGE_KEY_PREFIX + nextName, data);
-    stampDeckMeta(nextName);
-    setSavedDeckName(nextName);
-    setSavedDecks(listSavedDecks());
-    setJustSaved(true);
-  };
-
+  // Filters are a collapsible rail (lg+) / overlay sheet (below lg), shown on
+  // demand so the deck canvas owns the space by default. useIsMobile flips at the
+  // same 1024px boundary as the rail's `lg:static`, so it cleanly distinguishes
+  // "modal sheet" (mobile/tablet) from "inline rail" (desktop) — only the former
+  // gets dialog semantics + a focus trap.
+  const isMobile = useIsMobile();
+  const filterPanelRef = useRef<HTMLDivElement>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersAsDialog = filtersOpen && isMobile;
   useEffect(() => {
-    if (!justSaved) return;
-    const timer = setTimeout(() => setJustSaved(false), 1500);
-    return () => clearTimeout(timer);
-  }, [justSaved]);
+    if (!filtersOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFiltersOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [filtersOpen]);
 
-  const handleLoad = useCallback(async (name: string) => {
-    const parsed = loadSavedDeck(name);
-    const data = localStorage.getItem(STORAGE_KEY_PREFIX + name);
-    if (!parsed || !data) {
-      if (!name.startsWith(PRECON_PREFIX)) return;
-      const decks = await loadPreconDeckMap();
-      const found = Object.entries(decks ?? {}).find(([, entry]) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
-      if (!found) return;
-      const [deckId, deckEntry] = found;
-      const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
-      applyDeckToEditor(resolved);
-      setIsDeckViewExpanded(true);
-      setDeckName(`${deckEntry.name} (${deckEntry.code})`);
-      setSavedDeckName(null);
-      setBracket(getPreconBracket(deckId) ?? null);
-      return;
-    }
-    const persisted = JSON.parse(data) as ParsedDeck & { format?: string };
-    const resolved = await resolveCommander(parsed);
-    applyDeckToEditor(resolved);
-    setIsDeckViewExpanded(true);
-    if (persisted.format) {
-      const match = FORMAT_REGISTRY.find(
-        (m) => m.format.toLowerCase() === persisted.format!.toLowerCase(),
+  // Focus management for the filter sheet (mobile/tablet overlay only — the lg+
+  // inline rail is part of the page flow and needs no trap). On open: move focus
+  // into the sheet and trap Tab within it; on close: restore focus to whatever
+  // opened it (the Search trigger).
+  useEffect(() => {
+    if (!filtersAsDialog) return;
+    const panel = filterPanelRef.current;
+    if (!panel) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const focusables = () =>
+      panel.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
       );
-      if (match) onFormatChange(match.format);
-    } else if (resolved.commander?.length) {
-      onFormatChange("Commander");
-    }
-    setDeckName(name);
-    setSavedDeckName(name);
-    setBracket(loadSavedDeckBracket(name));
-  }, [applyDeckToEditor, onFormatChange]);
+    focusables()[0]?.focus();
 
-  const handleLoadRef = useRef(handleLoad);
-  handleLoadRef.current = handleLoad;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const items = focusables();
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    panel.addEventListener("keydown", onKeyDown);
+    return () => {
+      panel.removeEventListener("keydown", onKeyDown);
+      // Restore focus to the opener — but only if it's still visible. If the
+      // sheet was closed programmatically (e.g. a surface switch that hid the
+      // opener's section), focusing a display:none node silently drops focus to
+      // <body>; getClientRects() is empty for hidden/disconnected nodes.
+      if (previouslyFocused && previouslyFocused.getClientRects().length > 0) {
+        previouslyFocused.focus();
+      }
+    };
+  }, [filtersAsDialog]);
+  // Dismiss the filter rail/sheet when switching surfaces (good UX: changing
+  // tabs closes the overlay). The rail is a sibling of the main section — not a
+  // descendant — so this is purely UX, not a visibility correctness guard.
+  useEffect(() => {
+    setFiltersOpen(false);
+  }, [activeSurface]);
+
+  // Unsaved-changes guard. beforeunload covers tab close / refresh / browser
+  // back; an in-app confirm covers the back button and loading another deck.
+  const navigate = useNavigate();
+  const [pendingAction, setPendingAction] = useState<
+    { type: "back" } | { type: "load"; name: string } | null
+  >(null);
 
   useEffect(() => {
-    if (!initialDeckName) return;
-    void handleLoadRef.current(initialDeckName);
-  }, [initialDeckName]);
+    if (!dirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
 
-  // Set a card as commander with three-tier resolution:
-  //   1. No commanders yet → add it.
-  //   2. One commander and both have partner-family keywords → add as partner
-  //      (CR 702.124 / 702.135 — pair stays together).
-  //   3. Otherwise → swap: move existing commander(s) back to main and install
-  //      the new card as sole commander. This is the swap UX users need when
-  //      cycling through legendary creatures to pick the right commander.
-  const handleSetCommander = useCallback(
-    (cardName: string) => {
-      if (!commanderEligibleNames.has(cardName)) return;
-      const card = cardDataCache.get(cardName);
-
-      const isPartnerAdd =
-        card !== undefined &&
-        commanders.length === 1 &&
-        canAddPartner(commanders, card, cardDataCache);
-      const displaced =
-        isPartnerAdd || commanders.length === 0 ? [] : commanders;
-      const nextCommanders = isPartnerAdd
-        ? [...commanders, cardName]
-        : [cardName];
-
-      setCommanders(nextCommanders);
-      setDeck((prev) => {
-        // Remove the new commander from main, then re-introduce any displaced
-        // commanders so they remain in the deck for the user to re-pick.
-        const filtered = prev.main.filter((e) => e.name !== cardName);
-        const restored = displaced.reduce<DeckEntry[]>((acc, name) => {
-          const existing = acc.find((e) => e.name === name);
-          if (existing) {
-            return acc.map((e) =>
-              e.name === name ? { ...e, count: e.count + 1 } : e,
-            );
-          }
-          return [...acc, { count: 1, name }];
-        }, filtered);
-        return { ...prev, main: restored };
-      });
+  const performAction = useCallback(
+    (action: { type: "back" } | { type: "load"; name: string }) => {
+      if (action.type === "back") navigate(backPath);
+      else handleLoad(action.name);
     },
-    [cardDataCache, commanderEligibleNames, commanders],
+    [navigate, backPath, handleLoad],
   );
 
-  // Eligibility predicate consulted by each main-deck row. The set is loaded
-  // from the engine's format-aware command-zone predicate above.
-  const isCommanderEligible = useCallback(
+  const requestBack = useCallback(() => {
+    if (dirty) setPendingAction({ type: "back" });
+    else navigate(backPath);
+  }, [dirty, navigate, backPath]);
+
+  const requestLoad = useCallback(
     (name: string) => {
-      return commanderEligibleNames.has(name);
+      if (dirty) setPendingAction({ type: "load", name });
+      else handleLoad(name);
     },
-    [commanderEligibleNames],
+    [dirty, handleLoad],
   );
 
-  const handleRemoveCommander = useCallback((cardName: string) => {
-    setCommanders((prev) => prev.filter((n) => n !== cardName));
-    // Add back to main deck
-    setDeck((prev) => ({
-      ...prev,
-      main: [...prev.main, { count: 1, name: cardName }],
-    }));
-  }, []);
+  const confirmSaveThen = useCallback(async () => {
+    const action = pendingAction;
+    await handleSave();
+    setPendingAction(null);
+    if (action) performAction(action);
+  }, [pendingAction, handleSave, performAction]);
 
-  // Compute CMC and color arrays for ManaCurve
-  const cmcValues: number[] = [];
-  const colorValues: string[] = [];
-  for (const entry of deck.main) {
-    const card = cardDataCache.get(entry.name);
-    if (card) {
-      for (let i = 0; i < entry.count; i++) {
-        cmcValues.push(card.cmc);
-        colorValues.push(card.color_identity?.join("") ?? "");
-      }
-    }
-  }
+  const confirmDiscardThen = useCallback(() => {
+    const action = pendingAction;
+    setPendingAction(null);
+    if (action) performAction(action);
+  }, [pendingAction, performAction]);
 
-  const cardCounts = new Map(deck.main.map((entry) => [entry.name, entry.count]));
-  for (const commander of commanders) {
-    cardCounts.set(commander, (cardCounts.get(commander) ?? 0) + 1);
-  }
-
-  // Compute validation warnings
-  const warnings: string[] = [];
-  if (isCommander) {
-    const totalCards = deck.main.reduce((s, e) => s + e.count, 0) + commanders.length;
-    if (totalCards > 0 && totalCards !== expectedDeckSize) {
-      warnings.push(`Deck has ${totalCards} cards (need exactly ${expectedDeckSize})`);
-    }
-    for (const name of getSingletonViolations(deck.main, cardDataCache)) {
-      warnings.push(`${name}: multiple copies (singleton format)`);
-    }
-    for (const name of getColorIdentityViolations(deck.main, commanders, cardDataCache)) {
-      warnings.push(`${name}: outside commander color identity`);
-    }
-  } else {
-    const mainTotal = deck.main.reduce((s, e) => s + e.count, 0);
-    if (mainTotal > 0 && mainTotal < 60) {
-      warnings.push(`Deck has ${mainTotal} cards (minimum 60)`);
-    }
-    for (const entry of deck.main) {
-      if (entry.count > 4 && !BASIC_LAND_NAMES.has(entry.name) && !hasUnlimitedCopies(cardDataCache.get(entry.name)?.oracle_text)) {
-        warnings.push(`${entry.name}: ${entry.count} copies (max 4)`);
-      }
-    }
-  }
-  // CR 702.139a: Warn if a companion card is also in the main deck (likely import error)
-  if (deck.companion && deck.main.some((e) => e.name === deck.companion)) {
-    warnings.push(
-      `${deck.companion} is your companion but is also in the main deck — this violates its deckbuilding condition. Remove it from the main deck to use it as a companion.`,
-    );
-  }
+  // Phone: tab bar picks one surface. md+: both columns show.
+  const mainVisible = activeSurface === "deck" ? "flex" : "hidden md:flex";
+  const infoVisible = activeSurface === "info" ? "flex" : "hidden md:flex";
 
   return (
     <div className="flex h-screen flex-col bg-transparent">
-      <div className="flex items-center justify-between border-b border-white/8 bg-black/18 px-4 py-2 backdrop-blur-md">
-        <div className="flex min-w-0 items-center gap-4">
-          <button
-            onClick={() => navigate(backPath)}
-            className="text-sm text-slate-400 hover:text-white"
-          >
-            &larr; Menu
-          </button>
-          <div className="min-w-0">
-            <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Deck Builder</div>
-            <div className="truncate text-sm font-medium text-white">
-              {deckName.trim() || "Untitled Deck"}
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <FormatFilter selected={format} onChange={onFormatChange} />
-          {format === "Commander" && (
-            <div className="flex items-center gap-2">
-              <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Bracket</span>
-              <BracketPicker value={bracket} onChange={setBracket} />
-            </div>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            type="text"
-            value={deckName}
-            onChange={(e) => {
-              setDeckName(e.target.value);
-              if (justSaved) setJustSaved(false);
-            }}
-            placeholder="Deck name..."
-            className="w-40 rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
-          />
-          <button
-            onClick={handleSave}
-            disabled={!deckName.trim()}
-            className={
-              justSaved
-                ? "rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-sm text-emerald-200 disabled:opacity-40"
-                : "rounded-xl border border-white/10 bg-white/10 px-3 py-1.5 text-sm text-white hover:bg-white/14 disabled:opacity-40"
-            }
-          >
-            {justSaved ? "Saved ✓" : "Save"}
-          </button>
-          {savedDecks.length > 0 && (
-            <select
-              onChange={(e) => e.target.value && handleLoad(e.target.value)}
-              defaultValue=""
-              className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:outline-none"
-            >
-              <option value="">Load deck...</option>
-              {savedDecks.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-      </div>
+      <DeckBuilderToolbar
+        onBack={requestBack}
+        deckName={deckName}
+        onDeckNameChange={setDeckName}
+        justSaved={justSaved && !dirty}
+        onClearJustSaved={() => setJustSaved(false)}
+        onSave={handleSave}
+        onClone={handleClone}
+        canClone={deckCount > 0}
+        savedDecks={savedDecks}
+        onLoad={requestLoad}
+        format={format}
+        onFormatChange={onFormatChange}
+        bracket={bracket}
+        onBracketChange={setBracket}
+      />
+
+      <DeckBuilderTabBar
+        activeSurface={activeSurface}
+        onSurfaceChange={setActiveSurface}
+        deckCount={deckCount}
+      />
 
       <div className="flex min-h-0 flex-1">
-        <div className="w-56 shrink-0 overflow-y-auto border-r border-white/8 bg-black/12 backdrop-blur-sm">
-          <CardSearch
-            onResults={handleSearchResults}
-            onSearchTrigger={handleSearchTrigger}
-            filters={searchFilters}
-            onFiltersChange={onSearchFiltersChange}
-            onReset={onResetSearch}
+        {/* Filter rail backdrop (mobile overlay). */}
+        {filtersOpen && (
+          <button
+            type="button"
+            aria-label="Close filters"
+            onClick={() => setFiltersOpen(false)}
+            className="fixed inset-0 z-30 bg-black/60 lg:hidden"
           />
-        </div>
+        )}
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          {!isDeckViewExpanded && (
-            <div className="min-h-0 flex-1 overflow-y-auto border-b border-white/8">
-              <CardGrid
-                cards={searchResults}
-                onAddCard={handleAddCard}
-                onCardHover={onCardHover}
-                cardCounts={cardCounts}
-                legalityFormat={searchFilters.browseFormat}
-              />
-            </div>
-          )}
-
-          <div className="flex items-center justify-end border-b border-white/8 bg-black/12 px-3 py-2">
+        {/* Collapsible filter rail: inline sidebar at lg+ when open, overlay
+            sheet below lg, hidden when closed. A single CardSearch instance
+            (kept mounted so filter-driven searches keep running). */}
+        <div
+          ref={filterPanelRef}
+          role={filtersAsDialog ? "dialog" : undefined}
+          aria-modal={filtersAsDialog ? true : undefined}
+          aria-label={filtersAsDialog ? "Filters" : undefined}
+          className={
+            filtersOpen
+              ? "fixed inset-y-0 left-0 z-40 flex w-[min(20rem,85vw)] flex-col border-r border-white/10 bg-[#0b1020]/96 backdrop-blur-md lg:static lg:z-auto lg:w-64 lg:bg-black/12"
+              : "hidden"
+          }
+        >
+          <div className="flex shrink-0 items-center justify-between border-b border-white/8 px-4 py-3">
+            <span className="text-sm font-semibold text-white">Filters</span>
             <button
-              onClick={() => setIsDeckViewExpanded((prev) => !prev)}
-              className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/6"
+              type="button"
+              onClick={() => setFiltersOpen(false)}
+              className="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
             >
-              {isDeckViewExpanded ? "Show Browser" : "Expand Deck View"}
+              Done
             </button>
           </div>
-
-          <div className="min-h-0 flex-1 overflow-hidden bg-black/8">
-            <DeckStack
-              deck={deck}
-              commanders={commanders}
-              cardDataCache={cardDataCache}
-              onAddCard={handleAddCardByName}
-              onRemoveCard={handleRemoveCard}
-              onRemoveCommander={handleRemoveCommander}
-              onCardHover={onCardHover}
+          <div className="min-h-0 flex-1 overflow-y-auto pb-16">
+            <CardSearch
+              onResults={handleSearchResults}
+              onSearchTrigger={handleSearchTrigger}
+              filters={searchFilters}
+              onFiltersChange={onSearchFiltersChange}
+              onReset={onResetSearch}
             />
           </div>
         </div>
 
-        <div className="flex min-h-0 w-64 shrink-0 flex-col overflow-hidden border-l border-white/8 bg-black/12 p-3 backdrop-blur-sm">
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            {isCommander && (
-              <div className="mb-3 border-b border-white/8 pb-3">
-                <CommanderPanel
-                  commanders={commanders}
-                  deck={deck.main}
-                  cardDataCache={cardDataCache}
-                  expectedDeckSize={expectedDeckSize}
-                  isCommanderEligible={isCommanderEligible}
-                  onSetCommander={handleSetCommander}
-                  onRemoveCommander={handleRemoveCommander}
+        {/* Main canvas: the deck (idle) or search results (searching). Tab panel
+            for the phone tab bar; on md+ it's simply a visible column (the
+            controlling tab is display:none, but aria-labelledby still resolves
+            its name from the hidden node, so the region stays labelled). */}
+        <section
+          id={panelId("deck")}
+          role="tabpanel"
+          aria-labelledby={tabId("deck")}
+          className={`${mainVisible} min-h-0 min-w-0 flex-1 flex-col`}
+        >
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/8 px-3 py-2">
+            <button
+              type="button"
+              onClick={() => setFiltersOpen((v) => !v)}
+              aria-pressed={filtersOpen}
+              className={`flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-sm transition-colors ${
+                filtersOpen || searchActive
+                  ? "border-white/18 bg-white/10 text-white"
+                  : "border-white/10 bg-black/18 text-slate-200 hover:bg-white/6"
+              }`}
+            >
+              <FunnelIcon />
+              Search
+            </button>
+
+            {searchActive ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400">{searchResults.length} results</span>
+                <button
+                  type="button"
+                  onClick={onResetSearch}
+                  className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-xs text-slate-200 hover:bg-white/6"
+                >
+                  &larr; Back to deck
+                </button>
+              </div>
+            ) : (
+              <div className="flex gap-1 rounded-lg border border-white/8 bg-black/18 p-0.5">
+                {(["list", "stack"] as const).map((view) => (
+                  <button
+                    key={view}
+                    type="button"
+                    onClick={() => setDeckView(view)}
+                    aria-label={`${view === "list" ? "List" : "Stack"} view`}
+                    aria-pressed={deckView === view}
+                    title={`${view === "list" ? "List" : "Stack"} view`}
+                    className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+                      deckView === view
+                        ? "bg-white/14 text-white"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    {view === "list" ? <ListViewIcon /> : <StackViewIcon />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {searchActive ? (
+              <div className="h-full overflow-y-auto pb-16">
+                <CardGrid
+                  cards={searchResults}
+                  onAddCard={handleAddCard}
+                  onCardHover={onCardHover}
+                  cardCounts={cardCounts}
+                  legalityFormat={searchFilters.browseFormat}
                 />
-                <div className="mt-2">
-                  <BracketAuditPanel
-                    estimate={estimate}
-                    manualBracket={bracket}
-                    emptyReason={auditEmptyReason}
-                    onCardClick={handleScrollToCard}
-                  />
+              </div>
+            ) : (
+              // Deck view: validation warnings pin as a banner above the deck so
+              // they stay visible in both list and stack views (and while
+              // scrolling a long list), rather than being buried in the list-only
+              // DeckList. Capped height so a deck with many violations can't
+              // swallow the canvas.
+              <div className="flex h-full flex-col">
+                {warnings.length > 0 && (
+                  <div className="max-h-32 shrink-0 space-y-0.5 overflow-y-auto border-b border-white/8 px-3 py-2">
+                    {warnings.map((w) => (
+                      <div
+                        key={w}
+                        className="rounded-xl border border-amber-300/18 bg-amber-400/8 px-2 py-1 text-xs text-amber-200"
+                      >
+                        {w}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  {deckView === "list" ? (
+                    <div className="h-full overflow-y-auto px-3 pt-3 pb-16">
+                      <DeckList
+                        deck={currentDeck}
+                        onRemoveCard={handleRemoveCard}
+                        onMoveCard={handleMoveCard}
+                        onImport={handleImport}
+                        onCardHover={onCardHover}
+                        format={format}
+                        compatibility={compatibility}
+                        onChooseArt={handleListContextMenu}
+                        onSetAsCommander={isCommander ? handleSetCommander : undefined}
+                        isCommanderEligible={isCommander ? isCommanderEligible : undefined}
+                        onOpenArtPicker={handleOpenArtPicker}
+                      />
+                    </div>
+                  ) : (
+                    <DeckStack
+                      deck={deck}
+                      commanders={commanders}
+                      cardDataCache={cardDataCache}
+                      onAddCard={handleAddCardByName}
+                      onRemoveCard={handleRemoveCard}
+                      onRemoveCommander={handleRemoveCommander}
+                      onCardHover={onCardHover}
+                    />
+                  )}
                 </div>
               </div>
             )}
-            <DeckList
-              deck={currentDeck}
-              onRemoveCard={handleRemoveCard}
-              onMoveCard={handleMoveCard}
-              onImport={handleImport}
-              onCardHover={onCardHover}
-              warnings={warnings}
-              format={format}
+          </div>
+        </section>
+
+        {/* Info rail: commander + stats (curve, colors, legality, coverage, bracket). */}
+        <section
+          id={panelId("info")}
+          role="tabpanel"
+          aria-labelledby={tabId("info")}
+          className={`${infoVisible} min-h-0 w-full flex-col overflow-hidden border-white/8 bg-black/12 backdrop-blur-sm md:w-80 md:shrink-0 md:border-l lg:w-96`}
+        >
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 pt-3 pb-16">
+            {isCommander && (
+              <CommanderPanel
+                commanders={commanders}
+                deck={deck.main}
+                cardDataCache={cardDataCache}
+                expectedDeckSize={expectedDeckSize}
+                isCommanderEligible={isCommanderEligible}
+                onSetCommander={handleSetCommander}
+                onRemoveCommander={handleRemoveCommander}
+              />
+            )}
+            <StatsPanel
               compatibility={compatibility}
-              onChooseArt={handleListContextMenu}
-              onSetAsCommander={isCommander ? handleSetCommander : undefined}
-              isCommanderEligible={isCommander ? isCommanderEligible : undefined}
+              cmcValues={cmcValues}
+              colorValues={colorValues}
+              isCommander={isCommander}
+              estimate={estimate}
+              manualBracket={bracket}
+              auditEmptyReason={auditEmptyReason}
+              onCardClick={handleScrollToCard}
             />
           </div>
-
-          <div className="mt-3 shrink-0 rounded-[18px] border border-white/8 bg-black/18 p-3">
-            <ManaCurve cmcValues={cmcValues} colorValues={colorValues} />
-          </div>
-        </div>
+        </section>
       </div>
 
       {listContextMenu && (
@@ -715,6 +465,83 @@ export function DeckBuilder({
           onClose={() => setListPickerCard(null)}
         />
       )}
+
+      {pendingAction && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Unsaved changes"
+        >
+          <button
+            type="button"
+            aria-label="Dismiss dialog"
+            className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
+            onClick={() => setPendingAction(null)}
+          />
+          <div className="relative z-10 w-full max-w-sm rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-5 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
+            <h2 className="text-base font-semibold text-white">Unsaved changes</h2>
+            <p className="mt-1.5 text-sm text-slate-400">
+              You have unsaved changes to this deck. Save them before
+              {pendingAction.type === "back" ? " leaving" : " loading another deck"}?
+            </p>
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingAction(null)}
+                className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDiscardThen}
+                className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-sm text-red-200 hover:bg-red-500/20"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                onClick={confirmSaveThen}
+                disabled={!deckName.trim()}
+                title={deckName.trim() ? undefined : "Name the deck to save it"}
+                className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-sm text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
+              >
+                Save &amp; continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function FunnelIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5" aria-hidden="true">
+      <path d="M2 3.5A.5.5 0 0 1 2.5 3h11a.5.5 0 0 1 .39.812L9.5 9.3v3.2a.5.5 0 0 1-.276.447l-2 1A.5.5 0 0 1 6.5 13.5V9.3L2.11 3.812A.5.5 0 0 1 2 3.5Z" />
+    </svg>
+  );
+}
+
+function ListViewIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" className="h-4 w-4" aria-hidden="true">
+      <line x1="3" y1="4" x2="13" y2="4" />
+      <line x1="3" y1="8" x2="13" y2="8" />
+      <line x1="3" y1="12" x2="13" y2="12" />
+    </svg>
+  );
+}
+
+function StackViewIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" className="h-4 w-4" aria-hidden="true">
+      <rect x="2" y="2" width="5" height="5" rx="1" />
+      <rect x="9" y="2" width="5" height="5" rx="1" />
+      <rect x="2" y="9" width="5" height="5" rx="1" />
+      <rect x="9" y="9" width="5" height="5" rx="1" />
+    </svg>
   );
 }

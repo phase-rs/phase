@@ -32,10 +32,10 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastVariantPaid,
-    Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp,
-    OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect,
+    FilterProp, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -5259,6 +5259,18 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::DungeonCompleted, def));
     }
 
+    // CR 705.2: "Whenever you/a player win(s)/lose(s) a coin flip" — FlippedCoin
+    // with result filter.  Decomposed into three independent axes:
+    //   1. keyword ("whenever" | "when")
+    //   2. player  ("you" → Controller | "a player" → Player)
+    //   3. result  ("win"/"wins" → Won | "lose"/"loses" → Lost)
+    if let Some((target, result)) = parse_coin_flip_result_trigger(lower) {
+        def.mode = TriggerMode::FlippedCoin;
+        def.coin_flip_result = Some(result);
+        def.valid_target = target;
+        return Some((TriggerMode::FlippedCoin, def));
+    }
+
     if let Some(result) = try_parse_die_roll_trigger(lower) {
         return Some(result);
     }
@@ -5276,6 +5288,30 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::RingTemptsYou, def));
     }
     None
+}
+
+fn parse_coin_flip_result_trigger(lower: &str) -> Option<(Option<TargetFilter>, CoinFlipResult)> {
+    let (_, (_, target, result, _)) = all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        alt((
+            value(Some(TargetFilter::Controller), tag("you ")),
+            value(
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                tag("an opponent "),
+            ),
+            value(Some(TargetFilter::Player), tag("a player ")),
+        )),
+        alt((
+            value(CoinFlipResult::Won, alt((tag("wins"), tag("win")))),
+            value(CoinFlipResult::Lost, alt((tag("loses"), tag("lose")))),
+        )),
+        tag(" a coin flip"),
+    ))
+    .parse(lower)
+    .ok()?;
+    Some((target, result))
 }
 
 fn try_parse_die_roll_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
@@ -14309,6 +14345,62 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DungeonCompleted);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_win_a_coin_flip() {
+        // CR 705.2: "Whenever you win a coin flip" fires only on won flips.
+        let def = parse_trigger_line(
+            "Whenever you win a coin flip, draw a card.",
+            "Krark's Thumb",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Won));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_lose_a_coin_flip() {
+        let def = parse_trigger_line(
+            "Whenever you lose a coin flip, target opponent gains 1 life.",
+            "Bad Luck Charm",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Lost));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_a_player_loses_a_coin_flip() {
+        let def = parse_trigger_line(
+            "When a player loses a coin flip, you gain 1 life.",
+            "Tavern Swindler",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Lost));
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_opponent_wins_a_coin_flip() {
+        let def = parse_trigger_line(
+            "Whenever an opponent wins a coin flip, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Won));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_coin_flip_rejects_partial_suffix() {
+        let def = parse_trigger_line("Whenever you win a coin flipper, draw a card.", "Test Card");
+        assert!(matches!(def.mode, TriggerMode::Unknown(_)));
     }
 
     #[test]

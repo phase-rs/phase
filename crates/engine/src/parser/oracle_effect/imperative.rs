@@ -869,6 +869,29 @@ pub(super) fn parse_one_or_more_sacrifice(
     Some((count, target, min_count))
 }
 
+/// CR 701.21a + CR 609.3: "sacrifice all <filter>" carries a mandatory
+/// count equal to the eligible object pool. This lets the sacrifice resolver's
+/// existing mandatory-all fast path perform every legal sacrifice without a
+/// one-card special case.
+pub(super) fn parse_all_sacrifice<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(QuantityExpr, TargetFilter, &'a str)> {
+    let lower = text.to_lowercase();
+    let ((), rest) = nom_on_lower(text, &lower, |input| value((), tag("all ")).parse(input))?;
+    let (mut target, rem) = parse_target_with_ctx(rest.trim_start(), ctx);
+    if matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    apply_actor_default(&mut target, ctx);
+    let count = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: target.clone(),
+        },
+    };
+    Some((count, target, rem))
+}
+
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
@@ -910,6 +933,15 @@ pub(super) fn parse_targeted_action_ast(
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), tag("sacrifice ")).parse(input)
     }) {
+        if let Some((count, target, _rem)) = parse_all_sacrifice(rest, ctx) {
+            #[cfg(debug_assertions)]
+            assert_no_compound_remainder(_rem, text);
+            return Some(TargetedImperativeAst::Sacrifice {
+                target,
+                count,
+                min_count: 0,
+            });
+        }
         if let Some((count, target, min_count)) = parse_one_or_more_sacrifice(rest, ctx) {
             return Some(TargetedImperativeAst::Sacrifice {
                 target,
@@ -2668,6 +2700,17 @@ pub(super) fn parse_utility_imperative_ast(
             _ => unreachable!(),
         };
     }
+    if let Some((attachment_text, target_text)) = nom_on_lower(text, lower, |input| {
+        let (input, _) = tag("unattach all ").parse(input)?;
+        let (input, attachment) = terminated(take_until(" from "), tag(" from ")).parse(input)?;
+        Ok((input, attachment.to_string()))
+    }) {
+        let (attachment, attachment_rem) = parse_type_phrase(attachment_text.trim());
+        let (target, target_rem) = parse_target_with_ctx(target_text, ctx);
+        if attachment_rem.trim().is_empty() && target_rem.trim().is_empty() {
+            return Some(UtilityImperativeAst::UnattachAll { attachment, target });
+        }
+    }
     // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
     // CR 608.2k: the bare-pronoun and self-deictic arms ("transform it" /
     // "transform itself" / "transform this creature") split into two anaphor
@@ -2908,6 +2951,9 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { attachment, target } => {
             Effect::Attach { attachment, target }
+        }
+        UtilityImperativeAst::UnattachAll { attachment, target } => {
+            Effect::UnattachAll { attachment, target }
         }
         // CR 613.4d: Switch power and toughness.
         UtilityImperativeAst::SwitchPT { target } => Effect::SwitchPT { target },
@@ -4773,7 +4819,7 @@ pub(super) fn parse_imperative_family_ast(
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast))),
 
         // Utility verbs (CR 615, CR 701.19, CR 701.6, CR 613.4d)
-        "prevent" | "regenerate" | "copy" | "attach" | "switch" => {
+        "prevent" | "regenerate" | "copy" | "attach" | "unattach" | "switch" => {
             parse_utility_imperative_ast(text, lower, ctx)
                 .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)))
         }
@@ -6699,6 +6745,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_unattach_all_equipment_from_target_creature() {
+        let input = "unattach all Equipment from target creature";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::UnattachAll { attachment, target }) = result else {
+            panic!("{input}: expected UnattachAll, got {result:?}");
+        };
+        assert_eq!(
+            attachment,
+            TargetFilter::Typed(TypedFilter::default().subtype("Equipment".to_string()))
+        );
+        assert_eq!(target, TargetFilter::Typed(TypedFilter::creature()));
+    }
+
+    #[test]
+    fn parse_unattach_all_decomposes_attachment_type_and_pronoun_target() {
+        let input = "unattach all Equipment from it";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::UnattachAll { attachment, target }) = result else {
+            panic!("{input}: expected UnattachAll, got {result:?}");
+        };
+        assert_eq!(
+            attachment,
+            TargetFilter::Typed(TypedFilter::default().subtype("Equipment".to_string()))
+        );
+        assert!(matches!(target, TargetFilter::ParentTarget));
+    }
+
     /// CR 608.2k regression — issue #319 sibling.
     /// "attach ~ to it" inside a typed-subject trigger ("Whenever a Samurai
     /// or Warrior you control attacks alone … attach this Equipment to it"
@@ -6989,18 +7065,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_sacrifice_all_uses_filtered_object_count() {
+        let text = "sacrifice all permanents you control";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice {
+                target,
+                count,
+                min_count,
+            } => {
+                assert_eq!(min_count, 0);
+                match &target {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|type_filter| matches!(type_filter, TypeFilter::Permanent)));
+                    }
+                    other => panic!("expected Typed target, got {other:?}"),
+                }
+                match count {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    } => assert_eq!(filter, target),
+                    other => panic!("expected ObjectCount count, got {other:?}"),
+                }
+            }
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_all_applies_actor_default_to_count_filter() {
+        let text = "sacrifice all permanents";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            actor: Some(ControllerRef::ParentTargetController),
+            ..Default::default()
+        };
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice { target, count, .. } => {
+                let TargetFilter::Typed(tf) = &target else {
+                    panic!("expected Typed target, got {target:?}");
+                };
+                assert_eq!(tf.controller, Some(ControllerRef::ParentTargetController));
+                match count {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    } => assert_eq!(filter, target),
+                    other => panic!("expected ObjectCount count, got {other:?}"),
+                }
+            }
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
     /// Issue #967: "sacrifice any number of creatures, each with power 1 or
     /// less" — the comma+"each" distributive linker between the collective
     /// type word and the per-object property suffix dropped the power filter
-    /// entirely (the parser stopped at the comma, leaving `, each with…`
+    /// entirely (the parser stopped at the comma, leaving `, each with...`
     /// unconsumed; the type-phrase fallback then produced
     /// `Effect::Sacrifice { target: TargetFilter::Typed(Creature), count: 1 }`
     /// — no power constraint, fixed count). CR 208.1: the per-object power
-    /// comparison applies via the existing P/T suffix combinator (the "each"
-    /// distributive qualifier is a grammar normalization, not a CR rule).
-    /// Verify both the comma form and the bare "each with" phrasing produce
-    /// identical AST, and that the encoded comparison is `power <= 1`
-    /// against the chosen value.
+    /// comparison applies via the existing P/T suffix combinator.
     #[test]
     fn parse_sacrifice_any_number_creatures_comma_each_power_filter_attached() {
         use crate::types::ability::{Comparator, FilterProp, PtStat, PtValueScope};
@@ -7019,7 +7153,6 @@ mod tests {
             let Effect::Sacrifice { target, count, .. } = lower_targeted_action_ast(result) else {
                 panic!("expected Effect::Sacrifice for {text:?}");
             };
-            // Target must be Creature with `PtComparison Power LE 1`.
             let TargetFilter::Typed(ref tf) = target else {
                 panic!("expected Typed filter for {text:?}, got {target:?}");
             };
@@ -7043,8 +7176,6 @@ mod tests {
                 "missing PtComparison(Power, Current, LE, 1) for {text:?}: {:?}",
                 tf.properties,
             );
-            // Count must remain the dynamic `UpTo(ObjectCount(<same filter>))`
-            // ceiling — not the fixed-1 fallback the bug produced.
             match count {
                 QuantityExpr::UpTo { max } => match *max {
                     QuantityExpr::Ref {

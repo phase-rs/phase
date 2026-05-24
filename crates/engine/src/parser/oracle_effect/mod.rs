@@ -5995,6 +5995,16 @@ fn try_parse_verb_and_target<'a>(
         return Some((TargetedImperativeAst::Untap { target }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("sacrifice ")).parse(i)) {
+        if let Some((count, target, rem)) = imperative::parse_all_sacrifice(rest, ctx) {
+            return Some((
+                TargetedImperativeAst::Sacrifice {
+                    target,
+                    count,
+                    min_count: 0,
+                },
+                rem,
+            ));
+        }
         // CR 107.1c + CR 701.21a: "sacrifice one or more / any number of
         // <filter>" — delegate to the single variable-count-sacrifice
         // authority so the dynamic `UpTo(ObjectCount)` ceiling and the
@@ -6877,10 +6887,12 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
 
 /// CR 120.2b + CR 608.2c: Multi-target damage split (Cone of Flame, Banshee,
 /// Serpentine Spike, Spinal Embrace class). One source emits N independent
-/// `DealDamage` events whose amounts and targets vary, separated by commas
-/// (with `and` introducing the final segment). Each segment after the first
-/// is bare-form — `"M damage to T2"` without a leading "deals" verb — and
-/// inherits the source object from the printed sentence.
+/// `DealDamage` events whose amounts and targets vary. Segments are separated
+/// either by commas (with `and` introducing the final segment) or — for the
+/// two-segment case — by a bare `and` with no comma (Char: "deals 4 damage to
+/// any target and 2 damage to you"). Each segment after the first is bare-form
+/// — `"M damage to T2"` without a leading "deals" verb — and inherits the
+/// source object from the printed sentence.
 ///
 /// Build shape:
 ///   primary = `DealDamage { amount_1, target_1 }`
@@ -6888,9 +6900,11 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
 ///   primary.sub_ability.sub_ability = `DealDamage { amount_3, target_3 }`
 ///
 /// Each segment is parsed via [`parse_bare_damage_continuation`] and chained
-/// as a `sub_ability`. Returns `None` (and does not mutate `ctx`) if the text
-/// is not a multi-segment damage line — control returns to the caller for the
-/// single-and compound splitter and other paths.
+/// as a `sub_ability`. A non-damage continuation aborts the whole chain (the
+/// bare-damage parser returns `None`, propagated by `?`), so single-`and`
+/// compounds like "deals 3 damage to any target and you gain 3 life" fall
+/// through to the caller's compound splitter unharmed. Returns `None` (and
+/// does not mutate `ctx`) if the text is not a multi-segment damage line.
 fn try_parse_multi_target_damage_chain(
     text: &str,
     ctx: &mut ParseContext,
@@ -6899,12 +6913,17 @@ fn try_parse_multi_target_damage_chain(
     let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
     let trimmed = remainder.trim_start();
     let trimmed_lower = trimmed.to_lowercase();
-    if tag::<_, _, OracleError<'_>>(", ")
-        .parse(trimmed_lower.as_str())
-        .is_err()
+    // A comma-delimited list ("..., M damage to T2, and K ...") or a bare
+    // two-segment "and" ("... and 2 damage to you", Char). Non-damage "and"
+    // continuations still reach the loop but abort it at the bare-damage parse,
+    // so they fall through to the caller's compound splitter.
+    if alt((
+        tag::<_, _, OracleError<'_>>(", "),
+        tag::<_, _, OracleError<'_>>("and "),
+    ))
+    .parse(trimmed_lower.as_str())
+    .is_err()
     {
-        // No comma after the primary recipient — fall back to single-and
-        // compound or single-target damage.
         return None;
     }
 
@@ -6922,6 +6941,12 @@ fn try_parse_multi_target_damage_chain(
         } else if let Ok((rest, _)) =
             tag::<_, _, OracleError<'_>>(", ").parse(cursor_lower.as_str())
         {
+            &cursor[cursor_lower.len() - rest.len()..]
+        } else if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("and ").parse(cursor_lower.as_str())
+        {
+            // Bare two-segment "and" (Char) — `cursor` was trimmed of its
+            // leading space, so the connector is "and " with no comma.
             &cursor[cursor_lower.len() - rest.len()..]
         } else {
             // Trailing punctuation only — clean end of chain.
@@ -7639,6 +7664,9 @@ fn replace_target_with_parent(effect: &mut Effect) {
         Effect::Attach { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
             *target = TargetFilter::ParentTarget;
         }
+        Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
+            *target = TargetFilter::ParentTarget;
+        }
         Effect::PutCounter { target, .. }
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. } => {
@@ -7777,6 +7805,9 @@ fn has_typed_target(effect: &Effect) -> bool {
         } | Effect::Tap {
             target: TargetFilter::Typed(_),
             ..
+        } | Effect::Untap {
+            target: TargetFilter::Typed(_),
+            ..
         } | Effect::Bounce {
             target: TargetFilter::Typed(_),
             ..
@@ -7784,6 +7815,9 @@ fn has_typed_target(effect: &Effect) -> bool {
             target: TargetFilter::Typed(_),
             ..
         } | Effect::Attach {
+            target: TargetFilter::Typed(_),
+            ..
+        } | Effect::UnattachAll {
             target: TargetFilter::Typed(_),
             ..
         } | Effect::ChangeZone {
@@ -7794,6 +7828,9 @@ fn has_typed_target(effect: &Effect) -> bool {
             ..
         } | Effect::GenericEffect {
             target: Some(TargetFilter::Typed(_)),
+            ..
+        } | Effect::TargetOnly {
+            target: TargetFilter::Typed(_),
             ..
         } | Effect::CastFromZone {
             target: TargetFilter::Typed(_),
@@ -8037,7 +8074,6 @@ fn lower_subject_predicate_ast(
                 };
 
                 if subject.target.is_some()
-                    || subject.inherits_parent
                     || matches!(subject.affected, TargetFilter::TriggeringSource)
                 {
                     let mut explore = AbilityDefinition::new(AbilityKind::Spell, Effect::Explore);
@@ -8054,6 +8090,9 @@ fn lower_subject_predicate_ast(
                         optional: subject.is_optional,
                         unless_pay: None,
                     };
+                }
+                if subject.inherits_parent {
+                    return clause;
                 }
 
                 if !matches!(subject.affected, TargetFilter::SelfRef) {
@@ -8613,6 +8652,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::GainControl { target, .. }
         | Effect::ControlNextTurn { target, .. }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::SwitchPT { target, .. }
         | Effect::CopySpell { target, .. }
@@ -10030,6 +10070,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::ChangeZone { target, .. }
         | Effect::ChangeZoneAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::Attach { target, .. } => rewrite_filter_parent_to_tracked_set(target),
+        Effect::UnattachAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::GenericEffect {
             target,
             static_abilities,
@@ -10216,6 +10257,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
@@ -11558,6 +11600,8 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             if_you_do_anchor.clone().or_else(|| ctx.subject.clone())
         };
+        let parent_target_available =
+            if_you_do_anchor.is_some() || chain_has_prior_typed_referent(&clauses);
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
@@ -11594,6 +11638,7 @@ pub(crate) fn parse_effect_chain_ir(
             // zone so a `"the exiled card"` anaphor in any effect chunk
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
+            parent_target_available,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -19078,6 +19123,47 @@ mod tests {
     }
 
     #[test]
+    fn damage_chain_bare_and_two_segments() {
+        // CR 120.2b + CR 608.2c: A two-segment damage line joined by a bare
+        // "and" with no comma — "Char deals 4 damage to any target and 2 damage
+        // to you" — is a degenerate damage chain. The verbless "2 damage to you"
+        // segment must chain as a second DealDamage to the controller, not be
+        // dropped.
+        let def = parse_effect_chain(
+            "~ deals 4 damage to any target and 2 damage to you.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    target: TargetFilter::Any,
+                    ..
+                }
+            ),
+            "primary: {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("verbless second damage segment must chain a sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "sub_ability should be 2 damage to controller, got: {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
     fn destroy_target_was_dealt_damage_preserves_relative_clause() {
         let def = parse_effect_chain(
             "Destroy target creature that was dealt damage this turn.",
@@ -21024,6 +21110,82 @@ mod tests {
         assert!(matches!(*first.effect, Effect::Explore));
         let second = first.sub_ability.expect("expected repeated explore");
         assert!(matches!(*second.effect, Effect::Explore));
+    }
+
+    #[test]
+    fn effect_choose_two_tap_then_unattach_equipment_keeps_unattach_clause() {
+        let def = parse_effect_chain(
+            "Choose two target creatures. Tap those creatures, then unattach all Equipment from them.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
+        assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(2, 2)));
+
+        let tap = def
+            .sub_ability
+            .expect("targeted creatures should be tapped");
+        assert!(matches!(
+            &*tap.effect,
+            Effect::Tap {
+                target: TargetFilter::TrackedSet { .. }
+            }
+        ));
+
+        let unattach = tap
+            .sub_ability
+            .expect("unattach clause should remain in the continuation chain");
+        match &*unattach.effect {
+            Effect::UnattachAll { attachment, target } => {
+                assert!(matches!(
+                    attachment,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters == vec![TypeFilter::Subtype("Equipment".to_string())]
+                ));
+                assert!(matches!(target, TargetFilter::ParentTarget));
+            }
+            other => panic!("expected UnattachAll continuation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_target_creature_pump_then_can_block_additional_inherits_target() {
+        let def = parse_effect_chain(
+            "Untap target creature. It gets +2/+2 until end of turn and can block an additional creature this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Untap { .. }));
+
+        let pump = def.sub_ability.expect("target creature should get pumped");
+        assert!(matches!(
+            &*pump.effect,
+            Effect::Pump {
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                target: TargetFilter::ParentTarget
+            }
+        ));
+
+        let block_grant = pump
+            .sub_ability
+            .expect("additional-blocker grant should stay in the chain");
+        assert_eq!(block_grant.duration, Some(Duration::UntilEndOfTurn));
+        match &*block_grant.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target: Some(TargetFilter::ParentTarget),
+                ..
+            } => {
+                assert!(matches!(
+                    static_abilities.as_slice(),
+                    [StaticDefinition {
+                        mode: crate::types::statics::StaticMode::ExtraBlockers { count: Some(1) },
+                        affected: Some(TargetFilter::ParentTarget),
+                        ..
+                    }]
+                ));
+            }
+            other => panic!("expected inherited-target ExtraBlockers grant, got {other:?}"),
+        }
     }
 
     #[test]
@@ -25307,6 +25469,56 @@ mod tests {
             "Expected sub_ability GenericEffect with MustBeBlocked, got {:?}",
             sub.effect
         );
+    }
+
+    #[test]
+    fn pump_compound_with_extra_blockers() {
+        // Give No Ground: the trailing blocking permission is a second
+        // duration-scoped continuous effect on the same target, not a
+        // replacement for the pump.
+        let def = parse_effect_chain(
+            "Target creature gets +2/+6 until end of turn and can block any number of creatures this turn",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Pump { .. }),
+            "Expected Pump as primary effect, got {:?}",
+            def.effect
+        );
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Expected sub_ability for ExtraBlockers");
+        assert!(
+            matches!(&*sub.effect, Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|sd|
+                    sd.mode == crate::types::statics::StaticMode::ExtraBlockers { count: None }
+                        && sd.affected == Some(TargetFilter::ParentTarget)
+                )
+            ),
+            "Expected sub_ability GenericEffect with ExtraBlockers, got {:?}",
+            sub.effect
+        );
+        assert_eq!(sub.duration, Some(Duration::UntilEndOfTurn));
+    }
+
+    #[test]
+    fn suffix_power_equality_condition_preserves_pump_duration() {
+        let def = parse_effect_chain(
+            "Target creature you control gets +2/+2 until end of turn if its power is 2",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 2 },
+                ..
+            })
+        ));
     }
 
     #[test]

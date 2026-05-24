@@ -21,9 +21,9 @@ import { ACTIVE_DECK_KEY, touchDeckPlayed } from "../constants/storage";
 import { useCardImage } from "../hooks/useCardImage";
 import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
+import { useCardDataStore } from "../stores/cardDataStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
-import { disposeCompatibilityWorker } from "../services/deckCompatibility";
 
 // --- Format trigger styling ---
 //
@@ -48,6 +48,14 @@ export function GameSetupPage() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   useAudioContext("menu");
+
+  // Warm the shared card DB on mount so deck compat checks below are instant.
+  // Idempotent — a no-op if the menu already warmed; closes the deep-link hole
+  // when navigating straight to /setup.
+  const cardStatus = useCardDataStore((s) => s.status);
+  useEffect(() => {
+    void useCardDataStore.getState().warm();
+  }, []);
 
   // Format picker modal -- opened by the hero chip below the title. Mobile
   // gets a full-screen sheet via <ModalPanelShell>; desktop centers it.
@@ -86,8 +94,8 @@ export function GameSetupPage() {
       return;
     }
 
-    // Restore last-used format, or default to Standard
-    const fmt = lastFormat && FORMAT_DEFAULTS[lastFormat] ? lastFormat : "Standard";
+    // Restore last-used format, or default to Commander
+    const fmt = lastFormat && FORMAT_DEFAULTS[lastFormat] ? lastFormat : "Commander";
     const defaults = FORMAT_DEFAULTS[fmt];
     setSelectedFormat(fmt);
     setFormatConfig(defaults);
@@ -143,11 +151,6 @@ export function GameSetupPage() {
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
     saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
     useGameStore.setState({ gameId });
-    // Release the setup-page compatibility worker's full card-DB WASM instance
-    // before the game engine allocates its own — otherwise both are resident at
-    // game init, the peak that traps as "memory access out of bounds" on
-    // low-memory devices. Lazily recreated on the next compatibility check.
-    disposeCompatibilityWorker();
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
     navigate(
       `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
@@ -159,7 +162,11 @@ export function GameSetupPage() {
   const noDeckSelected = !activeDeckName;
   const deckBlockedForSelectedFormat = selectedCompat?.selected_format_compatible === false;
   const noLegalAiDecks = legalAiDeckCount === 0;
-  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks;
+  // Block start only while the card DB is actively loading — not on `error`/`idle`,
+  // since initializeGame awaits ensureCardDb itself and an errored warm must not
+  // trap the user on this screen.
+  const cardDataLoading = cardStatus === "loading";
+  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
   const representativeCard = useMemo(
     () => (activeDeckName ? getRepresentativeCard(activeDeckName) : null),
     [activeDeckName],
@@ -257,9 +264,23 @@ export function GameSetupPage() {
                       <div className="h-full w-full animate-pulse bg-gray-800" />
                     )}
                   </div>
-                  <h3 className="mt-3 truncate text-base font-semibold text-white">
-                    {activeDeckName}
-                  </h3>
+                  <div className="mt-3 flex items-center gap-2">
+                    <h3 className="min-w-0 flex-1 truncate text-base font-semibold text-white">
+                      {activeDeckName}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => handleEditDeck(activeDeckName)}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-black/30 text-gray-300 transition-colors hover:bg-indigo-600 hover:text-white"
+                      title={`Edit ${activeDeckName}`}
+                      aria-label={`Edit ${activeDeckName}`}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+                        <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 2.474L6.226 11.16a2.25 2.25 0 0 1-.892.547l-2.115.705a.5.5 0 0 1-.632-.632l.705-2.115a2.25 2.25 0 0 1 .547-.892l7.174-7.346Z" />
+                        <path d="M3.75 13.5a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5Z" />
+                      </svg>
+                    </button>
+                  </div>
                   <div className="mt-1 flex items-center gap-2">
                     <div className="flex gap-1">
                       {colors.map((c) => (
