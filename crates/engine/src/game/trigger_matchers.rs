@@ -1954,20 +1954,26 @@ pub(super) fn match_always(
     true
 }
 
-/// Explored: fires when a creature explores.
+/// CR 701.44: "Whenever [subject] explores" — fires when a creature explores and
+/// the exploring creature matches the trigger's `valid_card` filter. When
+/// `valid_card` is `None` the trigger is unscoped (fires for any explore).
+/// The `EffectResolved { source_id }` event carries the exploring creature's
+/// object ID, which is tested against the filter (e.g. `Controlled` for
+/// "a creature you control").
 pub(super) fn match_explored(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::Explore,
-            ..
-        }
-    )
+    let GameEvent::EffectResolved {
+        kind: EffectKind::Explore,
+        source_id: exploring_id,
+    } = event
+    else {
+        return false;
+    };
+    valid_card_matches(trigger, state, *exploring_id, source_id)
 }
 
 /// CR 702.110a: "When this creature exploits" = source is the exploiter.
@@ -7349,6 +7355,80 @@ mod tests {
         assert!(
             match_changes_zone(&opp_milled_event, &trigger, source, &state),
             "trigger must fire when an opponent's creature card is milled"
+        );
+    }
+
+    /// CR 701.44: match_explored fires when the exploring creature passes the
+    /// valid_card filter. With valid_card = Some(Controlled), only a creature
+    /// owned by the trigger controller should fire; events from other
+    /// controllers must not.
+    #[test]
+    fn explored_trigger_filters_by_controller() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wildgrowth Walker".to_string(),
+            Zone::Battlefield,
+        );
+        let my_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Merfolk Branchwalker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&my_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let opp_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Branchwalker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::Explored);
+        trigger.valid_card = Some(TargetFilter::Controlled);
+
+        let my_explore = GameEvent::EffectResolved {
+            kind: EffectKind::Explore,
+            source_id: my_creature,
+        };
+        assert!(
+            match_explored(&my_explore, &trigger, trigger_source, &state),
+            "trigger must fire when a creature you control explores"
+        );
+
+        let opp_explore = GameEvent::EffectResolved {
+            kind: EffectKind::Explore,
+            source_id: opp_creature,
+        };
+        assert!(
+            !match_explored(&opp_explore, &trigger, trigger_source, &state),
+            "trigger must not fire when an opponent's creature explores"
+        );
+
+        let non_explore = GameEvent::EffectResolved {
+            kind: EffectKind::Draw,
+            source_id: my_creature,
+        };
+        assert!(
+            !match_explored(&non_explore, &trigger, trigger_source, &state),
+            "trigger must not fire for non-Explore events"
         );
     }
 

@@ -4906,6 +4906,8 @@ fn try_parse_event(
         Mutates,
         ExploitsCreature,
         Exploits,
+        // CR 701.44: "explores" — the creature performs the explore action.
+        Explores,
         Transforms,
         Stations,
         SaddlesOrCrews,
@@ -4969,6 +4971,9 @@ fn try_parse_event(
             // CR 702.110b: "exploits a creature" — exploit trigger
             value(SimpleEvent::ExploitsCreature, tag("exploits a creature")),
             value(SimpleEvent::Exploits, tag("exploits")),
+            // CR 701.44: "explores" — explore trigger. The subject is the
+            // exploring creature (e.g. "a creature you control").
+            value(SimpleEvent::Explores, tag("explores")),
             // CR 712.14: "transforms" / "transforms into"
             value(SimpleEvent::Transforms, tag("transforms")),
             // CR 702.184a: "stations ~" — actor-side Station trigger.
@@ -5047,6 +5052,13 @@ fn try_parse_event(
             }
             SimpleEvent::ExploitsCreature | SimpleEvent::Exploits => {
                 def.mode = TriggerMode::Exploited;
+                def.valid_card = Some(subject.clone());
+            }
+            // CR 701.44: "explores" — fires when the named creature explores.
+            // valid_card carries the subject filter ("a creature you control",
+            // "this creature", etc.) so match_explored can scope it correctly.
+            SimpleEvent::Explores => {
+                def.mode = TriggerMode::Explored;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Transforms => {
@@ -20098,5 +20110,56 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 701.44: "Whenever a creature you control explores" — explore trigger
+    /// scoped to the controller's creatures. Cards: Wildgrowth Walker, Shadowed
+    /// Caravel, Lurking Chupacabra, Merfolk Cave-Diver.
+    /// The trigger mode must be Explored and valid_card must capture the creature
+    /// filter so match_explored can restrict firing to the right controller.
+    #[test]
+    fn trigger_creature_you_control_explores() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control explores, put a +1/+1 counter on this creature.",
+            "Wildgrowth Walker",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Explored,
+            "expected Explored mode, got {:?}",
+            def.mode
+        );
+        assert!(
+            def.valid_card.is_some(),
+            "valid_card must be set for controller-scoped explore trigger"
+        );
+        // The filter must describe a creature (not just any permanent).
+        let Some(TargetFilter::Typed(tf)) = def.valid_card else {
+            panic!(
+                "expected Typed creature filter for valid_card, got {:?}",
+                def.valid_card
+            );
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "valid_card filter must include Creature type, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 701.44: "Whenever ~ explores" — self-referential explore trigger.
+    /// Verifies SelfRef is preserved for cards that fire on their own explore.
+    #[test]
+    fn trigger_self_explores() {
+        let def = parse_trigger_line(
+            "Whenever ~ explores, put a +1/+1 counter on ~.",
+            "Jadelight Ranger",
+        );
+        assert_eq!(def.mode, TriggerMode::Explored);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "self-referential explore trigger must use SelfRef"
+        );
     }
 }
