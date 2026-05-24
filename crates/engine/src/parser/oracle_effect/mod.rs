@@ -5844,6 +5844,9 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     if let Some(clause) = try_parse_tap_goad_compound(text, ctx) {
         return clause;
     }
+    if let Some(clause) = try_parse_multi_target_counter_chain(text, ctx) {
+        return clause;
+    }
     if let Some(clause) = try_split_targeted_compound(text, ctx) {
         return clause;
     }
@@ -6941,6 +6944,96 @@ fn try_parse_multi_target_damage_chain(
         optional: false,
         unless_pay: None,
     })
+}
+
+/// CR 122.1 + CR 608.2c: Multi-target counter placement split. A single
+/// instruction may put different counter counts on different targets using
+/// comma-separated bare continuations:
+///
+/// `put N <counter> counter(s) on T1, M <counter> counter(s) on T2[, and K ...]`.
+///
+/// Each bare continuation inherits the `put` verb and is parsed by the same
+/// counter-placement building block as the primary segment.
+fn try_parse_multi_target_counter_chain(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (primary_effect, remainder, primary_multi_target) =
+        counter::try_parse_put_counter(&lower, text, ctx)?;
+
+    let trimmed = remainder.trim_start();
+    let trimmed_lower = trimmed.to_lowercase();
+    if tag::<_, _, OracleError<'_>>(", ")
+        .parse(trimmed_lower.as_str())
+        .is_err()
+    {
+        return None;
+    }
+
+    let mut segments: Vec<(Effect, Option<MultiTargetSpec>)> = Vec::new();
+    let mut cursor = remainder.trim_start();
+    while !cursor.is_empty() {
+        let cursor_lower = cursor.to_lowercase();
+        let after_separator = if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>(", and ").parse(cursor_lower.as_str())
+        {
+            &cursor[cursor_lower.len() - rest.len()..]
+        } else if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>(", ").parse(cursor_lower.as_str())
+        {
+            &cursor[cursor_lower.len() - rest.len()..]
+        } else {
+            // allow-noncombinator: structural punctuation cleanup after all
+            // comma-separated counter segments are parsed, not parser dispatch.
+            let rest_trimmed = cursor.trim_end_matches('.').trim();
+            if rest_trimmed.is_empty() {
+                break;
+            }
+            return None;
+        };
+
+        let (segment_effect, segment_remainder, segment_multi_target) =
+            parse_bare_counter_continuation(after_separator, ctx)?;
+        segments.push((segment_effect, segment_multi_target));
+        cursor = segment_remainder.trim_start();
+    }
+
+    if segments.is_empty() {
+        return None;
+    }
+
+    let mut chain_tail: Option<Box<AbilityDefinition>> = None;
+    for (effect, multi_target) in segments.into_iter().rev() {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
+        def.multi_target = multi_target;
+        def.sub_ability = chain_tail.take();
+        chain_tail = Some(Box::new(def));
+    }
+
+    Some(ParsedEffectClause {
+        effect: primary_effect,
+        duration: None,
+        sub_ability: chain_tail,
+        distribute: None,
+        multi_target: primary_multi_target,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+fn parse_bare_counter_continuation<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(Effect, &'a str, Option<MultiTargetSpec>)> {
+    let reparsed_text = format!("put {text}");
+    let reparsed_lower = reparsed_text.to_lowercase();
+    let (effect, remainder, multi_target) =
+        counter::try_parse_put_counter(&reparsed_lower, &reparsed_text, ctx)?;
+    let consumed = reparsed_text.len().checked_sub(remainder.len())?;
+    let text_consumed = consumed.checked_sub("put ".len())?;
+    Some((effect, &text[text_consumed..], multi_target))
 }
 
 /// Parse one bare-form damage continuation: `"N damage to T"` (no leading
@@ -17220,6 +17313,49 @@ mod tests {
 
     fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
         tf.type_filters.iter().any(|candidate| candidate == &ty)
+    }
+
+    fn assert_minus_counter_node(
+        def: &AbilityDefinition,
+        count: i32,
+        another: bool,
+    ) -> Option<&AbilityDefinition> {
+        match def.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count: QuantityExpr::Fixed { value },
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Minus1Minus1);
+                assert_eq!(*value, count);
+                let tf = typed_leg(target).expect("counter target should be typed");
+                assert!(has_type(tf, TypeFilter::Creature));
+                assert_eq!(
+                    tf.properties.contains(&FilterProp::Another),
+                    another,
+                    "unexpected Another property on {tf:?}",
+                );
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+        def.sub_ability.as_deref()
+    }
+
+    /// Issue #943: comma-separated counter placements with bare count-led
+    /// continuations inherit the `put` verb and stay as ordered sub-abilities.
+    #[test]
+    fn multi_target_counter_chain_incremental_blight_shape() {
+        let def = parse_effect_chain(
+            "Put a -1/-1 counter on target creature, two -1/-1 counters on another target creature, and three -1/-1 counters on a third target creature.",
+            AbilityKind::Spell,
+        );
+
+        let second = assert_minus_counter_node(&def, 1, false).expect("second counter node");
+        let third = assert_minus_counter_node(second, 2, true).expect("third counter node");
+        assert!(
+            assert_minus_counter_node(third, 3, false).is_none(),
+            "counter chain should contain exactly three nodes",
+        );
     }
 
     /// Issue #445 (Brokers Ascendancy): a compound counter clause whose FIRST
