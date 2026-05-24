@@ -21,9 +21,9 @@ import { ACTIVE_DECK_KEY, touchDeckPlayed } from "../constants/storage";
 import { useCardImage } from "../hooks/useCardImage";
 import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
+import { useCardDataStore } from "../stores/cardDataStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
-import { disposeCompatibilityWorker } from "../services/deckCompatibility";
 
 // --- Format trigger styling ---
 //
@@ -48,6 +48,14 @@ export function GameSetupPage() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   useAudioContext("menu");
+
+  // Warm the shared card DB on mount so deck compat checks below are instant.
+  // Idempotent — a no-op if the menu already warmed; closes the deep-link hole
+  // when navigating straight to /setup.
+  const cardStatus = useCardDataStore((s) => s.status);
+  useEffect(() => {
+    void useCardDataStore.getState().warm();
+  }, []);
 
   // Format picker modal -- opened by the hero chip below the title. Mobile
   // gets a full-screen sheet via <ModalPanelShell>; desktop centers it.
@@ -143,11 +151,6 @@ export function GameSetupPage() {
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
     saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
     useGameStore.setState({ gameId });
-    // Release the setup-page compatibility worker's full card-DB WASM instance
-    // before the game engine allocates its own — otherwise both are resident at
-    // game init, the peak that traps as "memory access out of bounds" on
-    // low-memory devices. Lazily recreated on the next compatibility check.
-    disposeCompatibilityWorker();
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
     navigate(
       `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
@@ -159,7 +162,11 @@ export function GameSetupPage() {
   const noDeckSelected = !activeDeckName;
   const deckBlockedForSelectedFormat = selectedCompat?.selected_format_compatible === false;
   const noLegalAiDecks = legalAiDeckCount === 0;
-  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks;
+  // Block start only while the card DB is actively loading — not on `error`/`idle`,
+  // since initializeGame awaits ensureCardDb itself and an errored warm must not
+  // trap the user on this screen.
+  const cardDataLoading = cardStatus === "loading";
+  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
   const representativeCard = useMemo(
     () => (activeDeckName ? getRepresentativeCard(activeDeckName) : null),
     [activeDeckName],

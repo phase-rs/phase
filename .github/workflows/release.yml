@@ -315,6 +315,10 @@ jobs:
           DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
           CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/${{ steps.card-data-hash.outputs.filename }}"
           AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
+          # Tagged production release: surfaces the "try the preview build" CTA
+          # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
+          # deploy (deploy.yml) deliberately omits this so it never self-links.
+          RELEASE_BUILD: "true"
         run: |
           cd client
           pnpm install --frozen-lockfile
@@ -872,6 +876,10 @@ jobs:
         if: steps.macos-signing.outputs.skip != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
+          # tauri-action runs beforeBuildCommand (pnpm build) as a child process,
+          # so this reaches vite.config.ts. Surfaces the preview-build CTA in the
+          # desktop app too (it routes through openExternal → shell open).
+          RELEASE_BUILD: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

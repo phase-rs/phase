@@ -3631,6 +3631,23 @@ fn parse_color_relative_clause_suffix(
             return None;
         };
 
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("one or more colors").parse(after_intro) {
+        let next_char_is_boundary = rest
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if next_char_is_boundary {
+            let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+            return Some((
+                vec![FilterProp::ColorCount {
+                    comparator: Comparator::GE,
+                    count: 1,
+                }],
+                consumed,
+            ));
+        }
+    }
+
     let (rest, colors) = parse_color_disjunction(after_intro).ok()?;
     let next_char_is_boundary = rest
         .chars()
@@ -8063,6 +8080,24 @@ mod tests {
                 value: Supertype::Legendary,
             }),
             "must exclude legendary permanents, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn permanents_that_are_one_or_more_colors_full_target() {
+        let (filter, rest) = parse_target("all permanents that are one or more colors");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(
+            tf.properties.contains(&FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 1,
+            }),
+            "must require colored permanents, got {:?}",
             tf.properties
         );
     }
