@@ -1015,8 +1015,19 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 608.2k: Bare pronoun "it" — context-dependent
+    // CR 608.2k: Bare pronoun "it" — context-dependent. In trigger context,
+    // `ctx.subject` identifies the trigger subject; in spell/effect-chain
+    // context, subject-predicate "it ..." refers back to the prior target.
     if lower == "it" {
+        if ctx.subject.is_none() {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: None,
+                multi_target: None,
+                inherits_parent: true,
+                is_optional: false,
+            });
+        }
         return Some(SubjectApplication {
             affected: resolve_it_pronoun(ctx),
             target: None,

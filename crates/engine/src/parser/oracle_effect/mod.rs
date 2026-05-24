@@ -21150,7 +21150,7 @@ mod tests {
             Effect::Pump {
                 power: PtValue::Fixed(2),
                 toughness: PtValue::Fixed(2),
-                target: TargetFilter::SelfRef
+                target: TargetFilter::ParentTarget
             }
         ));
 
@@ -21161,13 +21161,14 @@ mod tests {
         match &*block_grant.effect {
             Effect::GenericEffect {
                 static_abilities,
-                target: Some(TargetFilter::ParentTarget),
+                target: None,
                 ..
             } => {
                 assert!(matches!(
                     static_abilities.as_slice(),
                     [StaticDefinition {
                         mode: crate::types::statics::StaticMode::ExtraBlockers { count: Some(1) },
+                        affected: Some(TargetFilter::ParentTarget),
                         ..
                     }]
                 ));
