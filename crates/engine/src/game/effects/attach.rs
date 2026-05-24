@@ -1,5 +1,7 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
+use crate::game::replacement::{self, ReplacementResult};
+use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -7,6 +9,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
+use crate::types::zones::Zone;
 
 /// CR 701.3a + CR 701.3b: Attach — to place an Aura, Equipment, or Fortification on another object or player.
 pub fn resolve(
@@ -41,8 +45,10 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 701.3d: Unattach each matching Equipment from the matched host while the
-/// Equipment remain on the battlefield.
+/// CR 701.3d: Unattach each matching Equipment, Aura, or Fortification from
+/// the matched host. Equipment/Fortifications remain on the battlefield;
+/// Auras that are instructed to become unattached leave via the zone-change
+/// replacement pipeline.
 pub fn resolve_unattach_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -53,12 +59,7 @@ pub fn resolve_unattach_all(
         _ => (&TargetFilter::Any, &TargetFilter::Any),
     };
 
-    let target_ids = resolve_object_filters(state, ability, target_filter);
-    if target_ids.is_empty() {
-        return Err(EffectError::MissingParam(
-            "No target for UnattachAll".to_string(),
-        ));
-    }
+    let target_ids = resolved_object_ids_for_filter(state, ability, target_filter);
 
     let ctx = FilterContext::from_ability(ability);
     for target_id in target_ids {
@@ -71,7 +72,11 @@ pub fn resolve_unattach_all(
             if !matches_target_filter(state, attachment_id, attachment_filter, &ctx) {
                 continue;
             }
-            if let Some(old_target) = unattach(state, attachment_id) {
+            if is_aura(state, attachment_id) {
+                if !move_unattached_aura_to_graveyard(state, ability, attachment_id, events) {
+                    return Ok(());
+                }
+            } else if let Some(old_target) = unattach(state, attachment_id) {
                 events.push(GameEvent::Unattached {
                     attachment_id,
                     old_target,
@@ -86,6 +91,52 @@ pub fn resolve_unattach_all(
     });
 
     Ok(())
+}
+
+fn move_unattached_aura_to_graveyard(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    attachment_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let proposed = ProposedEvent::zone_change(
+        attachment_id,
+        Zone::Battlefield,
+        Zone::Graveyard,
+        Some(ability.source_id),
+    );
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let Some(old_target) = unattach(state, attachment_id) {
+                events.push(GameEvent::Unattached {
+                    attachment_id,
+                    old_target,
+                });
+            }
+            crate::game::effects::change_zone::deliver_replaced_zone_change(
+                state,
+                event,
+                Some(ability.source_id),
+                None,
+                false,
+                events,
+            );
+            true
+        }
+        ReplacementResult::Prevented => true,
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            false
+        }
+    }
+}
+
+fn is_aura(state: &GameState, attachment_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&attachment_id)
+        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
 }
 
 pub(crate) fn target_ref_from_attach_target(target: AttachTarget) -> TargetRef {
@@ -132,61 +183,6 @@ fn resolve_object_filter<'a>(
             TargetRef::Object(id) => Some(*id),
             TargetRef::Player(_) => None,
         }),
-    }
-}
-
-fn resolve_object_filters(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    filter: &TargetFilter,
-) -> Vec<ObjectId> {
-    match filter {
-        TargetFilter::ParentTarget => ability
-            .targets
-            .iter()
-            .filter_map(|target| match target {
-                TargetRef::Object(id) => Some(*id),
-                TargetRef::Player(_) => None,
-            })
-            .collect(),
-        TargetFilter::ParentTargetSlot { index } => ability
-            .targets
-            .get(*index)
-            .and_then(|target| match target {
-                TargetRef::Object(id) => Some(*id),
-                TargetRef::Player(_) => None,
-            })
-            .into_iter()
-            .collect(),
-        TargetFilter::LastCreated => state.last_created_token_ids.clone(),
-        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
-            let effective_filter =
-                crate::game::targeting::resolve_tracked_set_sentinel(state, filter.clone());
-            let ctx = FilterContext::from_ability(ability);
-            state
-                .battlefield
-                .iter()
-                .copied()
-                .filter(|id| matches_target_filter(state, *id, &effective_filter, &ctx))
-                .collect()
-        }
-        _ => {
-            let explicit_targets: Vec<ObjectId> = ability
-                .targets
-                .iter()
-                .filter_map(|target| match target {
-                    TargetRef::Object(id) => Some(*id),
-                    TargetRef::Player(_) => None,
-                })
-                .collect();
-            if !explicit_targets.is_empty() {
-                return explicit_targets;
-            }
-            let mut target_slots = ability.targets.iter();
-            resolve_object_filter(state, ability, filter, &mut target_slots)
-                .into_iter()
-                .collect()
-        }
     }
 }
 
@@ -350,7 +346,7 @@ pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{StaticDefinition, TargetFilter};
+    use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
@@ -376,13 +372,11 @@ mod tests {
     }
 
     fn spawn_creature(state: &mut GameState, name: &str) -> ObjectId {
-        let id = create_object(
-            state,
-            CardId(2),
-            PlayerId(0),
-            name.to_string(),
-            Zone::Battlefield,
-        );
+        spawn_creature_for(state, name, PlayerId(0))
+    }
+
+    fn spawn_creature_for(state: &mut GameState, name: &str, owner: PlayerId) -> ObjectId {
+        let id = create_object(state, CardId(2), owner, name.to_string(), Zone::Battlefield);
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
         id
@@ -656,6 +650,111 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn unattach_all_empty_target_set_resolves_noop() {
+        let mut state = setup();
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().subtype("Equipment".to_string()),
+                ),
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature()
+                        .controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            events.as_slice(),
+            [GameEvent::EffectResolved {
+                kind: EffectKind::UnattachAll,
+                source_id: ObjectId(999)
+            }]
+        ));
+    }
+
+    #[test]
+    fn unattach_all_filters_explicit_object_targets() {
+        let mut state = setup();
+        let sword = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let shield = spawn_with_subtype(&mut state, "Shield", "Equipment");
+        let own_creature = spawn_creature(&mut state, "Bear");
+        let opponent_creature = spawn_creature_for(&mut state, "Elf", PlayerId(1));
+        attach_to(&mut state, sword, own_creature);
+        attach_to(&mut state, shield, opponent_creature);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().subtype("Equipment".to_string()),
+                ),
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature().controller(ControllerRef::You),
+                ),
+            },
+            vec![
+                TargetRef::Object(own_creature),
+                TargetRef::Object(opponent_creature),
+            ],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects.get(&sword).unwrap().attached_to, None);
+        assert_eq!(
+            state.objects.get(&shield).unwrap().attached_to,
+            Some(AttachTarget::Object(opponent_creature))
+        );
+        assert!(state
+            .objects
+            .get(&opponent_creature)
+            .unwrap()
+            .attachments
+            .contains(&shield));
+    }
+
+    #[test]
+    fn unattach_all_moves_matching_auras_to_owner_graveyard() {
+        let mut state = setup();
+        let aura = spawn_with_subtype(&mut state, "Pacifism", "Aura");
+        let creature = spawn_creature(&mut state, "Bear");
+        attach_to(&mut state, aura, creature);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().subtype("Aura".to_string()),
+                ),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
+
+        let aura_obj = state.objects.get(&aura).unwrap();
+        assert_eq!(aura_obj.zone, Zone::Graveyard);
+        assert_eq!(aura_obj.attached_to, None);
+        assert!(state.players[0].graveyard.contains(&aura));
+        assert!(state.objects.get(&creature).unwrap().attachments.is_empty());
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { object_id, to, .. } if *object_id == aura && *to == Zone::Graveyard)));
     }
 
     #[test]

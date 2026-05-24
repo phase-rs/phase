@@ -2673,18 +2673,15 @@ pub(super) fn parse_utility_imperative_ast(
             _ => unreachable!(),
         };
     }
-    if let Some(((), target_text)) = nom_on_lower(text, lower, |input| {
-        let (input, _) = tag("unattach all equipment from ").parse(input)?;
-        Ok((input, ()))
+    if let Some((attachment_text, target_text)) = nom_on_lower(text, lower, |input| {
+        let (input, _) = tag("unattach all ").parse(input)?;
+        let (input, attachment) = terminated(take_until(" from "), tag(" from ")).parse(input)?;
+        Ok((input, attachment.to_string()))
     }) {
-        let (target, rem) = parse_target(target_text);
-        if rem.trim().is_empty() {
-            return Some(UtilityImperativeAst::UnattachAll {
-                attachment: TargetFilter::Typed(
-                    TypedFilter::default().subtype("Equipment".to_string()),
-                ),
-                target,
-            });
+        let (attachment, attachment_rem) = parse_type_phrase(attachment_text.trim());
+        let (target, target_rem) = parse_target_with_ctx(target_text, ctx);
+        if attachment_rem.trim().is_empty() && target_rem.trim().is_empty() {
+            return Some(UtilityImperativeAst::UnattachAll { attachment, target });
         }
     }
     // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
@@ -6734,6 +6731,21 @@ mod tests {
             TargetFilter::Typed(TypedFilter::default().subtype("Equipment".to_string()))
         );
         assert_eq!(target, TargetFilter::Typed(TypedFilter::creature()));
+    }
+
+    #[test]
+    fn parse_unattach_all_decomposes_attachment_type_and_pronoun_target() {
+        let input = "unattach all Auras from it";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::UnattachAll { attachment, target }) = result else {
+            panic!("{input}: expected UnattachAll, got {result:?}");
+        };
+        assert_eq!(
+            attachment,
+            TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string()))
+        );
+        assert!(matches!(target, TargetFilter::ParentTarget));
     }
 
     /// CR 608.2k regression — issue #319 sibling.
