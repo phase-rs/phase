@@ -25409,6 +25409,23 @@ mod tests {
     }
 
     #[test]
+    fn suffix_power_equality_condition_preserves_pump_duration() {
+        let def = parse_effect_chain(
+            "Target creature you control gets +2/+2 until end of turn if its power is 2",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 2 },
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn static_must_be_blocked_still_routes_to_static_parser() {
         // Regression: self-referential "CARDNAME must be blocked if able" should
         // still route to the static parser, not the effect parser.

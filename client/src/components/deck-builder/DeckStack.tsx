@@ -9,6 +9,7 @@ import type { ScryfallCard } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
+import { mouseHoverPreview } from "./hoverPreview";
 
 interface DeckStackProps {
   deck: ParsedDeck;
@@ -173,7 +174,10 @@ function DeckStackCard({
   const isCommander = item.section === "commander";
   const showAddButton = item.section === "main";
 
-  const handleRemove = () => {
+  // Buttons stop propagation so tapping +/- doesn't also fire the card-body
+  // tap-to-preview (the +/- sit on top of the card).
+  const handleRemove = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (item.section === "commander") {
       onRemoveCommander(item.name);
       return;
@@ -181,17 +185,20 @@ function DeckStackCard({
     onRemoveCard(item.name, item.section);
   };
 
-  const handleAdd = () => {
+  const handleAdd = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (!canAdd) return;
     onAddCard(item.name);
   };
 
   return (
     <div
-      className={`relative ${className ?? ""}`}
+      className={`relative ${onCardHover ? "cursor-pointer" : ""} ${className ?? ""}`}
       style={{ zIndex, width: CARD_WIDTH }}
-      onMouseEnter={() => onCardHover?.(item.name)}
-      onMouseLeave={() => onCardHover?.(null)}
+      // Tap previews the card on touch; hover previews on mouse (guarded so the
+      // touch-compat mouseleave can't tear down the overlay the tap just opened).
+      onClick={() => onCardHover?.(item.name)}
+      {...mouseHoverPreview(onCardHover, item.name)}
       onContextMenu={(e) => {
         if (onContextMenu) {
           e.preventDefault();
@@ -445,7 +452,7 @@ export function DeckStack({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto px-3 py-4">
+      <div className="flex-1 overflow-auto px-3 pt-4 pb-16">
         {!hasCards ? (
           <div className="flex h-full items-center justify-center rounded-[20px] border border-dashed border-white/10 bg-black/12 text-sm text-slate-500">
             Added cards will appear here as a staggered stack.

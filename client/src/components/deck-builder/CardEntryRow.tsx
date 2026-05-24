@@ -4,6 +4,7 @@ import type { DeckEntry } from "../../services/deckParser";
 import type { ParsedItem, UnsupportedCard } from "../../services/deckCompatibility";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
 import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
+import { mouseHoverPreview } from "./hoverPreview";
 
 const CATEGORY_COLORS: Record<string, string> = {
   keyword: "text-sky-400",
@@ -56,6 +57,14 @@ export interface CardEntryRowProps {
   /** Eligibility predicate paired with `onSetAsCommander`. The row consults it
    *  per-entry so the parent doesn't have to fan out card-data lookups. */
   isCommanderEligible?: (name: string) => boolean;
+  /** "compact" (default) keeps the row controls hover-revealed — used by the
+   *  in-game BO3 sideboard modal. "comfortable" makes them always-visible and
+   *  touch-sized for the deck builder (hover reveal is invisible on touch). */
+  density?: "comfortable" | "compact";
+  /** When provided, the alternate-art (✦) badge becomes a tap target that
+   *  opens the printing picker — the touch path for art selection (right-click
+   *  context menus don't exist on touch). */
+  onOpenArtPicker?: (name: string) => void;
 }
 
 export function CardEntryRow({
@@ -68,7 +77,15 @@ export function CardEntryRow({
   onChooseArt,
   onSetAsCommander,
   isCommanderEligible,
+  density = "compact",
+  onOpenArtPicker,
 }: CardEntryRowProps) {
+  const comfortable = density === "comfortable";
+  // Hover-reveal on compact (mouse only); always-visible + larger hit area on
+  // comfortable so the controls are usable on touch (~36px on touch, shrinking
+  // to the dense hover size on desktop where a pointer is available).
+  const controlVisibility = comfortable ? "" : "invisible group-hover:visible";
+  const controlSize = comfortable ? "h-9 w-9 text-sm lg:h-7 lg:w-7 lg:text-xs" : "h-5 w-5 text-xs";
   const showCommanderButton =
     section === "main" &&
     !!onSetAsCommander &&
@@ -88,8 +105,7 @@ export function CardEntryRow({
     <div data-card-name={entry.name.toLowerCase()}>
       <div
         className="group flex items-center justify-between py-0.5 text-sm"
-        onMouseEnter={() => onCardHover?.(entry.name)}
-        onMouseLeave={() => onCardHover?.(null)}
+        {...mouseHoverPreview(onCardHover, entry.name)}
         onContextMenu={(e) => {
           if (onChooseArt) {
             e.preventDefault();
@@ -97,7 +113,13 @@ export function CardEntryRow({
           }
         }}
       >
-        <span className={unsupported ? "text-amber-200/80" : "text-gray-300"}>
+        {/* Tapping the name previews the card — the touch path (hover above is
+            mouse-only). The ✦ / ! badges stopPropagation so they keep their
+            own actions. */}
+        <span
+          className={`${unsupported ? "text-amber-200/80" : "text-gray-300"} ${onCardHover ? "cursor-pointer" : ""}`}
+          onClick={() => onCardHover?.(entry.name)}
+        >
           <span className="mr-1 text-gray-500">{entry.count}x</span>
           {entry.name}
           {unsupported && (
@@ -112,19 +134,32 @@ export function CardEntryRow({
             </button>
           )}
           {hasAlternates && (
-            <span
-              className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-sky-500/60 text-[9px] leading-none text-sky-100"
-              title="Alternate art available — right-click to choose"
-            >
-              ✦
-            </span>
+            onOpenArtPicker ? (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onOpenArtPicker(entry.name); }}
+                className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded-sm bg-sky-500/60 text-[9px] leading-none text-sky-100 hover:bg-sky-500/80"
+                aria-label={`Choose art for ${entry.name}`}
+                title="Alternate art available — tap to choose"
+              >
+                ✦
+              </button>
+            ) : (
+              <span
+                className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-sky-500/60 text-[9px] leading-none text-sky-100"
+                title="Alternate art available — right-click to choose"
+              >
+                ✦
+              </span>
+            )
           )}
         </span>
         <span className="flex items-center">
           {showCommanderButton && (
             <button
+              type="button"
               onClick={() => onSetAsCommander?.(entry.name)}
-              className="invisible ml-1 h-5 w-5 rounded text-xs text-purple-300 hover:bg-purple-900/40 group-hover:visible"
+              className={`${controlVisibility} ml-1 ${controlSize} rounded text-purple-300 hover:bg-purple-900/40`}
               aria-label={`Make ${entry.name} the commander`}
               title="Make this my commander"
             >
@@ -132,8 +167,9 @@ export function CardEntryRow({
             </button>
           )}
           <button
+            type="button"
             onClick={() => onMove(entry.name, section)}
-            className="invisible ml-2 h-5 w-5 rounded text-xs text-sky-300 hover:bg-sky-900/40 group-hover:visible"
+            className={`${controlVisibility} ml-2 ${controlSize} rounded text-sky-300 hover:bg-sky-900/40`}
             aria-label={moveAriaLabel}
             title={moveAriaLabel}
           >
@@ -141,8 +177,9 @@ export function CardEntryRow({
           </button>
           {onRemove && (
             <button
+              type="button"
               onClick={() => onRemove(entry.name, section)}
-              className="invisible ml-1 h-5 w-5 rounded text-xs text-red-400 hover:bg-red-900/40 group-hover:visible"
+              className={`${controlVisibility} ml-1 ${controlSize} rounded text-red-400 hover:bg-red-900/40`}
               aria-label={`Remove one ${entry.name}`}
               title={`Remove one ${entry.name}`}
             >

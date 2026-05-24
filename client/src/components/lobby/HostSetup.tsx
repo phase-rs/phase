@@ -70,7 +70,7 @@ export function HostSetup({
   // the chosen format, and downstream views (the deck picker reached via
   // "Change Deck") can read the format from the store to filter decks.
   const storeFormatConfig = useMultiplayerStore((s) => s.formatConfig);
-  const initialFormatConfig = storeFormatConfig ?? FORMAT_DEFAULTS.Standard;
+  const initialFormatConfig = storeFormatConfig ?? FORMAT_DEFAULTS.Commander;
 
   const [roomName, setRoomName] = useState("");
   const [isPublic, setIsPublic] = useState(true);

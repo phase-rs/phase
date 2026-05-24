@@ -8,6 +8,7 @@ import {
 import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { useSetList } from "../../hooks/useSetList";
+import { hasSearchCriteria } from "./searchFilters";
 
 const DEBOUNCE_MS = 300;
 const MANA_COLORS = ["W", "U", "B", "R", "G"] as const;
@@ -52,16 +53,6 @@ export interface CardSearchFilters {
   cmcMax?: number;
   sets: string[];
   browseFormat: BrowserLegalityFilter;
-}
-
-function hasSearchCriteria(filters: CardSearchFilters): boolean {
-  return Boolean(
-    filters.text
-      || filters.colors.length > 0
-      || filters.type
-      || filters.cmcMax !== undefined
-      || filters.sets.length > 0,
-  );
 }
 
 interface CardSearchProps {
