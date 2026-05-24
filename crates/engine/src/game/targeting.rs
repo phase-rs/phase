@@ -409,6 +409,74 @@ pub fn resolved_targets(
     ability.targets.clone()
 }
 
+/// Resolve a `TargetFilter` to object ids for effects that operate over every
+/// object in the resolved set rather than a single target slot.
+pub(crate) fn resolved_object_ids_for_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    match filter {
+        TargetFilter::SelfRef => vec![ability.source_id],
+        TargetFilter::ParentTarget => object_targets(&ability.targets).collect(),
+        TargetFilter::ParentTargetSlot { index } => ability
+            .targets
+            .get(*index)
+            .and_then(target_ref_object)
+            .into_iter()
+            .collect(),
+        TargetFilter::LastCreated => state.last_created_token_ids.clone(),
+        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+            resolve_event_context_target(state, filter, ability.source_id)
+                .and_then(|target| target_ref_object(&target))
+                .into_iter()
+                .collect()
+        }
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
+            let effective_filter = resolve_tracked_set_sentinel(state, filter.clone());
+            let ctx = super::filter::FilterContext::from_ability(ability);
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| {
+                    super::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
+                })
+                .collect()
+        }
+        TargetFilter::Any | TargetFilter::None | TargetFilter::Player => {
+            object_targets(&ability.targets).collect()
+        }
+        _ => {
+            let ctx = super::filter::FilterContext::from_ability(ability);
+            let explicit_targets: Vec<ObjectId> = object_targets(&ability.targets)
+                .filter(|id| super::filter::matches_target_filter(state, *id, filter, &ctx))
+                .collect();
+            if !explicit_targets.is_empty() {
+                return explicit_targets;
+            }
+
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| super::filter::matches_target_filter(state, *id, filter, &ctx))
+                .collect()
+        }
+    }
+}
+
+fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
+    targets.iter().filter_map(target_ref_object)
+}
+
+fn target_ref_object(target: &TargetRef) -> Option<ObjectId> {
+    match target {
+        TargetRef::Object(id) => Some(*id),
+        TargetRef::Player(_) => None,
+    }
+}
+
 pub(crate) fn resolve_event_context_target_for_event_or_state(
     state: &GameState,
     filter: &TargetFilter,

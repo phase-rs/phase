@@ -637,6 +637,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GainControl { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }

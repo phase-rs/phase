@@ -1106,6 +1106,7 @@ pub fn resolve_effect(
         Effect::Detain { .. } => detain::resolve(state, ability, events),
         Effect::ExchangeControl { .. } => exchange_control::resolve(state, ability, events),
         Effect::Attach { .. } => attach::resolve(state, ability, events),
+        Effect::UnattachAll { .. } => attach::resolve_unattach_all(state, ability, events),
         Effect::ControlNextTurn { .. } => control_next_turn::resolve(state, ability, events),
         Effect::Surveil { .. } => surveil::resolve(state, ability, events),
         Effect::Fight { .. } => fight::resolve(state, ability, events),
@@ -1956,6 +1957,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Reveal { target, .. }
         | Effect::Fight { target, .. }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Transform { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::CopyTokenOf { target, .. }

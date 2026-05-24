@@ -7664,6 +7664,9 @@ fn replace_target_with_parent(effect: &mut Effect) {
         Effect::Attach { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
             *target = TargetFilter::ParentTarget;
         }
+        Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
+            *target = TargetFilter::ParentTarget;
+        }
         Effect::PutCounter { target, .. }
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. } => {
@@ -7802,6 +7805,9 @@ fn has_typed_target(effect: &Effect) -> bool {
         } | Effect::Tap {
             target: TargetFilter::Typed(_),
             ..
+        } | Effect::Untap {
+            target: TargetFilter::Typed(_),
+            ..
         } | Effect::Bounce {
             target: TargetFilter::Typed(_),
             ..
@@ -7809,6 +7815,9 @@ fn has_typed_target(effect: &Effect) -> bool {
             target: TargetFilter::Typed(_),
             ..
         } | Effect::Attach {
+            target: TargetFilter::Typed(_),
+            ..
+        } | Effect::UnattachAll {
             target: TargetFilter::Typed(_),
             ..
         } | Effect::ChangeZone {
@@ -7819,6 +7828,9 @@ fn has_typed_target(effect: &Effect) -> bool {
             ..
         } | Effect::GenericEffect {
             target: Some(TargetFilter::Typed(_)),
+            ..
+        } | Effect::TargetOnly {
+            target: TargetFilter::Typed(_),
             ..
         } | Effect::CastFromZone {
             target: TargetFilter::Typed(_),
@@ -8062,7 +8074,6 @@ fn lower_subject_predicate_ast(
                 };
 
                 if subject.target.is_some()
-                    || subject.inherits_parent
                     || matches!(subject.affected, TargetFilter::TriggeringSource)
                 {
                     let mut explore = AbilityDefinition::new(AbilityKind::Spell, Effect::Explore);
@@ -8079,6 +8090,9 @@ fn lower_subject_predicate_ast(
                         optional: subject.is_optional,
                         unless_pay: None,
                     };
+                }
+                if subject.inherits_parent {
+                    return clause;
                 }
 
                 if !matches!(subject.affected, TargetFilter::SelfRef) {
@@ -8638,6 +8652,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::GainControl { target, .. }
         | Effect::ControlNextTurn { target, .. }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::SwitchPT { target, .. }
         | Effect::CopySpell { target, .. }
@@ -10055,6 +10070,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::ChangeZone { target, .. }
         | Effect::ChangeZoneAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::Attach { target, .. } => rewrite_filter_parent_to_tracked_set(target),
+        Effect::UnattachAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::GenericEffect {
             target,
             static_abilities,
@@ -10241,6 +10257,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
@@ -11583,6 +11600,8 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             if_you_do_anchor.clone().or_else(|| ctx.subject.clone())
         };
+        let parent_target_available =
+            if_you_do_anchor.is_some() || chain_has_prior_typed_referent(&clauses);
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
@@ -11619,6 +11638,7 @@ pub(crate) fn parse_effect_chain_ir(
             // zone so a `"the exiled card"` anaphor in any effect chunk
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
+            parent_target_available,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -21090,6 +21110,82 @@ mod tests {
         assert!(matches!(*first.effect, Effect::Explore));
         let second = first.sub_ability.expect("expected repeated explore");
         assert!(matches!(*second.effect, Effect::Explore));
+    }
+
+    #[test]
+    fn effect_choose_two_tap_then_unattach_equipment_keeps_unattach_clause() {
+        let def = parse_effect_chain(
+            "Choose two target creatures. Tap those creatures, then unattach all Equipment from them.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
+        assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(2, 2)));
+
+        let tap = def
+            .sub_ability
+            .expect("targeted creatures should be tapped");
+        assert!(matches!(
+            &*tap.effect,
+            Effect::Tap {
+                target: TargetFilter::TrackedSet { .. }
+            }
+        ));
+
+        let unattach = tap
+            .sub_ability
+            .expect("unattach clause should remain in the continuation chain");
+        match &*unattach.effect {
+            Effect::UnattachAll { attachment, target } => {
+                assert!(matches!(
+                    attachment,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters == vec![TypeFilter::Subtype("Equipment".to_string())]
+                ));
+                assert!(matches!(target, TargetFilter::ParentTarget));
+            }
+            other => panic!("expected UnattachAll continuation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_target_creature_pump_then_can_block_additional_inherits_target() {
+        let def = parse_effect_chain(
+            "Untap target creature. It gets +2/+2 until end of turn and can block an additional creature this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Untap { .. }));
+
+        let pump = def.sub_ability.expect("target creature should get pumped");
+        assert!(matches!(
+            &*pump.effect,
+            Effect::Pump {
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                target: TargetFilter::ParentTarget
+            }
+        ));
+
+        let block_grant = pump
+            .sub_ability
+            .expect("additional-blocker grant should stay in the chain");
+        assert_eq!(block_grant.duration, Some(Duration::UntilEndOfTurn));
+        match &*block_grant.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target: Some(TargetFilter::ParentTarget),
+                ..
+            } => {
+                assert!(matches!(
+                    static_abilities.as_slice(),
+                    [StaticDefinition {
+                        mode: crate::types::statics::StaticMode::ExtraBlockers { count: Some(1) },
+                        affected: Some(TargetFilter::ParentTarget),
+                        ..
+                    }]
+                ));
+            }
+            other => panic!("expected inherited-target ExtraBlockers grant, got {other:?}"),
+        }
     }
 
     #[test]

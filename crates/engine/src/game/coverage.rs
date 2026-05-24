@@ -1506,6 +1506,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Fight { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::BecomeCopy { target, .. }

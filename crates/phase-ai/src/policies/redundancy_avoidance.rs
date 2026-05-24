@@ -231,6 +231,7 @@ fn redundancy_delta(
         | Effect::GainControl { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }
