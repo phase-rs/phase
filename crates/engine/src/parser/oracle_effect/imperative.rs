@@ -4280,7 +4280,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
         return Some(ZoneCounterImperativeAst::Counter {
             target: stack_ability_filter_from_text(rest),
-            source_static: None,
+            source_rider: None,
             unless_pay,
             all: mass_consumed,
         });
@@ -4305,7 +4305,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
         return Some(ZoneCounterImperativeAst::Counter {
             target: stack_target,
-            source_static: None,
+            source_rider: None,
             unless_pay,
             all: mass_consumed,
         });
@@ -4323,7 +4323,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
     Some(ZoneCounterImperativeAst::Counter {
         target,
-        source_static: None,
+        source_rider: None,
         unless_pay,
         all: mass_consumed,
     })
@@ -5650,19 +5650,19 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
         // counter-specific bespoke branch.
         ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::Counter {
             target,
-            source_static,
+            source_rider,
             unless_pay: Some(unless_pay),
             all,
         }) => {
             let effect = if all {
-                // CR 701.6 + CR 405.1: Mass counter drops both source_static
+                // CR 701.6 + CR 405.1: Mass counter drops both source_rider
                 // and unless_pay (no corpus card combines them with mass
                 // counter, and mass counter is non-targeting per CR 115.1).
                 Effect::CounterAll { target }
             } else {
                 Effect::Counter {
                     target,
-                    source_static: source_static.map(|s| *s),
+                    source_rider,
                 }
             };
             let mut clause = parsed_clause(effect);
@@ -6113,7 +6113,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         },
         ZoneCounterImperativeAst::Counter {
             target,
-            source_static,
+            source_rider,
             // CR 118.12: An unless-pay-bearing Counter is intercepted in
             // `lower_imperative_family_ast` so the modifier flows into
             // `ParsedEffectClause.unless_pay`. By the time we reach this
@@ -6126,16 +6126,16 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             all,
         } => {
             if all {
-                // CR 701.6 + CR 405.1: Mass counter. Drops `source_static` —
-                // no corpus card combines a source_static with mass counter,
+                // CR 701.6 + CR 405.1: Mass counter. Drops `source_rider` —
+                // no corpus card combines a source_rider with mass counter,
                 // and the runtime resolver does not honor that slot on
-                // `Effect::CounterAll`. (Source-static is a per-target-
-                // permanent silencing pattern.)
+                // `Effect::CounterAll`. (The rider is a per-target-permanent
+                // silence/destroy follow-up.)
                 Effect::CounterAll { target }
             } else {
                 Effect::Counter {
                     target,
-                    source_static: source_static.map(|s| *s),
+                    source_rider,
                 }
             }
         }

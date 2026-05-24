@@ -8744,7 +8744,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Counter {
                     target: TargetFilter::Typed(TypedFilter::card()),
-                    source_static: None,
+                    source_rider: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {

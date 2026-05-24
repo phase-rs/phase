@@ -1332,6 +1332,8 @@ mod tests {
                 name: "Essence Channeler".to_string(),
                 power: Some(5),
                 toughness: Some(4),
+                base_power: Some(5),
+                base_toughness: Some(4),
                 mana_value: 2,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

@@ -770,6 +770,32 @@ pub enum CounterTransferMode {
     Put,
 }
 
+/// CR 701.6 + CR 608.2c: A follow-up instruction carried by `Effect::Counter`
+/// that acts on the *source permanent* of an ability countered by the effect.
+///
+/// The rider only fires when the countered object was an activated or triggered
+/// ability — per CR 701.8a / CR 110.1 a spell is not a permanent, so when a
+/// spell is countered there is no permanent for the rider to act on and it is
+/// skipped (the conditional "if a permanent's ability is countered this way" is
+/// encoded structurally by this spell-vs-ability gate, not by a separate
+/// `AbilityCondition`).
+///
+/// Both variants share one categorical axis — "an effect applied to the
+/// countered ability's source permanent" — so they live on a single enum rather
+/// than as sibling `Option` fields on `Effect::Counter` (parameterize, don't
+/// proliferate).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CounterSourceRider {
+    /// CR 611.2: "that permanent loses all abilities ..." — applies a static
+    /// definition to the countered ability's source permanent
+    /// (Tishana's Tidebinder).
+    LosesAbilities { static_def: Box<StaticDefinition> },
+    /// CR 701.8: "destroy that permanent" — destroys the countered ability's
+    /// source permanent (Teferi's Response, Green Slime).
+    Destroy,
+}
+
 /// Power/toughness value -- either a fixed integer or a variable reference (e.g. "*", "X").
 ///
 /// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","value":2}` (new)
@@ -4746,6 +4772,13 @@ pub enum SpeedDelta {
 
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
+// clippy::large_enum_variant: `Effect` is the engine's central 100+ variant
+// dispatch enum, so the largest/smallest spread is inherent. The current
+// largest variant is `Token`, which inlines two `PtValue` fields that can each
+// carry a `QuantityExpr`; the right remedy is to box `PtValue::Quantity` (used
+// in 70+ sites), not to box individual `Effect` variants. Allow the spread here
+// until that boxing lands.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
 pub enum Effect {
@@ -4822,11 +4855,14 @@ pub enum Effect {
     Counter {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// Static applied to counter's source, affecting the countered ability's source permanent.
-        /// The `affected` filter is bound at resolution time to `SpecificObject(source_permanent_id)`.
-        /// Used by cards like Tishana's Tidebinder ("loses all abilities for as long as ~").
-        #[serde(default)]
-        source_static: Option<StaticDefinition>,
+        /// CR 701.6 + CR 608.2c: A follow-up instruction acting on the countered
+        /// ability's source permanent (e.g. Tishana's Tidebinder "loses all
+        /// abilities for as long as ~", Teferi's Response / Green Slime "destroy
+        /// that permanent"). Resolved at counter-resolution time, bound to
+        /// `source_permanent_id`. Only fires when an ability is countered — a
+        /// countered spell is not a permanent (CR 701.8a / CR 110.1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_rider: Option<CounterSourceRider>,
     },
     /// CR 701.6 + CR 405.1: Mass counter — counter every spell or ability on
     /// the stack matching `target`. Mirrors `Effect::DestroyAll` /

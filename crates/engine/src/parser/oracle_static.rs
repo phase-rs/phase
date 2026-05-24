@@ -634,17 +634,27 @@ pub(crate) fn lower_static_ir(ir: &StaticIr) -> StaticDefinition {
 /// mirrors `self_recursion_trigger_zone` for `TriggerDefinition.trigger_zones`.
 ///
 /// Walks the `StaticCondition` tree and collects every `SourceInZone { zone }`
-/// where `zone != Zone::Battlefield`, populating `StaticDefinition.active_zones`.
-/// The battlefield is NOT included (battlefield is the CR 113.6 default and
-/// does not need opt-in). If the condition does not reference a
-/// non-battlefield zone, `active_zones` is left empty (battlefield-only).
+/// it can reach. For a single non-battlefield reference (Anger-class), the
+/// resulting `active_zones` is `[Zone]` — `Battlefield` is the CR 113.6 default
+/// and only needs to be listed when the condition is a disjunction that names
+/// multiple zones (Eminence: "in the command zone or on the battlefield").
+/// When ALL collected zones happen to be `Battlefield`, `active_zones` is left
+/// empty so the standard battlefield-default applies.
 fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
-    let mut zones: Vec<crate::types::zones::Zone> = Vec::new();
+    use crate::types::zones::Zone;
+    let mut zones: Vec<Zone> = Vec::new();
     if let Some(cond) = def.condition.as_ref() {
         collect_source_in_zones(cond, &mut zones);
     }
     // Deduplicate while preserving order.
     zones.dedup();
+    // If the only reference was Battlefield, fall back to the empty/default
+    // representation (CR 113.6) — adding `[Battlefield]` explicitly is
+    // semantically identical but would diverge from existing tests that
+    // assume `active_zones.is_empty()` for pure-battlefield statics.
+    if zones.len() == 1 && zones[0] == Zone::Battlefield {
+        zones.clear();
+    }
     // Don't clobber an explicitly-set active_zones: upstream callers may pin
     // non-battlefield zones directly on the StaticDefinition (e.g. hand-zone
     // statics) and the condition-derived inference should only fill in zones
@@ -655,11 +665,8 @@ fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
 }
 
 fn collect_source_in_zones(cond: &StaticCondition, out: &mut Vec<crate::types::zones::Zone>) {
-    use crate::types::zones::Zone;
     match cond {
-        StaticCondition::SourceInZone { zone }
-            if *zone != Zone::Battlefield && !out.contains(zone) =>
-        {
+        StaticCondition::SourceInZone { zone } if !out.contains(zone) => {
             out.push(*zone);
         }
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
@@ -11715,6 +11722,94 @@ mod tests {
 
     // NOTE: static_enters_with_counters test moved to oracle_replacement tests —
     // "enters with counters" is now parsed as a Moved replacement effect.
+
+    /// CR 113.6b + CR 207.2c + CR 408 + CR 601.2f: The Ur-Dragon's Eminence
+    /// line (canonical form) — "Other Dragon spells you cast cost {1} less to
+    /// cast as long as ~ is in the command zone or on the battlefield."
+    /// The condition disjunction must seed `active_zones` with both
+    /// `Battlefield` and `Command`, and produce a typed `Or { SourceInZone,
+    /// SourceInZone }` (no `SwallowedClause`).
+    #[test]
+    fn static_eminence_cost_reduction_command_zone_or_battlefield() {
+        let def = parse_static_line(
+            "Other Dragon spells you cast cost {1} less to cast as long as ~ is in the command zone or on the battlefield.",
+        )
+        .expect("Eminence cost-reduction line must parse");
+
+        // Mode is unchanged: ReduceCost {1} with a Dragon spell filter.
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ReduceCost {
+                    amount: ManaCost::Cost { generic: 1, .. },
+                    ..
+                }
+            ),
+            "expected ReduceCost {{1}}, got {:?}",
+            def.mode
+        );
+
+        // CR 113.6b: active_zones must include BOTH Battlefield and Command —
+        // populate_active_zones_from_condition walks the typed Or-disjunction.
+        assert!(
+            def.active_zones.contains(&Zone::Battlefield),
+            "active_zones must contain Battlefield, got {:?}",
+            def.active_zones
+        );
+        assert!(
+            def.active_zones.contains(&Zone::Command),
+            "active_zones must contain Command, got {:?}",
+            def.active_zones
+        );
+
+        // Condition is a typed Or-disjunction over SourceInZone variants —
+        // NOT a SwallowedClause / Unrecognized fallback.
+        match def.condition.as_ref().expect("condition must be set") {
+            StaticCondition::Or { conditions } => {
+                let zones: Vec<Zone> = conditions
+                    .iter()
+                    .filter_map(|c| match c {
+                        StaticCondition::SourceInZone { zone } => Some(*zone),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(zones.contains(&Zone::Command));
+                assert!(zones.contains(&Zone::Battlefield));
+            }
+            other => panic!("expected Or-disjunction, got {other:?}"),
+        }
+    }
+
+    /// CR 113.6b: Inverted Eminence form — "As long as ~ is in the command zone
+    /// or on the battlefield, other Dragon spells you cast cost {1} less to
+    /// cast." (The shape parsed straight off the printed Oracle text after the
+    /// Eminence ability-word strip.) Must converge to the same typed shape as
+    /// the canonical-form test.
+    #[test]
+    fn static_eminence_cost_reduction_inverted_form() {
+        let def = parse_static_line(
+            "As long as ~ is in the command zone or on the battlefield, other Dragon spells you cast cost {1} less to cast.",
+        )
+        .expect("inverted Eminence cost-reduction must parse");
+
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ReduceCost {
+                    amount: ManaCost::Cost { generic: 1, .. },
+                    ..
+                }
+            ),
+            "expected ReduceCost {{1}}, got {:?}",
+            def.mode
+        );
+        assert!(def.active_zones.contains(&Zone::Battlefield));
+        assert!(def.active_zones.contains(&Zone::Command));
+        assert!(matches!(
+            def.condition.as_ref().expect("condition must be set"),
+            StaticCondition::Or { .. }
+        ));
+    }
 
     #[test]
     fn static_as_long_as_chosen_color() {

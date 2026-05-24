@@ -2748,7 +2748,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // CR 701.27: Counter spell.
         Action::CounterSpell(_spell) => Effect::Counter {
             target: TargetFilter::StackSpell,
-            source_static: None,
+            source_rider: None,
         },
 
         // CR 800.4 / CR 110.2: Gain control.

@@ -4296,14 +4296,30 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
     .parse(i)
 }
 
-fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult<'_, Zone> {
-    // Longer (plural) variants precede singular so `tag` doesn't prefix-match "graveyard"
-    // out of "graveyards" and leave a stray "s" that peek_zone_boundary would reject.
+/// Recognize a bare zone word (lowercased). Returns the typed `Zone`.
+///
+/// Canonical entry for zone-token parsing — shared by `parse_zone_suffix_nom`
+/// (origin/destination zone phrases in target filters) and by the
+/// source-referential condition parser in `oracle_nom/condition.rs`. New zone
+/// tokens MUST be added here, not duplicated at call sites.
+///
+/// "command zone" (CR 408) is recognized as a two-word token — `Zone::Command`
+/// is a shared zone that always appears with the qualifier "the " in printed
+/// Oracle text ("the command zone"), so it composes the same way as the
+/// bare-word zones at every call site that already strips a `ZoneQual`.
+pub(crate) fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult<'_, Zone> {
+    // Longer (plural / multi-word) variants precede shorter ones so `tag` doesn't
+    // prefix-match "graveyard" out of "graveyards" and leave a stray "s" that
+    // peek_zone_boundary would reject.
     alt((
         value(
             Zone::Battlefield,
             alt((tag("battlefields"), tag("battlefield"))),
         ),
+        // CR 408: the command zone — multi-word zone token. Placed before the
+        // bare-word arms because it has no shared prefix with them and the
+        // longest-prefix-first convention keeps additions ordered by length.
+        value(Zone::Command, tag("command zone")),
         value(Zone::Graveyard, alt((tag("graveyards"), tag("graveyard")))),
         value(Zone::Exile, alt((tag("exiles"), tag("exile")))),
         value(Zone::Hand, alt((tag("hands"), tag("hand")))),
@@ -4314,7 +4330,7 @@ fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult<'_, Zone> 
 
 /// Peek that the next character is a word boundary (end-of-string, space, comma, period).
 /// Prevents matches like "graveyardkeeper" from succeeding as "graveyard".
-fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
     match i.chars().next() {
         None | Some(' ' | ',' | '.') => Ok((i, ())),
         _ => Err(nom::Err::Error(nom::error::Error::new(
@@ -4361,6 +4377,26 @@ mod tests {
         let (f, rest) = parse_target("any target");
         assert_eq!(f, TargetFilter::Any);
         assert_eq!(rest, "");
+    }
+
+    /// CR 408: `parse_zone_word` recognizes "command zone" as the typed
+    /// `Zone::Command` token. Locks the canonical zone vocabulary so any
+    /// caller composing on top of `parse_zone_word` (e.g., the
+    /// source-referential condition parser in `oracle_nom/condition.rs`)
+    /// picks up the command zone without duplicating its spelling.
+    #[test]
+    fn parse_zone_word_recognizes_command_zone() {
+        let (rest, zone) = parse_zone_word("command zone").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(zone, Zone::Command);
+    }
+
+    /// Sanity: existing single-word zone tokens still resolve through the
+    /// same combinator after the `Command` extension.
+    #[test]
+    fn parse_zone_word_recognizes_graveyard_and_battlefield() {
+        assert_eq!(parse_zone_word("graveyard").unwrap().1, Zone::Graveyard);
+        assert_eq!(parse_zone_word("battlefield").unwrap().1, Zone::Battlefield);
     }
 
     #[test]

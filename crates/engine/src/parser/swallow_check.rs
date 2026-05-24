@@ -1476,6 +1476,13 @@ fn detect_condition_if(
         "\"type\":\"FlipCoins\"",
         "\"type\":\"RollDie\"",
         "DefilerCostReduction",
+        // CR 701.6 + CR 608.2c: Effect::Counter.source_rider encodes the
+        // "If a permanent's ability is countered this way, [destroy that
+        // permanent | that permanent loses all abilities]" follow-up. Its
+        // presence (serialized as the `source_rider` field key with
+        // skip_serializing_if = is_none) IS the conditional gate (Teferi's
+        // Response, Green Slime, Tishana's Tidebinder).
+        "\"source_rider\":",
     ];
     if json_has_any(ast_json, cond_markers) {
         return;
@@ -2439,6 +2446,30 @@ mod tests {
         );
         assert!(!has_swallowed_detector(&songbirds, "Optional_YouMay"));
         assert!(!has_swallowed_detector(&songbirds, "Condition_If"));
+    }
+
+    /// CR 701.6 + CR 608.2c: The "If a permanent's ability is countered this
+    /// way, destroy that permanent." rider is represented as
+    /// `Effect::Counter.source_rider = Some(Destroy)`, so the `Condition_If`
+    /// detector must not flag Teferi's Response or Green Slime.
+    #[test]
+    fn condition_if_accepts_counter_destroy_rider() {
+        let teferis = parse_named(
+            "Counter target spell or ability an opponent controls that targets a land you control. \
+             If a permanent's ability is countered this way, destroy that permanent.\nDraw two cards.",
+            "Teferi's Response",
+            &["Instant"],
+        );
+        assert!(!has_swallowed_detector(&teferis, "Condition_If"));
+
+        let green_slime = parse_named(
+            "Flash\nWhen this creature enters, counter target activated or triggered ability from \
+             an artifact or enchantment source. If a permanent's ability is countered this way, \
+             destroy that permanent.",
+            "Green Slime",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
     }
 
     /// CR 707.10c: Mirrorpool's "you may choose new targets for the copy" is

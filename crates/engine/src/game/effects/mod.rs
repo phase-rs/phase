@@ -694,6 +694,11 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         name: record.name.clone(),
         power: record.power,
         toughness: record.toughness,
+        // CR 208.4b + CR 613.4b: Carry the layer-7b base values from the
+        // zone-change snapshot so a later `PtComparison { scope: Base }`
+        // evaluation on this LKI reads the base, not the current, value.
+        base_power: record.base_power,
+        base_toughness: record.base_toughness,
         mana_value: record.mana_value,
         controller: record.controller,
         owner: record.owner,
@@ -5170,7 +5175,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::StackSpell,
-                source_static: None,
+                source_rider: None,
             },
             vec![TargetRef::Object(spell)],
             ObjectId(100),
@@ -5405,6 +5410,8 @@ mod tests {
                 name: "Sacrificed".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
                 mana_value: 5,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

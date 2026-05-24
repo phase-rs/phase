@@ -970,7 +970,7 @@ fn collect_pending_triggers(
                                     let unless_cost = ward_cost_to_ability_cost(ward);
                                     let counter_effect = Effect::Counter {
                                         target: TargetFilter::TriggeringSource,
-                                        source_static: None,
+                                        source_rider: None,
                                     };
                                     let mut ward_ability = ResolvedAbility::new(
                                         counter_effect,
@@ -5355,6 +5355,8 @@ pub mod tests {
                 name: "Countered Dead".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
                 mana_value: 2,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

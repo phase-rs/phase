@@ -7042,7 +7042,7 @@ mod tests {
             ability: ResolvedAbility::new(
                 Effect::Counter {
                     target: TargetFilter::Any,
-                    source_static: None,
+                    source_rider: None,
                 },
                 Vec::new(),
                 source_id,
@@ -7159,7 +7159,7 @@ mod tests {
             ability: ResolvedAbility::new(
                 Effect::Counter {
                     target: TargetFilter::Any,
-                    source_static: None,
+                    source_rider: None,
                 },
                 Vec::new(),
                 source_id,
@@ -7245,7 +7245,7 @@ mod tests {
             ability: ResolvedAbility::new(
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
-                    source_static: None,
+                    source_rider: None,
                 },
                 Vec::new(),
                 source_id,
@@ -7320,7 +7320,7 @@ mod tests {
             ability: ResolvedAbility::new(
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
-                    source_static: None,
+                    source_rider: None,
                 },
                 Vec::new(),
                 source_id,
@@ -7428,7 +7428,7 @@ mod tests {
             ability: ResolvedAbility::new(
                 Effect::Counter {
                     target: TargetFilter::Any,
-                    source_static: None,
+                    source_rider: None,
                 },
                 Vec::new(),
                 source_id,

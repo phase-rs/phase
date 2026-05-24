@@ -71,6 +71,10 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                 name: obj.name.clone(),
                 power: obj.power,
                 toughness: obj.toughness,
+                // CR 208.4b + CR 613.4b: Capture the layer-7b base values so
+                // base-scope P/T look-back filters read the base, not current.
+                base_power: obj.base_power,
+                base_toughness: obj.base_toughness,
                 mana_value: obj.mana_cost.mana_value(),
                 controller: obj.controller,
                 owner: obj.owner,

@@ -16,8 +16,9 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, CastingPermission, Chooser, CopyRetargetPermission, Effect,
-    LibraryPosition, PermissionGrantee, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, CastingPermission, Chooser, CopyRetargetPermission,
+    CounterSourceRider, Effect, LibraryPosition, PermissionGrantee, QuantityExpr, QuantityRef,
+    StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -1214,6 +1215,32 @@ fn effect_wraps_copy_spell(effect: &Effect) -> bool {
     }
 }
 
+/// CR 701.8 + CR 608.2c: nom recognizer for the "if a permanent's ability is
+/// countered this way, destroy that permanent" continuation clause (Teferi's
+/// Response, Green Slime). Operates on lowercased text; tolerates a trailing
+/// period/whitespace.
+///
+/// Composed from independent axes rather than enumerated as full strings:
+///   - condition subject ("a permanent's ability" / "an ability") — the gate
+///     that scopes the destroy to *abilities* whose source is a permanent.
+///   - destroy object ("that permanent" / "that source") — the determiner that
+///     refers back to the countered ability's source permanent.
+fn recognize_counter_destroy_rider(lower: &str) -> bool {
+    let clause = lower.trim().trim_end_matches('.').trim_end();
+    value(
+        (),
+        (
+            tag::<_, _, OracleError<'_>>("if "),
+            alt((tag("a permanent's ability"), tag("an ability"))),
+            tag(" is countered this way, destroy "),
+            alt((tag("that permanent"), tag("that source"))),
+            eof,
+        ),
+    )
+    .parse(clause)
+    .is_ok()
+}
+
 /// CR 707.10c: nom recognizer for the "[you] may choose [a] new target[s] for
 /// {the,that} copy/copies" continuation clause that grants copy retargeting.
 /// Operates on lowercased text; tolerates a trailing period/whitespace.
@@ -1380,11 +1407,28 @@ pub(super) fn apply_clause_continuation(
                 return;
             };
             if let Effect::Counter {
-                source_static: existing,
+                source_rider: existing,
                 ..
             } = &mut *previous.effect
             {
-                *existing = Some(*source_static);
+                // CR 611.2: "that permanent loses all abilities ..." rider.
+                *existing = Some(CounterSourceRider::LosesAbilities {
+                    static_def: source_static,
+                });
+            }
+        }
+        ContinuationAst::CounterSourceRiderDestroy => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::Counter {
+                source_rider: existing,
+                ..
+            } = &mut *previous.effect
+            {
+                // CR 701.8: "If a permanent's ability is countered this way,
+                // destroy that permanent." rider (Teferi's Response, Green Slime).
+                *existing = Some(CounterSourceRider::Destroy);
             }
         }
         ContinuationAst::CopyMayRetarget => {
@@ -1858,7 +1902,8 @@ pub(super) fn continuation_absorbs_current(
         }
         ContinuationAst::ManaRestriction { .. }
         | ContinuationAst::ManaGrant { .. }
-        | ContinuationAst::CounterSourceStatic { .. } => true,
+        | ContinuationAst::CounterSourceStatic { .. }
+        | ContinuationAst::CounterSourceRiderDestroy => true,
         // CR 707.10c: recognition was already gated on a preceding CopySpell in
         // parse_followup_continuation_ast, so absorption is unconditional —
         // identical to the CounterSourceStatic precedent.
@@ -2424,6 +2469,13 @@ pub(super) fn parse_followup_continuation_ast(
                     crate::types::ability::ContinuousModification::RemoveAllAbilities,
                 ])),
             })
+        }
+        // CR 701.8 + CR 608.2c: "If a permanent's ability is countered this way,
+        // destroy that permanent." (Teferi's Response, Green Slime). Claiming
+        // this clause as a continuation prevents the generic sequence parser
+        // from emitting a stray chained `Destroy { ParentTarget }`.
+        Effect::Counter { .. } if recognize_counter_destroy_rider(&lower) => {
+            Some(ContinuationAst::CounterSourceRiderDestroy)
         }
         // CR 707.10c: "You may choose new targets for the copy/copies." after a
         // CopySpell — directly, or wrapped in a CreateDelayedTrigger ("When you
