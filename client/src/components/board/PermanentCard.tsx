@@ -313,6 +313,16 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   // PlayerArea; both can be active independently.
   const isPhasedOut = obj.phase_status?.status === "PhasedOut";
 
+  // CR 707.2: A token-copy of a real card (Twinflame, Helm of the Host, or a
+  // debug `CreateTokenCopy`) is `is_token` yet keeps `display_source = "Card"`,
+  // so it renders pixel-identical to the printed permanent. Flag it so the
+  // board carries a "Copy" badge — generic tokens (Treasure, Goblin) already
+  // read as tokens via their distinct generic-token art and are excluded.
+  // CR 708.2: a face-down permanent has no characteristics other than those
+  // its face-down rule grants, so never surface "Copy" on it — that would leak
+  // that it's a token-copy (matches the `!face_down` guard on the keyword strip).
+  const isCopy = obj.is_token === true && obj.display_source !== "Token" && !obj.face_down;
+
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
 
@@ -624,6 +634,21 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           className={`pointer-events-none absolute ${isUnderAttack ? "left-1 top-7" : "left-1 top-1"} z-40 rounded bg-lime-300 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-black ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
         >
           Target
+        </div>
+      )}
+
+      {/* CR 707.2: "Copy" badge for token-copies of real cards — these are
+          pixel-identical to the printed permanent, so without this tag there's
+          no way to tell a copy apart from the original on the board. Hidden
+          while the card is a valid target (the lime "Target" tag owns the
+          corner during targeting) and shifted down under attack to clear the
+          ⚔ badge — same coordination the Target tag uses. */}
+      {isCopy && !isValidTarget && (
+        <div
+          className={`pointer-events-none absolute left-1 ${isUnderAttack ? "top-7" : "top-1"} z-20 rounded bg-indigo-600/90 px-1 py-0.5 text-[9px] font-black uppercase leading-none tracking-wide text-white ring-1 ring-black/60 shadow-[0_1px_4px_rgba(0,0,0,0.6)]`}
+          title="Token copy of a real card"
+        >
+          Copy
         </div>
       )}
 

@@ -126,6 +126,7 @@ function buildDefaultPreferences(): PreferencesState {
     lastPlayerCount: 2,
     experimentalFeatures: false,
     dismissedFlowHelpNudge: false,
+    dismissedSandboxToolsNudge: false,
     artChain: [] as ArtChainEntry[],
     artOverrides: {} as Record<string, CardArtOverride>,
   };
@@ -173,6 +174,7 @@ interface PreferencesState {
   lastPlayerCount: number;
   experimentalFeatures: boolean;
   dismissedFlowHelpNudge: boolean;
+  dismissedSandboxToolsNudge: boolean;
   artChain: ArtChainEntry[];
   artOverrides: Record<string, CardArtOverride>;
 }
@@ -222,6 +224,7 @@ interface PreferencesActions {
   setLastPlayerCount: (count: number) => void;
   setExperimentalFeatures: (enabled: boolean) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
+  setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
   addArtChainEntry: (entry: ArtChainEntry) => void;
   removeArtChainEntry: (index: number) => void;
   moveArtChainEntry: (fromIndex: number, toIndex: number) => void;
@@ -349,6 +352,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
       setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
+      setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),
       addArtChainEntry: (entry) =>
         set((state) => {
           const isDuplicate = state.artChain.some((e) =>

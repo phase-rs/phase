@@ -3979,7 +3979,7 @@ mod tests {
         FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, ObjectScope,
         ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr,
         QuantityRef, ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation,
-        ShieldKind, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        ShieldKind, StaticCondition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -11201,6 +11201,51 @@ mod tests {
             "Ability-word trigger should produce 1 trigger, got: triggers={:?}",
             result.triggers,
         );
+    }
+
+    #[test]
+    fn ability_word_trigger_preserves_fixed_land_subtype_intervening_if() {
+        let result = parse(
+            "The Minstrel's Ballad — At the beginning of combat on your turn, if you control five or more Towns, create a 2/2 Elemental creature token that's all colors.",
+            "The Wandering Minstrel",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+        let trigger = &result.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::Phase);
+        assert_eq!(trigger.phase, Some(Phase::BeginCombat));
+        assert_eq!(
+            trigger.constraint,
+            Some(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+        );
+        match trigger.condition.as_ref() {
+            Some(TriggerCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(typed),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            }) => {
+                assert!(
+                    typed
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Town".to_string())),
+                    "expected Town subtype filter, got {:?}",
+                    typed.type_filters
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(typed.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }));
+            }
+            other => panic!("expected Town ObjectCount trigger condition, got {other:?}"),
+        }
     }
 
     #[test]

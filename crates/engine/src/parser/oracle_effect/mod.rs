@@ -15,7 +15,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map, opt, rest, value};
 use nom::multi::many1;
@@ -15664,25 +15664,32 @@ fn absorb_trailing_rounding_suffix(
     (amount, rest)
 }
 
-fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
+fn parse_pump_modifier_phrase(input: &str) -> OracleResult<'_, (PtValue, PtValue)> {
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("an additional "),
+        tag("additional "),
+    )))
+    .parse(input)?;
+    let (rest, token) =
+        take_till1(|c: char| c.is_whitespace() || c == ',' || c == '.').parse(rest)?;
+    let (power, toughness) = parse_pt_modifier(token)
+        .ok_or_else(|| nom::Err::Error(OracleError::new(token, nom::error::ErrorKind::Verify)))?;
+    Ok((rest, (power, toughness)))
+}
+
+fn try_parse_pump(lower: &str, _text: &str) -> Option<Effect> {
     // Match "+N/+M", "+X/+0", "-X/-X", etc.
-    let tp = TextPair::new(text, lower);
-    let re_pos = tp.find("gets ").or_else(|| tp.find("get "))?;
-    let offset = if tag::<_, _, OracleError<'_>>("gets ")
-        .parse(&lower[re_pos..])
-        .is_ok()
-    {
-        5
-    } else {
-        4
-    };
-    let (_, after_tp) = tp.split_at(re_pos + offset);
-    let after = after_tp.original.trim();
-    let token_end = after
-        .find(|c: char| c.is_whitespace() || c == ',' || c == '.')
-        .unwrap_or(after.len());
-    let token = &after[..token_end];
-    parse_pt_modifier(token).map(|(power, toughness)| Effect::Pump {
+    let (_, (power, toughness), _) = nom_primitives::scan_preceded(lower, |input| {
+        preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag::<_, _, OracleError<'_>>("get "),
+            )),
+            parse_pump_modifier_phrase,
+        )
+        .parse(input)
+    })?;
+    Some(Effect::Pump {
         power,
         toughness,
         target: TargetFilter::Any,
@@ -15699,24 +15706,23 @@ fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Durati
     let (without_duration, duration) = strip_trailing_duration(without_for_each);
     let lower = without_duration.to_lowercase();
 
-    let after = nom_on_lower(without_duration, &lower, |i| {
-        value((), alt((tag("gets "), tag("get ")))).parse(i)
-    });
-    let (_, after) = after?;
-    let after = after.trim_start();
-
-    let token_end = after
-        .find(|c: char| c.is_whitespace() || c == ',' || c == '.')
-        .unwrap_or(after.len());
-    let token = &after[..token_end];
-    let trailing = after[token_end..]
-        .trim_start_matches(|c: char| c == ',' || c.is_whitespace())
-        .trim();
-    if !trailing.is_empty() {
-        return None;
-    }
-
-    let (power, toughness) = parse_pt_modifier(token)?;
+    let (_, (power, toughness)) = (|input| {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("gets "),
+            tag::<_, _, OracleError<'_>>("get "),
+        ))
+        .parse(input)?;
+        let (rest, pt) = parse_pump_modifier_phrase(rest)?;
+        let (rest, _) = multispace0.parse(rest)?;
+        let (rest, _) = opt(terminated(
+            alt((tag::<_, _, OracleError<'_>>(","), tag("."))),
+            multispace0,
+        ))
+        .parse(rest)?;
+        let (rest, _) = eof.parse(rest)?;
+        Ok::<_, nom::Err<OracleError<'_>>>((rest, pt))
+    })(lower.as_str())
+    .ok()?;
     let power = apply_where_x_expression(power, where_x_expression.as_deref());
     let toughness = apply_where_x_expression(toughness, where_x_expression.as_deref());
 
@@ -18845,6 +18851,67 @@ mod tests {
             "should parse, got: {:?}",
             clause.effect
         );
+    }
+
+    #[test]
+    fn parse_pump_clause_accepts_additional_modifier() {
+        let (power, toughness, duration) =
+            parse_pump_clause("get an additional -3/-3 until end of turn")
+                .expect("additional pump should parse");
+        assert_eq!(power, PtValue::Fixed(-3));
+        assert_eq!(toughness, PtValue::Fixed(-3));
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+    }
+
+    #[test]
+    fn faerie_fencing_parses_additional_cast_time_pump() {
+        let def = parse_effect_chain(
+            "Target creature gets -X/-X until end of turn. That creature gets an additional -3/-3 until end of turn if you controlled a Faerie as you cast this spell.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::Pump {
+                power, toughness, ..
+            } => {
+                assert_eq!(power, &PtValue::Variable("-X".to_string()));
+                assert_eq!(toughness, &PtValue::Variable("-X".to_string()));
+            }
+            other => panic!("expected primary Pump, got {other:?}"),
+        }
+
+        let sub = def
+            .sub_ability
+            .expect("additional pump should be a sub ability");
+        match &*sub.effect {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(power, &PtValue::Fixed(-3));
+                assert_eq!(toughness, &PtValue::Fixed(-3));
+                assert_eq!(target, &TargetFilter::ParentTarget);
+            }
+            other => panic!("expected additional Pump, got {other:?}"),
+        }
+        match sub.condition {
+            Some(AbilityCondition::ControllerControlledMatchingAsCast { filter }) => {
+                let TargetFilter::Typed(filter) = filter else {
+                    panic!("cast-time control condition should be typed, got {filter:?}");
+                };
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+                assert!(
+                    filter.properties.iter().any(|prop| matches!(
+                        prop,
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield
+                        }
+                    )),
+                    "cast-time control condition should be battlefield-scoped, got {filter:?}"
+                );
+            }
+            other => panic!("expected cast-time control condition, got {other:?}"),
+        }
     }
 
     #[test]
@@ -22229,6 +22296,61 @@ mod tests {
                 ..
             } if tf.type_filters.contains(&TypeFilter::Creature)
         ));
+    }
+
+    #[test]
+    fn targeted_keyword_choice_grant_uses_target_only_then_choose_one_of() {
+        let def = parse_effect_chain(
+            "Target Mouse you control gains your choice of double strike or trample until end of turn",
+            AbilityKind::Spell,
+        );
+
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(target),
+        } = &*def.effect
+        else {
+            panic!("expected TargetOnly head, got {:?}", def.effect);
+        };
+        assert_eq!(target.controller, Some(ControllerRef::You));
+        assert!(target
+            .type_filters
+            .contains(&TypeFilter::Subtype("Mouse".to_string())));
+
+        let choice = def
+            .sub_ability
+            .as_deref()
+            .expect("targeted keyword choice must chain a choice prompt");
+        let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+            panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 2);
+
+        for (branch, keyword) in [
+            (&branches[0], Keyword::DoubleStrike),
+            (&branches[1], Keyword::Trample),
+        ] {
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } = &*branch.effect
+            else {
+                panic!(
+                    "expected keyword GenericEffect branch, got {:?}",
+                    branch.effect
+                );
+            };
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(*target, None);
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::ParentTarget)
+            );
+            assert!(static_abilities[0]
+                .modifications
+                .contains(&ContinuousModification::AddKeyword { keyword }));
+        }
     }
 
     /// Issue #501 FOLLOW-UP — ROOT CAUSE A building-block test. A "gains
@@ -34653,6 +34775,28 @@ mod tests {
                     })
                 }
             } if properties.as_slice() == [FilterProp::Attacking]
+        ));
+    }
+
+    #[test]
+    fn each_opponent_loses_life_equal_to_life_you_gained_stays_lose_life() {
+        let def = parse_effect_chain(
+            "Each opponent loses life equal to the amount of life you gained this turn.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+        let Effect::LoseLife { amount, target } = &*def.effect else {
+            panic!("expected LoseLife, got {:?}", def.effect);
+        };
+        assert_eq!(target, &None);
+        assert!(matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller
+                }
+            }
         ));
     }
 
