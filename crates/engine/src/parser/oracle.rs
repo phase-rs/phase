@@ -13802,4 +13802,59 @@ mod pipeline_snapshot_tests {
             other => panic!("expected Destroy, got {:?}", other),
         }
     }
+
+    /// CR 608.2c + CR 701.8a: Loyal Sentry — "destroy that creature and ~"
+    /// compound action with self-reference carry-forward.
+    #[test]
+    fn pipeline_loyal_sentry_compound_destroy_self_ref() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::triggers::TriggerMode;
+        let result = pipeline_parse(
+            "When this creature blocks a creature, destroy that creature and ~.",
+            "Loyal Sentry",
+            &["Creature"],
+            &[],
+        );
+        // Should have one triggered ability.
+        assert_eq!(
+            result.triggers.len(),
+            1,
+            "expected one trigger, got {:?}",
+            result.triggers,
+        );
+        let trig = &result.triggers[0];
+        // CR 509.1g: Trigger mode must be Blocks.
+        assert_eq!(
+            trig.mode,
+            TriggerMode::Blocks,
+            "trigger mode must be Blocks",
+        );
+        // The execute field holds the AbilityDefinition for the triggered effect.
+        let exec = trig.execute.as_deref().expect("trigger must have execute");
+        // CR 608.2c: Primary effect is Destroy targeting the blocked creature.
+        // The anaphoric "that creature" resolves to ParentTarget (inherits the
+        // trigger's target binding via try_split_targeted_compound).
+        match exec.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                assert_eq!(
+                    target.clone(),
+                    TargetFilter::ParentTarget,
+                    "primary target must be ParentTarget (the blocked creature)",
+                );
+            }
+            other => panic!("primary effect must be Destroy, got {:?}", other),
+        }
+        // CR 608.2c + CR 701.8a: Sub-clause is Destroy { SelfRef } for '~'.
+        let sub = exec.sub_ability.as_deref().expect("must have sub_ability");
+        match sub.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                assert_eq!(
+                    target.clone(),
+                    TargetFilter::SelfRef,
+                    "sub-clause target must be SelfRef for '~'",
+                );
+            }
+            other => panic!("sub-clause must be Destroy, got {:?}", other),
+        }
+    }
 }

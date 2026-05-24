@@ -1068,20 +1068,31 @@ pub(super) fn match_blocks(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
+    !matching_block_events(event, trigger, source_id, state).is_empty()
+}
+
+pub(super) fn matching_block_events(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Vec<GameEvent> {
     if let GameEvent::BlockersDeclared { assignments } = event {
-        if trigger.valid_card.is_some() {
-            // valid_card filter: check if any blocker in the assignments matches.
-            // For self-reference ("Whenever ~ blocks"), this fires when source_id is a blocker.
-            // For typed filters ("Whenever a creature you control blocks"), check each blocker.
-            assignments
-                .iter()
-                .any(|(blocker, _)| valid_card_matches(trigger, state, *blocker, source_id))
-        } else {
-            // No filter: fire if source itself is among blockers
-            assignments.iter().any(|(blocker, _)| *blocker == source_id)
-        }
+        assignments
+            .iter()
+            .filter_map(|(blocker, attacker)| {
+                let blocker_matches = if trigger.valid_card.is_some() {
+                    valid_card_matches(trigger, state, *blocker, source_id)
+                } else {
+                    *blocker == source_id
+                };
+                blocker_matches.then_some(GameEvent::BlockersDeclared {
+                    assignments: vec![(*blocker, *attacker)],
+                })
+            })
+            .collect()
     } else {
-        false
+        Vec::new()
     }
 }
 
@@ -4788,6 +4799,51 @@ mod tests {
             ObjectId(1),
             &state
         ));
+    }
+
+    #[test]
+    fn blocks_trigger_events_split_per_blocked_attacker() {
+        let mut state = setup();
+        let blocker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Loyal Sentry".to_string(),
+            Zone::Battlefield,
+        );
+        let first_attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "First Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let second_attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Second Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::Blocks).valid_card(TargetFilter::SelfRef);
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![(blocker, first_attacker), (blocker, second_attacker)],
+        };
+
+        let matched = matching_block_events(&event, &trigger, blocker, &state);
+
+        assert_eq!(matched.len(), 2);
+        assert_eq!(
+            matched,
+            vec![
+                GameEvent::BlockersDeclared {
+                    assignments: vec![(blocker, first_attacker)]
+                },
+                GameEvent::BlockersDeclared {
+                    assignments: vec![(blocker, second_attacker)]
+                },
+            ]
+        );
     }
 
     #[test]
