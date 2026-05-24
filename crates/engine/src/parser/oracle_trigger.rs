@@ -5238,6 +5238,10 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::DungeonCompleted, def));
     }
 
+    if let Some(result) = try_parse_die_roll_trigger(lower) {
+        return Some(result);
+    }
+
     // CR 701.54d: "Whenever the Ring tempts you" / "When the Ring tempts you" —
     // the Ring temptation event fires once per temptation resolution.
     if all_consuming(pair(
@@ -5251,6 +5255,54 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::RingTemptsYou, def));
     }
     None
+}
+
+fn try_parse_die_roll_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // CR 706.2: die-roll triggers compose the triggering player axis
+    // (you/opponent/player) with the die object axis (a die/a d20/one or more dice).
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let (rest, valid_target) = parse_die_roll_actor(rest).ok()?;
+    let (rest, (mode, batched, die_sides)) = parse_die_roll_object(rest).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+
+    let mut def = make_base();
+    def.mode = mode.clone();
+    def.valid_target = Some(valid_target);
+    def.batched = batched;
+    def.die_sides = die_sides;
+    Some((mode, def))
+}
+
+fn parse_die_roll_actor(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(TargetFilter::Controller, pair(tag("you "), tag("roll "))),
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            pair(tag("an opponent "), tag("rolls ")),
+        ),
+        value(TargetFilter::Player, pair(tag("a player "), tag("rolls "))),
+    ))
+    .parse(input)
+}
+
+fn parse_die_roll_object(input: &str) -> OracleResult<'_, (TriggerMode, bool, Option<u8>)> {
+    alt((
+        value(
+            (TriggerMode::RolledDie, true, None),
+            tag("one or more dice"),
+        ),
+        value((TriggerMode::RolledDieOnce, false, Some(20)), tag("a d20")),
+        value((TriggerMode::RolledDieOnce, false, None), tag("a die")),
+    ))
+    .parse(input)
 }
 
 /// CR 120.1 + CR 120.3 + CR 603.2: "Whenever a source [you control] deals
@@ -14054,6 +14106,7 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::RingTemptsYou);
     }
+
     #[test]
     fn trigger_ring_tempts_you_when() {
         let def = parse_trigger_line(
@@ -14061,6 +14114,57 @@ mod tests {
             "Ringwraiths",
         );
         assert_eq!(def.mode, TriggerMode::RingTemptsYou);
+    }
+
+    #[test]
+    fn trigger_rolled_die_batch() {
+        let def = parse_trigger_line(
+            "Whenever you roll one or more dice, put a +1/+1 counter on ~.",
+            "Vrondiss, Rage of Ancients",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDie);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert!(def.batched);
+        assert_eq!(def.die_sides, None);
+    }
+
+    #[test]
+    fn trigger_rolled_die_single() {
+        let def = parse_trigger_line(
+            "Whenever you roll a die, put a +1/+1 counter on ~.",
+            "The Space Family Goblinson",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert!(!def.batched);
+        assert_eq!(def.die_sides, None);
+    }
+
+    #[test]
+    fn trigger_rolled_die_opponent_scope() {
+        let def = parse_trigger_line(
+            "Whenever an opponent rolls a die, draw a card.",
+            "Barbarian Class",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(def.die_sides, None);
+    }
+
+    #[test]
+    fn trigger_rolled_d20_filters_sides() {
+        let def = parse_trigger_line(
+            "Whenever you roll a d20, put a +1/+1 counter on ~.",
+            "Pixie Guide",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.die_sides, Some(20));
     }
 
     #[test]

@@ -2276,7 +2276,13 @@ pub(super) fn match_rolled_die(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::DieRolled { player_id, .. } = event {
+    if let GameEvent::DieRolled {
+        player_id, sides, ..
+    } = event
+    {
+        if trigger.die_sides.is_some_and(|required| required != *sides) {
+            return false;
+        }
         valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
@@ -2850,6 +2856,52 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn rolled_die_matcher_filters_player_and_sides() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pixie Guide".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger =
+            make_trigger(TriggerMode::RolledDieOnce).valid_target(TargetFilter::Controller);
+        trigger.die_sides = Some(20);
+
+        assert!(match_rolled_die(
+            &GameEvent::DieRolled {
+                player_id: PlayerId(0),
+                sides: 20,
+                result: 13,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_rolled_die(
+            &GameEvent::DieRolled {
+                player_id: PlayerId(0),
+                sides: 6,
+                result: 4,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_rolled_die(
+            &GameEvent::DieRolled {
+                player_id: PlayerId(1),
+                sides: 20,
+                result: 13,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
     }
 
     #[test]

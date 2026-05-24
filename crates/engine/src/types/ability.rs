@@ -9574,6 +9574,10 @@ pub struct TriggerDefinition {
     /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
     #[serde(default)]
     pub batched: bool,
+    /// CR 706.2: Optional sides filter for die-roll triggers such as
+    /// "Whenever you roll a d20". `None` accepts any die.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_sides: Option<u8>,
     /// CR 700.14: Expend threshold — fires when cumulative mana spent on spells crosses N.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expend_threshold: Option<u32>,
@@ -9617,6 +9621,7 @@ impl TriggerDefinition {
             counter_filter: None,
             unless_pay: None,
             batched: false,
+            die_sides: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
@@ -11583,6 +11588,7 @@ mod tests {
             counter_filter: None,
             unless_pay: None,
             batched: false,
+            die_sides: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
