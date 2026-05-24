@@ -790,4 +790,112 @@ mod tests {
 
         assert_eq!(state.players[0].life, starting_life + 1);
     }
+
+    /// Issue #933 — Fell the Mighty: "Destroy all creatures with power greater
+    /// than target creature's power." This is the resolution-flow counterpart
+    /// to the parser AST test in
+    /// `parser/oracle_effect/imperative.rs::fell_the_mighty_anchors_destroy_all_with_target_creature_slot`:
+    /// the parser surfaces a `TargetOnly { target: creature }` anchor with a
+    /// `DestroyAll` sub-ability so the embedded `QuantityRef::Power { Target }`
+    /// inside the mass filter can resolve against the chosen creature. Without
+    /// the anchor the embedded `Target` ref reads from an empty
+    /// `ability.targets` and the comparison degenerates (every creature with
+    /// power >= 1 dies — the original bug).
+    ///
+    /// This test wires the AST shape directly into `ResolvedAbility` and
+    /// exercises `resolve_ability_chain` end-to-end:
+    /// - Three creatures: power 2, power 3, power 5.
+    /// - Player picks the power-3 creature as the anchor target.
+    /// - Expected: only strictly-greater-power creatures die (power 5),
+    ///   the target (power 3) and lower-power creatures (power 2) survive.
+    #[test]
+    fn fell_the_mighty_destroys_only_higher_power_creatures() {
+        use crate::types::ability::{FilterProp, ObjectScope, TargetRef};
+
+        let mut state = GameState::new_two_player(42);
+        let power_2 = spawn_creature_with_power(&mut state, CardId(1), PlayerId(0), "Cub", 2);
+        let power_3 = spawn_creature_with_power(&mut state, CardId(2), PlayerId(0), "Bear", 3);
+        let power_5 = spawn_creature_with_power(&mut state, CardId(3), PlayerId(0), "Giant", 5);
+
+        // Mass filter: creatures with power >= (Target's power + 1) — i.e.
+        // strictly greater than the chosen target's power.
+        let mass_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::PowerGE {
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target,
+                        },
+                    }),
+                    offset: 1,
+                },
+            }],
+        });
+
+        // Sub-ability: DestroyAll with the mass filter that embeds a target ref.
+        let destroy_all = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: mass_filter,
+                cant_regenerate: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        // Parent ability: TargetOnly anchoring the chosen power-3 creature.
+        // The DestroyAll sub-ability inherits the parent's targets via the
+        // standard sub-chain target propagation in `resolve_chain_body`, so the
+        // embedded `Power { Target }` resolves against the chosen creature.
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(power_3)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(destroy_all);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Only the power-5 creature (strictly greater than the target's 3)
+        // should be destroyed; the target itself and the lower-power creature
+        // must survive.
+        assert!(
+            state.battlefield.contains(&power_2),
+            "power-2 creature must survive (power 2 < target power 3)",
+        );
+        assert!(
+            state.battlefield.contains(&power_3),
+            "target creature (power 3) must survive — only strictly-greater-power creatures die",
+        );
+        assert!(
+            !state.battlefield.contains(&power_5),
+            "power-5 creature must be destroyed (power 5 > target power 3)",
+        );
+    }
+
+    /// Spawn a creature with a specified power; toughness defaults to power
+    /// (irrelevant for the Fell the Mighty resolution-flow test).
+    fn spawn_creature_with_power(
+        state: &mut GameState,
+        card_id: CardId,
+        owner: PlayerId,
+        name: &str,
+        power: i32,
+    ) -> ObjectId {
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(power);
+        obj.power = Some(power);
+        obj.toughness = Some(power);
+        id
+    }
 }

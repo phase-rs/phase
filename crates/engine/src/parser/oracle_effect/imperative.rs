@@ -5681,6 +5681,269 @@ pub(crate) fn try_parse_coin_flip_branch(text: &str) -> Option<(bool, &str)> {
     None
 }
 
+/// CR 115.1 + CR 608.2c: Detect whether a mass-effect filter embeds a reference
+/// to a target-scoped object quantity — e.g., `QuantityRef::Power { scope:
+/// Target }` inside a `PowerGE`'s `QuantityExpr`. Such references resolve
+/// against `ResolvedAbility.targets` at effect time (see
+/// `crate::game::quantity::resolve_object_pt`), so the parser must surface an
+/// explicit parent target slot for the runtime to bind. Without it, the inner
+/// `Target` ref reads from an empty targets slice (defaults to 0), causing
+/// "destroy all creatures with power greater than target creature's power"
+/// (Fell the Mighty) to degenerate to "destroy every creature with power >= 1".
+///
+/// Generic over `TargetFilter` shape so And/Or/Not/TrackedSetFiltered
+/// composites are walked too. When this returns true, the
+/// `ZoneCounter::Destroy { all: true }` intercept arm in
+/// `lower_imperative_family_ast` wraps the effect inline with
+/// `Effect::TargetOnly { target: creature }` so casting binds an object into
+/// `ability.targets` for the embedded `Target`-scoped ref to read.
+fn filter_references_target_object_quantity(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(filter_prop_references_target_object_quantity),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_target_object_quantity)
+        }
+        TargetFilter::Not { filter } => filter_references_target_object_quantity(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_references_target_object_quantity(filter)
+        }
+        // Leaf and structural variants that carry no nested `TargetFilter`
+        // and cannot embed a `QuantityExpr` — there is nothing to walk into,
+        // so they cannot reference a target-scoped object quantity.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::OriginalController
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+// The match below is intentionally exhaustive (no `_` wildcard) — see
+// CLAUDE.md "exhaustive `match` without wildcard fallbacks" guidance. Every
+// FilterProp variant is enumerated so any future variant that embeds a
+// `QuantityExpr` will fail to compile here, forcing a deliberate decision about
+// whether the new variant can carry a target-scoped object quantity (and would
+// therefore require a target-anchor wrap in the mass-destroy intercept).
+fn filter_prop_references_target_object_quantity(prop: &FilterProp) -> bool {
+    match prop {
+        // QuantityExpr-bearing variants — recurse into the expression.
+        FilterProp::PowerLE { value }
+        | FilterProp::PowerGE { value }
+        | FilterProp::ToughnessLE { value }
+        | FilterProp::ToughnessGE { value }
+        | FilterProp::Cmc { value, .. } => quantity_expr_references_target_object(value),
+        FilterProp::Counters { count, .. } => quantity_expr_references_target_object(count),
+        // Composite — walk inner props.
+        FilterProp::AnyOf { props } => props
+            .iter()
+            .any(filter_prop_references_target_object_quantity),
+        // Composite filter-bearing variants — recurse into the inner filter.
+        FilterProp::CanEnchant { target } => filter_references_target_object_quantity(target),
+        FilterProp::DifferentNameFrom { filter }
+        | FilterProp::TargetsOnly { filter }
+        | FilterProp::Targets { filter } => filter_references_target_object_quantity(filter),
+        // All other variants carry no embedded QuantityExpr and no nested
+        // TargetFilter — they cannot reference a target-scoped object quantity.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::Attacking
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::Unblocked
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::HasSingleTarget
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::ToughnessGTPower
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::FaceDown
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::AttackingController
+        | FilterProp::IsCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
+fn quantity_expr_references_target_object(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_uses_target_scope(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_references_target_object(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_target_object),
+        QuantityExpr::UpTo { max } => quantity_expr_references_target_object(max),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_references_target_object(exponent),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_references_target_object(left)
+                || quantity_expr_references_target_object(right)
+        }
+    }
+}
+
+/// CR 115.1: True iff `qty` reads from `ability.targets` at resolution time —
+/// i.e. is one of the `scope: ObjectScope` variants of `QuantityRef` whose
+/// scope resolves to `ObjectScope::Target` (the first object target). Covers
+/// every `QuantityRef` variant carrying an `ObjectScope` axis so the mass-
+/// destroy intercept catches the full class, not just `Power`/`Toughness`.
+/// `ObjectScope::Recipient` is deliberately excluded — it is the layer-
+/// evaluator's per-recipient binding, not a spell-resolution target slot.
+///
+/// The match below is intentionally exhaustive (no `_` wildcard) — see
+/// CLAUDE.md "exhaustive `match` without wildcard fallbacks" guidance. Every
+/// QuantityRef variant is enumerated so any new variant added later will fail
+/// to compile here, forcing a deliberate decision about whether it can carry
+/// an `ObjectScope::Target` reference (and would therefore require a
+/// target-anchor wrap in the mass-destroy intercept).
+fn quantity_ref_uses_target_scope(qty: &QuantityRef) -> bool {
+    use crate::types::ability::ObjectScope;
+    match qty {
+        // ObjectScope-axis variants — true iff scope is Target.
+        QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+        | QuantityRef::CountersOn { scope, .. } => matches!(scope, ObjectScope::Target),
+        // All other QuantityRef variants either carry no ObjectScope axis
+        // (player-scoped, filter-scoped, zone-scoped, aggregate, etc.) or
+        // use a different scope enum (PlayerScope, CountScope). None read
+        // from `ability.targets`'s object slot the way ObjectScope::Target
+        // does, so they do not require a target-anchor wrap.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::ObjectCount { .. }
+        | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::Aggregate { .. }
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::ChosenNumber
+        | QuantityRef::AttackedThisTurn
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::DistinctColorsAmongPermanents { .. } => false,
+    }
+}
+
 pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEffectClause {
     match ast {
         // CR 118.12: A Counter with an "unless [player] pays [cost]" modifier
@@ -5847,6 +6110,46 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 target,
             });
             clause.multi_target = Some(MultiTargetSpec::fixed(0, count as usize));
+            clause
+        }
+        // CR 115.1 + CR 608.2c: "Destroy all <subject> with <property
+        // referencing target <type>'s power/toughness>" — Fell the Mighty
+        // class. The parsed mass filter embeds a `QuantityRef::Power { scope:
+        // Target }` (or toughness) reference that needs a real parent target
+        // slot to resolve against. `Effect::DestroyAll` does not surface its
+        // `target` field as a stack-time target slot (see
+        // `Effect::target_filter` — DestroyAll returns `None` there). That
+        // return is intentional: `DestroyAll.target` models the mass-scan
+        // predicate (CR 700.4 — "all" sweep), not a player-chosen target slot.
+        // Rather than retrofitting `DestroyAll.target_filter()` to surface the
+        // mass filter (which would create a circular "pick a creature with
+        // power > your own power" target requirement), the fix surfaces a
+        // SEPARATE parent anchor via `Effect::TargetOnly`. Without that anchor
+        // the embedded `Target` ref reads from an empty targets slice and the
+        // comparison degenerates (e.g. "power >= 0 + 1" matches every creature
+        // with power >= 1).
+        //
+        // Wrap with `Effect::TargetOnly { target: creature }` (mirrors the
+        // existing Leadership Vacuum and choose-two-targets intercepts above)
+        // so casting surfaces a "target creature" slot. The DestroyAll
+        // sub_ability inherits `ability.targets` at resolution time via the
+        // standard sub-chain target propagation in
+        // `crate::game::effects::resolve_chain_body`, letting the embedded
+        // `Power { Target }` resolve against the chosen creature.
+        ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::Destroy {
+            target,
+            all: true,
+        }) if filter_references_target_object_quantity(&target) => {
+            let anchor = TargetFilter::Typed(TypedFilter::creature());
+            let destroy = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DestroyAll {
+                    target,
+                    cant_regenerate: false,
+                },
+            );
+            let mut clause = parsed_clause(Effect::TargetOnly { target: anchor });
+            clause.sub_ability = Some(Box::new(destroy));
             clause
         }
         // All other arms produce a bare Effect with no sub_ability chain.
@@ -9173,6 +9476,91 @@ mod tests {
                 );
             }
             other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    /// Issue #933 — Fell the Mighty: "Destroy all creatures with power greater
+    /// than target creature's power." The mass-destroy filter embeds a
+    /// reference to the target creature's power, so the ability needs a real
+    /// target slot (`Effect::TargetOnly`) for the player to pick a creature.
+    /// Without the parent anchor, the embedded `QuantityRef::Power { Target }`
+    /// reads from an empty `ability.targets` and the comparison
+    /// (`power >= 0 + 1 = power >= 1`) destroys every creature with power >= 1
+    /// — the original bug.
+    #[test]
+    fn fell_the_mighty_anchors_destroy_all_with_target_creature_slot() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::ObjectScope;
+
+        let parsed = parse_oracle_text(
+            "Destroy all creatures with power greater than target creature's power.",
+            "Fell the Mighty",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "expected one spell ability");
+        let ability = &parsed.abilities[0];
+
+        // Parent effect: TargetOnly anchoring a "target creature" slot.
+        match &*ability.effect {
+            Effect::TargetOnly { target } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "anchor target must filter to creatures, got {:?}",
+                        tf.type_filters
+                    );
+                    assert!(
+                        tf.properties.is_empty(),
+                        "anchor target must be unconstrained 'target creature', got {:?}",
+                        tf.properties
+                    );
+                }
+                other => panic!("anchor target must be a Typed creature filter, got {other:?}"),
+            },
+            other => panic!("expected Effect::TargetOnly anchor, got {other:?}"),
+        }
+
+        // Sub-ability: DestroyAll with the embedded target-power reference.
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("DestroyAll must be chained as sub_ability of the TargetOnly anchor");
+        match &*sub.effect {
+            Effect::DestroyAll {
+                target,
+                cant_regenerate: false,
+            } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    // Mass filter must keep the power-greater-than-target encoding.
+                    let has_target_ref = tf.properties.iter().any(|prop| {
+                        if let FilterProp::PowerGE {
+                            value: QuantityExpr::Offset { inner, offset: 1 },
+                        } = prop
+                        {
+                            matches!(
+                                inner.as_ref(),
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::Power {
+                                        scope: ObjectScope::Target,
+                                    },
+                                },
+                            )
+                        } else {
+                            false
+                        }
+                    });
+                    assert!(
+                        has_target_ref,
+                        "mass filter must reference target creature's power, got {:?}",
+                        tf.properties
+                    );
+                }
+                other => panic!("mass filter must be a Typed creature filter, got {other:?}"),
+            },
+            other => panic!("expected DestroyAll sub_ability, got {other:?}"),
         }
     }
 }
