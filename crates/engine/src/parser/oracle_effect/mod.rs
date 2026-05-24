@@ -17,7 +17,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{multispace0, multispace1};
-use nom::combinator::{eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, rest, value};
 use nom::multi::many1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -6461,6 +6461,24 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                 if sub_clause.multi_target.is_none() {
                     sub_clause.multi_target = up_to_spec;
                 }
+            }
+        }
+    }
+
+    // CR 608.2c + CR 701.8a: Self-reference carry-forward for compound actions.
+    // "destroy that creature and ~" splits on " and " into sub-text "~" which
+    // lacks a verb. Prepend the primary verb so it becomes "destroy ~" — parsed
+    // as Destroy { target: SelfRef }. Handles Loyal Sentry, etc.
+    if matches!(sub_clause.effect, Effect::Unimplemented { .. })
+        && all_consuming(tag::<_, _, OracleError<'_>>("~"))
+            .parse(sub_lower.as_str())
+            .is_ok()
+    {
+        if let Some(verb) = extract_effect_verb(&primary_effect) {
+            let reparsed_text = format!("{verb} {sub_text}");
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
+            if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
+                sub_clause = reparsed;
             }
         }
     }
@@ -17472,6 +17490,32 @@ mod tests {
                 );
             }
             other => panic!("expected Destroy, got {:?}", other),
+        }
+    }
+
+    /// CR 608.2c + CR 701.8a: Verb carry-forward for self-reference "~" in compound
+    /// actions. "destroy that creature and ~" → sub-clause becomes Destroy { SelfRef }.
+    #[test]
+    fn compound_verb_carry_forward_self_ref() {
+        let clause =
+            parse_effect_clause("Destroy that creature and ~", &mut ParseContext::default());
+        assert!(
+            matches!(clause.effect, Effect::Destroy { .. }),
+            "primary clause must be Destroy, got {:?}",
+            clause.effect
+        );
+        let sub = clause
+            .sub_ability
+            .expect("must have sub_ability for compound");
+        match sub.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "sub-clause target must be SelfRef for '~'",
+                );
+            }
+            other => panic!("sub-clause must be Destroy, got {:?}", other),
         }
     }
 
