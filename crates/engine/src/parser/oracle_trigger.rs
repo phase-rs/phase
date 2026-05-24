@@ -613,8 +613,16 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one");
     let body = if !effect_for_parse.is_empty() {
+        if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
+            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Unsupported monarch turn-began condition".to_string(),
+                    description: Some(effect_for_parse.clone()),
+                },
+            ))))
         // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
-        if let Some(vote_def) =
+        } else if let Some(vote_def) =
             crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
         {
             let mut ability = vote_def;
@@ -6650,7 +6658,10 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 725.1: "Whenever you become the monarch" / "Whenever an opponent becomes
     // the monarch" — monarch-designation trigger. Decompose into prefix (whenever/when)
     // + subject (you/opponent/player) + verb (become/becomes) + "the monarch".
-    if let Some((valid_target, _after)) = parse_become_monarch_trigger(lower) {
+    if let Some((valid_target, after)) = parse_become_monarch_trigger(lower) {
+        if !after.trim().is_empty() {
+            return None;
+        }
         let mut def = make_base();
         def.mode = TriggerMode::BecomeMonarch;
         def.valid_target = valid_target;
@@ -8951,6 +8962,14 @@ fn parse_become_monarch_trigger(lower: &str) -> Option<(Option<TargetFilter>, &s
     Some((valid_target, after_monarch))
 }
 
+fn parse_monarch_turn_began_condition(lower: &str) -> Option<&str> {
+    let (after_condition, _) =
+        tag::<_, _, OracleError<'_>>("if you were the monarch as the turn began,")
+            .parse(lower)
+            .ok()?;
+    Some(after_condition)
+}
+
 /// CR 700.13: "Whenever [subject] commits a crime" — scoped crime trigger parser.
 ///
 /// Handles three subject forms (trailing space bundled into each tag for precision):
@@ -10160,6 +10179,26 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn trigger_monarch_turn_began_condition_stays_unimplemented() {
+        let def = parse_trigger_line(
+            "Whenever an opponent becomes the monarch, if you were the monarch as the turn began, that player loses 2 life and you gain 2 life.",
+            "Knights of the Black Rose",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        let execute = def.execute.expect("trigger should keep an explicit body");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Unimplemented { name, .. }
+                    if name == "Unsupported monarch turn-began condition"
+            ),
+            "unsupported monarch turn-began guard must not parse as unconditional, got {:?}",
+            execute.effect
+        );
+    }
+
     #[test]
     fn trigger_a_player_becomes_the_monarch() {
         let def = parse_trigger_line(
@@ -10168,6 +10207,12 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::BecomeMonarch);
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_become_the_monarch_rejects_partial_suffix() {
+        let def = parse_trigger_line("Whenever you become the monarchy, draw a card.", "Test");
+        assert!(matches!(def.mode, TriggerMode::Unknown(_)));
     }
 
     #[test]

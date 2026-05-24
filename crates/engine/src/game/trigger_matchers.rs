@@ -3196,6 +3196,73 @@ mod tests {
     }
 
     #[test]
+    fn become_monarch_trigger_filters_player_scope() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Custodi Lich".to_string(),
+            Zone::Battlefield,
+        );
+        let controller_trigger = parse_trigger_line(
+            "Whenever you become the monarch, target player sacrifices a creature of their choice.",
+            "Custodi Lich",
+        );
+        let opponent_trigger = parse_trigger_line(
+            "Whenever an opponent becomes the monarch, that player loses 2 life.",
+            "Knights of the Black Rose",
+        );
+        let any_player_trigger = parse_trigger_line(
+            "Whenever a player becomes the monarch, draw a card.",
+            "Test Card",
+        );
+        let controller_event = GameEvent::MonarchChanged {
+            player_id: PlayerId(0),
+        };
+        let opponent_event = GameEvent::MonarchChanged {
+            player_id: PlayerId(1),
+        };
+
+        assert!(match_become_monarch(
+            &controller_event,
+            &controller_trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_become_monarch(
+            &opponent_event,
+            &controller_trigger,
+            source,
+            &state,
+        ));
+        assert!(match_become_monarch(
+            &opponent_event,
+            &opponent_trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_become_monarch(
+            &controller_event,
+            &opponent_trigger,
+            source,
+            &state,
+        ));
+        assert!(match_become_monarch(
+            &controller_event,
+            &any_player_trigger,
+            source,
+            &state,
+        ));
+        assert!(match_become_monarch(
+            &opponent_event,
+            &any_player_trigger,
+            source,
+            &state,
+        ));
+    }
+
+    #[test]
     fn becomes_plotted_matches_only_source_card() {
         let mut state = setup();
         let plotted = create_object(
