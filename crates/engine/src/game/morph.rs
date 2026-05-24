@@ -62,6 +62,13 @@ pub fn apply_face_down_creature_characteristics(obj: &mut crate::game::game_obje
     obj.base_static_definitions = Arc::new(Vec::new());
     obj.color = Vec::new();
     obj.base_color = Vec::new();
+    // CR 708.2a: A face-down permanent has no name or printed identity. Clear
+    // both the live and baseline display pointer so the layer reset cannot
+    // restore the real card's art onto the face-down 2/2. The real ref is
+    // preserved in `back_face` by `snapshot_object_face` and restored by
+    // `turn_face_up` → `apply_back_face_to_object`.
+    obj.printed_ref = None;
+    obj.base_printed_ref = None;
 }
 
 /// CR 702.37a: A face-down permanent is a 2/2 creature with no name, mana cost, creature types, or abilities.
@@ -347,6 +354,38 @@ mod tests {
             })));
         assert_eq!(obj.abilities.len(), 1);
         assert_eq!(obj.color, vec![ManaColor::Green]);
+    }
+
+    #[test]
+    fn face_down_clears_printed_ref_and_turn_face_up_restores_it() {
+        // CR 708.2a: a face-down 2/2 exposes no card identity, so its display
+        // pointer (`printed_ref`) is cleared — including the baseline, so the
+        // layer reset cannot resurrect the real card's art. Turning it face up
+        // restores the original art from the snapshot in `back_face`.
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        let secret_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "secret-oracle-id".to_string(),
+            face_name: "Secret Creature".to_string(),
+        };
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.printed_ref = Some(secret_ref.clone());
+            obj.base_printed_ref = Some(secret_ref.clone());
+        }
+
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        assert_eq!(state.objects[&id].printed_ref, None);
+        assert_eq!(state.objects[&id].base_printed_ref, None);
+        // A layer pass must not restore the hidden card's art from a stale base.
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(state.objects[&id].printed_ref, None);
+
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+        assert_eq!(state.objects[&id].printed_ref, Some(secret_ref.clone()));
+        assert_eq!(state.objects[&id].base_printed_ref, Some(secret_ref));
     }
 
     #[test]

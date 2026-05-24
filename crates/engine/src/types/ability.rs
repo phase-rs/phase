@@ -6,6 +6,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -10384,6 +10385,14 @@ pub struct CopiableValues {
 pub enum ContinuousModification {
     CopyValues {
         values: Box<CopiableValues>,
+        /// Display-identity pointer of the copy source (oracle id + displayed
+        /// face name). NOT a CR 707.2 copiable characteristic — it carries no
+        /// rules weight and is deliberately kept off `CopiableValues`. It rides
+        /// on the modification so the copy's art is applied (and reverts) through
+        /// the same layer pass as the copied characteristics. `None` when the
+        /// source is a true token with no printed identity.
+        #[serde(default)]
+        printed_ref: Option<PrintedCardRef>,
     },
     /// CR 707.9 + CR 707.2: Override the copy's name after `CopyValues` applies.
     /// Used by "enter as a copy, except its name is X" (e.g., Superior Spider-Man's

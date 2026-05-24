@@ -1,8 +1,8 @@
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ControllerRef, Effect, GameRestriction, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, QuantityExpr, QuantityRef,
-    ResolvedAbility, RestrictionPlayerScope, SpellContext, TargetChoiceTiming, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    ModalSelectionCondition, ModalSelectionConstraint, ObjectScope, PlayerFilter, QuantityExpr,
+    QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext, TargetChoiceTiming,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -1055,6 +1055,21 @@ fn collect_target_slots(
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
+            && effect_needs_target_creature_quantity_slot(&ability.effect)
+        {
+            let filter = target_creature_quantity_slot_filter();
+            let legal_targets = legal_targets_for_ability_filter(state, ability, &filter, slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            slots.push(TargetSelectionSlot {
+                legal_targets,
+                optional: ability.optional_targeting,
+            });
+        }
+        if ability.target_choice_timing == TargetChoiceTiming::Stack
             && !effect_target_filter_references_chosen_player(&ability.effect)
         {
             if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
@@ -1351,6 +1366,146 @@ pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
     }
 }
 
+fn target_creature_quantity_slot_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature())
+}
+
+fn effect_needs_target_creature_quantity_slot(effect: &Effect) -> bool {
+    effect_references_target_creature_quantity(effect)
+        && !effect_primary_target_supplies_creature_target(effect)
+}
+
+fn effect_primary_target_supplies_creature_target(effect: &Effect) -> bool {
+    triggers::extract_target_filter_from_effect(effect)
+        .is_some_and(target_filter_can_supply_creature_quantity)
+}
+
+fn target_filter_can_supply_creature_quantity(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Any | TargetFilter::Typed(_) | TargetFilter::SpecificObject { .. }
+    )
+}
+
+fn effect_references_target_creature_quantity(effect: &Effect) -> bool {
+    if effect
+        .target_filter()
+        .is_some_and(filter_references_target_creature_quantity)
+    {
+        return true;
+    }
+
+    match effect {
+        Effect::GainLife { amount, .. }
+        | Effect::Draw { count: amount, .. }
+        | Effect::Mill { count: amount, .. }
+        | Effect::Discard { count: amount, .. }
+        | Effect::Scry { count: amount, .. }
+        | Effect::Surveil { count: amount, .. }
+        | Effect::LoseLife { amount, .. }
+        | Effect::SetLifeTotal { amount, .. }
+        | Effect::DealDamage { amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
+        | Effect::PutCounter { count: amount, .. }
+        | Effect::PutCounterAll { count: amount, .. }
+        | Effect::AddCounter { count: amount, .. }
+        | Effect::Sacrifice { count: amount, .. } => {
+            quantity_expr_references_target_creature(amount)
+        }
+        Effect::DestroyAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::TapAll { target, .. }
+        | Effect::UntapAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => filter_references_target_creature_quantity(target),
+        _ => false,
+    }
+}
+
+fn filter_references_target_creature_quantity(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
+            .iter()
+            .any(filter_prop_references_target_creature_quantity),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(filter_references_target_creature_quantity),
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_references_target_creature_quantity(filter)
+        }
+        _ => false,
+    }
+}
+
+fn filter_prop_references_target_creature_quantity(
+    prop: &crate::types::ability::FilterProp,
+) -> bool {
+    match prop {
+        crate::types::ability::FilterProp::Counters { count, .. }
+        | crate::types::ability::FilterProp::Cmc { value: count, .. }
+        | crate::types::ability::FilterProp::PtComparison { value: count, .. } => {
+            quantity_expr_references_target_creature(count)
+        }
+        crate::types::ability::FilterProp::CanEnchant { target } => {
+            filter_references_target_creature_quantity(target)
+        }
+        crate::types::ability::FilterProp::AnyOf { props } => props
+            .iter()
+            .any(filter_prop_references_target_creature_quantity),
+        crate::types::ability::FilterProp::DifferentNameFrom { filter } => {
+            filter_references_target_creature_quantity(filter)
+        }
+        crate::types::ability::FilterProp::SharesQuality { reference, .. } => reference
+            .as_deref()
+            .is_some_and(filter_references_target_creature_quantity),
+        crate::types::ability::FilterProp::TargetsOnly { filter }
+        | crate::types::ability::FilterProp::Targets { filter } => {
+            filter_references_target_creature_quantity(filter)
+        }
+        _ => false,
+    }
+}
+
+fn quantity_expr_references_target_creature(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_references_target_creature(qty),
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_references_target_creature(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_target_creature),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_references_target_creature(left)
+                || quantity_expr_references_target_creature(right)
+        }
+        QuantityExpr::Fixed { .. } => false,
+    }
+}
+
+fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
+    match qty {
+        QuantityRef::Power { scope } | QuantityRef::Toughness { scope } => {
+            *scope == ObjectScope::Target
+        }
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::DistinctCardTypes {
+            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        } => filter_references_target_creature_quantity(filter),
+        QuantityRef::PlayerCount {
+            filter: crate::types::ability::PlayerFilter::ControlsPermanent { filter, .. },
+        } => filter_references_target_creature_quantity(filter),
+        _ => false,
+    }
+}
+
 fn collect_target_slot_specs(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1438,6 +1593,14 @@ fn collect_target_slot_specs(
         {
             specs.push(TargetSlotSpec {
                 filter: TargetFilter::Player,
+                optional: ability.optional_targeting,
+            });
+        }
+        if ability.target_choice_timing == TargetChoiceTiming::Stack
+            && effect_needs_target_creature_quantity_slot(&ability.effect)
+        {
+            specs.push(TargetSlotSpec {
+                filter: target_creature_quantity_slot_filter(),
                 optional: ability.optional_targeting,
             });
         }
@@ -2562,6 +2725,18 @@ fn assign_targets_recursive(
         }
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && effect_needs_target_creature_quantity_slot(&ability.effect)
+    {
+        if let Some(target) = targets.get(*next_target) {
+            ability.targets.push(target.clone());
+            *next_target += 1;
+        } else if !ability.optional_targeting {
+            return Err(EngineError::InvalidAction(
+                "Missing required target".to_string(),
+            ));
+        }
+    }
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
         && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability.multi_target.as_ref() {
@@ -2724,6 +2899,25 @@ fn assign_selected_slots_recursive(
     // (DamageAll, PutCounterAll, etc.). See `assign_targets_recursive`.
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && effect_references_target_player(&ability.effect)
+    {
+        let Some(selected_slot) = selected_slots.get(*next_slot) else {
+            return Err(EngineError::InvalidAction(
+                "Missing target selection".to_string(),
+            ));
+        };
+        match selected_slot {
+            Some(target) => ability.targets.push(target.clone()),
+            None if ability.optional_targeting => {}
+            None => {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
+            }
+        }
+        *next_slot += 1;
+    }
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && effect_needs_target_creature_quantity_slot(&ability.effect)
     {
         let Some(selected_slot) = selected_slots.get(*next_slot) else {
             return Err(EngineError::InvalidAction(
@@ -2938,6 +3132,11 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         return true;
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && effect_needs_target_creature_quantity_slot(&ability.effect)
+    {
+        return true;
+    }
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
         && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
     {
         return true;
@@ -3001,6 +3200,15 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     } else {
         0
     };
+    let target_creature_quantity_companion = if ability.target_choice_timing
+        == TargetChoiceTiming::Stack
+        && effect_needs_target_creature_quantity_slot(&ability.effect)
+        && !ability.optional_targeting
+    {
+        1
+    } else {
+        0
+    };
     let current = if matches!(
         &ability.effect,
         Effect::Attach { .. } | Effect::MoveCounters { .. }
@@ -3023,7 +3231,11 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     } else {
         0
     };
-    let current = attach_targets + move_counter_targets + player_companion + current;
+    let current = attach_targets
+        + move_counter_targets
+        + player_companion
+        + target_creature_quantity_companion
+        + current;
 
     let rest = if defers_sub_ability_target_selection(&ability.effect) {
         minimum_targets_after_deferred_effect(ability.sub_ability.as_deref())
@@ -3151,11 +3363,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, ContinuousModification, CounterTransferMode, Duration, Effect,
-        FilterProp, GameRestriction, LibraryPosition, ModalChoice, ModalSelectionConstraint,
-        MultiTargetSpec, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry,
-        RestrictionPlayerScope, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        AbilityCost, AbilityKind, Comparator, ContinuousModification, CounterTransferMode,
+        Duration, Effect, FilterProp, GameRestriction, LibraryPosition, ModalChoice,
+        ModalSelectionConstraint, MultiTargetSpec, ProhibitedActivity, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -5344,6 +5557,70 @@ mod tests {
                 chosen.0
             );
         }
+    }
+
+    /// Issue #933: mass filters can declare a target only through a dynamic
+    /// threshold ("power greater than target creature's power"). The target
+    /// lives inside `FilterProp::PtComparison.value`, so `DestroyAll` must
+    /// surface a companion creature slot even though the effect has no primary
+    /// `target_filter()`.
+    #[test]
+    fn build_target_slots_surfaces_creature_slot_for_target_power_mass_filter() {
+        let mut state = GameState::new_two_player(42);
+        let small = create_creature(&mut state, PlayerId(0), CardId(1), "Small");
+        let large = create_creature(&mut state, PlayerId(0), CardId(2), "Large");
+        let reference = create_creature(&mut state, PlayerId(1), CardId(3), "Reference");
+        state.objects.get_mut(&small).unwrap().power = Some(2);
+        state.objects.get_mut(&large).unwrap().power = Some(5);
+        state.objects.get_mut(&reference).unwrap().power = Some(3);
+
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target,
+                        },
+                    }),
+                    offset: 1,
+                },
+            },
+        ]));
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: filter.clone(),
+                cant_regenerate: false,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots.len(),
+            1,
+            "target-relative mass filter should declare one creature target"
+        );
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(reference)));
+
+        let mut assigned = ability.clone();
+        assign_targets_in_chain(&state, &mut assigned, &[TargetRef::Object(reference)])
+            .expect("target should assign to mass filter ability");
+        assert_eq!(assigned.targets, vec![TargetRef::Object(reference)]);
+
+        let ctx = crate::game::filter::FilterContext::from_ability(&assigned);
+        assert!(crate::game::filter::matches_target_filter(
+            &state, large, &filter, &ctx
+        ));
+        assert!(!crate::game::filter::matches_target_filter(
+            &state, small, &filter, &ctx
+        ));
     }
 
     /// CR 115.1 + CR 611.2c: Continuous effects whose affected set is
