@@ -10487,8 +10487,8 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope,
-        SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope, PtStat,
+        PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
     };
 
     /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
@@ -10726,9 +10726,9 @@ mod tests {
             matches!(
                 &def.mode,
                 StaticMode::CantBeBlockedBy { filter }
-                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerLE { value: QuantityExpr::Fixed { value: 2 } }))
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PtComparison { stat: PtStat::Power, scope: PtValueScope::Current, comparator: Comparator::LE, value: QuantityExpr::Fixed { value: 2 } }))
             ),
-            "Expected CantBeBlockedBy with PowerLE(2), got {:?}",
+            "Expected CantBeBlockedBy with PtComparison(Power, LE, 2), got {:?}",
             def.mode
         );
     }
@@ -10744,9 +10744,9 @@ mod tests {
             matches!(
                 &def.mode,
                 StaticMode::CantBeBlockedBy { filter }
-                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerGE { value: QuantityExpr::Fixed { value: 3 } }))
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PtComparison { stat: PtStat::Power, scope: PtValueScope::Current, comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 3 } }))
             ),
-            "Expected CantBeBlockedBy with PowerGE(3), got {:?}",
+            "Expected CantBeBlockedBy with PtComparison(Power, GE, 3), got {:?}",
             def.mode
         );
     }

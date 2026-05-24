@@ -387,6 +387,41 @@ fn damage_modification_for_rid(
         .clone()
 }
 
+/// Look up the `ShieldKind` of the matched replacement (object-hosted or pending
+/// registry), using the same `rid.source == ObjectId(0)` sentinel discriminator
+/// as `damage_modification_for_rid`.
+fn shield_kind_for_rid(state: &GameState, rid: ReplacementId) -> Option<ShieldKind> {
+    if rid.source == ObjectId(0) {
+        return state
+            .pending_damage_replacements
+            .get(rid.index)
+            .map(|repl| repl.shield_kind);
+    }
+    state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .map(|repl| repl.shield_kind)
+}
+
+/// CR 614.9: Read back the captured chosen-object recipient stashed in the
+/// matched replacement's `redirect_target` field (set at resolution time for
+/// `DamageRedirectTarget::ChosenObjectTarget` — "to target creature").
+fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Option<ObjectId> {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    };
+    match repl.and_then(|r| r.redirect_target.as_ref()) {
+        Some(TargetFilter::SpecificObject { id }) => Some(*id),
+        _ => None,
+    }
+}
+
 /// CR 614.1a: Apply damage modification or prevention from the replacement definition.
 fn damage_done_applier(
     event: ProposedEvent,
@@ -452,10 +487,73 @@ fn damage_done_applier(
                     }
                 }
             };
+            // CR 614.5: A one-shot effect-created amount replacement (Desperate
+            // Gambit) gets a single opportunity, then is consumed. Continuous
+            // statics (Furnace of Rath) keep `ShieldKind::None` and are never
+            // consumed here — they re-apply to every damage event.
+            if let Some(ShieldKind::DamageReplacementOneShot) = shield_kind_for_rid(state, rid) {
+                consume_prevention_shield(state, rid, None);
+            }
             return ApplyResult::Modified(ProposedEvent::Damage {
                 source_id,
                 target,
                 amount: new_amount,
+                is_combat,
+                applied,
+            });
+        }
+        return ApplyResult::Modified(event);
+    }
+
+    // Branch 1b: CR 614.9 — one-shot redirection shield. Replace the damage
+    // event's recipient with the redirection target, then consume the shield.
+    if let Some(ShieldKind::Redirection { recipient }) = shield_kind_for_rid(state, rid) {
+        if let ProposedEvent::Damage {
+            source_id,
+            target,
+            amount,
+            is_combat,
+            applied,
+        } = event
+        {
+            // CR 614.7a: A source that would deal 0 damage deals no damage at
+            // all — there is no damage event to redirect. Pass through and do
+            // not consume the shield (no opportunity was spent).
+            if amount == 0 {
+                return ApplyResult::Modified(ProposedEvent::Damage {
+                    source_id,
+                    target,
+                    amount,
+                    is_combat,
+                    applied,
+                });
+            }
+
+            let chosen = redirect_chosen_object_for_rid(state, rid);
+            let new_recipient =
+                super::effects::create_damage_replacement::resolve_redirect_recipient(
+                    state, recipient, rid.source, chosen,
+                )
+                .filter(|new_target| {
+                    super::effects::create_damage_replacement::redirect_recipient_is_legal(
+                        state, new_target,
+                    )
+                });
+
+            // CR 614.5: The one-shot opportunity is spent on this event whether
+            // or not the redirection succeeds — consume the shield in both the
+            // success and the "does nothing" (illegal recipient per CR 614.9)
+            // outcomes.
+            consume_prevention_shield(state, rid, None);
+
+            // CR 614.9: A legal recipient takes the damage instead; an illegal
+            // one (left the battlefield, no longer a battle/creature/planeswalker,
+            // or a player who left the game) makes the redirection do nothing,
+            // so the damage stays on the original recipient.
+            return ApplyResult::Modified(ProposedEvent::Damage {
+                source_id,
+                target: new_recipient.unwrap_or(target),
+                amount,
                 is_combat,
                 applied,
             });

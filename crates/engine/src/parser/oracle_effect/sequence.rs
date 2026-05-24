@@ -2272,6 +2272,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
         | Effect::LoseTheGame
         | Effect::WinTheGame
         | Effect::RollDie { .. }

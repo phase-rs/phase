@@ -27,10 +27,10 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, FilterProp, ManaModification,
-    ManaReplacementScope, PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter,
+    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
+    FilterProp, ManaModification, ManaReplacementScope, PreventionAmount, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ReplacementPlayerScope, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -2799,6 +2799,241 @@ fn parse_damage_modification_replacement(
         def = def.combat_scope(cs);
     }
     Some(def)
+}
+
+/// CR 614.9 + CR 614.1a + CR 615: Parse a one-shot "the next time [source]
+/// would deal [combat] damage [to X] this turn, [modify/redirect] instead"
+/// damage-replacement effect into `Effect::CreateDamageReplacement`.
+///
+/// This is effect-creating text living in an activated/triggered ability body
+/// (after `{T}:`, `{0}:`, in a flip-coin branch — Desperate Gambit, Soltari
+/// Guerrillas, Beacon of Destiny, Jade Monolith, Goblin Psychopath), NOT a
+/// permanent static replacement (those route through `parse_replacement_line`).
+///
+/// The detector IS the parser: the one-shot branch is gated by the
+/// `tag("the next time ")` prefix combinator succeeding, never a string
+/// heuristic. Returns `None` (fall-through) when the prefix or grammar fails.
+pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effect> {
+    // CR 614.1a + CR 514.2: "the next time ... this turn" — a replacement effect
+    // ("instead", CR 614.1a) with a "this turn" duration that ends at cleanup
+    // (CR 514.2). The one-opportunity consumption is CR 614.5 (see resolver).
+    let (after_prefix, _) = preceded(
+        tag::<_, _, OracleError<'_>>("the next time "),
+        peek(take_until::<_, _, OracleError<'_>>("would deal")),
+    )
+    .parse(norm_lower)
+    .ok()?;
+    // Require a "would deal ... this turn" spine; bail early otherwise so this
+    // never shadows other "the next time" effects (e.g. card-draw replacements).
+    if !nom_primitives::scan_contains(after_prefix, "would deal")
+        || !nom_primitives::scan_contains(after_prefix, "this turn")
+    {
+        return None;
+    }
+
+    // Strip the prefix for sub-parser reuse — `parse_damage_source_filter`
+    // splits on "would deal" itself, so feed it the post-prefix slice.
+    let body = after_prefix.trim();
+
+    // The "would deal ... this turn" clause carries the source + original
+    // recipient; the result clause (after the comma) carries the redirect /
+    // amount. Split there so recipient parsing never sees the redirect's "to ..."
+    // and vice-versa.
+    let (would_clause, result_clause) = split_would_deal_clause(body);
+
+    // Source spec (subject before "would deal"). Reuse the shared source-filter
+    // parser, then layer the one-shot-specific anaphors it doesn't cover.
+    let source_filter = parse_oneshot_source_filter(body);
+
+    // Combat scope: "combat damage" vs "damage".
+    let combat_scope = scan_combat_scope(would_clause);
+
+    // Original-recipient scope from the would-deal clause: a typed scope ("to an
+    // opponent" / "to a creature") OR a chosen target ("to target creature" —
+    // Jade Monolith). The latter becomes a hosted object slot, not a scope.
+    let recipient_object_filter = parse_damage_to_target_filter(would_clause);
+    let target_filter = if recipient_object_filter.is_some() {
+        None
+    } else {
+        parse_damage_target_filter(would_clause)
+    };
+
+    // Result clause: amount-modifying form ("double that damage") first; else
+    // redirection form ("it deals that damage to <recipient> instead").
+    if let Some(modification) = scan_damage_modification(result_clause) {
+        // CR 614.1a: amount-modifying one-shot (Desperate Gambit).
+        return Some(Effect::CreateDamageReplacement {
+            source_filter,
+            combat_scope,
+            target_filter,
+            modification: Some(modification),
+            redirect_to: None,
+            redirect_object_filter: None,
+            recipient_object_filter,
+        });
+    }
+
+    // CR 614.9: redirection one-shot.
+    if let Some(redirect_to) = parse_redirect_recipient(result_clause) {
+        let redirect_object_filter = match redirect_to {
+            DamageRedirectTarget::ChosenObjectTarget => {
+                parse_damage_to_target_filter(result_clause)
+            }
+            DamageRedirectTarget::Controller | DamageRedirectTarget::SourceObject => None,
+        };
+        return Some(Effect::CreateDamageReplacement {
+            source_filter,
+            combat_scope,
+            target_filter,
+            modification: None,
+            redirect_to: Some(redirect_to),
+            redirect_object_filter,
+            recipient_object_filter,
+        });
+    }
+
+    // CR 615: prevention sibling ("the next time [source] would deal damage this
+    // turn, prevent that damage" — Desperate Gambit lose-branch). The existing
+    // `PreventDamage` resolver builds a one-shot `ShieldKind::Prevention` shield;
+    // route the source-scoped one-shot prevention through it rather than
+    // duplicating the shield-creation flow.
+    if nom_primitives::scan_contains(result_clause, "prevent that damage")
+        || nom_primitives::scan_contains(result_clause, "prevent the damage")
+    {
+        return Some(Effect::PreventDamage {
+            amount: PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            scope: combat_scope
+                .map(|_| crate::types::ability::PreventionScope::CombatDamage)
+                .unwrap_or(crate::types::ability::PreventionScope::AllDamage),
+            damage_source_filter: source_filter,
+        });
+    }
+
+    None
+}
+
+/// Split the one-shot body at the "this turn[,]" boundary into the would-deal
+/// clause (source + original recipient) and the result clause (redirect /
+/// amount / prevention). The result clause is what follows "this turn".
+fn split_would_deal_clause(body: &str) -> (&str, &str) {
+    match nom_primitives::split_once_on(body, "this turn") {
+        Ok((_, (before, after))) => {
+            // `after` begins after "this turn"; trim a leading comma/space.
+            let after = after.trim_start_matches([',', ' ']);
+            (before, after)
+        }
+        Err(_) => (body, body),
+    }
+}
+
+/// CR 115.1: Detect a chosen-target recipient ("to target creature" / "to
+/// target permanent") and return its `TargetFilter`. Distinct from
+/// `parse_damage_target_filter`, which handles typed *scopes* ("to a creature",
+/// "to an opponent"). Returns `None` when the recipient is a scope or implicit.
+fn parse_damage_to_target_filter(clause: &str) -> Option<TargetFilter> {
+    nom_primitives::scan_at_word_boundaries(clause, |input| {
+        let (input, _) = tag("to ").parse(input)?;
+        let (input, filter) = alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                tag("target creature"),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default()),
+                tag("target permanent"),
+            ),
+        ))
+        .parse(input)?;
+        Ok((input, filter))
+    })
+}
+
+/// CR 614.1a: Resolve the one-shot replacement's damage *source* spec. Delegates
+/// to the shared `parse_damage_source_filter` for the "source you control" /
+/// color / type forms, then layers the one-shot anaphors:
+/// - "it" / "~" / "this creature" → `SelfRef` (Goblin Psychopath, Soltari).
+/// - "that source" / "a source of your choice" → `ChosenDamageSource` (Desperate
+///   Gambit, Beacon of Destiny, Jade Monolith) — bound to the source chosen by
+///   the preceding "choose a source" step at resolution time.
+fn parse_oneshot_source_filter(body: &str) -> Option<TargetFilter> {
+    let (_, (subject, _)) = nom_primitives::split_once_on(body, "would deal").ok()?;
+    let subject = subject.trim();
+    // Bare-anaphor source references (handled by combinator dispatch, not the
+    // generic source-filter parser).
+    //
+    // TODO (known limitation, deferred): cross-sentence anaphora. In the
+    // Desperate Gambit lose-branch ("...the next time it would deal damage this
+    // turn, prevent that damage"), the bare "it" co-refers with the prior
+    // sentence's "that source" (the chosen source), so it should resolve to
+    // `ChosenDamageSource`, not `SelfRef`. Resolving that requires sentence-level
+    // anaphora tracking across the FlipCoin branches, which is a separate parser
+    // problem out of scope here. The win-branch (amount) and the activated-ability
+    // cards (Soltari/Beacon/Jade/Goblin Psychopath) are unaffected.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it"),
+        tag("~"),
+        tag("this creature"),
+    ))
+    .parse(subject)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::SelfRef);
+        }
+    }
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that source"),
+        tag("a source of your choice"),
+    ))
+    .parse(subject)
+    {
+        if rest.trim().is_empty() {
+            // TODO (known limitation, deferred): the candidate constraint on the
+            // chosen source is dropped. Desperate Gambit's separate "Choose a
+            // source you control" sentence parses as TargetOnly{Any}, and the
+            // inline source prompt enumerates with TargetFilter::Any — so a
+            // "you control" restriction (and any similar qualifier) is not yet
+            // enforced when the player picks the source. Closing this needs the
+            // pre-choice candidate filter threaded into ChosenDamageSource;
+            // out of scope for this change.
+            return Some(TargetFilter::ChosenDamageSource);
+        }
+    }
+    parse_damage_source_filter(body)
+}
+
+/// CR 614.9: Parse the redirection recipient from the result clause by scanning
+/// word boundaries for one redirection lead-in followed by a recipient. The
+/// three lead-ins ("it deals that damage to ", "that damage is dealt to ",
+/// "that source deals that damage to ") collapse to two `to`-anchors; the
+/// recipient is "you" (Controller), "~" (the source object), or "target
+/// creature"/"target permanent" (a chosen object target).
+fn parse_redirect_recipient(body: &str) -> Option<DamageRedirectTarget> {
+    nom_primitives::scan_at_word_boundaries(body, parse_redirect_recipient_phrase)
+}
+
+/// Nom combinator for a redirection lead-in + recipient phrase.
+fn parse_redirect_recipient_phrase(
+    input: &str,
+) -> nom::IResult<&str, DamageRedirectTarget, OracleError<'_>> {
+    // Lead-in: "(deals|is dealt) that damage to " — the active form ("it/that
+    // source deals that damage to") and passive form ("that damage is dealt
+    // to") share the trailing "that damage ... to ".
+    let (input, _) = alt((
+        tag("deals that damage to "),
+        tag("that damage is dealt to "),
+    ))
+    .parse(input)?;
+    alt((
+        value(DamageRedirectTarget::Controller, tag("you")),
+        value(DamageRedirectTarget::SourceObject, tag("~")),
+        value(
+            DamageRedirectTarget::ChosenObjectTarget,
+            alt((tag("target creature"), tag("target permanent"))),
+        ),
+    ))
+    .parse(input)
 }
 
 /// Parse the damage source filter from the subject clause before "would deal".
@@ -9105,6 +9340,134 @@ mod snapshot_tests {
         )
         .unwrap();
         insta::assert_json_snapshot!(def);
+    }
+
+    // CR 614.1a + CR 614.9: building-block coverage for the one-shot
+    // damage-replacement parser across the source × scope × recipient axes.
+    #[test]
+    fn oneshot_amount_double_from_chosen_source() {
+        // Desperate Gambit win-branch.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time that source would deal damage this turn, it deals double that damage instead",
+        )
+        .expect("must parse amount one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: Some(DamageModification::Double),
+                redirect_to: None,
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                combat_scope: None,
+                ..
+            } => {}
+            other => panic!("expected Double amount one-shot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_redirect_to_target_creature_combat_from_self() {
+        // Soltari Guerrillas.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time ~ would deal combat damage to an opponent this turn, it deals that damage to target creature instead",
+        )
+        .expect("must parse redirection one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: Some(CombatDamageScope::CombatOnly),
+                target_filter: Some(DamageTargetFilter::Player { .. }),
+                // CR 115.1: the "to target creature instead" redirect recipient
+                // must surface a creature target filter so the targeting layer
+                // offers the slot (Defect 1).
+                redirect_object_filter: Some(_),
+                recipient_object_filter: None,
+            } => {}
+            other => panic!("expected redirect-to-target-creature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_redirect_to_source_passive_phrasing() {
+        // Beacon of Destiny — passive "that damage is dealt to ~ instead".
+        let effect = parse_oneshot_damage_replacement(
+            "the next time a source of your choice would deal damage to you this turn, that damage is dealt to ~ instead",
+        )
+        .expect("must parse passive redirection one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::SourceObject),
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                ..
+            } => {}
+            other => panic!("expected redirect-to-source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_redirect_to_controller_from_chosen_source() {
+        // Jade Monolith.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time a source of your choice would deal damage to target creature this turn, that source deals that damage to you instead",
+        )
+        .expect("must parse redirect-to-you one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                // CR 614.9: "would deal damage to target creature" — the
+                // protected creature is a chosen original-recipient target, not
+                // a broad scope (Defect 3). `target_filter` must stay None.
+                recipient_object_filter: Some(_),
+                target_filter: None,
+                redirect_object_filter: None,
+                ..
+            } => {}
+            other => panic!("expected redirect-to-controller, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_redirect_to_controller_combat_from_self() {
+        // Goblin Psychopath.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time it would deal combat damage this turn, it deals that damage to you instead",
+        )
+        .expect("must parse Goblin Psychopath one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: Some(CombatDamageScope::CombatOnly),
+                ..
+            } => {}
+            other => panic!("expected Goblin Psychopath redirect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_prevention_sibling() {
+        // Desperate Gambit lose-branch — routes to PreventDamage.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time it would deal damage this turn, prevent that damage",
+        )
+        .expect("must parse prevention sibling");
+        assert!(
+            matches!(effect, Effect::PreventDamage { .. }),
+            "expected PreventDamage, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn oneshot_rejects_unrelated_next_time_text() {
+        // "the next time you draw" must not be hijacked by the damage parser.
+        assert!(parse_oneshot_damage_replacement(
+            "the next time you would draw a card this turn, draw two cards instead"
+        )
+        .is_none());
     }
 
     /// CR 614.1a + CR 614.6 + CR 121.6 + CR 701.20a: Abundance — the

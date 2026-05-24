@@ -4707,6 +4707,19 @@ pub(super) fn parse_imperative_family_ast(
         }
     }
 
+    // CR 614.9 + CR 614.1a + CR 615: One-shot "the next time [source] would deal
+    // [combat] damage [to X] this turn, [modify/redirect] instead" damage
+    // replacement (Desperate Gambit, Soltari Guerrillas, Beacon of Destiny, Jade
+    // Monolith, Goblin Psychopath). The text begins with "the next time" — not a
+    // verb — so it is intercepted here, alongside the other non-verb-led effects
+    // above, before the first-word verb dispatch. The detector is the prefix
+    // combinator inside `parse_oneshot_damage_replacement`; on failure it returns
+    // `None` and we fall through.
+    if let Some(effect) = crate::parser::oracle_replacement::parse_oneshot_damage_replacement(lower)
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(effect));
+    }
+
     // NOTE: when adding verbs here, also add them to IMPERATIVE_EXTRA_VERBS
     // in game/gap_analysis.rs so the parser gap analyzer can classify them.
     match first_word {

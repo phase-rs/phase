@@ -3100,6 +3100,35 @@ fn alternative_spell_layout(obj: &crate::game::game_object::GameObject) -> Optio
     }
 }
 
+/// CR 712.11b: Returns true if `obj` is a Modal double-faced card whose two
+/// faces present a real *cast*-time face choice — i.e. both faces are spells
+/// (neither is a land). This is the spell//spell MDFC class (Esika, God of the
+/// Tree // The Prismatic Bridge and the other Kaldheim gods, Valki // Tibalt,
+/// Halvar // Sword, etc.) where `CastSpell` must let the player choose which
+/// face to put on the stack.
+///
+/// Land faces are deliberately excluded: a land MDFC face is put onto the
+/// battlefield through the play-land special action (`handle_play_land`), which
+/// runs its own `ModalFaceChoice`. A spell//land MDFC casts its spell (front)
+/// face normally and plays its land (back) face via PlayLand, so neither needs
+/// a cast-time choice here.
+///
+/// The gate keys off `back_face.layout_kind == Modal`, which
+/// `snapshot_object_face` clears to `None` after a swap — so re-entry into the
+/// cast pipeline for the chosen face does not re-prompt.
+fn modal_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+    use crate::types::card_type::CoreType;
+    let Some(back) = obj.back_face.as_ref() else {
+        return false;
+    };
+    if back.layout_kind != Some(LayoutKind::Modal) {
+        return false;
+    }
+    let front_is_land = obj.card_types.core_types.contains(&CoreType::Land);
+    let back_is_land = back.card_types.core_types.contains(&CoreType::Land);
+    !front_is_land && !back_is_land
+}
+
 fn casting_variant_for_alternative_spell(layout: LayoutKind) -> CastingVariant {
     match layout {
         LayoutKind::Adventure => CastingVariant::Adventure,
@@ -4201,6 +4230,22 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
+    // CR 712.11b: Spell//spell Modal DFCs from hand require choosing which face
+    // to cast (Esika, God of the Tree // The Prismatic Bridge, etc.). The
+    // `ChooseModalFace` handler swaps to the chosen face (if back) and re-enters
+    // this function; the swap clears the back face's Modal `layout_kind`, so the
+    // re-entry casts the chosen face without re-prompting.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand && modal_spell_face_choice_available(obj) {
+            return Ok(WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
+                payment_mode,
+            });
+        }
+    }
+
     let variant_choices = casting_variant_choice_set(state, player, object_id);
     if variant_choices.options.len() > 1 {
         return Ok(WaitingFor::CastingVariantChoice {
@@ -5271,6 +5316,23 @@ fn can_cast_prepared_now(
     // spell face is castable; in that case the card is still legally castable
     // and will prompt AdventureCastChoice.
     if alternative_spell_layout(obj).is_some() {
+        let mut sim = state.clone();
+        if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
+            swap_to_alternative_spell_face(sim_obj);
+        }
+        return can_cast_object_now(&sim, player, prepared.object_id);
+    }
+
+    // CR 712.11c: For a spell//spell Modal DFC, only the face that will be face
+    // up on the stack is evaluated to determine if it can be cast — so the back
+    // face must be tested independently. The front face may be unaffordable
+    // (Esika, God of the Tree needs {1}{G}{G}) while the back face is castable
+    // (The Prismatic Bridge needs {W}{U}{B}{R}{G}); the card is still legally
+    // castable and will prompt ModalFaceChoice (CR 712.11b). Mirror the Adventure
+    // recursion: swap to the back face and re-test. `swap_to_alternative_spell_face`
+    // clears the back face's `layout_kind`, so the recursive call does not
+    // re-enter this branch (no infinite recursion).
+    if modal_spell_face_choice_available(obj) {
         let mut sim = state.clone();
         if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
             swap_to_alternative_spell_face(sim_obj);

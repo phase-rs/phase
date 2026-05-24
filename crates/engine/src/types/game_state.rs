@@ -1784,12 +1784,22 @@ pub enum WaitingFor {
         #[serde(default)]
         payment_mode: CastPaymentMode,
     },
-    /// CR 712.12: Player chooses which face of an MDFC to play as a land
-    /// when both faces have the Land type.
+    /// CR 712.12 / CR 712.11b: Player chooses which face of an MDFC to
+    /// play/cast. Two cases reach this prompt: (a) both faces are lands (CR
+    /// 712.12 — the player picks which to put onto the battlefield via the
+    /// play-land action), and (b) both faces are spells (CR 712.11b — e.g.
+    /// Esika, God of the Tree // The Prismatic Bridge and the other Kaldheim
+    /// gods — where the player picks which face to cast before it goes on the
+    /// stack). The `ChooseModalFace` handler routes the post-choice re-entry
+    /// by the now-active face's type (land → play-land, spell → cast).
+    /// `payment_mode` carries the manual/auto mana mode forward into the
+    /// spell-cast re-entry (ignored for the land path, which is always Auto).
     ModalFaceChoice {
         player: PlayerId,
         object_id: ObjectId,
         card_id: CardId,
+        #[serde(default)]
+        payment_mode: CastPaymentMode,
     },
     /// CR 118.9: Player chooses between paying the spell's printed mana cost
     /// and paying a keyword-granted alternative mana cost. Only presented when

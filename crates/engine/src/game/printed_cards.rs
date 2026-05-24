@@ -741,6 +741,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
+        | Effect::CreateDamageReplacement { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }

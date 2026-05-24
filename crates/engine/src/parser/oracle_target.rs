@@ -2163,7 +2163,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
     )
 }
 
-/// Distribute trailing filter properties (CmcLE, CmcGE, PowerLE, PowerGE, etc.)
+/// Distribute trailing filter properties (Cmc, PtComparison, etc.)
 /// from the last `Typed` element in an `Or` filter to all preceding `Typed`
 /// elements that lack a property of the same kind.
 /// Handles "artifacts and creatures with mana value 2 or less" where only the
@@ -2418,159 +2418,33 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
 
 /// Parse "with power [or toughness] N or less/greater", "with toughness N or
 /// less/greater", and "with greater power" suffixes. Returns `(FilterProp,
-/// bytes consumed from the original text)`. CR 208.1 governs P/T comparisons;
+/// bytes consumed from the original text)`. CR 208 governs P/T comparisons;
 /// CR 509.1b covers the source-relative "greater power" form.
 ///
-/// The disjunctive form "with power or toughness N or less" produces
-/// `FilterProp::AnyOf { [PowerLE(N), ToughnessLE(N)] }` so the composite
-/// matches when *either* property is at or below N — matching the natural-
-/// language semantics of "power or toughness". Used by Arnyn Deathbloom
-/// Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail, etc.
+/// The P/T-comparison grammar (including the disjunctive "power or toughness"
+/// form and the optional "base " scope marker per CR 208.4b) is delegated in
+/// full to the single shared combinator `nom_filter::parse_pt_comparison`, so
+/// this function holds no duplicate grammar — it only handles the source-
+/// relative "greater power" leaf and adapts the combinator's `&str` remainder
+/// into the byte-offset return contract this call site expects. Used by Arnyn
+/// Deathbloom Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail,
+/// etc.
 fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
 
-    // CR 509.1b: "with greater power" — relative to the source object.
+    // CR 509.1b: "with greater power" — relative to the source object. This is
+    // source-relative (not a numeric threshold) and is not part of the shared
+    // P/T-comparison combinator, so it is handled here.
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("with greater power").parse(trimmed) {
         return Some((FilterProp::PowerGTSource, text.len() - after.len()));
     }
 
-    // Longest-match first: disjunctive "with power or toughness N or {less,greater}".
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with power or toughness ").parse(trimmed) {
-        if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
-            let props = if comparator == Comparator::LE {
-                vec![
-                    FilterProp::PowerLE {
-                        value: value.clone(),
-                    },
-                    FilterProp::ToughnessLE { value },
-                ]
-            } else {
-                vec![
-                    FilterProp::PowerGE {
-                        value: value.clone(),
-                    },
-                    FilterProp::ToughnessGE { value },
-                ]
-            };
-            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
-        }
-
-        let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
-        let after_num = rest.trim_start();
-        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
-            let props = vec![
-                FilterProp::PowerLE {
-                    value: value.clone(),
-                },
-                FilterProp::ToughnessLE { value },
-            ];
-            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
-        }
-        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
-            let props = vec![
-                FilterProp::PowerGE {
-                    value: value.clone(),
-                },
-                FilterProp::ToughnessGE { value },
-            ];
-            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
-        }
-        return None;
-    }
-
-    // "with toughness N or less/greater" — CR 208.1, mirrors the power form.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with toughness ").parse(trimmed) {
-        if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
-            let prop = if comparator == Comparator::LE {
-                FilterProp::ToughnessLE { value }
-            } else {
-                FilterProp::ToughnessGE { value }
-            };
-            return Some((prop, text.len() - after.len()));
-        }
-
-        let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
-        let after_num = rest.trim_start();
-        let (prop, after) =
-            if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
-                (FilterProp::ToughnessLE { value }, a)
-            } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
-                (FilterProp::ToughnessGE { value }, a)
-            } else {
-                return None;
-            };
-        return Some((prop, text.len() - after.len()));
-    }
-
-    let (rest, _) = tag::<_, _, OracleError<'_>>("with power ")
-        .parse(trimmed)
-        .ok()?;
-    if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
-        let prop = if comparator == Comparator::LE {
-            FilterProp::PowerLE { value }
-        } else {
-            FilterProp::PowerGE { value }
-        };
-        return Some((prop, text.len() - after.len()));
-    }
-
-    // CR 208.1 + CR 107.3a: Accept literal N or the variable X — X emits
-    // `QuantityRef::Variable { "X" }` resolved at effect time against the
-    // resolving ability's `chosen_x` via `FilterContext::from_ability`.
-    let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
-    let after_num = rest.trim_start();
-    let (prop, after) = if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num)
-    {
-        (FilterProp::PowerLE { value }, a)
-    } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
-        (FilterProp::PowerGE { value }, a)
-    } else {
-        return None;
-    };
-    Some((prop, text.len() - after.len()))
-}
-
-fn parse_pt_quantity_comparison_tail(input: &str) -> Option<(Comparator, QuantityExpr, &str)> {
-    type Vbe<'a> = OracleError<'a>;
-    let input = input.trim_start();
-    let (after_cmp, comparator) = alt((
-        value(Comparator::LT, tag::<_, _, Vbe>("less than")),
-        value(Comparator::GT, tag("greater than")),
-    ))
-    .parse(input)
-    .ok()?;
-    let after_cmp = after_cmp.trim_start();
-    let (after_eq, includes_equal) =
-        if let Ok((rest, _)) = tag::<_, _, Vbe>("or equal to").parse(after_cmp) {
-            (rest.trim_start(), true)
-        } else {
-            (after_cmp, false)
-        };
-    let (after_qty, qty) = nom_quantity::parse_quantity_ref(after_eq).ok()?;
-    let value = QuantityExpr::Ref { qty };
-    let comparator = match (comparator, includes_equal) {
-        (Comparator::LT, true) => Comparator::LE,
-        (Comparator::GT, true) => Comparator::GE,
-        (comparator, false) => comparator,
-        _ => return None,
-    };
-    let value = match comparator {
-        Comparator::LT => QuantityExpr::Offset {
-            inner: Box::new(value),
-            offset: -1,
-        },
-        Comparator::GT => QuantityExpr::Offset {
-            inner: Box::new(value),
-            offset: 1,
-        },
-        _ => value,
-    };
-    let comparator = match comparator {
-        Comparator::LT => Comparator::LE,
-        Comparator::GT => Comparator::GE,
-        comparator => comparator,
-    };
-    Some((comparator, value, after_qty))
+    // Delegate the full P/T-comparison grammar to the canonical combinator. It
+    // consumes the leading "with " itself (optional prefix), so pass `trimmed`.
+    // Recompute the consumed-byte offset against the original `text` from the
+    // combinator's remainder (`text.len() - rest.len()`).
+    let (rest, prop) = nom_filter::parse_pt_comparison(trimmed).ok()?;
+    Some((prop, text.len() - rest.len()))
 }
 
 /// CR 202.3 + CR 608.2h: Postnominal superlative mana-value qualifier —
@@ -4455,6 +4329,7 @@ mod tests {
     use super::*;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
 
     fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
@@ -5257,10 +5132,10 @@ mod tests {
         );
     }
 
-    /// CR 208.1: "creature with power or toughness N or less" produces a
-    /// disjunctive `AnyOf { [PowerLE, ToughnessLE] }` property. Used by
-    /// Arnyn Deathbloom Botanist's dies-trigger subject filter, Stern
-    /// Scolding's counter target, Warping Wail mode 1, etc.
+    /// CR 208: "creature with power or toughness N or less" produces a
+    /// disjunctive `AnyOf { [PtComparison(Power,LE,N), PtComparison(Toughness,LE,N)] }`
+    /// property. Used by Arnyn Deathbloom Botanist's dies-trigger subject
+    /// filter, Stern Scolding's counter target, Warping Wail mode 1, etc.
     #[test]
     fn creature_with_power_or_toughness_1_or_less() {
         let (f, _) = parse_type_phrase("creature with power or toughness 1 or less");
@@ -5268,10 +5143,16 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
                 props: vec![
-                    FilterProp::PowerLE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 1 },
                     },
-                    FilterProp::ToughnessLE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 1 },
                     },
                 ],
@@ -5287,10 +5168,16 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
                 props: vec![
-                    FilterProp::PowerGE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 3 },
                     },
-                    FilterProp::ToughnessGE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 3 },
                     },
                 ],
@@ -5298,15 +5185,44 @@ mod tests {
         );
     }
 
-    /// Standalone "with toughness N or less" — new parser branch, mirror of
-    /// the pre-existing "with power N or less" form.
+    /// Disjunctive "base" form — CR 208.4b. "creature with base power or
+    /// toughness 1 or less" reads base P/T (after layer 7b, ignoring counters).
+    #[test]
+    fn creature_with_base_power_or_toughness_1_or_less() {
+        let (f, _) = parse_type_phrase("creature with base power or toughness 1 or less");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                    FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }]))
+        );
+    }
+
+    /// Standalone "with toughness N or less" — mirror of the "with power N or
+    /// less" form, routed through the shared combinator.
     #[test]
     fn creature_with_toughness_2_or_less() {
         let (f, _) = parse_type_phrase("creature with toughness 2 or less");
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                FilterProp::ToughnessLE {
+                FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { value: 2 },
                 }
             ]))
@@ -5322,7 +5238,10 @@ mod tests {
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                FilterProp::ToughnessLE {
+                FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Offset {
                         inner: Box::new(QuantityExpr::Ref {
                             qty: QuantityRef::BasicLandTypeCount {
@@ -5344,8 +5263,11 @@ mod tests {
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
         assert_eq!(
             f,
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::PowerLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
                             filter: TargetFilter::Typed(TypedFilter {
@@ -5355,8 +5277,8 @@ mod tests {
                             }),
                         },
                     },
-                }])
-            )
+                }
+            ]))
         );
     }
 
@@ -5606,7 +5528,10 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::PowerLE {
+                    .properties(vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 2 }
                     }])
             )
@@ -5620,11 +5545,14 @@ mod tests {
         let (f, _) = parse_type_phrase("creature with power 3 or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::PowerGE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { value: 3 }
-                }])
-            )
+                }
+            ]))
         );
     }
 
@@ -5635,7 +5563,10 @@ mod tests {
         let (prop, _) = parse_power_suffix("with power x or less").expect("parses");
         assert_eq!(
             prop,
-            FilterProp::PowerLE {
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string()
@@ -5650,7 +5581,10 @@ mod tests {
         let (prop, _) = parse_power_suffix("with power x or greater").expect("parses");
         assert_eq!(
             prop,
-            FilterProp::PowerGE {
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string()
@@ -8398,11 +8332,14 @@ mod tests {
             assert!(
                 tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::PowerGE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 3 }
                     }
                 )),
-                "Expected PowerGE(3) in {:?}",
+                "Expected PtComparison(Power, GE, 3) in {:?}",
                 tf.properties
             );
         } else {

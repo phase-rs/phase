@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, Comparator,
+    ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction,
     ContinuousModification, DelayedTriggerCondition, Effect, ManaProduction, ModalChoice,
     ParsedCondition, QuantityExpr, ReplacementDefinition, SolveCondition, SpellCastingOption,
     StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
@@ -902,8 +902,9 @@ fn is_spell_resolution_instruction_line(
 /// - Ferocious: you control a creature with power 4 or greater
 fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::StaticCondition> {
     use crate::types::ability::{
-        CardTypeSetSource, ControllerRef, CountScope, FilterProp, PlayerScope, QuantityExpr,
-        QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+        CardTypeSetSource, Comparator, ControllerRef, CountScope, FilterProp, PlayerScope, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter,
+        TypedFilter, ZoneRef,
     };
 
     match word {
@@ -984,7 +985,10 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
                         TypedFilter::creature()
                             .controller(ControllerRef::You)
                             .properties(vec![
-                                FilterProp::PowerGE {
+                                FilterProp::PtComparison {
+                                    stat: PtStat::Power,
+                                    scope: PtValueScope::Current,
+                                    comparator: Comparator::GE,
                                     value: QuantityExpr::Fixed { value: 4 },
                                 },
                                 FilterProp::InZone {
@@ -11607,7 +11611,7 @@ mod tests {
 
     #[test]
     fn ferocious_ability_word_applies_power_condition_to_spell_effect() {
-        use crate::types::ability::{AbilityCondition, QuantityRef};
+        use crate::types::ability::{AbilityCondition, PtStat, PtValueScope, QuantityRef};
 
         let r = parse_oracle_text(
             "You gain 5 life.\nFerocious \u{2014} You gain 10 life instead if you control a creature with power 4 or greater.",
@@ -11661,7 +11665,10 @@ mod tests {
             panic!("expected typed creature filter");
         };
         assert_eq!(filter.controller, Some(ControllerRef::You));
-        assert!(filter.properties.contains(&FilterProp::PowerGE {
+        assert!(filter.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
             value: QuantityExpr::Fixed { value: 4 },
         }));
     }

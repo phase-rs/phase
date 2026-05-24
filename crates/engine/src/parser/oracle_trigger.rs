@@ -8582,8 +8582,8 @@ mod tests {
         AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, CastingPermission,
         Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
         DelayedTriggerCondition, Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope,
-        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
-        TypedFilter,
+        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -15457,21 +15457,24 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
-        // Should have PowerGE { value: 4 } in the filter props
+        // Should have PtComparison(Power, GE, 4) in the filter props
         if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
             assert!(
                 tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::PowerGE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 4 }
                     }
                 )),
-                "Expected PowerGE(4) in properties, got {:?}",
+                "Expected PtComparison(Power, GE, 4) in properties, got {:?}",
                 tf.properties
             );
         } else {
             panic!(
-                "Expected Typed filter with PowerGE, got {:?}",
+                "Expected Typed filter with PtComparison, got {:?}",
                 def.valid_card
             );
         }

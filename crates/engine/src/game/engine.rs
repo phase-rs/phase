@@ -1473,12 +1473,14 @@ fn apply_action(
             *payment_mode,
             &mut events,
         )?,
-        // CR 712.12: Player chooses which face of an MDFC to play as a land.
+        // CR 712.12 (land face) / CR 712.11b (spell face): Player chooses which
+        // face of an MDFC to play (land) or cast (spell).
         (
             WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
                 card_id,
+                payment_mode,
             },
             GameAction::ChooseModalFace { back_face },
         ) => {
@@ -1497,17 +1499,36 @@ fn apply_action(
                     // Do NOT set obj.transformed — MDFC face choice ≠ transform
                 } else {
                     // Front face chosen — clear layout_kind so the MDFC intercept
-                    // won't re-fire on re-entry into handle_play_land.
+                    // won't re-fire on re-entry into handle_play_land / handle_cast_spell.
                     if let Some(ref mut bf) = obj.back_face {
                         bf.layout_kind = None;
                     }
                 }
             }
-            // Re-enter handle_play_land. After swap, the new back_face (from
-            // snapshot_object_face) has layout_kind: None. After front-face choice,
-            // layout_kind is explicitly cleared. Either way, the both-faces-land
-            // intercept won't re-fire.
-            handle_play_land(state, *object_id, *card_id, &mut events)?
+            // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
+            // type. A land face is put onto the battlefield via the play-land
+            // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
+            // // The Prismatic Bridge). After a swap
+            // the new back_face (from snapshot_object_face) has layout_kind: None,
+            // and a front-face choice clears it explicitly — so neither the
+            // both-faces-land intercept nor the spell-face intercept re-fires.
+            let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
+                obj.card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Land)
+            });
+            if active_is_land {
+                handle_play_land(state, *object_id, *card_id, &mut events)?
+            } else {
+                casting::handle_cast_spell_with_payment_mode(
+                    state,
+                    *player,
+                    *object_id,
+                    *card_id,
+                    *payment_mode,
+                    &mut events,
+                )?
+            }
         }
         // CR 118.9: Player chooses between the printed mana cost and the
         // keyword-granted alternative cost. The `keyword` axis on the waiting
@@ -4159,11 +4180,14 @@ fn handle_play_land(
         });
 
         if is_modal && front_is_land && back_is_land {
-            // Both faces are lands — player must choose which face to put into play
+            // Both faces are lands — player must choose which face to put into play.
+            // The land path never consumes payment_mode (lands cost no mana), but
+            // the field is required; Auto is the inert default.
             return Ok(WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
                 card_id,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             });
         }
 
@@ -18554,6 +18578,165 @@ mod mdfc_land_tests {
         assert!(
             land_actions.is_empty(),
             "CR 712.8a: MDFC Creature/Land in graveyard should not be offered as PlayLand"
+        );
+    }
+
+    /// Build a spell//spell Modal DFC (Esika, God of the Tree //
+    /// The Prismatic Bridge) in hand with explicit, asymmetric mana costs.
+    fn create_spell_mdfc_in_hand(state: &mut GameState) -> (ObjectId, CardId) {
+        use crate::types::mana::ManaCostShard;
+        let obj_id = create_object(
+            state,
+            CardId(400),
+            PlayerId(0),
+            "Esika, God of the Tree".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types = make_creature_type();
+        // Front: {1}{G}{G}
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+            generic: 1,
+        };
+        let mut back = make_back_face(
+            "The Prismatic Bridge",
+            CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec![],
+            },
+            Some(LayoutKind::Modal),
+        );
+        // Back: {W}{U}{B}{R}{G}
+        back.mana_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Green,
+            ],
+            generic: 0,
+        };
+        obj.back_face = Some(back);
+        (obj_id, CardId(400))
+    }
+
+    /// Add one mana of each given color to the player's pool.
+    fn add_pool_mana(
+        state: &mut GameState,
+        player: PlayerId,
+        colors: &[crate::types::mana::ManaType],
+    ) {
+        use crate::types::mana::ManaUnit;
+        let p = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        for &color in colors {
+            p.mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
+    // CR 712.11c: A spell//spell MDFC is castable when only the *back* face is
+    // affordable — only the face that will be on the stack is evaluated for
+    // castability (front Esika needs {1}{G}{G}; back Prismatic Bridge needs
+    // {W}{U}{B}{R}{G}). The user's bug: with W/U/B/R/G in pool the front is
+    // unaffordable, so the card was dropping out of legal actions entirely.
+    #[test]
+    fn spell_mdfc_castable_when_only_back_face_affordable() {
+        use crate::types::mana::ManaType;
+        let mut state = setup_game_at_main_phase();
+        let (obj_id, _card_id) = create_spell_mdfc_in_hand(&mut state);
+        add_pool_mana(
+            &mut state,
+            PlayerId(0),
+            &[
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ],
+        );
+
+        assert!(
+            crate::game::casting::can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Spell MDFC must be castable when only the back face is affordable"
+        );
+
+        let candidates = crate::ai_support::legal_actions(&state);
+        assert!(
+            candidates.iter().any(|c| matches!(
+                c,
+                GameAction::CastSpell { object_id, .. } if *object_id == obj_id
+            )),
+            "Expected a CastSpell candidate for the spell MDFC"
+        );
+    }
+
+    // CR 712.11b: Casting a spell//spell MDFC prompts a face choice, and choosing
+    // the back face puts the back-face spell on the stack.
+    #[test]
+    fn spell_mdfc_cast_back_face_goes_on_stack() {
+        use crate::types::mana::ManaType;
+        let mut state = setup_game_at_main_phase();
+        let (obj_id, card_id) = create_spell_mdfc_in_hand(&mut state);
+        add_pool_mana(
+            &mut state,
+            PlayerId(0),
+            &[
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ],
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::ModalFaceChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "Casting a spell MDFC should prompt ModalFaceChoice, got {:?}",
+            result.waiting_for
+        );
+
+        let result =
+            apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true }).unwrap();
+        assert!(
+            matches!(result.waiting_for, WaitingFor::Priority { .. }),
+            "Expected Priority after casting the back face, got {:?}",
+            result.waiting_for
+        );
+
+        // The back-face spell is on the stack; the object left the hand.
+        let on_stack = state.stack.iter().any(|e| e.id == obj_id);
+        assert!(on_stack, "back-face spell should be on the stack");
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(obj.name, "The Prismatic Bridge");
+        assert!(
+            !obj.transformed,
+            "MDFC face choice must not set transformed"
         );
     }
 

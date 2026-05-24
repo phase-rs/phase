@@ -986,6 +986,38 @@ fn collect_target_slots(
                 optional: ability.optional_targeting,
             });
         }
+    } else if let Effect::CreateDamageReplacement {
+        recipient_object_filter,
+        redirect_object_filter,
+        ..
+    } = &ability.effect
+    {
+        // CR 115.1 + CR 614.9: Surface up to two object target slots for the
+        // one-shot damage replacement — `target_filter()` returns None for this
+        // effect, so the generic path below never reaches it.
+        //
+        // ORDER IS LOAD-BEARING: the *original-recipient* slot ("would deal
+        // damage to target creature" — Jade Monolith) is declared FIRST, then
+        // the *redirect-destination* slot ("...to target creature instead" —
+        // Soltari Guerrillas). The resolver reads `recipient_host` from
+        // `chosen_target_object(ability, 0)` and the redirect from
+        // `chosen_redirect_object` (which skips the recipient slot when present),
+        // so the surfacing order here must match that indexing exactly.
+        for filter in [recipient_object_filter, redirect_object_filter]
+            .into_iter()
+            .flatten()
+        {
+            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            slots.push(TargetSelectionSlot {
+                legal_targets,
+                optional: ability.optional_targeting,
+            });
+        }
     } else {
         if is_per_opponent_target_fanout(ability) {
             collect_per_opponent_target_fanout_slots(state, ability, slots)?;
@@ -1369,6 +1401,24 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                 });
             }
+        }
+    } else if let Effect::CreateDamageReplacement {
+        recipient_object_filter,
+        redirect_object_filter,
+        ..
+    } = &ability.effect
+    {
+        // CR 115.1 + CR 614.9: Mirror `collect_target_slots` one-for-one — the
+        // recipient slot (Jade Monolith) before the redirect slot (Soltari) — so
+        // per-slot specs line up with the surfaced TargetSelectionSlots.
+        for filter in [recipient_object_filter, redirect_object_filter]
+            .into_iter()
+            .flatten()
+        {
+            specs.push(TargetSlotSpec {
+                filter: filter.clone(),
+                optional: ability.optional_targeting,
+            });
         }
     } else {
         if is_per_opponent_target_fanout(ability) {
@@ -6246,6 +6296,171 @@ mod tests {
             parent_target_controller(&ability, &state),
             None,
             "An ability with no targets has no parent target controller"
+        );
+    }
+
+    fn creature_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature))
+    }
+
+    /// CR 115.1 + CR 614.9 (Defect 1 / Nit 2): Soltari Guerrillas's "...deals
+    /// that damage to target creature instead" redirect destination MUST surface
+    /// a creature target slot through `build_target_slots`. This drives the REAL
+    /// targeting pipeline — deleting the `collect_target_slots`
+    /// CreateDamageReplacement branch makes this fail.
+    #[test]
+    fn build_target_slots_surfaces_redirect_creature_slot() {
+        use crate::types::ability::DamageRedirectTarget;
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Soltari".into(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Redirect Target".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_object_filter: Some(creature_filter()),
+                recipient_object_filter: None,
+            },
+            vec![],
+            host,
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("redirect slot must build");
+        assert_eq!(slots.len(), 1, "exactly one redirect-destination slot");
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(creature)),
+            "the redirect creature must be a legal target, got {:?}",
+            slots[0].legal_targets
+        );
+    }
+
+    /// CR 115.1 + CR 614.9 (Defect 3 / Nit 1+2): Jade Monolith's "would deal
+    /// damage to target creature" original recipient MUST surface a creature
+    /// target slot — without it the shield hosts on Jade with no recipient
+    /// scoping and redirects damage to ANY creature. Deleting the
+    /// `recipient_object_filter` arm of the `collect_target_slots` branch makes
+    /// this fail.
+    #[test]
+    fn build_target_slots_surfaces_recipient_creature_slot() {
+        use crate::types::ability::DamageRedirectTarget;
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jade".into(),
+            Zone::Battlefield,
+        );
+        let protected = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Protected Creature".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&protected)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_object_filter: None,
+                recipient_object_filter: Some(creature_filter()),
+            },
+            vec![],
+            host,
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("recipient slot must build");
+        assert_eq!(slots.len(), 1, "exactly one original-recipient slot");
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(protected)),
+            "the protected creature must be a legal target, got {:?}",
+            slots[0].legal_targets
+        );
+    }
+
+    /// Ordering contract (Nit 1): when BOTH filters are present the recipient
+    /// slot is surfaced FIRST, then the redirect slot — matching the resolver's
+    /// `chosen_target_object(_, 0)` / `chosen_redirect_object` indexing.
+    #[test]
+    fn build_target_slots_recipient_slot_precedes_redirect_slot() {
+        use crate::types::ability::DamageRedirectTarget;
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hybrid".into(),
+            Zone::Battlefield,
+        );
+        for (cid, name) in [(2u64, "A"), (3, "B")] {
+            let id = create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_object_filter: Some(creature_filter()),
+                recipient_object_filter: Some(creature_filter()),
+            },
+            vec![],
+            host,
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("two slots must build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "recipient + redirect slots must both surface when both filters are set"
         );
     }
 }

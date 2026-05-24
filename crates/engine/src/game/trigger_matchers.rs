@@ -4407,7 +4407,10 @@ mod tests {
         trigger.origin = Some(Zone::Battlefield);
         trigger.destination = Some(Zone::Graveyard);
         trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::creature().properties(
-            vec![crate::types::ability::FilterProp::PowerGE {
+            vec![crate::types::ability::FilterProp::PtComparison {
+                stat: crate::types::ability::PtStat::Power,
+                scope: crate::types::ability::PtValueScope::Current,
+                comparator: crate::types::ability::Comparator::GE,
                 value: crate::types::ability::QuantityExpr::Fixed { value: 4 },
             }],
         )));

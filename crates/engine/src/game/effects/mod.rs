@@ -50,6 +50,7 @@ pub mod control_next_turn;
 pub mod copy_spell;
 pub mod counter;
 pub mod counters;
+pub mod create_damage_replacement;
 pub mod create_emblem;
 pub mod deal_damage;
 pub mod delayed_trigger;
@@ -1181,6 +1182,9 @@ pub fn resolve_effect(
         Effect::PayCost { .. } => pay::resolve(state, ability, events),
         Effect::CastFromZone { .. } => cast_from_zone::resolve(state, ability, events),
         Effect::PreventDamage { .. } => prevent_damage::resolve(state, ability, events),
+        Effect::CreateDamageReplacement { .. } => {
+            create_damage_replacement::resolve(state, ability, events)
+        }
         Effect::LoseTheGame => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => roll_die::resolve(state, ability, events),

@@ -2304,7 +2304,10 @@ pub(super) fn effective_casualty_additional_cost(
         })?;
     Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
         target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
-            crate::types::ability::FilterProp::PowerGE {
+            crate::types::ability::FilterProp::PtComparison {
+                stat: crate::types::ability::PtStat::Power,
+                scope: crate::types::ability::PtValueScope::Current,
+                comparator: crate::types::ability::Comparator::GE,
                 value: QuantityExpr::Fixed {
                     value: threshold as i32,
                 },
@@ -4310,8 +4313,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp,
-        QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
+        PtStat, PtValueScope, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -4660,7 +4663,10 @@ mod tests {
                     match target {
                         TargetFilter::Typed(tf) => {
                             assert!(tf.type_filters.contains(&TypeFilter::Creature));
-                            assert!(tf.properties.contains(&FilterProp::PowerGE {
+                            assert!(tf.properties.contains(&FilterProp::PtComparison {
+                                stat: PtStat::Power,
+                                scope: PtValueScope::Current,
+                                comparator: Comparator::GE,
                                 value: QuantityExpr::Fixed { value: 1 },
                             }));
                         }
