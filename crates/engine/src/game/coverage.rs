@@ -9,12 +9,13 @@ use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
-    ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition, DoublePTMode,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
+    DoublePTMode, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -1561,12 +1562,18 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::Counter {
             target,
-            source_static,
+            source_rider,
             ..
         } => {
             d.push(("target".into(), fmt_target(target)));
-            if source_static.is_some() {
-                d.push(("+ static".into(), "on source".into()));
+            match source_rider {
+                Some(CounterSourceRider::LosesAbilities { .. }) => {
+                    d.push(("+ static".into(), "on source".into()));
+                }
+                Some(CounterSourceRider::Destroy) => {
+                    d.push(("+ destroy".into(), "source".into()));
+                }
+                None => {}
             }
         }
         Effect::Token {

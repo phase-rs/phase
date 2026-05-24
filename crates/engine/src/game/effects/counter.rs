@@ -1,9 +1,10 @@
+use crate::game::effects::destroy::{self, DestroyOutcome};
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::targeting;
 use crate::game::zones;
 use crate::types::ability::{
-    Duration, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter,
-    TargetRef,
+    CounterSourceRider, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
+    StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -23,17 +24,20 @@ use crate::types::zones::Zone;
 /// `resolve`, either the player declined to pay (so the counter goes
 /// through unconditionally) or there was no unless-pay to begin with.
 ///
-/// If the effect carries a `source_static`, it is applied to the counter's source
-/// (e.g., Tidebinder) with `affected: SpecificObject(source_permanent_id)` after
-/// successfully countering a permanent's ability. This implements "that permanent
-/// loses all abilities for as long as ~" patterns.
+/// CR 701.6 + CR 608.2c: If the effect carries a `source_rider`, it runs as a
+/// follow-up instruction acting on the countered ability's source permanent —
+/// only when an *ability* (not a spell) was countered (CR 110.1 / CR 701.8a: a
+/// spell is not a permanent). `CounterSourceRider::LosesAbilities` registers a
+/// continuous "loses all abilities for as long as ~" static (Tidebinder);
+/// `CounterSourceRider::Destroy` destroys the permanent (Teferi's Response,
+/// Green Slime).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let source_static = match &ability.effect {
-        Effect::Counter { source_static, .. } => source_static.clone(),
+    let source_rider = match &ability.effect {
+        Effect::Counter { source_rider, .. } => source_rider.clone(),
         _ => None,
     };
 
@@ -52,6 +56,20 @@ pub fn resolve(
         Effect::Counter { target, .. } => targeting::resolved_targets(ability, target, state),
         _ => ability.targets.clone(),
     };
+
+    // CR 115.1: `Effect::Counter` is single-target by construction — mass
+    // counter is `Effect::CounterAll`. The post-loop rider therefore acts on at
+    // most one countered ability's source permanent.
+    debug_assert!(
+        targets.len() <= 1,
+        "Effect::Counter must be single-target (mass counter is Effect::CounterAll)"
+    );
+
+    // CR 701.6 + CR 608.2c: When an *ability* is countered (not a spell), carry
+    // its source permanent and the rider out of the loop so the follow-up
+    // instruction runs after EffectResolved (see CR 110.1 / CR 701.8a: a
+    // countered spell is not a permanent, so no rider fires for spells).
+    let mut countered_ability_source: Option<ObjectId> = None;
 
     for target in targets {
         if let TargetRef::Object(obj_id) = target {
@@ -120,13 +138,11 @@ pub fn resolve(
                     };
                     zones::move_to_zone(state, obj_id, dest, events);
                 } else {
-                    // Ability was countered — apply source_static if present
-                    apply_source_static(
-                        state,
-                        ability.source_id,
-                        source_permanent_id,
-                        &source_static,
-                    );
+                    // CR 110.1 / CR 701.8a: An ability was countered, so its
+                    // source is a permanent the rider can act on. Defer the
+                    // rider to the post-loop block so EffectResolved precedes
+                    // any WaitingFor a replacement choice may set.
+                    countered_ability_source = Some(source_permanent_id);
                 }
 
                 events.push(GameEvent::SpellCountered {
@@ -141,6 +157,40 @@ pub fn resolve(
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
+
+    // CR 608.2c: The rider is a follow-up instruction conditional on the prior
+    // counter outcome — it runs only when an ability (not a spell) was actually
+    // countered. EffectResolved is already pushed above, so an early return on a
+    // mid-resolution replacement choice loses nothing.
+    if let Some(source_permanent_id) = countered_ability_source {
+        match source_rider {
+            // CR 611.2: Apply the "loses all abilities ..." static to the
+            // countered ability's source permanent (Tishana's Tidebinder).
+            Some(CounterSourceRider::LosesAbilities { static_def }) => {
+                apply_source_static(state, ability.source_id, source_permanent_id, &static_def);
+            }
+            // CR 701.8: Destroy the countered ability's source permanent
+            // (Teferi's Response, Green Slime) through the shared guarded path
+            // so emblem (CR 114.5), zone, and indestructible (CR 702.12b)
+            // guards cannot be bypassed.
+            Some(CounterSourceRider::Destroy) => {
+                match destroy::destroy_single_object(
+                    state,
+                    source_permanent_id,
+                    ability.source_id,
+                    // CR 701.8: "destroy that permanent" with no "can't be
+                    // regenerated" clause.
+                    false,
+                    events,
+                ) {
+                    DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
+                    // `state.waiting_for` is set by the replacement pipeline.
+                    DestroyOutcome::NeedsChoice => return Ok(()),
+                }
+            }
+            None => {}
+        }
+    }
 
     Ok(())
 }
@@ -262,7 +312,8 @@ pub fn resolve_all(
     Ok(())
 }
 
-/// Register a transient continuous effect for a counter's source_static.
+/// CR 611.2: Register a transient continuous effect for a counter's
+/// `CounterSourceRider::LosesAbilities` static.
 ///
 /// The effect targets the countered ability's source permanent and persists
 /// as long as the counter source (e.g., Tidebinder) remains on the battlefield.
@@ -270,13 +321,8 @@ fn apply_source_static(
     state: &mut GameState,
     counter_source_id: ObjectId,
     source_permanent_id: ObjectId,
-    source_static: &Option<StaticDefinition>,
+    static_def: &StaticDefinition,
 ) {
-    let static_def = match source_static {
-        Some(def) => def,
-        None => return,
-    };
-
     // Only apply if the source permanent is still on the battlefield
     if !state.battlefield.contains(&source_permanent_id) {
         return;
@@ -339,7 +385,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -386,7 +432,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -433,7 +479,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -502,7 +548,9 @@ mod tests {
         let counter_ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::StackAbility { controller: None },
-                source_static: Some(source_static),
+                source_rider: Some(CounterSourceRider::LosesAbilities {
+                    static_def: Box::new(source_static),
+                }),
             },
             vec![TargetRef::Object(ability_on_stack)],
             tidebinder,
@@ -580,7 +628,9 @@ mod tests {
         let counter_ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: Some(source_static),
+                source_rider: Some(CounterSourceRider::LosesAbilities {
+                    static_def: Box::new(source_static),
+                }),
             },
             vec![TargetRef::Object(spell_id)],
             tidebinder,
@@ -590,10 +640,172 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &counter_ability, &mut events).unwrap();
 
-        // Spell countered, but source_static should NOT be applied (it's a spell, not an ability)
+        // Spell countered, but the rider should NOT be applied (it's a spell,
+        // not an ability — CR 110.1 / CR 701.8a).
         assert!(
             state.transient_continuous_effects.is_empty(),
-            "source_static should not apply when countering a spell"
+            "source_rider should not apply when countering a spell"
+        );
+    }
+
+    /// CR 701.8: Countering an *ability* with the Destroy rider destroys the
+    /// ability's source permanent (Teferi's Response, Green Slime).
+    #[test]
+    fn counter_ability_destroy_rider_destroys_source_permanent() {
+        let mut state = GameState::new_two_player(42);
+
+        // The source permanent whose ability is on the stack.
+        let source_permanent = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Source Creature".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The counter source (e.g. Green Slime).
+        let counter_source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Green Slime".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability_on_stack = ObjectId(999);
+        state.stack.push_back(StackEntry {
+            id: ability_on_stack,
+            source_id: source_permanent,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source_permanent,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "Dummy".to_string(),
+                        description: None,
+                    },
+                    vec![],
+                    source_permanent,
+                    PlayerId(1),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+            },
+        });
+
+        let counter_ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackAbility { controller: None },
+                source_rider: Some(CounterSourceRider::Destroy),
+            },
+            vec![TargetRef::Object(ability_on_stack)],
+            counter_source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &counter_ability, &mut events).unwrap();
+
+        // CR 701.6a: ability removed from the stack.
+        assert!(state.stack.is_empty(), "ability should be countered");
+        // CR 701.8a: the source permanent moved battlefield → graveyard.
+        assert!(
+            !state.battlefield.contains(&source_permanent),
+            "source permanent should leave the battlefield"
+        );
+        assert!(
+            state.players[1].graveyard.contains(&source_permanent),
+            "source permanent should be in its owner's graveyard"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == source_permanent)),
+            "a destroy event should fire for the source permanent"
+        );
+    }
+
+    /// CR 701.8a / CR 110.1 discriminator: countering a *spell* with the Destroy
+    /// rider destroys nothing — a spell on the stack is not a permanent, so the
+    /// rider does not fire. (This is the spell-vs-ability gate, the structural
+    /// encoding of "if a permanent's ability is countered this way".)
+    #[test]
+    fn counter_spell_destroy_rider_destroys_nothing() {
+        let mut state = GameState::new_two_player(42);
+
+        let counter_source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Teferi's Response".to_string(),
+            Zone::Battlefield,
+        );
+
+        // A battlefield permanent recorded as the countered spell's stack
+        // `source_id`. This is the sharp CR 110.1 discriminator: if the rider
+        // fired on the spell-vs-ability gate's *wrong* (spell) side, this
+        // battlefield permanent would be destroyed. The spell-vs-ability gate
+        // must skip the rider entirely for spells, so this permanent survives —
+        // independent of the destroy zone guard.
+        let decoy_permanent = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Decoy Creature".to_string(),
+            Zone::Battlefield,
+        );
+
+        // A spell on the stack (not an ability), whose `source_id` points at a
+        // battlefield permanent.
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: decoy_permanent,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let counter_ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: Some(CounterSourceRider::Destroy),
+            },
+            vec![TargetRef::Object(spell_id)],
+            counter_source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &counter_ability, &mut events).unwrap();
+
+        // CR 608.2b: the spell was countered into its owner's graveyard.
+        assert!(state.stack.is_empty(), "spell should be countered");
+        assert!(state.players[1].graveyard.contains(&spell_id));
+        // CR 701.8a / CR 110.1: a countered spell is not a permanent — the
+        // rider does not fire, so the battlefield permanent recorded as the
+        // spell's source survives and no destroy event is produced.
+        assert!(
+            state.battlefield.contains(&decoy_permanent),
+            "the destroy rider must not fire when a spell is countered (CR 110.1)"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CreatureDestroyed { .. })),
+            "no destroy event should fire when a spell is countered"
         );
     }
 
@@ -622,7 +834,7 @@ mod tests {
         let counter_ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -675,7 +887,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),

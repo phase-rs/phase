@@ -341,7 +341,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             },
         )
     }

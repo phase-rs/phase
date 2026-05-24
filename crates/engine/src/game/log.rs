@@ -1108,6 +1108,8 @@ mod tests {
                 name: "Grizzly Bears".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
                 mana_value: 2,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

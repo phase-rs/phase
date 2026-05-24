@@ -6189,7 +6189,7 @@ fn try_parse_verb_and_target<'a>(
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Counter {
                 target,
-                source_static: None,
+                source_rider: None,
                 unless_pay,
                 all: true,
             })),
@@ -6216,7 +6216,7 @@ fn try_parse_verb_and_target<'a>(
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Counter {
                 target,
-                source_static: None,
+                source_rider: None,
                 unless_pay,
                 all: false,
             })),
@@ -19033,7 +19033,7 @@ mod tests {
 
     #[test]
     fn effect_counter_ability_with_source_static_absorption() {
-        use crate::types::ability::ContinuousModification;
+        use crate::types::ability::{ContinuousModification, CounterSourceRider};
         use crate::types::statics::StaticMode;
 
         let ability = parse_effect_chain(
@@ -19044,8 +19044,13 @@ mod tests {
             ability.sub_ability.is_none(),
             "sub_ability should be absorbed"
         );
-        if let Effect::Counter { source_static, .. } = &*ability.effect {
-            let static_def = source_static.as_ref().expect("should have source_static");
+        if let Effect::Counter { source_rider, .. } = &*ability.effect {
+            let CounterSourceRider::LosesAbilities { static_def } = source_rider
+                .as_ref()
+                .expect("should have a LosesAbilities source_rider")
+            else {
+                panic!("expected LosesAbilities rider, got {source_rider:?}");
+            };
             assert_eq!(static_def.mode, StaticMode::Continuous);
             assert_eq!(
                 static_def.modifications,
@@ -19054,6 +19059,74 @@ mod tests {
         } else {
             panic!("expected Counter effect");
         }
+    }
+
+    /// CR 701.8 + CR 608.2c: "If a permanent's ability is countered this way,
+    /// destroy that permanent." is absorbed into `Effect::Counter.source_rider`
+    /// as `CounterSourceRider::Destroy` — NOT a chained `Destroy { ParentTarget }`
+    /// sub_ability. (Teferi's Response / Green Slime rider class.)
+    #[test]
+    fn effect_counter_ability_with_destroy_rider_absorption() {
+        use crate::types::ability::CounterSourceRider;
+
+        let ability = parse_effect_chain(
+            "counter target spell or ability. If a permanent's ability is countered this way, destroy that permanent",
+            AbilityKind::Spell,
+        );
+        assert!(
+            ability.sub_ability.is_none(),
+            "destroy rider should be absorbed, not chained as a sub_ability: {:?}",
+            ability.sub_ability
+        );
+        let Effect::Counter { source_rider, .. } = &*ability.effect else {
+            panic!("expected Counter effect, got {:?}", ability.effect);
+        };
+        assert!(
+            matches!(source_rider, Some(CounterSourceRider::Destroy)),
+            "expected source_rider = Some(Destroy), got {source_rider:?}"
+        );
+    }
+
+    /// CR 608.2c: Teferi's Response — the destroy rider is absorbed into Counter
+    /// while the subsequent "Draw two cards." still chains as a sibling.
+    #[test]
+    fn teferis_response_destroy_rider_absorbed_draw_chains() {
+        use crate::types::ability::CounterSourceRider;
+
+        let result = crate::parser::parse_oracle_text(
+            "Counter target spell or ability an opponent controls that targets a land you control. If a permanent's ability is countered this way, destroy that permanent.\nDraw two cards.",
+            "Teferi's Response",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+
+        let ability = &result.abilities[0];
+        let Effect::Counter { source_rider, .. } = &*ability.effect else {
+            panic!("expected Counter effect, got {:?}", ability.effect);
+        };
+        assert!(
+            matches!(source_rider, Some(CounterSourceRider::Destroy)),
+            "destroy should be absorbed into source_rider, got {source_rider:?}"
+        );
+
+        // "Draw two cards." must still chain as a sibling — not be swallowed by
+        // the rider absorption.
+        let draw = ability
+            .sub_ability
+            .as_deref()
+            .expect("Draw two cards should chain after the counter");
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { .. }),
+            "expected the chained sibling to be Draw, got {:?}",
+            draw.effect
+        );
+        // No stray chained Destroy { ParentTarget } anywhere in the chain.
+        assert!(
+            draw.sub_ability.is_none(),
+            "no further sub_ability expected after Draw, got {:?}",
+            draw.sub_ability
+        );
     }
 
     #[test]

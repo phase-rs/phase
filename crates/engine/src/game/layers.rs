@@ -7663,6 +7663,8 @@ mod tests {
                 name: "Mortician Beetle".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
                 mana_value: 1,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

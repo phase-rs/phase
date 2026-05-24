@@ -815,6 +815,8 @@ mod tests {
                 keywords: Vec::new(),
                 power: None,
                 toughness: None,
+                base_power: None,
+                base_toughness: None,
                 colors: Vec::new(),
                 mana_value: 0,
                 controller: PlayerId(1),

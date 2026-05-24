@@ -137,6 +137,16 @@ pub struct LKISnapshot {
     pub name: String,
     pub power: Option<i32>,
     pub toughness: Option<i32>,
+    /// CR 208.4b + CR 613.4b: Base power as it last existed in the public zone
+    /// (layer-7b value). Threaded so that an LKI snapshot converted to a
+    /// `ZoneChangeRecord` (see `matches_target_filter_on_lki_snapshot`)
+    /// evaluates `PtComparison { scope: Base }` against the base value rather
+    /// than defaulting to 0.
+    #[serde(default)]
+    pub base_power: Option<i32>,
+    /// CR 208.4b + CR 613.4b: Base toughness as it last existed in the public zone.
+    #[serde(default)]
+    pub base_toughness: Option<i32>,
     pub mana_value: u32,
     pub controller: PlayerId,
     pub owner: PlayerId,
@@ -312,6 +322,16 @@ pub struct ZoneChangeRecord {
     pub power: Option<i32>,
     /// CR 208.1: Toughness as of the zone change.
     pub toughness: Option<i32>,
+    /// CR 208.4b + CR 613.4b: Base power as of the zone change (the layer-7b
+    /// value, ignoring +1/+1 counters and non-setting P/T modifiers in layer
+    /// 7c). Read by `PtComparison` filters with `scope = Base` on the look-back
+    /// (leaves-the-battlefield / dies) path so base-vs-current is honored after
+    /// the object has left the battlefield (CR 603.10a).
+    #[serde(default)]
+    pub base_power: Option<i32>,
+    /// CR 208.4b + CR 613.4b: Base toughness as of the zone change.
+    #[serde(default)]
+    pub base_toughness: Option<i32>,
     /// CR 105.1 / CR 202.2: Colors as of the zone change.
     pub colors: Vec<ManaColor>,
     /// CR 202.3: Mana value as of the zone change.
@@ -405,6 +425,8 @@ impl ZoneChangeRecord {
             keywords: Vec::new(),
             power: None,
             toughness: None,
+            base_power: None,
+            base_toughness: None,
             colors: Vec::new(),
             mana_value: 0,
             controller: PlayerId(0),

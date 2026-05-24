@@ -1,7 +1,7 @@
 use crate::database::CardDatabase;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues, Effect, PtValue,
-    ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition,
+    AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues, CounterSourceRider,
+    Effect, PtValue, ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
 use crate::types::counter::CounterType;
@@ -575,10 +575,11 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         }
         // Carries a nested ReplacementDefinition whose execute/decline/cost may conjure.
         Effect::AddTargetReplacement { replacement, .. } => walk_replacement(replacement, out),
-        // Counter's `source_static` applies a static to the countered source; it
-        // may grant an ability that conjures.
-        Effect::Counter { source_static, .. } => {
-            if let Some(static_def) = source_static {
+        // Counter's `source_rider` may apply a static to the countered source
+        // (LosesAbilities) that grants an ability that conjures. The Destroy
+        // rider carries no static.
+        Effect::Counter { source_rider, .. } => {
+            if let Some(CounterSourceRider::LosesAbilities { static_def }) = source_rider {
                 walk_static(static_def, out);
             }
         }
@@ -1866,7 +1867,7 @@ mod tests {
         };
         walk_effect(&emblem, &mut names);
 
-        // Counter.source_static may grant an ability that conjures.
+        // Counter.source_rider (LosesAbilities) may grant an ability that conjures.
         let mut counter_static = StaticDefinition::new(StaticMode::Continuous);
         counter_static
             .modifications
@@ -1875,7 +1876,9 @@ mod tests {
             });
         let counter = Effect::Counter {
             target: TargetFilter::Any,
-            source_static: Some(counter_static),
+            source_rider: Some(CounterSourceRider::LosesAbilities {
+                static_def: Box::new(counter_static),
+            }),
         };
         walk_effect(&counter, &mut names);
 

@@ -17007,7 +17007,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Counter {
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::card()),
-                    source_static: None,
+                    source_rider: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
