@@ -7237,6 +7237,23 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::DamageReceived, def));
     }
 
+    // CR 701.30: "whenever you clash" — fires when the controller of the trigger
+    // source participates as the initiating player in a clash.
+    // Cards: Entangling Trap, Rebellion of the Flamekin.
+    if matches!(lower, "whenever you clash" | "when you clash") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Clashed;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::Clashed, def));
+    }
+
+    // CR 701.30: "whenever a player clashes" — fires for any clashing player.
+    if matches!(lower, "whenever a player clashes" | "when a player clashes") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Clashed;
+        return Some((TriggerMode::Clashed, def));
+    }
+
     None
 }
 
@@ -20141,5 +20158,28 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 701.30: "Whenever you clash" scopes to the trigger controller only.
+    /// Cards: Entangling Trap, Rebellion of the Flamekin.
+    #[test]
+    fn trigger_you_clash_whenever() {
+        let def = parse_trigger_line(
+            "Whenever you clash, tap target creature an opponent controls. If you won, that creature doesn't untap during its controller's next untap step.",
+            "Entangling Trap",
+        );
+        assert_eq!(def.mode, TriggerMode::Clashed);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    /// CR 701.30: "Whenever you clash" with a pay-to-copy effect.
+    #[test]
+    fn trigger_you_clash_rebellion() {
+        let def = parse_trigger_line(
+            "Whenever you clash, you may pay {1}. If you do, create a 3/1 red Elemental Shaman creature token. If you won, create two of those tokens instead.",
+            "Rebellion of the Flamekin",
+        );
+        assert_eq!(def.mode, TriggerMode::Clashed);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 }

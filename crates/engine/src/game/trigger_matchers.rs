@@ -95,6 +95,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::BecomeMonarch => match_become_monarch,
         TriggerMode::RolledDie | TriggerMode::RolledDieOnce => match_rolled_die,
         TriggerMode::FlippedCoin => match_flipped_coin,
+        TriggerMode::Clashed => match_clash,
         TriggerMode::RingTemptsYou => match_ring_tempts_you,
         TriggerMode::DungeonCompleted => match_dungeon_completed,
         TriggerMode::RoomEntered => match_room_entered,
@@ -145,7 +146,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::PlaneswalkedFrom
         | TriggerMode::PlaneswalkedTo
         | TriggerMode::ChaosEnsues
-        | TriggerMode::Clashed
         | TriggerMode::Copied
         | TriggerMode::ConjureAll
         | TriggerMode::Vote
@@ -313,6 +313,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 705: Coin flipping triggers
     r.insert(TriggerMode::FlippedCoin, match_flipped_coin);
 
+    // CR 701.30: Clash trigger
+    r.insert(TriggerMode::Clashed, match_clash);
+
     // CR 701.54: Ring tempts you trigger
     r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
 
@@ -372,7 +375,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::PlaneswalkedFrom,
         TriggerMode::PlaneswalkedTo,
         TriggerMode::ChaosEnsues,
-        TriggerMode::Clashed,
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
         TriggerMode::Vote,
@@ -2326,6 +2328,23 @@ pub(super) fn match_ring_tempts_you(
             .map(|obj| obj.controller)
             .unwrap_or(PlayerId(255));
         *player_id == source_controller
+    } else {
+        false
+    }
+}
+
+/// CR 701.30: Match clash events.
+/// Fires when a clash occurs and the clashing player matches `valid_target`.
+/// "Whenever you clash" sets `valid_target = Controller`; a generic "whenever
+/// a player clashes" leaves `valid_target` unset to match any clash.
+pub(super) fn match_clash(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::Clash { controller, .. } = event {
+        valid_player_matches(trigger, state, *controller, source_id)
     } else {
         false
     }
@@ -7412,6 +7431,48 @@ mod tests {
         assert!(
             match_changes_zone(&opp_milled_event, &trigger, source, &state),
             "trigger must fire when an opponent's creature card is milled"
+        );
+    }
+
+    /// CR 701.30: match_clash fires only when the controller of the trigger
+    /// source is the one who clashed.
+    #[test]
+    fn clash_trigger_fires_for_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Entangling Trap".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Clashed);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        // Controller (P0) clashes — fires.
+        let event = GameEvent::Clash {
+            controller: PlayerId(0),
+            opponent: PlayerId(1),
+            controller_mana_value: None,
+            opponent_mana_value: None,
+            result: crate::types::events::ClashResult::Won,
+        };
+        assert!(
+            match_clash(&event, &trigger, source, &state),
+            "clash trigger must fire for controller"
+        );
+
+        // Opponent (P1) clashes — must NOT fire.
+        let event2 = GameEvent::Clash {
+            controller: PlayerId(1),
+            opponent: PlayerId(0),
+            controller_mana_value: None,
+            opponent_mana_value: None,
+            result: crate::types::events::ClashResult::Won,
+        };
+        assert!(
+            !match_clash(&event2, &trigger, source, &state),
+            "clash trigger must not fire for opponent"
         );
     }
 
