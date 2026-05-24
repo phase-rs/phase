@@ -715,6 +715,7 @@ pub(super) fn match_damage_done(
         source_id: dmg_source,
         target,
         is_combat,
+        amount,
         ..
     } = event
     {
@@ -728,6 +729,16 @@ pub(super) fn match_damage_done(
             DamageKindFilter::CombatOnly if !is_combat => return false,
             DamageKindFilter::NoncombatOnly if *is_combat => return false,
             _ => {}
+        }
+        // CR 603.2 + CR 120.1: Optional per-event damage-amount threshold
+        // ("…deals 5 or more damage to a player"). When set, only damage events
+        // whose amount satisfies the comparator vs the threshold fire the
+        // trigger. CR 120.1 events carry a single nonnegative amount, so the
+        // u32→i32 widening here cannot truncate.
+        if let Some((cmp, threshold)) = trigger.damage_amount {
+            if !cmp.evaluate(*amount as i32, threshold as i32) {
+                return false;
+            }
         }
         // Check valid_target for damage target filtering (e.g. "to an opponent")
         if let Some(ref vt) = trigger.valid_target {
@@ -2121,11 +2132,23 @@ pub(super) fn match_damage_received(
     _state: &GameState,
 ) -> bool {
     if let GameEvent::DamageDealt {
-        target, is_combat, ..
+        target,
+        is_combat,
+        amount,
+        ..
     } = event
     {
         if matches!(trigger.damage_kind, DamageKindFilter::CombatOnly) && !is_combat {
             return false;
+        }
+        // CR 603.2 + CR 120.1: Per-event damage-amount threshold. Mirrors
+        // `match_damage_done` so a "is dealt N or more damage" trigger sets
+        // `damage_amount` once and the field's semantics is uniform across
+        // every damage-event matcher.
+        if let Some((cmp, threshold)) = trigger.damage_amount {
+            if !cmp.evaluate(*amount as i32, threshold as i32) {
+                return false;
+            }
         }
         match target {
             TargetRef::Object(target_id) => {
@@ -2145,6 +2168,12 @@ pub(super) fn match_damage_received(
 }
 
 /// CR 120.10: ExcessDamage — fires when the trigger source deals excess damage to a permanent.
+///
+/// Intentionally ignores `trigger.damage_amount`: that field gates on the raw
+/// dealt `amount`, while excess-damage triggers semantically gate on the
+/// `excess` field (the portion beyond lethal/loyalty/defense). No printed card
+/// composes these two thresholds, and the parser does not emit
+/// `damage_amount` on `ExcessDamage` modes.
 pub(super) fn match_excess_damage(
     event: &GameEvent,
     _trigger: &TriggerDefinition,
@@ -2156,6 +2185,8 @@ pub(super) fn match_excess_damage(
 }
 
 /// CR 120.10: ExcessDamageAll — fires when any source deals excess damage to a permanent.
+///
+/// See `match_excess_damage` for why `trigger.damage_amount` is not consulted.
 pub(super) fn match_excess_damage_all(
     event: &GameEvent,
     _trigger: &TriggerDefinition,
@@ -2789,8 +2820,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;
     use crate::types::ability::{
-        ControllerRef, FilterProp, QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition,
-        TypeFilter, TypedFilter,
+        Comparator, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::{GameEvent, ManaTapState, PlayerActionKind};
@@ -5901,6 +5932,127 @@ mod tests {
             excess: 0,
         };
         assert!(match_damage_done(&event_opp, &trigger, source_id, &state));
+    }
+
+    // ── damage_amount threshold (CR 603.2 + CR 120.1) ─────────────
+    //
+    // Building-block tests: the matcher must apply the optional
+    // `(Comparator, threshold)` filter to the `DamageDealt` event's `amount`
+    // independently of the source/target/damage-kind axes. Exercises the
+    // common `GE` comparator (covers Dragonborn Champion's "5 or more" form)
+    // plus the orthogonal `EQ` comparator to prove the field is a true
+    // comparator slot, not a hard-coded GE check.
+    #[test]
+    fn damage_amount_ge_threshold_rejects_below() {
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.damage_amount = Some((Comparator::GE, 5));
+
+        let event = GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 4,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(!match_damage_done(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn damage_amount_ge_threshold_accepts_at_or_above() {
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.damage_amount = Some((Comparator::GE, 5));
+
+        for amount in [5, 7, 100] {
+            let event = GameEvent::DamageDealt {
+                source_id: ObjectId(1),
+                target: TargetRef::Player(PlayerId(0)),
+                amount,
+                is_combat: false,
+                excess: 0,
+            };
+            assert!(
+                match_damage_done(&event, &trigger, ObjectId(1), &state),
+                "expected amount={amount} to satisfy GE 5"
+            );
+        }
+    }
+
+    #[test]
+    fn damage_amount_none_passes_any_amount() {
+        let state = setup();
+        let trigger = make_trigger(TriggerMode::DamageDone);
+        assert_eq!(trigger.damage_amount, None);
+
+        for amount in [0, 1, 99] {
+            let event = GameEvent::DamageDealt {
+                source_id: ObjectId(1),
+                target: TargetRef::Player(PlayerId(0)),
+                amount,
+                is_combat: false,
+                excess: 0,
+            };
+            assert!(match_damage_done(&event, &trigger, ObjectId(1), &state));
+        }
+    }
+
+    // CR 603.2 + CR 120.1: `match_damage_received` must apply the same
+    // `damage_amount` threshold as `match_damage_done` so the field's
+    // semantics is uniform across damage-event matchers. Without this gate, a
+    // future "Whenever ~ is dealt N or more damage" trigger would silently
+    // drop its threshold.
+    #[test]
+    fn damage_received_amount_ge_threshold_rejects_below_and_accepts_at_or_above() {
+        let mut state = setup();
+        // The DamageReceived matcher checks the *target* against `source_id`,
+        // so the trigger's source object must equal the damage target.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            String::new(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.damage_amount = Some((Comparator::GE, 3));
+
+        for (amount, expect) in [(2u32, false), (3, true), (10, true)] {
+            let event = GameEvent::DamageDealt {
+                source_id: ObjectId(99),
+                target: TargetRef::Object(source_id),
+                amount,
+                is_combat: false,
+                excess: 0,
+            };
+            assert_eq!(
+                match_damage_received(&event, &trigger, source_id, &state),
+                expect,
+                "amount={amount} GE 3"
+            );
+        }
+    }
+
+    #[test]
+    fn damage_amount_eq_threshold_only_matches_exact() {
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.damage_amount = Some((Comparator::EQ, 3));
+
+        for (amount, expect) in [(2, false), (3, true), (4, false)] {
+            let event = GameEvent::DamageDealt {
+                source_id: ObjectId(1),
+                target: TargetRef::Player(PlayerId(0)),
+                amount,
+                is_combat: false,
+                excess: 0,
+            };
+            assert_eq!(
+                match_damage_done(&event, &trigger, ObjectId(1), &state),
+                expect,
+                "amount={amount} EQ 3"
+            );
+        }
     }
 
     // ── Work Item 4: Transforms Into Self ─────────────────────────

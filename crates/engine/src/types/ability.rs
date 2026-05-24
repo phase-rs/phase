@@ -9573,6 +9573,14 @@ pub struct TriggerDefinition {
     /// Typed player actions for PlayerPerformedAction trigger mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_actions: Option<Vec<PlayerActionKind>>,
+    /// CR 603.2 + CR 120.1: Per-event damage-amount threshold for damage triggers
+    /// ("…deals 5 or more damage to a player"). When `Some((cmp, n))`, the
+    /// matcher requires the `DamageDealt` event's `amount` to satisfy
+    /// `amount cmp n`. `None` means no amount restriction. Applies to all
+    /// damage-event trigger modes (`DamageDone`, `DamageDoneOnce`, `DamageAll`,
+    /// `DamageDealtOnce`); ignored by other modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_amount: Option<(Comparator, u32)>,
 }
 
 impl TriggerDefinition {
@@ -9602,6 +9610,7 @@ impl TriggerDefinition {
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
+            damage_amount: None,
         }
     }
 
@@ -11567,6 +11576,7 @@ mod tests {
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
+            damage_amount: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
