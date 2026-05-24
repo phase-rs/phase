@@ -7652,6 +7652,58 @@ mod tests {
         }
     }
 
+    /// CR 119.3 + CR 208.1: "loses life equal to its power plus its toughness" —
+    /// Phthisis class. Both operands use Anaphoric scope so the enclosing
+    /// clause's subject-injection applies identically to the individual
+    /// "its power" / "its toughness" single-value forms. The destroy effect
+    /// that precedes this clause sets `effect_context_object` to the destroyed
+    /// creature's LKI, providing the correct runtime referent.
+    #[test]
+    fn parse_lose_life_equal_to_power_plus_toughness() {
+        let text = "lose life equal to its power plus its toughness";
+        let lower = text.to_lowercase();
+        let result = parse_numeric_imperative_ast(text, &lower);
+        assert!(
+            result.is_some(),
+            "Should parse 'lose life equal to its power plus its toughness'"
+        );
+        match result.unwrap() {
+            NumericImperativeAst::LoseLife { amount } => {
+                match amount {
+                    QuantityExpr::Sum { exprs } => {
+                        assert_eq!(exprs.len(), 2, "Sum should have two operands");
+                        assert!(
+                            matches!(
+                                exprs[0],
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::Power {
+                                        scope: crate::types::ability::ObjectScope::Anaphoric
+                                    }
+                                }
+                            ),
+                            "First operand should be Power(Anaphoric), got {:?}",
+                            exprs[0]
+                        );
+                        assert!(
+                            matches!(
+                                exprs[1],
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::Toughness {
+                                        scope: crate::types::ability::ObjectScope::Anaphoric
+                                    }
+                                }
+                            ),
+                            "Second operand should be Toughness(Anaphoric), got {:?}",
+                            exprs[1]
+                        );
+                    }
+                    other => panic!("Expected Sum, got {other:?}"),
+                }
+            }
+            other => panic!("Expected LoseLife, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_amass_zombies_2() {
         let result = try_parse_amass("amass Zombies 2", "amass zombies 2");

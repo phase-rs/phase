@@ -757,6 +757,29 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
                 },
             })
         }
+        // CR 119.3 + CR 208.1: "its power plus its toughness" / "its toughness
+        // plus its power" — sum of Anaphoric power and toughness refs. Both
+        // operands use Anaphoric scope so the enclosing clause's subject-injection
+        // (Source when "~", Target when "itself") and the runtime resolver apply
+        // identically to the individual "its power" / "its toughness" arms above.
+        // Class: Phthisis ("lose life equal to its power plus its toughness").
+        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
+        "its power plus its toughness" | "its toughness plus its power" => {
+            return Some(QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Anaphoric,
+                        },
+                    },
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Anaphoric,
+                        },
+                    },
+                ],
+            })
+        }
         _ => {}
     }
 
@@ -2503,6 +2526,38 @@ mod tests {
                     scope: ObjectScope::Anaphoric
                 }
             })
+        );
+    }
+
+    /// CR 119.3 + CR 208.1: "its power plus its toughness" / "its toughness plus
+    /// its power" — sum of Anaphoric power + toughness refs. Both orderings are
+    /// accepted; the result is always Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+    /// Class: Phthisis ("lose life equal to its power plus its toughness").
+    #[test]
+    fn parse_event_context_quantity_its_power_plus_toughness() {
+        let expected = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Anaphoric,
+                    },
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Anaphoric,
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            parse_event_context_quantity("its power plus its toughness"),
+            Some(expected.clone()),
+            "power then toughness ordering"
+        );
+        assert_eq!(
+            parse_event_context_quantity("its toughness plus its power"),
+            Some(expected),
+            "toughness then power ordering should yield the same Sum"
         );
     }
 

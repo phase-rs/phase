@@ -8045,6 +8045,75 @@ mod tests {
         assert_eq!(def.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
     }
 
+    // ── Phthisis: destroy + lose life equal to power plus toughness ──────
+
+    /// CR 119.3 + CR 208.1: Phthisis — "Destroy target creature. Its controller
+    /// loses life equal to its power plus its toughness." The second clause is a
+    /// chained LoseLife whose amount is Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+    /// The destroy effect sets `effect_context_object` to the destroyed creature's
+    /// LKI, supplying the Anaphoric referent at runtime.
+    #[test]
+    fn phthisis_destroy_then_lose_life_power_plus_toughness() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        let oracle = "Destroy target creature. Its controller loses life equal to its power plus its toughness.";
+        let def = parse_effect_chain(oracle, AbilityKind::Spell);
+        // The root effect is Destroy.
+        assert!(
+            matches!(&*def.effect, Effect::Destroy { .. }),
+            "root effect should be Destroy, got {:?}",
+            def.effect,
+        );
+        // The chained sub-ability must be LoseLife.
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("Phthisis must have a chained sub_ability for the life loss");
+        assert!(
+            matches!(&*sub.effect, Effect::LoseLife { .. }),
+            "sub_ability effect should be LoseLife, got {:?}",
+            sub.effect,
+        );
+        // The life-loss amount must be Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+        let Effect::LoseLife { amount, .. } = &*sub.effect else {
+            panic!("expected LoseLife");
+        };
+        match amount {
+            QuantityExpr::Sum { exprs } => {
+                assert_eq!(exprs.len(), 2, "Sum must have exactly two operands");
+                assert!(
+                    matches!(
+                        exprs[0],
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Anaphoric
+                            }
+                        }
+                    ),
+                    "first operand must be Power(Anaphoric), got {:?}",
+                    exprs[0]
+                );
+                assert!(
+                    matches!(
+                        exprs[1],
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Toughness {
+                                scope: ObjectScope::Anaphoric
+                            }
+                        }
+                    ),
+                    "second operand must be Toughness(Anaphoric), got {:?}",
+                    exprs[1]
+                );
+            }
+            other => panic!("amount must be Sum, got {other:?}"),
+        }
+        // No Unimplemented anywhere in the chain.
+        assert!(
+            !matches!(&*sub.effect, Effect::Unimplemented { .. }),
+            "LoseLife sub-effect must not be Unimplemented"
+        );
+    }
+
     // ── Coverage batch: gold tokens ──────────────────────────────────
 
     #[test]
