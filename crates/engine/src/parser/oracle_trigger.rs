@@ -11545,6 +11545,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trigger_you_cast_another_spell_keeps_another_filter() {
+        let def = parse_trigger_line("Whenever you cast another spell, draw a card.", "Test");
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+            panic!("expected Typed valid_card, got {:?}", def.valid_card);
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "expected Another in {:?}",
+            tf.properties
+        );
+    }
+
     /// CR 603.4 + CR 122.1: "at the beginning of your end step, if there are
     /// thirty or more counters among artifacts and creatures you control, ..."
     /// — intervening-if with counter-count condition that sums across every
