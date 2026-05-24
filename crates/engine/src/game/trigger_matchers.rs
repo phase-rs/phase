@@ -4008,6 +4008,27 @@ mod tests {
     }
 
     #[test]
+    fn player_performed_action_matches_proliferate() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(15),
+            PlayerId(0),
+            "Scheming Aspirant".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever you proliferate, each opponent loses 2 life and you gain 2 life.",
+            "Scheming Aspirant",
+        );
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Proliferate,
+        };
+        assert!(match_player_action(&event, &trigger, source_id, &state));
+    }
+
+    #[test]
     fn changes_zone_dies_matches() {
         let state = setup();
         let mut trigger = make_trigger(TriggerMode::ChangesZone);

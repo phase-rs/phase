@@ -6880,11 +6880,6 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 def.mode = TriggerMode::Shuffled;
                 return Some((TriggerMode::Shuffled, def));
             }
-            // CR 701.34a: Proliferate — player-action trigger.
-            [PlayerActionKind::Proliferate] => {
-                def.mode = TriggerMode::Proliferate;
-                return Some((TriggerMode::Proliferate, def));
-            }
             _ => {
                 def.mode = TriggerMode::PlayerPerformedAction;
                 def.player_actions = Some(actions.clone());
@@ -6914,6 +6909,9 @@ fn parse_player_action_list(text: &str) -> Option<Vec<PlayerActionKind>> {
 }
 
 fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
+    if let Ok(("", action)) = parse_proliferate_player_action(text) {
+        return Some(action);
+    }
     match text {
         "search your library" | "searches their library" => Some(PlayerActionKind::SearchedLibrary),
         "scry" | "scries" => Some(PlayerActionKind::Scry),
@@ -6927,10 +6925,17 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
         | "shuffle his or her library"
         | "shuffles a library"
         | "shuffle a library" => Some(PlayerActionKind::ShuffledLibrary),
-        // CR 701.34a: Proliferate — choose permanents/players with counters.
-        "proliferate" | "proliferates" => Some(PlayerActionKind::Proliferate),
         _ => None,
     }
+}
+
+fn parse_proliferate_player_action(input: &str) -> OracleResult<'_, PlayerActionKind> {
+    // CR 701.34a: Proliferate — choose permanents/players with counters.
+    all_consuming(alt((
+        value(PlayerActionKind::Proliferate, tag("proliferate")),
+        value(PlayerActionKind::Proliferate, tag("proliferates")),
+    )))
+    .parse(input)
 }
 
 /// Parse "whenever you cast your Nth spell each turn" (or "in a turn") and
@@ -12654,8 +12659,12 @@ mod tests {
             "Whenever you proliferate, each opponent loses 2 life and you gain 2 life.",
             "Scheming Aspirant",
         );
-        assert_eq!(def.mode, TriggerMode::Proliferate);
+        assert_eq!(def.mode, TriggerMode::PlayerPerformedAction);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.player_actions,
+            Some(vec![PlayerActionKind::Proliferate])
+        );
     }
 
     #[test]

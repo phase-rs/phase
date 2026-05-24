@@ -13805,8 +13805,6 @@ mod pipeline_snapshot_tests {
 
     #[test]
     fn pipeline_scheming_aspirant_proliferate_trigger() {
-        use crate::types::triggers::TriggerMode;
-
         let result = pipeline_parse(
             "Whenever you proliferate, each opponent loses 2 life and you gain 2 life.",
             "Scheming Aspirant",
@@ -13815,8 +13813,12 @@ mod pipeline_snapshot_tests {
         );
         assert_eq!(result.triggers.len(), 1);
         let trigger = &result.triggers[0];
-        assert_eq!(trigger.mode, TriggerMode::Proliferate);
+        assert_eq!(trigger.mode, TriggerMode::PlayerPerformedAction);
         assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            trigger.player_actions,
+            Some(vec![crate::types::events::PlayerActionKind::Proliferate])
+        );
         // Verify the execute body is LoseLife + GainLife
         let exec = trigger.execute.as_ref().expect("execute body");
         assert!(
