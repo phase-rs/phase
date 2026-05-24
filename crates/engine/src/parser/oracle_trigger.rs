@@ -5196,8 +5196,8 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.mode = TriggerMode::CrankContraption;
         return Some((TriggerMode::CrankContraption, def));
     }
-    // CR 309.7: "Whenever you complete a dungeon" — fires when the last room
-    // ability of a dungeon card resolves.
+    // CR 309.7: "Whenever you complete a dungeon" — fires as that dungeon card
+    // is removed from the game.
     if (
         alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
         tag("you "),
