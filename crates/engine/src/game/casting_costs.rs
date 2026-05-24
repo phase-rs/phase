@@ -3642,6 +3642,51 @@ pub fn max_x_value(
         })
         .sum();
 
+    if let Some(spell_id) = object_id {
+        if let Some(pending) = state
+            .pending_cast
+            .as_ref()
+            .filter(|pending| pending.object_id == spell_id)
+        {
+            let affordable = |x_value: u32| {
+                let Some(recomputed) = super::casting::recompute_pending_spell_cost_with_chosen_x(
+                    state, player, pending, x_value,
+                ) else {
+                    return false;
+                };
+                super::casting::can_pay_cost_after_auto_tap(
+                    state,
+                    player,
+                    pending.object_id,
+                    &recomputed,
+                )
+            };
+
+            let hard_cap = pool.saturating_add(capacity).saturating_add(1024);
+            let mut low = 0u32;
+            let mut high = 1u32;
+            while high <= hard_cap && affordable(high) {
+                low = high;
+                high = high.saturating_mul(2).min(hard_cap);
+                if high == low {
+                    break;
+                }
+            }
+            if low == 0 && !affordable(0) {
+                return 0;
+            }
+            while low < high {
+                let mid = low + (high - low + 1) / 2;
+                if affordable(mid) {
+                    low = mid;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            return low;
+        }
+    }
+
     // CR 107.1b: Each `ManaCostShard::X` in the cost contributes `value` generic,
     // so for `{X}{X}` each point of X costs 2 mana. Dividing by `x_count` yields
     // the largest X the caster can actually afford.

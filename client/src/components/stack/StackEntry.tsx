@@ -43,6 +43,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const pendingCast = useGameStore((s) => s.gameState?.pending_cast);
   const inspectObject = useUiStore((s) => s.inspectObject);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
@@ -72,6 +73,10 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   });
 
   const isSpell = entry.kind.type === "Spell";
+  const displayManaCost =
+    isSpell && pendingCast?.object_id === entry.source_id
+      ? pendingCast.cost
+      : sourceObj?.mana_cost;
   const isTriggered = entry.kind.type === "TriggeredAbility";
   // Triggered abilities show "Triggered — From <source>" so the player can
   // tell which permanent owns the trigger without hovering the card image.
@@ -164,8 +169,8 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             draggable={false}
           />
         )}
-        {isSpell && sourceObj?.mana_cost && (
-          <ManaCostPips cost={sourceObj.mana_cost} size="sm" className="absolute right-[5%] top-[2.5%]" />
+        {isSpell && displayManaCost && (
+          <ManaCostPips cost={displayManaCost} size="sm" className="absolute right-[5%] top-[2.5%]" />
         )}
       </div>
 

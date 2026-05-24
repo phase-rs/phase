@@ -2254,6 +2254,80 @@ pub(super) fn recompute_pending_cast_cost(
     apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
 }
 
+pub(super) fn apply_selected_target_cost_adjustments(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    ability: &ResolvedAbility,
+    cost: ManaCost,
+) -> ManaCost {
+    let strive_adjusted_cost;
+    let cost = if let Some(strive_cost) = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.strive_cost.clone())
+    {
+        let target_count = super::ability_utils::flatten_targets_in_chain(ability).len();
+        if target_count > 1 {
+            strive_adjusted_cost = (1..target_count).fold(cost.clone(), |acc, _| {
+                super::restrictions::add_mana_cost(&acc, &strive_cost)
+            });
+            &strive_adjusted_cost
+        } else {
+            &cost
+        }
+    } else {
+        &cost
+    };
+
+    let mut target_adjusted_cost = cost.clone();
+    apply_self_spell_cost_modifiers_with_selected_targets(
+        state,
+        player,
+        object_id,
+        ability,
+        &mut target_adjusted_cost,
+    );
+    apply_battlefield_cost_modifiers_with_selected_targets(
+        state,
+        player,
+        object_id,
+        ability,
+        &mut target_adjusted_cost,
+    );
+    apply_cost_floor_with_selected_targets(
+        state,
+        player,
+        object_id,
+        ability,
+        &mut target_adjusted_cost,
+    );
+    target_adjusted_cost
+}
+
+pub(super) fn recompute_pending_spell_cost_with_chosen_x(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    x_value: u32,
+) -> Option<ManaCost> {
+    if pending.card_id == CardId(0) || pending.casting_variant != CastingVariant::Normal {
+        return None;
+    }
+
+    let obj = state.objects.get(&pending.object_id)?;
+    let mut base_cost = obj.base_mana_cost.clone();
+    base_cost.concretize_x(x_value);
+    let cost = apply_cost_modifiers_to_base(state, player, pending.object_id, base_cost)?;
+    Some(apply_selected_target_cost_adjustments(
+        state,
+        player,
+        pending.object_id,
+        &pending.ability,
+        cost,
+    ))
+}
+
 /// CR 117.7 + CR 601.2f: Apply self-spell cost modifications — `ReduceCost` / `RaiseCost`
 /// statics printed on the spell being cast, with `affected = SelfRef` and `active_zones`
 /// covering the card's current zone (Hand for normal casting, Stack for the cost-
@@ -11217,6 +11291,282 @@ mod tests {
         assert!(
             state.stack.iter().all(|entry| entry.id != obj_id),
             "failed spell cast must remove its announcement placeholder"
+        );
+    }
+
+    #[test]
+    fn magnus_battlefield_reduction_increases_x_spell_max() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+
+        let magnus_id = create_object(
+            &mut state,
+            CardId(970),
+            PlayerId(0),
+            "Magnus the Red".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&magnus_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions.push(
+                parse_static_line(
+                    "Instant and sorcery spells you cast cost {1} less to cast for each creature token you control.",
+                )
+                .expect("Magnus cost-reduction static should parse"),
+            );
+        }
+
+        for i in 0u64..2 {
+            let id = create_object(
+                &mut state,
+                CardId(971 + i),
+                PlayerId(0),
+                format!("Spawn {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(980),
+            PlayerId(0),
+            "Synthetic X under Magnus".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 2,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 4);
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(980),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        let max = match state.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => max,
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        };
+        assert_eq!(
+            max, 3,
+            "Magnus's two-token reduction should raise affordable X from 1 to 3"
+        );
+    }
+
+    #[test]
+    fn magnus_choose_x_waiting_state_carries_reduced_pending_cost() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+
+        let magnus_id = create_object(
+            &mut state,
+            CardId(981),
+            PlayerId(0),
+            "Magnus the Red".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&magnus_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions.push(
+                parse_static_line(
+                    "Instant and sorcery spells you cast cost {1} less to cast for each creature token you control.",
+                )
+                .expect("Magnus cost-reduction static should parse"),
+            );
+        }
+
+        for i in 0u64..2 {
+            let id = create_object(
+                &mut state,
+                CardId(982 + i),
+                PlayerId(0),
+                format!("Spawn {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(990),
+            PlayerId(0),
+            "Synthetic X under Magnus".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 2,
+            };
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(990),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+
+        let waiting_cost = match &state.waiting_for {
+            WaitingFor::ChooseXValue { pending_cast, .. } => pending_cast.cost.clone(),
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        };
+        let state_cost = state
+            .pending_cast
+            .as_ref()
+            .expect("pending cast should exist during ChooseXValue")
+            .cost
+            .clone();
+
+        let expected = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 0,
+        };
+        assert_eq!(
+            waiting_cost, expected,
+            "ChooseXValue payload must already carry Magnus's reduced cost"
+        );
+        assert_eq!(
+            state_cost, expected,
+            "state.pending_cast must match the ChooseXValue payload during X selection"
+        );
+    }
+
+    #[test]
+    fn magnus_reduction_increases_max_for_pure_x_spell() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+
+        let magnus_id = create_object(
+            &mut state,
+            CardId(991),
+            PlayerId(0),
+            "Magnus the Red".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&magnus_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions.push(
+                parse_static_line(
+                    "Instant and sorcery spells you cast cost {1} less to cast for each creature token you control.",
+                )
+                .expect("Magnus cost-reduction static should parse"),
+            );
+        }
+
+        for i in 0u64..5 {
+            let id = create_object(
+                &mut state,
+                CardId(992 + i),
+                PlayerId(0),
+                format!("Spawn {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Synthetic Finale".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 0,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+
+        for _ in 0..7 {
+            add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(1000),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+
+        let max = match &state.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => *max,
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        };
+        assert_eq!(
+            max, 10,
+            "5 creature tokens should raise pure-X max from 5 to 10 on {{X}}{{U}}{{U}}"
         );
     }
 

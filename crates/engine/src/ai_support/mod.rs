@@ -814,7 +814,9 @@ mod tests {
         candidate_actions, cheap_reject_candidate, legal_actions, legal_actions_for_viewer,
         legal_actions_full, validated_candidate_actions,
     };
+    use crate::game::derived::derive_display_state;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
         ManaProduction, QuantityExpr, ResolvedAbility, SearchSelectionConstraint, TargetFilter,
@@ -1976,6 +1978,180 @@ mod tests {
             shards,
             &vec![ManaCostShard::Red],
             "colored shards remain untouched by Affinity"
+        );
+    }
+
+    #[test]
+    fn magnus_reduced_spell_is_displayed_and_legal_with_only_reduced_mana() {
+        use crate::types::mana::ManaCostShard;
+
+        let mut state = setup_priority();
+
+        let magnus_id = create_object(
+            &mut state,
+            CardId(1200),
+            PlayerId(0),
+            "Magnus the Red".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&magnus_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions.push(
+                parse_static_line(
+                    "Instant and sorcery spells you cast cost {1} less to cast for each creature token you control.",
+                )
+                .expect("Magnus cost-reduction static should parse"),
+            );
+        }
+
+        for i in 0u64..2 {
+            let id = create_object(
+                &mut state,
+                CardId(1210 + i),
+                PlayerId(0),
+                format!("Spawn {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+
+        for (i, color) in [ManaColor::Red, ManaColor::Red, ManaColor::Red]
+            .into_iter()
+            .enumerate()
+        {
+            let land = create_land(&mut state, &format!("Mana Land {i}"), &[]);
+            add_fixed_mana_ability(&mut state, land, color);
+        }
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(1220),
+            PlayerId(0),
+            "Big Burn".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 4,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            ));
+        }
+
+        derive_display_state(&mut state);
+
+        let (actions, spell_costs, _grouped) = legal_actions_full(&state);
+
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must include the Magnus-reduced instant");
+        assert_eq!(
+            *displayed,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            },
+            "spellCosts should surface Magnus's {{2}} generic reduction"
+        );
+
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::CastSpell { object_id, .. } if *object_id == spell_id
+            )),
+            "CastSpell should be legal when the spell is only affordable because of Magnus"
+        );
+    }
+
+    #[test]
+    fn magnus_reduced_x_spell_is_displayed_in_spell_costs() {
+        use crate::types::mana::ManaCostShard;
+
+        let mut state = setup_priority();
+
+        let magnus_id = create_object(
+            &mut state,
+            CardId(1230),
+            PlayerId(0),
+            "Magnus the Red".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&magnus_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions.push(
+                parse_static_line(
+                    "Instant and sorcery spells you cast cost {1} less to cast for each creature token you control.",
+                )
+                .expect("Magnus cost-reduction static should parse"),
+            );
+        }
+
+        for i in 0u64..2 {
+            let id = create_object(
+                &mut state,
+                CardId(1240 + i),
+                PlayerId(0),
+                format!("Spawn {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(1250),
+            PlayerId(0),
+            "Magnus X Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 2,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: crate::types::ability::TargetFilter::Controller,
+                },
+            ));
+        }
+
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must include the Magnus-reduced X spell");
+        assert_eq!(
+            *displayed,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 0,
+            },
+            "spellCosts should surface Magnus's reduction on unresolved X-spells"
         );
     }
 }

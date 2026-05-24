@@ -2216,14 +2216,31 @@ fn apply_action(
             }
             let player = *player;
             let convoke_mode = *convoke_mode;
+            let (object_id, pending_snapshot) = {
+                let pending = state.pending_cast.as_mut().ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast awaiting X".to_string())
+                })?;
+                pending.ability.set_chosen_x_recursive(value);
+                let object_id = pending.object_id;
+                (object_id, pending.clone())
+            };
+            let recomputed_cost = casting::recompute_pending_spell_cost_with_chosen_x(
+                state,
+                player,
+                &pending_snapshot,
+                value,
+            );
             let pending = state.pending_cast.as_mut().ok_or_else(|| {
                 EngineError::InvalidAction("No pending cast awaiting X".to_string())
             })?;
-            pending.ability.set_chosen_x_recursive(value);
-            pending.cost.concretize_x(value);
+            if let Some(recomputed) = recomputed_cost {
+                pending.cost = recomputed;
+            } else {
+                pending.cost.concretize_x(value);
+            }
             events.push(GameEvent::XValueChosen {
                 player,
-                object_id: pending.object_id,
+                object_id,
                 value,
             });
             casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?
