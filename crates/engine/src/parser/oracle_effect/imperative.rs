@@ -7127,6 +7127,118 @@ mod tests {
         }
     }
 
+    /// Issue #967: "sacrifice any number of creatures, each with power 1 or
+    /// less" — the comma+"each" distributive linker between the collective
+    /// type word and the per-object property suffix dropped the power filter
+    /// entirely (the parser stopped at the comma, leaving `, each with...`
+    /// unconsumed; the type-phrase fallback then produced
+    /// `Effect::Sacrifice { target: TargetFilter::Typed(Creature), count: 1 }`
+    /// — no power constraint, fixed count). CR 208.1: the per-object power
+    /// comparison applies via the existing P/T suffix combinator.
+    #[test]
+    fn parse_sacrifice_any_number_creatures_comma_each_power_filter_attached() {
+        use crate::types::ability::{Comparator, FilterProp, PtStat, PtValueScope};
+
+        for text in [
+            "sacrifice any number of creatures, each with power 1 or less",
+            "sacrifice any number of creatures each with power 1 or less",
+        ] {
+            let lower = text.to_lowercase();
+            let mut ctx = ParseContext {
+                actor: Some(ControllerRef::You),
+                ..Default::default()
+            };
+            let result =
+                parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+            let Effect::Sacrifice { target, count, .. } = lower_targeted_action_ast(result) else {
+                panic!("expected Effect::Sacrifice for {text:?}");
+            };
+            let TargetFilter::Typed(ref tf) = target else {
+                panic!("expected Typed filter for {text:?}, got {target:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "missing Creature type for {text:?}",
+            );
+            let has_pt = tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    }
+                )
+            });
+            assert!(
+                has_pt,
+                "missing PtComparison(Power, Current, LE, 1) for {text:?}: {:?}",
+                tf.properties,
+            );
+            match count {
+                QuantityExpr::UpTo { max } => match *max {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    } => assert_eq!(filter, target, "ObjectCount filter mismatch for {text:?}"),
+                    other => panic!("expected ObjectCount max for {text:?}, got {other:?}"),
+                },
+                other => panic!("expected UpTo count for {text:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Issue #967 follow-up: Angelic Aberration's "each with base power or
+    /// toughness 1 or less" disjunctive variant. The same comma-each linker
+    /// must allow the `power or toughness` disjunction (CR 208 + CR 208.4b)
+    /// to attach correctly with the `Base` scope qualifier.
+    #[test]
+    fn parse_sacrifice_any_number_creatures_comma_each_base_pt_disjunction() {
+        use crate::types::ability::{Comparator, FilterProp, PtStat, PtValueScope};
+
+        let text = "sacrifice any number of creatures, each with base power or toughness 1 or less";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            actor: Some(ControllerRef::You),
+            ..Default::default()
+        };
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        let Effect::Sacrifice { target, .. } = lower_targeted_action_ast(result) else {
+            panic!("expected Effect::Sacrifice");
+        };
+        let TargetFilter::Typed(ref tf) = target else {
+            panic!("expected Typed filter, got {target:?}");
+        };
+        // Disjunctive `power or toughness ≤ 1` ⇒ `AnyOf {
+        //   PtComparison(Power, Base, LE, 1),
+        //   PtComparison(Toughness, Base, LE, 1),
+        // }`.
+        let has_disj = tf.properties.iter().any(|p| {
+            let FilterProp::AnyOf { props } = p else {
+                return false;
+            };
+            let want_power = FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Base,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 1 },
+            };
+            let want_tough = FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Base,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 1 },
+            };
+            props.contains(&want_power) && props.contains(&want_tough)
+        });
+        assert!(
+            has_disj,
+            "missing AnyOf[Power Base LE 1, Toughness Base LE 1], got {:?}",
+            tf.properties,
+        );
+    }
+
     // Issue #458: "sacrifice any number of <filter>" — Scapeshift class.
     // CR 107.1c: "any number" includes zero, so `min_count` is 0 (vs. 1 for
     // "one or more"). The dynamic `UpTo(ObjectCount)` ceiling is unchanged.

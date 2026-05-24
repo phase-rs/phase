@@ -1597,6 +1597,26 @@ pub fn parse_type_phrase_with_ctx<'a>(
     pos +=
         parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller, ctx);
 
+    // Grammar normalization: strip the distributive-"each" linker between a
+    // collective type word and a per-object property suffix —
+    // "creatures, each with power 1 or less" /
+    // "creatures, each with base power or toughness 1 or less" (Angelic
+    // Aberration class; #967). Consuming the entire `, [space]each ` token
+    // normalizes the remaining input to the bare suffix form ("with …") so
+    // that all downstream suffix parsers (power/toughness via CR 208,
+    // mana-value via CR 202.3, counters via CR 122.1, keywords via CR 702)
+    // receive the same input regardless of whether the Oracle text used the
+    // distributive linker or the comma-less phrasing.
+    if let Ok((rem, _)) = (
+        tag::<_, _, OracleError<'_>>(","),
+        opt(tag::<_, _, OracleError<'_>>(" ")),
+        tag::<_, _, OracleError<'_>>("each "),
+    )
+        .parse(&lower[pos..])
+    {
+        pos += lower[pos..].len() - rem.len();
+    }
+
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..], ctx) {
         properties.push(prop);
@@ -5120,6 +5140,49 @@ mod tests {
                 FilterProp::Cmc {
                     comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { value: 7 },
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn distributive_each_linker_preserves_mana_value_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with mana value 2 or less");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }]))
+        );
+    }
+
+    #[test]
+    fn distributive_each_linker_preserves_counter_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with ice counters on them");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic("ice".to_string())),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }])
+            )
+        );
+    }
+
+    #[test]
+    fn distributive_each_linker_preserves_keyword_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::WithKeyword {
+                    value: Keyword::Flying,
                 }
             ]))
         );
