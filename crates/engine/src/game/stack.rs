@@ -681,7 +681,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .filter(|obj| obj.zone == Zone::Library)
                 .map(|obj| obj.owner)
             {
-                effects::change_zone::shuffle_library(state, owner);
+                effects::change_zone::shuffle_library(state, owner, events);
             }
         }
 

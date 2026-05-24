@@ -62,6 +62,44 @@ fn filter_references_self(filter: &TargetFilter) -> bool {
     }
 }
 
+fn with_owner_scope(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if !typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+            {
+                typed.properties.push(FilterProp::Owned { controller });
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| with_owner_scope(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| with_owner_scope(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(with_owner_scope(*filter, controller)),
+        },
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::Owned { controller }]),
+                ),
+            ],
+        },
+    }
+}
+
 fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinition) -> Option<Zone> {
     match ability.effect.as_ref() {
         crate::types::ability::Effect::ChangeZone {
@@ -2772,6 +2810,89 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     None
 }
 
+/// CR 602.1 + CR 603.2 + CR 605.1a: Parse "Whenever <player_scope> activates
+/// an ability [that isn't a mana ability]" triggers — the generic activated-
+/// ability trigger class covering Burning-Tree Shaman ("a player"),
+/// Flamescroll Celebrant ("an opponent"), and future cards using the same
+/// shape ("you"). Player scope is composed via three independent axes that
+/// each map to a typed value:
+///
+/// - **prefix**: "whenever" / "when" — handled by the outer `alt` (CR 603.1)
+/// - **subject**: `a player` / `an opponent` / `you` → `TargetFilter` for
+///   `valid_target` (CR 602.2a: "Its controller is the player who activated
+///   the ability"). "a player" leaves `valid_target` unset so
+///   `valid_player_matches` accepts every player (Burning-Tree Shaman).
+/// - **non-mana qualifier**: optional " that isn't a mana ability" (CR
+///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana` so the
+///   qualifier is preserved in the AST even though `GameEvent::AbilityActivated`
+///   already excludes mana abilities (CR 605.3b).
+///
+/// Nesting by prefix dispatch avoids enumerating the 6-way prefix × subject
+/// permutation as separate `tag` arms.
+fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // Pair subject with its verb conjugation: third-person-singular subjects
+    // ("a player", "an opponent") take "activates"; second-person ("you")
+    // takes "activate". Each arm carries the typed `valid_target` filter so
+    // the activating player is matched correctly via `valid_player_matches`.
+    fn parse_subject_and_verb(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+        alt((
+            // CR 602.2a: "a player" — leave `valid_target` unset so every
+            // player's activation matches (Burning-Tree Shaman).
+            value(None, tag("a player activates ")),
+            value(
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                tag("an opponent activates "),
+            ),
+            value(Some(TargetFilter::Controller), tag("you activate ")),
+        ))
+        .parse(input)
+    }
+
+    // Object noun phrase: the "ability" being activated. Decomposed into
+    // article + optional modifier + noun so the grammar accepts both "an
+    // ability" and "an activated ability". This is also the clean extension
+    // point for the source-object filter axis ("an ability **of an artifact**",
+    // "of a creature or land", "of a permanent"). The matcher already consults
+    // `def.valid_card` via `valid_card_matches`, so adding source-object filters
+    // here unlocks Crackdown Construct, Wizened Mentor, Runic Armasaur, Ceaseless
+    // Searblades, and similar cards.
+    fn parse_ability_object(input: &str) -> OracleResult<'_, ()> {
+        value((), (tag("an "), opt(tag("activated ")), tag("ability"))).parse(input)
+    }
+
+    fn parse_qualifier(input: &str) -> OracleResult<'_, Option<TriggerCondition>> {
+        // CR 605.1a: "that isn't a mana ability" qualifier is optional in
+        // principle (no such printed card exists today without it, but the
+        // grammar admits a bare "activates an ability").
+        alt((
+            value(
+                Some(TriggerCondition::ActivatedAbilityIsNonMana),
+                tag(" that isn't a mana ability"),
+            ),
+            value(None, eof),
+        ))
+        .parse(input)
+    }
+
+    let parse_line = preceded(
+        alt((tag("whenever "), tag("when "))),
+        (
+            parse_subject_and_verb,
+            parse_ability_object,
+            parse_qualifier,
+        ),
+    );
+
+    let (_, (subject, _, qualifier)) = all_consuming(parse_line).parse(lower).ok()?;
+    let mut def = make_base();
+    def.mode = TriggerMode::AbilityActivated;
+    def.valid_target = subject;
+    def.condition = qualifier;
+    Some((TriggerMode::AbilityActivated, def))
+}
+
 /// CR 702.49: Extract ninjutsu/sneak cost-paid conditions.
 /// Guard: "instead" after the condition means conditional override, not intervening-if.
 fn try_extract_ninjutsu_condition(
@@ -4620,6 +4741,28 @@ fn try_parse_event(
         }
     }
 
+    // CR 701.24: "shuffles their library" / "shuffles" — shuffle trigger
+    if let Ok((tail, _)) = pair(
+        alt((tag::<_, _, OracleError<'_>>("shuffles"), tag("shuffle"))),
+        opt(preceded(
+            space1,
+            alt((
+                tag("their library"),
+                tag("his or her library"),
+                tag("your library"),
+                tag("a library"),
+            )),
+        )),
+    )
+    .parse(rest)
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::Shuffled;
+        def.valid_target = Some(subject.clone());
+        attach_event_timing_tail(&mut def, tail);
+        return Some((TriggerMode::Shuffled, def));
+    }
+
     // Simple event verbs using nom alt() — each maps to a single TriggerMode
     // These are all "is_some()" pattern strip_prefix calls
     #[derive(Clone)]
@@ -5568,7 +5711,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
 
         // Parse subject type filter: "creature cards", "artifact and/or creature cards", "cards"
         let filter = if subject_text == "cards" {
-            None
+            TargetFilter::Typed(TypedFilter::card())
         } else if let Some(type_text) = subject_text.strip_suffix(" cards") {
             // Handle "artifact and/or creature" → OR filter
             if scan_contains(type_text, "and/or") {
@@ -5585,7 +5728,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
                     })
                     .collect();
                 if filters.len() == parts.len() && filters.len() > 1 {
-                    Some(TargetFilter::Or { filters })
+                    TargetFilter::Or { filters }
                 } else {
                     continue;
                 }
@@ -5594,7 +5737,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
                 if !remainder.trim().is_empty() {
                     continue;
                 }
-                Some(filter)
+                filter
             }
         } else {
             continue;
@@ -5603,7 +5746,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZoneAll;
         def.origin = Some(Zone::Graveyard);
-        def.valid_card = filter;
+        def.valid_card = Some(with_owner_scope(filter, ControllerRef::You));
         def.batched = true;
         // LTB-from-graveyard triggers need to fire from graveyard zone context
         def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
@@ -6073,6 +6216,17 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 702.49a: "whenever you activate a ninjutsu ability" — ninjutsu-family activation trigger.
     // Covers all ninjutsu variants (ninjutsu, commander ninjutsu, sneak).
     if let Some(result) = try_parse_keyword_activation_trigger(lower) {
+        return Some(result);
+    }
+
+    // CR 602.1 + CR 605.1a: "Whenever <player> activates an ability that
+    // isn't a mana ability" — generic activated-ability trigger class.
+    // Covers Burning-Tree Shaman, Flamescroll Celebrant. Ordering is
+    // incidental here: "activates" is not in `parse_player_action_phrase`'s
+    // lookup table, and `try_parse_keyword_activation_trigger` rejects any
+    // shape lacking a keyword name, so the earlier dispatchers correctly
+    // fall through to this one regardless of position.
+    if let Some(result) = try_parse_ability_activation_trigger(lower) {
         return Some(result);
     }
 
@@ -6673,7 +6827,13 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 TypedFilter::default().controller(ControllerRef::Opponent),
             )),
         ),
-        ("whenever a player ", None),
+        (
+            "whenever each opponent ",
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+        ),
+        ("whenever a player ", Some(TargetFilter::Player)),
         ("when you ", Some(TargetFilter::Controller)),
         (
             "when an opponent ",
@@ -6681,7 +6841,13 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 TypedFilter::default().controller(ControllerRef::Opponent),
             )),
         ),
-        ("when a player ", None),
+        (
+            "when each opponent ",
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+        ),
+        ("when a player ", Some(TargetFilter::Player)),
     ] {
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
@@ -6706,6 +6872,13 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
             [PlayerActionKind::CollectEvidence] => {
                 def.mode = TriggerMode::CollectEvidence;
                 return Some((TriggerMode::CollectEvidence, def));
+            }
+            // CR 701.24a: Shuffle — player-action trigger, scoped by
+            // valid_target so "you", "an opponent", and "a player" forms all
+            // use the same matcher path.
+            [PlayerActionKind::ShuffledLibrary] => {
+                def.mode = TriggerMode::Shuffled;
+                return Some((TriggerMode::Shuffled, def));
             }
             _ => {
                 def.mode = TriggerMode::PlayerPerformedAction;
@@ -6742,6 +6915,13 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
         "surveil" | "surveils" => Some(PlayerActionKind::Surveil),
         // CR 701.59a: Collect evidence — exile cards from your graveyard with total mana value N or more.
         "collect evidence" | "collects evidence" => Some(PlayerActionKind::CollectEvidence),
+        "shuffle your library"
+        | "shuffles their library"
+        | "shuffle their library"
+        | "shuffles his or her library"
+        | "shuffle his or her library"
+        | "shuffles a library"
+        | "shuffle a library" => Some(PlayerActionKind::ShuffledLibrary),
         _ => None,
     }
 }
@@ -8414,8 +8594,8 @@ mod tests {
         AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, CastingPermission,
         Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
         DelayedTriggerCondition, Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope,
-        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
-        TypedFilter,
+        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -8433,6 +8613,24 @@ mod tests {
                 },
             }),
             offset: -1,
+        }
+    }
+
+    fn assert_owned_by_you(filter: &TargetFilter) {
+        match filter {
+            TargetFilter::Typed(typed) => assert!(
+                typed.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }),
+                "expected Owned(You) property in {typed:?}"
+            ),
+            TargetFilter::Or { filters } => {
+                assert!(!filters.is_empty(), "expected non-empty Or filter");
+                for filter in filters {
+                    assert_owned_by_you(filter);
+                }
+            }
+            other => panic!("expected Typed or Or filter, got {other:?}"),
         }
     }
 
@@ -14165,7 +14363,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
-        assert!(def.valid_card.is_some());
+        assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
     }
 
     #[test]
@@ -14177,7 +14375,12 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
-        assert_eq!(def.valid_card, None); // no type filter — "cards"
+        let filter = def.valid_card.as_ref().expect("valid_card");
+        assert_owned_by_you(filter);
+        assert!(
+            matches!(filter, TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Card]),
+            "expected card filter for unqualified cards, got {filter:?}"
+        );
     }
 
     #[test]
@@ -14189,6 +14392,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
+        assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
     }
 
@@ -14228,7 +14432,9 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
-        assert!(matches!(def.valid_card, Some(TargetFilter::Or { .. })));
+        let filter = def.valid_card.as_ref().expect("valid_card");
+        assert!(matches!(filter, TargetFilter::Or { .. }));
+        assert_owned_by_you(filter);
     }
 
     // ── Work Item 2: Discard Batch Triggers ───────────────────────
@@ -14743,6 +14949,72 @@ mod tests {
         }
     }
 
+    // --- CR 602.1 + CR 605.1a: generic non-mana ability activation trigger ---
+
+    #[test]
+    fn ability_activation_trigger_a_player() {
+        // Burning-Tree Shaman: "Whenever a player activates an ability that
+        // isn't a mana ability, this creature deals 1 damage to that player."
+        let def = parse_trigger_line(
+            "Whenever a player activates an ability that isn't a mana ability, this creature deals 1 damage to that player.",
+            "Burning-Tree Shaman",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        // "a player" — every player matches, so no valid_target filter.
+        assert_eq!(def.valid_target, None);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+    }
+
+    #[test]
+    fn ability_activation_trigger_an_opponent() {
+        // Flamescroll Celebrant: "Whenever an opponent activates an ability
+        // that isn't a mana ability, this creature deals 1 damage to that
+        // player."
+        let def = parse_trigger_line(
+            "Whenever an opponent activates an ability that isn't a mana ability, this creature deals 1 damage to that player.",
+            "Flamescroll Celebrant",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ))
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+    }
+
+    #[test]
+    fn ability_activation_trigger_you_form() {
+        // Symmetric "you activate" form — verb conjugates to second-person.
+        let def = parse_trigger_line(
+            "Whenever you activate an ability that isn't a mana ability, draw a card.",
+            "Hypothetical You-Activate",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn ability_activation_trigger_accepts_activated_modifier() {
+        let def = parse_trigger_line(
+            "Whenever you activate an activated ability that isn't a mana ability, draw a card.",
+            "Hypothetical Activated-Modifier",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+    }
+
     // --- CR 115.9c: "that targets only [X]" trigger tests ---
 
     #[test]
@@ -15197,21 +15469,24 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
-        // Should have PowerGE { value: 4 } in the filter props
+        // Should have PtComparison(Power, GE, 4) in the filter props
         if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
             assert!(
                 tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::PowerGE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 4 }
                     }
                 )),
-                "Expected PowerGE(4) in properties, got {:?}",
+                "Expected PtComparison(Power, GE, 4) in properties, got {:?}",
                 tf.properties
             );
         } else {
             panic!(
-                "Expected Typed filter with PowerGE, got {:?}",
+                "Expected Typed filter with PtComparison, got {:?}",
                 def.valid_card
             );
         }
@@ -16308,6 +16583,42 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Fight);
         assert!(def.valid_card.is_some());
+    }
+
+    #[test]
+    fn trigger_player_shuffles_library_scopes_actor_as_valid_target() {
+        let def = parse_trigger_line(
+            "Whenever an opponent shuffles their library, put a +1/+1 counter on this creature.",
+            "Cosi's Trickster",
+        );
+        assert_eq!(def.mode, TriggerMode::Shuffled);
+        assert_eq!(def.valid_card, None);
+        assert!(matches!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn trigger_player_shuffles_library_sibling_phrases() {
+        let cases = [
+            "Whenever a player shuffles their library, draw a card.",
+            "Whenever each opponent shuffle his or her library, draw a card.",
+            "Whenever you shuffle your library, draw a card.",
+            "Whenever a player shuffles a library, draw a card.",
+        ];
+
+        for text in cases {
+            let def = parse_trigger_line(text, "Test Card");
+            assert_eq!(def.mode, TriggerMode::Shuffled, "{text}");
+            assert!(
+                def.valid_target.is_some(),
+                "shuffle actor must be represented as valid_target for: {text}"
+            );
+        }
     }
 
     // -- StaticCondition → TriggerCondition bridge tests --

@@ -310,6 +310,7 @@ fn redundancy_delta(
         | Effect::PutOnTopOrBottom { .. }
         | Effect::GiftDelivery { .. }
         | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
         | Effect::Detain { .. }
         | Effect::ExchangeControl { .. }
         | Effect::ChangeTargets { .. }
@@ -373,6 +374,10 @@ fn redundancy_delta(
         // target later triggers the replacement event — no static redundancy
         // signal available.
         | Effect::AddTargetReplacement { .. }
+        // CR 614.9 + CR 615: CreateDamageReplacement installs a one-shot
+        // damage-modification or redirection shield. Its value depends on a
+        // future damage event, so this policy has no static redundancy signal.
+        | Effect::CreateDamageReplacement { .. }
         | Effect::ProcessRadCounters => None,
     }
 }

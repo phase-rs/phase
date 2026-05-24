@@ -11,8 +11,9 @@ use crate::game::quantity::{
     counter_count_from_map, resolve_quantity, resolve_quantity_with_targets,
 };
 use crate::types::ability::{
-    ChoiceValue, ChosenAttribute, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ChoiceValue, ChosenAttribute, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
+    ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
@@ -1226,6 +1227,17 @@ pub fn spell_object_matches_filter_from_state(
             state,
             source_id,
             source_controller: source_obj.controller,
+            // CR 109.1 is cited as the identity foundation here (an object
+            // is uniquely the object that it is) because the Comprehensive
+            // Rules have no dedicated entry defining "another" — the
+            // standard reading across the rules text is "an object distinct
+            // from the referenced object". Thread the cast-spell's
+            // object_id through so `FilterProp::Another` ("other Dragon
+            // spells you cast") can exclude the case where the spell being
+            // cast IS the static's own source (e.g. casting The Ur-Dragon
+            // itself from the command zone — Eminence must not reduce its
+            // own cost).
+            spell_object_id: Some(spell_obj.id),
         }),
     )
 }
@@ -1250,6 +1262,14 @@ struct SpellFilterContext<'a> {
     state: &'a GameState,
     source_id: ObjectId,
     source_controller: PlayerId,
+    /// CR 109.1 (cited as identity foundation — CR has no dedicated
+    /// "another" entry): ObjectId of the spell being filtered. `None` when
+    /// the caller is matching against a historical `SpellCastRecord`
+    /// (CR 117.x turn-history queries) for which `Another` is structurally
+    /// indeterminate — those callers fail-closed on `Another`. Live
+    /// cost-modifier evaluation passes `Some(spell.id)` so "other [X]
+    /// spells you cast" excludes the static's own source.
+    spell_object_id: Option<ObjectId>,
 }
 
 fn spell_object_matches_filter_inner(
@@ -1428,6 +1448,20 @@ fn spell_object_matches_property(
                 })
                 .is_some_and(|card_type| record.core_types.contains(card_type))
         }),
+        // CR 109.1 (cited as identity foundation — CR has no dedicated
+        // "another" entry): "other [X] spells you cast" excludes the case
+        // where the spell being cast IS the static's own source object. The
+        // check is identity-only (`object_id != source_id`); two distinct
+        // copies of the same card are NOT "the same" object. Historical-
+        // record callers pass `spell_object_id: None` and fail-closed here
+        // (a turn-history "another" query needs the original cast's
+        // object_id, which is not stored in the snapshot — CR 117.x
+        // predicates that need it must route through dedicated `Another`-
+        // aware paths).
+        FilterProp::Another => context.is_some_and(|ctx| {
+            ctx.spell_object_id
+                .is_some_and(|spell_id| spell_id != ctx.source_id)
+        }),
         _ => spell_record_matches_property(record, prop),
     }
 }
@@ -1555,10 +1589,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
-        | FilterProp::PowerLE { .. }
-        | FilterProp::PowerGE { .. }
-        | FilterProp::ToughnessLE { .. }
-        | FilterProp::ToughnessGE { .. }
+        | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::IsChosenCreatureType
         | FilterProp::MostPrevalentCreatureTypeIn { .. }
@@ -2070,21 +2101,26 @@ fn matches_filter_prop(
         // every object from individual match checks.
         FilterProp::OtherThanTriggerObject => true,
         FilterProp::HasColor { color } => obj.color.contains(color),
-        // CR 208.1: Power comparison against a dynamic threshold. Dynamic thresholds
-        // (`QuantityRef::Variable { "X" }`) resolve against the ability's `chosen_x`
-        // when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
-        FilterProp::PowerLE { value } => {
-            obj.power.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::PowerGE { value } => {
-            obj.power.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
-        }
-        // CR 208.1: Toughness comparison against a dynamic threshold.
-        FilterProp::ToughnessLE { value } => {
-            obj.toughness.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::ToughnessGE { value } => {
-            obj.toughness.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
+        // CR 208 + CR 208.4b: Power/toughness comparison against a dynamic
+        // threshold. `scope = Base` reads `base_power`/`base_toughness` (the
+        // value after layer 7b, ignoring counters/modifiers per CR 208.4b);
+        // `scope = Current` reads the fully-modified `power`/`toughness`.
+        // Dynamic thresholds (`QuantityRef::Variable { "X" }`) resolve against
+        // the ability's `chosen_x` via `FilterContext::from_ability`.
+        FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } => {
+            let lhs = match (stat, scope) {
+                (PtStat::Power, PtValueScope::Current) => obj.power,
+                (PtStat::Power, PtValueScope::Base) => obj.base_power,
+                (PtStat::Toughness, PtValueScope::Current) => obj.toughness,
+                (PtStat::Toughness, PtValueScope::Base) => obj.base_toughness,
+            }
+            .unwrap_or(0);
+            comparator.evaluate(lhs, resolve_filter_threshold(state, value, source))
         }
         // Disjunctive composite: any inner prop matches.
         FilterProp::AnyOf { props } => props
@@ -2344,20 +2380,25 @@ fn zone_change_record_matches_property(
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
-        // CR 208.1: Power threshold on the event-time object. A `None` power
-        // (non-creature in some zones) treats as 0 — matches live-state behavior.
-        FilterProp::PowerLE { value } => {
-            record.power.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::PowerGE { value } => {
-            record.power.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
-        }
-        // CR 208.1: Toughness threshold on the event-time object.
-        FilterProp::ToughnessLE { value } => {
-            record.toughness.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::ToughnessGE { value } => {
-            record.toughness.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
+        // CR 208 + CR 208.4b: Power/toughness threshold on the event-time
+        // object. A `None` value (non-creature in some zones) treats as 0,
+        // matching live-state behavior. The zone-change snapshot records only
+        // the value as-of the change (already past layer 7), so `scope = Base`
+        // reads the same recorded value — base-vs-current distinction is not
+        // snapshotted (a known conservative gap per CR 603.10 group 5; live-
+        // object filtering on the battlefield evaluates base scope precisely).
+        FilterProp::PtComparison {
+            stat,
+            scope: _,
+            comparator,
+            value,
+        } => {
+            let lhs = match stat {
+                PtStat::Power => record.power,
+                PtStat::Toughness => record.toughness,
+            }
+            .unwrap_or(0);
+            comparator.evaluate(lhs, resolve_filter_threshold(state, value, source))
         }
         // CR 202.3: Mana value threshold on the event-time object.
         FilterProp::Cmc { comparator, value } => comparator.evaluate(
@@ -5069,12 +5110,13 @@ mod tests {
         assert!(!super::matches_target_filter(&state, cmc8, &filter, &ctx));
     }
 
-    /// CR 208.1 + CR 107.3a: `PowerLE { Variable("X") }` + `chosen_x = Some(3)`
-    /// matches only power-≤-3 creatures.
+    /// CR 208 + CR 107.3a: `PtComparison { Power, Current, LE, Variable("X") }`
+    /// + `chosen_x = Some(3)` matches only power-≤-3 creatures.
     #[test]
     fn filter_context_from_ability_resolves_x_in_power_le() {
         use crate::types::ability::{
-            Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TypedFilter,
+            Comparator, Effect, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
+            TargetFilter, TypedFilter,
         };
         let mut state = setup();
         let weak = add_creature(&mut state, PlayerId(0), "Weak");
@@ -5082,16 +5124,18 @@ mod tests {
         let strong = add_creature(&mut state, PlayerId(0), "Strong");
         state.objects.get_mut(&strong).unwrap().power = Some(5);
 
-        let filter =
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::PowerLE {
-                    value: QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: "X".to_string(),
-                        },
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
                     },
-                }]),
-            );
+                },
+            },
+        ]));
         let mut ability = ResolvedAbility::new(
             Effect::Unimplemented {
                 name: String::new(),
@@ -5376,14 +5420,19 @@ mod tests {
         assert!(super::matches_target_filter(&state, mixed, &ne0, &ctx));
     }
 
-    /// Serde round-trip for widened `FilterProp::PowerLE.value: QuantityExpr`,
+    /// Serde round-trip for `FilterProp::PtComparison.value: QuantityExpr`,
     /// `Counters.count: QuantityExpr`, and `Effect::SearchLibrary.count: QuantityExpr`.
     #[test]
     fn widened_numeric_fields_roundtrip_through_json() {
-        use crate::types::ability::{Comparator, Effect, QuantityExpr, TargetFilter, TypedFilter};
+        use crate::types::ability::{
+            Comparator, Effect, PtStat, PtValueScope, QuantityExpr, TargetFilter, TypedFilter,
+        };
         use crate::types::counter::{CounterMatch, CounterType};
 
-        let power_filter = FilterProp::PowerLE {
+        let power_filter = FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LE,
             value: QuantityExpr::Fixed { value: 3 },
         };
         let json = serde_json::to_string(&power_filter).unwrap();

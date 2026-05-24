@@ -1,5 +1,5 @@
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 
 /// CR 701.24a: Shuffle — randomize the cards in a library.
@@ -50,6 +50,14 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,
         source_id: ability.source_id,
+    });
+
+    // CR 701.24a: Emit player-action event so trigger matchers (e.g.
+    // Cosi's Trickster: "Whenever an opponent shuffles their library")
+    // can filter by the identity of the shuffling player.
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: target_player,
+        action: PlayerActionKind::ShuffledLibrary,
     });
 
     Ok(())

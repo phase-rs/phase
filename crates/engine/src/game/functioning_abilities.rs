@@ -48,7 +48,12 @@ use crate::types::zones::Zone;
 /// CR 702.26b + CR 114.4: Shared "does this object function at all?" gate.
 ///
 /// CR 702.26b: Phased-out permanents' abilities don't function.
-/// CR 114.4: In the command zone, only emblems' abilities function.
+/// CR 114.4: In the command zone, only emblems' abilities function — UNLESS
+/// the individual static/trigger declares via `active_zones` that it functions
+/// from the command zone per CR 113.6b (Eminence: "as long as ~ is in the
+/// command zone or on the battlefield"). The per-definition `active_zones`
+/// override is enforced by `static_functions_on_object`; this helper only
+/// captures the object-level default.
 fn object_functions(obj: &GameObject) -> bool {
     if obj.is_phased_out() {
         return false;
@@ -57,6 +62,16 @@ fn object_functions(obj: &GameObject) -> bool {
         return false;
     }
     true
+}
+
+/// CR 113.6b + CR 114.4: True when a static on a command-zone object opts in
+/// to function from the command zone via its `active_zones` list. Used to
+/// extend the CR 114.4 "only emblems function" default with explicit opt-in
+/// for Eminence-style abilities ("as long as ~ is in the command zone or on
+/// the battlefield"), per CR 113.6b. Phased-out is checked upstream — this
+/// helper only encodes the zone/opt-in part of the gate.
+pub fn static_opts_in_to_command_zone(def: &StaticDefinition) -> bool {
+    def.active_zones.contains(&Zone::Command)
 }
 
 /// Iterate `StaticDefinition`s on `obj` that are currently functioning, with
@@ -69,15 +84,26 @@ pub fn active_static_definitions<'a>(
     state: &'a GameState,
     obj: &'a GameObject,
 ) -> Box<dyn Iterator<Item = &'a StaticDefinition> + 'a> {
-    if !object_functions(obj) {
+    // CR 702.26b: phased-out permanents' abilities never function.
+    if obj.is_phased_out() {
         return Box::new(std::iter::empty());
     }
     let source_id = obj.id;
     let controller = obj.controller;
-    // CR 604.1 / CR 613.1: a static's `condition` must hold for the effect
-    // to apply continuously — re-evaluated every time the layers pipeline
-    // (or any reader of statics) runs.
+    // CR 114.4 + CR 113.6b: In the command zone, only emblems function by
+    // default; a non-emblem object still contributes statics that opt in via
+    // `active_zones.contains(Command)` (Eminence). Outside the command zone,
+    // the standard CR 113.6 default applies (empty active_zones = battlefield;
+    // non-empty restricts to the listed zones).
+    let zone = obj.zone;
+    let is_emblem = obj.is_emblem;
     Box::new(obj.static_definitions.iter_all().filter(move |def| {
+        if zone == Zone::Command && !is_emblem && !static_opts_in_to_command_zone(def) {
+            return false;
+        }
+        // CR 604.1 / CR 613.1: a static's `condition` must hold for the
+        // effect to apply continuously — re-evaluated every time the layers
+        // pipeline (or any reader of statics) runs.
         def.condition
             .as_ref()
             .is_none_or(|cond| evaluate_condition(state, cond, controller, source_id))
@@ -114,7 +140,11 @@ pub fn game_active_statics(
 /// with object-function gates applied but without condition filtering.
 ///
 /// Use this when a caller must evaluate the condition with additional context,
-/// such as the affected object for recipient-relative static quantities.
+/// such as the affected object for recipient-relative static quantities, or
+/// the casting player for cost-modifier scope checks. Command-zone non-emblem
+/// objects contribute only their statics that opt in via CR 113.6b
+/// `active_zones.contains(Command)` (Eminence); phased-out objects contribute
+/// nothing per CR 702.26b.
 pub fn game_functioning_statics(
     state: &GameState,
 ) -> impl Iterator<Item = (&GameObject, &StaticDefinition)> {
@@ -123,8 +153,22 @@ pub fn game_functioning_statics(
         .iter()
         .chain(state.command_zone.iter())
         .filter_map(move |id| state.objects.get(id))
-        .filter(|obj| object_functions(obj))
-        .flat_map(move |obj| obj.static_definitions.iter_all().map(move |def| (obj, def)))
+        .filter(|obj| !obj.is_phased_out())
+        .flat_map(move |obj| {
+            let zone = obj.zone;
+            let is_emblem = obj.is_emblem;
+            obj.static_definitions
+                .iter_all()
+                .filter(move |def| {
+                    // CR 114.4 + CR 113.6b: command-zone non-emblem objects
+                    // only contribute statics that explicitly opt in.
+                    if zone == Zone::Command && !is_emblem {
+                        return static_opts_in_to_command_zone(def);
+                    }
+                    true
+                })
+                .map(move |def| (obj, def))
+        })
 }
 
 /// Like `battlefield_active_statics` but WITHOUT condition filtering.
@@ -314,6 +358,47 @@ mod tests {
         obj.is_emblem = true;
         obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)].into();
         assert_eq!(active_static_definitions(&state, &obj).count(), 1);
+    }
+
+    /// CR 113.6b: A static on a non-emblem command-zone object functions
+    /// when (and only when) it lists `Zone::Command` in its `active_zones`.
+    /// Eminence statics opt in this way; sibling statics on the same
+    /// commander that DO NOT opt in remain blocked by CR 114.4.
+    #[test]
+    fn command_zone_non_emblem_yields_only_active_zone_opt_in_statics() {
+        let state = new_state();
+        let mut obj = make_obj(1, Zone::Command);
+        obj.is_emblem = false;
+        // Two statics: one default (battlefield-only), one with explicit
+        // command-zone opt-in via active_zones.
+        let battlefield_only = StaticDefinition::new(StaticMode::Continuous);
+        let eminence_optin = StaticDefinition::new(StaticMode::Continuous)
+            .active_zones(vec![Zone::Battlefield, Zone::Command]);
+        obj.static_definitions = vec![battlefield_only, eminence_optin].into();
+        // Only the opt-in static survives the command-zone gate per CR 113.6b.
+        assert_eq!(active_static_definitions(&state, &obj).count(), 1);
+    }
+
+    /// Symmetric coverage for the cost-mod / "without condition filtering"
+    /// iterator: a non-emblem command-zone object must contribute only its
+    /// `active_zones.contains(Command)` statics to `game_functioning_statics`.
+    #[test]
+    fn game_functioning_statics_command_zone_non_emblem_requires_opt_in() {
+        let mut state = new_state();
+        let mut obj = make_obj(1, Zone::Command);
+        obj.is_emblem = false;
+        let battlefield_only = StaticDefinition::new(StaticMode::Continuous);
+        let eminence_optin = StaticDefinition::new(StaticMode::Continuous)
+            .active_zones(vec![Zone::Battlefield, Zone::Command]);
+        obj.static_definitions = vec![battlefield_only, eminence_optin].into();
+        state.command_zone.push_back(obj.id);
+        state.objects.insert(obj.id, obj);
+        // Only the opt-in static appears in the global iterator.
+        let pairs: Vec<_> = game_functioning_statics(&state)
+            .filter(|(obj, _)| obj.id == ObjectId(1))
+            .collect();
+        assert_eq!(pairs.len(), 1);
+        assert!(pairs[0].1.active_zones.contains(&Zone::Command));
     }
 
     #[test]

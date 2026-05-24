@@ -72,16 +72,54 @@ describe("useCardImage", () => {
     });
   });
 
+  it("marks split-layout card images as rotated", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url === "/scryfall-data.json") {
+        return Promise.resolve(jsonResponse({
+          "walk-in closet": {
+            oracle_id: "oracle-room",
+            face_names: ["walk-in closet", "forgotten cellar"],
+            faces: [
+              { normal: "https://img.example/room.jpg", art_crop: "https://img.example/room-art.jpg" },
+              { normal: "https://img.example/room.jpg", art_crop: "https://img.example/room-art.jpg" },
+            ],
+            layout: "split",
+            name: "Walk-In Closet // Forgotten Cellar",
+            mana_cost: "{2}{G} // {3}{G}{G}",
+            cmc: 8,
+            type_line: "Enchantment — Room // Enchantment — Room",
+            colors: ["G"],
+            color_identity: ["G"],
+            keywords: [],
+          },
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() => useCardImage("Walk-In Closet", { size: "normal" }));
+
+    await waitFor(() => {
+      expect(result.current.src).toBe("https://img.example/room.jpg");
+    });
+    expect(result.current.isRotated).toBe(true);
+  });
+
   it("falls back to token search when exact token image metadata is unusable", async () => {
     const fetchTokenImageByRef = vi.fn().mockRejectedValue(new Error("missing image"));
     const fetchTokenImageUrl = vi.fn().mockResolvedValue("https://img.example/food.jpg");
     vi.doMock("../../services/scryfall.ts", () => ({
+      fetchCardImageAsset: vi.fn(),
+      fetchCardImageAssetByOracleId: vi.fn(),
       fetchCardImageByOracleId: vi.fn(),
       fetchCardImageUrl: vi.fn(),
       fetchTokenImageByRef,
       fetchTokenImageUrl,
       findPrintingById: vi.fn(),
       getCardPrintings: vi.fn().mockResolvedValue([]),
+      isCardImageRotatedSync: vi.fn().mockReturnValue(false),
+      resolveFaceIndexSync: vi.fn().mockReturnValue(null),
       resolveOracleIdSync: vi.fn().mockReturnValue(null),
       resolvePrintingImageUrl: vi.fn(),
     }));

@@ -64,9 +64,12 @@ const COLON_SECTION_RE = /:$/;
 const COMMANDER_ANNOTATION_RE = /\s*(?:\[Commander(?:\s*\{[^}]*\})?\]|\*CMDR\*|\*Commander\*)\s*$/i;
 const COMPANION_ANNOTATION_RE = /\s*(?:\[Companion(?:\s*\{[^}]*\})?\]|\*Companion\*)\s*$/i;
 
-// Foil / finish indicators appended by various deck exporters:
-//   "1 Bolt (FDN) 123 *F*"  /  "[Foil]"  /  "(Etched)"  /  "*Foil*"  /  "F"
-const FOIL_INDICATOR_RE = /\s+(?:\*F\*|\*Foil\*|\[Foil\]|\(Foil\)|\(Etched\)|F)\s*$/i;
+// Foil / finish indicators appended by various deck exporters. Moxfield uses
+// asterisk-wrapped finish codes — "*F*" (foil) and "*E*" (etched) — while
+// others use words or bracketed/parenthesized forms:
+//   "1 Bolt (FDN) 123 *F*"  /  "... *E*"  /  "[Foil]"  /  "(Etched)"  /  "*Foil*"  /  "F"
+const FOIL_INDICATOR_RE =
+  /\s+(?:\*F\*|\*E\*|\*Foil\*|\*Etched\*|\[Foil\]|\[Etched\]|\(Foil\)|\(Etched\)|F)\s*$/i;
 
 // "Commanders" is the section label Archidekt uses when exporting with categories.
 function getNamedSection(line: string): DeckSection | null {
@@ -103,7 +106,13 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
 
   remainder = remainder.replace(FOIL_INDICATOR_RE, "");
 
-  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Z0-9]*)\)\s+(\S+)$/);
+  // Collector number is the first token after the set parens. Tolerate (and
+  // discard) any trailing annotation the foil/finish strip above didn't catch
+  // — e.g. an unrecognized finish code or a language tag — mirroring the
+  // trailing-group allowance in MTGA_LINE_PATTERN so a detected MTGA line is
+  // never demoted to the simple matcher (which would swallow the set/number
+  // into the card name).
+  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Z0-9]*)\)\s+(\S+)(?:\s+.*)?$/);
   if (mtgaMatch) {
     const setCode = mtgaMatch[3];
     const collectorNumber = mtgaMatch[4];

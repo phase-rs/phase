@@ -114,6 +114,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::SaddlesOrCrews => match_saddles_or_crews,
         TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
         TriggerMode::KeywordAbilityActivated(_) => match_keyword_ability_activated,
+        TriggerMode::AbilityActivated => match_ability_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
         TriggerMode::Earthbend => match_earthbend,
@@ -437,6 +438,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
             match_keyword_ability_activated,
         );
     }
+    // CR 602.1 + CR 605.1a: generic non-mana ability activation trigger
+    // (Burning-Tree Shaman, Flamescroll Celebrant).
+    r.insert(TriggerMode::AbilityActivated, match_ability_activated);
 
     // Avatar crossover: bending trigger matchers
     r.insert(TriggerMode::Firebend, match_firebend);
@@ -1783,20 +1787,24 @@ pub(super) fn match_cycled_or_discarded(
     }
 }
 
-/// Shuffled: fires when a library is shuffled.
+/// CR 701.24a: Shuffled — fires when a player shuffles their library.
+/// Uses `PlayerPerformedAction { ShuffledLibrary }` to identify the acting
+/// player, then gates on `trigger.valid_target` (e.g. Cosi's Trickster:
+/// "Whenever an opponent shuffles their library").
 pub(super) fn match_shuffled(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::Shuffle,
-            ..
-        }
-    )
+    let GameEvent::PlayerPerformedAction {
+        player_id,
+        action: PlayerActionKind::ShuffledLibrary,
+    } = event
+    else {
+        return false;
+    };
+    valid_player_matches(trigger, state, *player_id, source_id)
 }
 
 /// Revealed: fires when a card is revealed.
@@ -2423,6 +2431,30 @@ pub(super) fn match_keyword_ability_activated(
     } else {
         false
     }
+}
+
+/// CR 602.1 + CR 603.2 + CR 605.1a: Matches when any player activates an
+/// activated ability that uses the stack (which by CR 605.3b excludes mana
+/// abilities). Player scope is filtered via `trigger.valid_target` (e.g.
+/// "an opponent" → `ControllerRef::Opponent` filter against the activating
+/// player); when no `valid_target` is set, the trigger fires for every player
+/// (Burning-Tree Shaman). Source-object filtering rides on `valid_card`
+/// (reserved for future patterns like "an ability of an artifact source").
+pub(super) fn match_ability_activated(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::AbilityActivated {
+        player_id,
+        source_id: activated_id,
+    } = event
+    else {
+        return false;
+    };
+    valid_player_matches(trigger, state, *player_id, source_id)
+        && valid_card_matches(trigger, state, *activated_id, source_id)
 }
 
 pub(super) fn match_unimplemented(
@@ -3195,6 +3227,122 @@ mod tests {
                 player_id: PlayerId(0),
                 source_id: other,
                 is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    // --- CR 602.1 + CR 605.1a: generic non-mana ability activation matcher ---
+
+    #[test]
+    fn ability_activation_a_player_scope_matches_every_player() {
+        // Burning-Tree Shaman: "Whenever a player activates an ability …" —
+        // no valid_target filter, so every player's activation triggers.
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Burning-Tree Shaman".to_string(),
+            Zone::Battlefield,
+        );
+        let activated = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::AbilityActivated);
+
+        // Opponent's activation fires.
+        assert!(match_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(1),
+                source_id: activated,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        // Own activation also fires.
+        assert!(match_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(0),
+                source_id: activated,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn ability_activation_an_opponent_scope_filters_by_controller() {
+        // Flamescroll Celebrant: "Whenever an opponent activates an ability …"
+        // — valid_target scopes the activator to opponents of the source's
+        // controller.
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flamescroll Celebrant".to_string(),
+            Zone::Battlefield,
+        );
+        let activated = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::AbilityActivated);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+
+        // Opponent activation fires.
+        assert!(match_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(1),
+                source_id: activated,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        // Own activation must NOT fire.
+        assert!(!match_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(0),
+                source_id: activated,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn ability_activation_rejects_unrelated_event() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Burning-Tree Shaman".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::AbilityActivated);
+        // SpellCast is a different family — must not match.
+        assert!(!match_ability_activated(
+            &GameEvent::SpellCast {
+                card_id: CardId(2),
+                controller: PlayerId(1),
+                object_id: ObjectId(99),
             },
             &trigger,
             source,
@@ -4141,6 +4289,81 @@ mod tests {
     }
 
     #[test]
+    fn changes_zone_parsed_teval_trigger_scopes_to_own_graveyard() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(893),
+            PlayerId(0),
+            "Teval, the Balanced Scale".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever one or more cards leave your graveyard, create a 2/2 black Zombie Druid creature token.",
+            "Teval, the Balanced Scale",
+        );
+
+        let own_card = ObjectId(100);
+        let own_card_leaves_graveyard = GameEvent::ZoneChanged {
+            object_id: own_card,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                ..ZoneChangeRecord::test_minimal(own_card, Some(Zone::Graveyard), Zone::Battlefield)
+            }),
+        };
+        assert!(match_changes_zone(
+            &own_card_leaves_graveyard,
+            &trigger,
+            source,
+            &state
+        ));
+
+        let opponent_card = ObjectId(101);
+        let opponent_card_leaves_graveyard = GameEvent::ZoneChanged {
+            object_id: opponent_card,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(
+                    opponent_card,
+                    Some(Zone::Graveyard),
+                    Zone::Battlefield,
+                )
+            }),
+        };
+        assert!(
+            !match_changes_zone(&opponent_card_leaves_graveyard, &trigger, source, &state),
+            "Teval must not trigger for a card leaving an opponent's graveyard"
+        );
+
+        let opponent_creature = ObjectId(102);
+        let opponent_creature_dies = GameEvent::ZoneChanged {
+            object_id: opponent_creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(
+                    opponent_creature,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
+            }),
+        };
+        assert!(
+            !match_changes_zone(&opponent_creature_dies, &trigger, source, &state),
+            "Teval must not trigger for an opponent's creature dying"
+        );
+    }
+
+    #[test]
     fn changes_zone_uses_event_snapshot_for_subtype_filters() {
         let mut state = setup();
         let source_id = create_object(
@@ -4184,7 +4407,10 @@ mod tests {
         trigger.origin = Some(Zone::Battlefield);
         trigger.destination = Some(Zone::Graveyard);
         trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::creature().properties(
-            vec![crate::types::ability::FilterProp::PowerGE {
+            vec![crate::types::ability::FilterProp::PtComparison {
+                stat: crate::types::ability::PtStat::Power,
+                scope: crate::types::ability::PtValueScope::Current,
+                comparator: crate::types::ability::Comparator::GE,
                 value: crate::types::ability::QuantityExpr::Fixed { value: 4 },
             }],
         )));
@@ -4818,14 +5044,57 @@ mod tests {
     }
 
     #[test]
-    fn shuffled_matches_shuffled_event() {
+    fn shuffled_matches_player_performed_action_event() {
         let state = setup();
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::ShuffledLibrary,
+        };
+        let trigger = make_trigger(TriggerMode::Shuffled);
+        assert!(match_shuffled(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn shuffled_rejects_opponent_when_valid_target_is_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cosis Trickster".to_string(),
+            Zone::Battlefield,
+        );
+        // "Whenever an opponent shuffles" — valid_target filters for opponent
+        let mut trigger = make_trigger(TriggerMode::Shuffled);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(crate::types::ability::ControllerRef::Opponent),
+        ));
+
+        // Opponent shuffles — should fire
+        let opp_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(1),
+            action: PlayerActionKind::ShuffledLibrary,
+        };
+        assert!(match_shuffled(&opp_event, &trigger, source, &state));
+
+        // Controller shuffles — should NOT fire
+        let self_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::ShuffledLibrary,
+        };
+        assert!(!match_shuffled(&self_event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn shuffled_rejects_effect_resolved_event() {
+        let state = setup();
+        // The old EffectResolved event should no longer trigger match_shuffled
         let event = GameEvent::EffectResolved {
             kind: EffectKind::Shuffle,
             source_id: ObjectId(1),
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
-        assert!(match_shuffled(&event, &trigger, ObjectId(1), &state));
+        assert!(!match_shuffled(&event, &trigger, ObjectId(1), &state));
     }
 
     #[test]

@@ -382,6 +382,36 @@ export function MultiplayerPage() {
           return false;
         }
 
+        const opponentCount = Math.max(0, action.settings.formatConfig.max_players - 1);
+        const aiSeatIndexes = new Set(action.settings.aiSeats.map((seat) => seat.seatIndex));
+        const allOpponentsAreAi =
+          opponentCount > 0
+          && Array.from({ length: opponentCount }, (_, i) => i + 1)
+            .every((seatIndex) => aiSeatIndexes.has(seatIndex));
+        if (allOpponentsAreAi) {
+          const sortedAiSeats = [...action.settings.aiSeats]
+            .sort((a, b) => a.seatIndex - b.seatIndex);
+          const aiSeats = sortedAiSeats.map((seat) => ({
+            difficulty: seat.difficulty,
+            deckName: seat.deckName,
+          }));
+          const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
+          const gameId = crypto.randomUUID();
+          clearWsSession();
+          saveActiveGame({
+            id: gameId,
+            mode: "ai",
+            difficulty: headDifficulty,
+            aiSeats,
+            formatConfig: action.settings.formatConfig,
+          });
+          useGameStore.setState({ gameId });
+          navigate(
+            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}`,
+          );
+          return true;
+        }
+
         // Reachability + mode check for the hosting flow. We lean on the
         // store's long-lived subscription socket (opened when the user
         // entered this page) rather than paying a fresh broker handshake:
@@ -710,7 +740,12 @@ export function MultiplayerPage() {
 
         {view === "lobby" && (
           <LobbyView
-            key={lobbyRetryKey}
+            // Remount on server change so local lobby state (playerCount,
+            // game list) resets and the subscription effect re-runs against
+            // the freshly-dialed socket — without this, switching servers
+            // left the previous region's PlayerCount on screen. lobbyRetryKey
+            // still drives the "Keep waiting" offline retry.
+            key={`${serverAddress}:${lobbyRetryKey}`}
             onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
             onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
             onHostDraft={experimentalFeatures ? handleHostDraft : undefined}

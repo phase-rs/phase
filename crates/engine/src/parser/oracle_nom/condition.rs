@@ -8,6 +8,7 @@ use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
 use nom::character::complete::multispace1;
 use nom::combinator::{map, opt, value};
+use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -16,7 +17,9 @@ use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
 };
 use super::quantity as nom_quantity;
-use crate::parser::oracle_target::{parse_type_phrase, parse_zone_suffix};
+use crate::parser::oracle_target::{
+    parse_type_phrase, parse_zone_suffix, parse_zone_word, peek_zone_boundary,
+};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator,
@@ -2320,35 +2323,129 @@ fn parse_life_total_comparator(input: &str) -> OracleResult<'_, Comparator> {
     .parse(input)
 }
 
-/// CR 113.6b: Parse zone-based source conditions.
-/// Handles all player-specific zones (graveyard, hand, library) with "your",
-/// and the shared exile zone (no "your").
-fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
-    use crate::types::zones::Zone;
+/// CR 113.6b: Self-referential subject tokens that anchor a zone condition.
+/// `~` is the canonical card-name placeholder; the `this <type>` variants are
+/// equivalent self-references for the printed types that may appear in
+/// "as long as this <type> is ..." clauses.
+fn parse_source_self_token(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("~"),
+            tag("this card"),
+            tag("this enchantment"),
+            tag("this permanent"),
+            tag("this creature"),
+            tag("this artifact"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 113.6b: A zone phrase that follows the verb "is" in a source-referential
+/// condition — e.g., " on the battlefield", " in your graveyard",
+/// " in the command zone". Returns the typed `Zone` referenced.
+///
+/// Composes the shared `parse_zone_word` building block (the canonical
+/// zone-token vocabulary in `oracle_target.rs`) with the preposition +
+/// qualifier glue that printed Oracle text uses for source-referential
+/// conditions. New zone tokens MUST be added to `parse_zone_word`, not here —
+/// the per-qualifier arms below pick them up automatically.
+///
+/// CR-correct qualifier mapping (printed Oracle text always uses exactly one
+/// of these forms per zone):
+///   - " on the <Z>"  — only Battlefield (CR 400.1).
+///   - " in the <Z>"  — shared zones with definite article (CR 408 command).
+///   - " in your <Z>" — player-specific zones (CR 401 / 402 / 403).
+///   - " in <Z>"      — Exile (shared zone with no possessive; CR 406).
+fn parse_zone_phrase(input: &str) -> OracleResult<'_, Zone> {
+    // Parse a zone token and assert it matches `allowed`. Composes
+    // `parse_zone_word` (the canonical zone vocabulary) with the per-
+    // qualifier CR constraint, so adding a new zone is a single edit in
+    // `oracle_target.rs`.
+    fn zone_in<F>(i: &str, allowed: F) -> OracleResult<'_, Zone>
+    where
+        F: Fn(&Zone) -> bool,
+    {
+        let (rest, zone) = parse_zone_word(i)?;
+        if !allowed(&zone) {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        let (rest, _) = peek_zone_boundary(rest)?;
+        Ok((rest, zone))
+    }
 
     alt((
-        // CR 110.1: A permanent is a card or token on the battlefield.
-        // "this enchantment" / "this permanent" (etc.) are self-referential
-        // subject tokens equivalent to "~" for a permanent's own zone check.
-        value(
-            StaticCondition::SourceInZone {
-                zone: Zone::Battlefield,
-            },
-            preceded(
-                alt((
-                    tag("~"),
-                    tag("this card"),
-                    tag("this enchantment"),
-                    tag("this permanent"),
-                    tag("this creature"),
-                    tag("this artifact"),
-                )),
-                tag(" is on the battlefield"),
-            ),
-        ),
+        // " on the <Z>" — CR 400.1: only the battlefield uses "on".
+        preceded(tag(" on the "), |i| {
+            zone_in(i, |z| matches!(z, Zone::Battlefield))
+        }),
+        // " in the <Z>" — CR 408: shared zones (command zone) take "the".
+        // Bare-word player zones (graveyard/hand/library) print "in your <Z>",
+        // not "in the <Z>" — rejecting them here keeps the qualifier→zone
+        // mapping CR-faithful.
+        preceded(tag(" in the "), |i| {
+            zone_in(i, |z| matches!(z, Zone::Command))
+        }),
+        // " in your <Z>" — CR 401/402/403: player-specific owned zones.
+        preceded(tag(" in your "), |i| {
+            zone_in(i, |z| {
+                matches!(z, Zone::Graveyard | Zone::Hand | Zone::Library)
+            })
+        }),
+        // " in <Z>" — CR 406: exile is a shared zone with no possessive.
+        preceded(tag(" in "), |i| zone_in(i, |z| matches!(z, Zone::Exile))),
+    ))
+    .parse(input)
+}
+
+/// CR 113.6b: Parse "<source> is <zone-phrase> [or <zone-phrase> ...]" into a
+/// typed `StaticCondition`. A single zone produces `SourceInZone { zone }`;
+/// a disjunction produces `StaticCondition::Or` over the per-zone arms — the
+/// shape `populate_active_zones_from_condition` walks to seed `active_zones`.
+///
+/// Covers the class of Eminence-style "as long as ~ is in the command zone or
+/// on the battlefield" statics (The Ur-Dragon, Edgar Markov, Oloro, Inalla,
+/// etc.) without enumerating each (zone × zone) permutation.
+fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_source_self_token(input)?;
+    let (rest, _) = tag(" is").parse(rest)?;
+    let (rest, first) = parse_zone_phrase(rest)?;
+    // CR 113.6b: a single ability that names multiple zones functions in each
+    // of them — the "or"-separated zone list composes disjunctively across the
+    // listed zones. ("or" is English grammar, not a CR construct; the rules
+    // authority for the disjunction is the same CR 113.6b that authorizes the
+    // zone clause itself.)
+    let (rest, more) = many0(preceded(parse_zone_list_separator, parse_zone_phrase)).parse(rest)?;
+    if more.is_empty() {
+        return Ok((rest, StaticCondition::SourceInZone { zone: first }));
+    }
+    let mut conditions = Vec::with_capacity(more.len() + 1);
+    conditions.push(StaticCondition::SourceInZone { zone: first });
+    for zone in more {
+        conditions.push(StaticCondition::SourceInZone { zone });
+    }
+    Ok((rest, StaticCondition::Or { conditions }))
+}
+
+fn parse_zone_list_separator(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag(", or"), tag(" or"), tag(",")))).parse(input)
+}
+
+/// CR 113.6b: Parse zone-based source conditions.
+/// Handles all player-specific zones (graveyard, hand, library) with "your",
+/// the shared exile and command zones (no "your"), and disjunctions across
+/// any pair of those zones ("~ is in the command zone or on the battlefield").
+fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
         // CR 702.62b: A card is suspended while it is in exile with a time
         // counter on it. The "has suspend" component is guaranteed by cards
-        // that print this source-referential condition.
+        // that print this source-referential condition. Tried first so the
+        // generic zone-phrase parser does not misclassify "~ is suspended"
+        // as an unanchored "is" + zone match.
         value(
             StaticCondition::And {
                 conditions: vec![
@@ -2362,36 +2459,8 @@ fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             },
             alt((tag("~ is suspended"), tag("this card is suspended"))),
         ),
-        // Graveyard (player-specific)
-        value(
-            StaticCondition::SourceInZone {
-                zone: Zone::Graveyard,
-            },
-            alt((
-                tag("~ is in your graveyard"),
-                tag("this card is in your graveyard"),
-            )),
-        ),
-        // Hand (player-specific)
-        value(
-            StaticCondition::SourceInZone { zone: Zone::Hand },
-            alt((tag("~ is in your hand"), tag("this card is in your hand"))),
-        ),
-        // Library (player-specific)
-        value(
-            StaticCondition::SourceInZone {
-                zone: Zone::Library,
-            },
-            alt((
-                tag("~ is in your library"),
-                tag("this card is in your library"),
-            )),
-        ),
-        // Exile (shared zone — no "your")
-        value(
-            StaticCondition::SourceInZone { zone: Zone::Exile },
-            alt((tag("~ is in exile"), tag("this card is in exile"))),
-        ),
+        // CR 113.6b: Generic "<source> is <zone> [or <zone>]" form.
+        parse_source_in_zone_condition,
     ))
     .parse(input)
 }
@@ -5545,6 +5614,106 @@ mod tests {
                 zone: crate::types::zones::Zone::Library
             }
         ));
+    }
+
+    /// CR 408 + CR 113.6b: A standalone "command zone" zone condition,
+    /// covering Eminence ability-word lines whose static functions from the
+    /// command zone.
+    #[test]
+    fn test_source_in_command_zone() {
+        let (rest, c) = parse_inner_condition("~ is in the command zone").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::SourceInZone {
+                zone: crate::types::zones::Zone::Command
+            }
+        ));
+    }
+
+    /// CR 113.6b + CR 408: "as long as ~ is in the command zone or on the
+    /// battlefield" — the canonical Eminence shape. Must produce a typed
+    /// disjunction of `SourceInZone { Command }` and `SourceInZone {
+    /// Battlefield }` so `populate_active_zones_from_condition` seeds both
+    /// zones into the static definition's `active_zones`.
+    #[test]
+    fn test_source_in_command_zone_or_battlefield() {
+        let (rest, c) =
+            parse_inner_condition("~ is in the command zone or on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        let zones = match c {
+            StaticCondition::Or { conditions } => conditions
+                .into_iter()
+                .filter_map(|c| match c {
+                    StaticCondition::SourceInZone { zone } => Some(zone),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected Or {{ conditions }}, got {other:?}"),
+        };
+        assert_eq!(
+            zones,
+            vec![
+                crate::types::zones::Zone::Command,
+                crate::types::zones::Zone::Battlefield,
+            ]
+        );
+    }
+
+    /// Symmetric variant — "as long as ~ is on the battlefield or in the
+    /// command zone" — must produce the same Or-disjunction (order matches
+    /// the printed zone order).
+    #[test]
+    fn test_source_on_battlefield_or_in_command_zone() {
+        let (rest, c) =
+            parse_inner_condition("~ is on the battlefield or in the command zone").unwrap();
+        assert_eq!(rest, "");
+        let zones = match c {
+            StaticCondition::Or { conditions } => conditions
+                .into_iter()
+                .filter_map(|c| match c {
+                    StaticCondition::SourceInZone { zone } => Some(zone),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected Or {{ conditions }}, got {other:?}"),
+        };
+        assert_eq!(
+            zones,
+            vec![
+                crate::types::zones::Zone::Battlefield,
+                crate::types::zones::Zone::Command,
+            ]
+        );
+    }
+
+    /// CR 113.6b: Source-zone lists can contain three or more zones using
+    /// comma and Oxford-comma separators, not just a two-zone "or" pair.
+    /// This locks the reusable zone-list separator used by all
+    /// source-referential zone conditions.
+    #[test]
+    fn test_source_in_three_zone_oxford_list() {
+        let (rest, c) =
+            parse_inner_condition("~ is in your graveyard, in your hand, or in exile").unwrap();
+        assert_eq!(rest, "");
+        let zones = match c {
+            StaticCondition::Or { conditions } => conditions
+                .into_iter()
+                .filter_map(|c| match c {
+                    StaticCondition::SourceInZone { zone } => Some(zone),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected Or {{ conditions }}, got {other:?}"),
+        };
+        assert_eq!(
+            zones,
+            vec![
+                crate::types::zones::Zone::Graveyard,
+                crate::types::zones::Zone::Hand,
+                crate::types::zones::Zone::Exile,
+            ]
+        );
     }
 
     // -- "There are" graveyard threshold tests (Phase 2) --
