@@ -5114,23 +5114,36 @@ fn try_parse_event(
                 }
             }
             SimpleEvent::BecomesAttached => {
-                // CR 701.3a: "Whenever [this Equipment/Aura] becomes attached to
-                // [a creature / a permanent]" — fires when an Attach or AttachAll
-                // effect resolves and the source is now attached to something.
-                // Non-self subjects need an event payload naming the object that
-                // became attached; EffectResolved only carries the ability source.
-                if !matches!(subject, TargetFilter::SelfRef) {
-                    return None;
-                }
-                def.mode = TriggerMode::Attached;
-                def.valid_card = Some(subject.clone());
-                let remaining = remaining.trim();
-                if !remaining.is_empty() {
-                    let (filter, rest) = parse_type_phrase(remaining);
-                    if !rest.trim().is_empty() {
+                // CR 701.3a: Two grammatical patterns for attachment triggers.
+                if matches!(subject, TargetFilter::SelfRef) {
+                    // Pattern 1: "Whenever ~ becomes attached to [host]"
+                    // The trigger source IS the attachment (Equipment/Aura).
+                    // The optional trailing phrase ("to a creature") sets valid_target.
+                    def.mode = TriggerMode::Attached;
+                    def.valid_card = Some(subject.clone());
+                    let remaining = remaining.trim();
+                    if !remaining.is_empty() {
+                        let (filter, rest) = parse_type_phrase(remaining);
+                        if !rest.trim().is_empty() {
+                            return None;
+                        }
+                        def.valid_target = Some(filter);
+                    }
+                } else {
+                    // Pattern 2: "Whenever [an Aura] becomes attached to ~"
+                    // An external attachment object (the subject, e.g., "an Aura")
+                    // becomes attached TO the trigger source. match_attached checks
+                    // state.objects[event_source_id].attached_to == source_id after the
+                    // Attach effect resolves.
+                    // Cards: Bramble Elemental, Brood Keeper.
+                    let remaining = remaining.trim();
+                    // Only the self-reference host ("~") is supported for Pattern 2.
+                    if !matches!(remaining, "~" | "") {
                         return None;
                     }
-                    def.valid_target = Some(filter);
+                    def.mode = TriggerMode::Attached;
+                    def.valid_card = Some(subject.clone()); // filter for the attaching object
+                    // valid_target stays None — match_attached uses source_id as the implicit host
                 }
             }
         }
@@ -20141,5 +20154,41 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 701.3a Pattern 2: "Whenever an Aura becomes attached to ~" —
+    /// the subject is the Aura (not self-ref), the host is the trigger source.
+    /// Cards: Bramble Elemental, Brood Keeper.
+    #[test]
+    fn trigger_an_aura_becomes_attached_to_self() {
+        let def = parse_trigger_line(
+            "Whenever an Aura becomes attached to ~, create two 1/1 green Saproling creature tokens.",
+            "Bramble Elemental",
+        );
+        assert_eq!(def.mode, TriggerMode::Attached);
+        // valid_card must be the Aura filter (not SelfRef — Pattern 2)
+        let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+            panic!("expected typed Aura filter, got {:?}", def.valid_card);
+        };
+        assert!(
+            tf.type_filters
+                .contains(&crate::types::ability::TypeFilter::Subtype("Aura".to_string())),
+            "filter must restrict to Aura subtype, got {:?}",
+            tf.type_filters
+        );
+        // valid_target stays None (host is implicitly the trigger source)
+        assert_eq!(def.valid_target, None);
+    }
+
+    /// CR 701.3a Pattern 2: Brood Keeper uses the same phrase.
+    #[test]
+    fn trigger_an_aura_becomes_attached_to_self_brood_keeper() {
+        let def = parse_trigger_line(
+            "Whenever an Aura becomes attached to ~, create a 2/2 red Dragon creature token with flying. It has \"{R}: This creature gets +1/+0 until end of turn.\"",
+            "Brood Keeper",
+        );
+        assert_eq!(def.mode, TriggerMode::Attached);
+        assert!(def.valid_card.is_some(), "Aura filter must be set");
+        assert_eq!(def.valid_target, None);
     }
 }
