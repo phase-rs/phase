@@ -3182,6 +3182,19 @@ fn resolve_chain_body(
                 1
             };
 
+            // CR 707.10 + CR 614.1a: "copy an additional time" replacement
+            // effects (Twinning Staff) increase how many copies a copy-a-spell
+            // effect produces. Applied once here at the copy-count site because
+            // copies are created through this `repeat_for` loop, not the
+            // `ProposedEvent` replacement pipeline. The adjusted count flows into
+            // `total_iterations` and the resume stash below, so each additional
+            // copy runs the same per-copy retarget step as the base copies.
+            let iterations = if matches!(ability.effect, Effect::CopySpell { .. }) {
+                copy_spell::copy_count_with_replacements(state, ability, iterations)
+            } else {
+                iterations
+            };
+
             let initial_waiting_for = state.waiting_for.clone();
             let mut iteration = 0usize;
             while iteration < iterations {
