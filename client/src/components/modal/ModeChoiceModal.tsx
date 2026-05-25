@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { ModalChoice } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
@@ -6,6 +7,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
 export function ModeChoiceModal() {
+  const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -68,8 +70,8 @@ export function ModeChoiceModal() {
 
   const chooseLabel =
     modal.min_choices === modal.max_choices
-      ? `Choose ${numberWord(modal.min_choices)}`
-      : `Choose ${numberWord(modal.min_choices)} to ${numberWord(modal.max_choices)}`;
+      ? t("modeChoice.chooseExact", { count: modal.min_choices })
+      : t("modeChoice.chooseRange", { min: modal.min_choices, max: modal.max_choices });
 
   const showFooter = !isSingleChoice || !isAbilityMode;
   const footer = showFooter ? (
@@ -84,7 +86,7 @@ export function ModeChoiceModal() {
               : "cursor-not-allowed border border-white/8 bg-white/5 text-slate-500"
           }`}
         >
-          Confirm ({selected.length}/{modal.max_choices})
+          {t("modeChoice.confirm", { selected: selected.length, count: modal.max_choices })}
         </button>
       )}
       {!isSingleChoice && selected.length > 0 && (
@@ -92,7 +94,7 @@ export function ModeChoiceModal() {
           onClick={() => setSelected([])}
           className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
         >
-          Clear
+          {t("modeChoice.clear")}
         </button>
       )}
       {!isAbilityMode && (
@@ -100,7 +102,7 @@ export function ModeChoiceModal() {
           onClick={handleCancel}
           className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-6 py-2 font-semibold text-slate-200 transition hover:bg-white/8"
         >
-          Cancel
+          {t("common:actions.cancel")}
         </button>
       )}
     </div>
@@ -108,9 +110,9 @@ export function ModeChoiceModal() {
 
   return (
     <DialogShell
-      eyebrow={isAbilityMode ? "Ability Modes" : "Spell Modes"}
+      eyebrow={isAbilityMode ? t("modeChoice.eyebrowAbility") : t("modeChoice.eyebrowSpell")}
       title={chooseLabel}
-      subtitle="Select the mode or modes to apply."
+      subtitle={t("modeChoice.subtitle")}
       size="md"
       scrollable
       footer={footer}
@@ -144,7 +146,7 @@ export function ModeChoiceModal() {
               >
                 <span className={`font-semibold ${isUnavailable ? "text-slate-500" : "text-white"}`}>{desc}</span>
                 {isUnavailable && (
-                  <span className="ml-2 text-xs text-slate-500">(already chosen)</span>
+                  <span className="ml-2 text-xs text-slate-500">{t("modeChoice.alreadyChosen")}</span>
                 )}
                 {count > 0 && (
                   <span className="ml-2 inline-flex min-w-6 items-center justify-center rounded-full bg-cyan-300/20 px-2 py-0.5 text-xs font-semibold text-cyan-100">
@@ -158,9 +160,4 @@ export function ModeChoiceModal() {
       </div>
     </DialogShell>
   );
-}
-
-function numberWord(n: number): string {
-  const words = ["zero", "one", "two", "three", "four", "five"];
-  return words[n] ?? String(n);
 }

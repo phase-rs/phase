@@ -58,6 +58,25 @@ pub struct AtomicCard {
     #[serde(default)]
     pub is_game_changer: bool,
     pub identifiers: AtomicIdentifiers,
+    /// Localized printings of this card from MTGJSON. Only display fields
+    /// (name/text/type) are captured — used to emit per-language card-data
+    /// sidecars for content i18n. The engine itself stays English-only.
+    #[serde(default)]
+    pub foreign_data: Vec<ForeignData>,
+}
+
+/// A localized printing of a card from MTGJSON's `foreignData` array. `language`
+/// is the full English language name (e.g. "German", "Portuguese (Brazil)").
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignData {
+    pub language: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(rename = "type", default)]
+    pub type_line: Option<String>,
 }
 
 /// An official WotC ruling attached to a card. MTGJSON mirrors these from Gatherer.
@@ -89,7 +108,96 @@ pub struct LeadershipSkills {
 #[serde(rename_all = "camelCase")]
 pub struct AtomicIdentifiers {
     #[serde(default)]
+    pub scryfall_id: Option<String>,
+    #[serde(default)]
     pub scryfall_oracle_id: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SetFile {
+    pub data: SetData,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SetData {
+    pub code: String,
+    pub name: String,
+    #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
+    pub cards: Vec<SetCard>,
+    #[serde(default)]
+    pub tokens: Vec<SetToken>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SetCard {
+    pub uuid: String,
+    pub name: String,
+    #[serde(default)]
+    pub face_name: Option<String>,
+    #[serde(default)]
+    pub rarity: String,
+    #[serde(default)]
+    pub identifiers: SetIdentifiers,
+    #[serde(default)]
+    pub related_cards: SetRelatedCards,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SetToken {
+    pub uuid: String,
+    pub name: String,
+    pub layout: String,
+    #[serde(default)]
+    pub side: Option<String>,
+    #[serde(default)]
+    pub face_name: Option<String>,
+    #[serde(default)]
+    pub number: Option<String>,
+    #[serde(rename = "type")]
+    pub type_line: String,
+    #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub subtypes: Vec<String>,
+    #[serde(default)]
+    pub supertypes: Vec<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub power: Option<String>,
+    #[serde(default)]
+    pub toughness: Option<String>,
+    #[serde(default)]
+    pub colors: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub identifiers: SetIdentifiers,
+    #[serde(default)]
+    pub related_cards: SetRelatedCards,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SetIdentifiers {
+    #[serde(default)]
+    pub scryfall_id: Option<String>,
+    #[serde(default)]
+    pub scryfall_oracle_id: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRelatedCards {
+    #[serde(default)]
+    pub tokens: Vec<String>,
+    #[serde(default)]
+    pub reverse_related: Vec<String>,
 }
 
 /// Load and deserialize an AtomicCards.json file.

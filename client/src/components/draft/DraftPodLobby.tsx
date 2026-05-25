@@ -17,6 +17,7 @@
  */
 
 import { useCallback } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { SeatPublicView } from "../../adapter/draft-adapter";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -42,11 +43,12 @@ function SeatCard({
   canKick,
   onKick,
 }: SeatCardProps) {
+  const { t } = useTranslation("draft");
   const isEmpty = !seat.display_name;
   const seatLabel = isEmpty
     ? botFillEnabled
-      ? "Bot"
-      : "Waiting..."
+      ? t("lobby.botSeat")
+      : t("lobby.waitingSeat")
     : seat.display_name;
 
   const borderColor = isLocalSeat
@@ -71,7 +73,7 @@ function SeatCard({
     >
       {/* Seat number */}
       <div className="text-xs font-medium text-white/40">
-        Seat {seat.seat_index + 1}
+        {t("lobby.seatNumber", { number: seat.seat_index + 1 })}
       </div>
 
       {/* Status indicator */}
@@ -99,7 +101,7 @@ function SeatCard({
       {/* Role badge */}
       {seat.seat_index === 0 && (
         <span className="rounded-full bg-emerald-400/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
-          HOST
+          {t("lobby.hostBadge")}
         </span>
       )}
 
@@ -109,7 +111,7 @@ function SeatCard({
           onClick={onKick}
           className="absolute right-2 top-2 rounded px-1.5 py-0.5 text-[10px] text-red-300/60 transition-colors hover:bg-red-400/10 hover:text-red-300"
         >
-          Kick
+          {t("lobby.kick")}
         </button>
       )}
     </div>
@@ -124,6 +126,7 @@ interface DraftPodLobbyProps {
 }
 
 export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
+  const { t } = useTranslation("draft");
   const role = useMultiplayerDraftStore((s) => s.role);
   const seats = useMultiplayerDraftStore((s) => s.seats);
   const joined = useMultiplayerDraftStore((s) => s.joined);
@@ -180,10 +183,10 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="menu-display text-2xl text-white">Draft Pod Lobby</h2>
+          <h2 className="menu-display text-2xl text-white">{t("lobby.title")}</h2>
           <p className="mt-1 text-sm text-white/50">
             {config.setName || config.setCode} &mdash;{" "}
-            {config.kind} Draft
+            {t("lobby.draftKind", { kind: config.kind })}
           </p>
         </div>
 
@@ -192,14 +195,14 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
           <button
             onClick={handleCopyCode}
             className="group flex flex-col items-end gap-0.5"
-            title="Click to copy room code"
+            title={t("lobby.copyRoomCodeTitle")}
           >
-            <span className="text-xs text-white/40">Room Code</span>
+            <span className="text-xs text-white/40">{t("lobby.roomCode")}</span>
             <span className="font-mono text-lg font-bold tracking-wider text-emerald-300 transition-colors group-hover:text-emerald-200">
               {roomCode}
             </span>
             <span className="text-[10px] text-white/30 transition-colors group-hover:text-white/50">
-              Click to copy
+              {t("lobby.clickToCopy")}
             </span>
           </button>
         )}
@@ -207,7 +210,10 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
 
       {/* Seat count */}
       <div className="text-sm text-white/60">
-        {joined || filledSeats} / {total || config.podSize} seats filled
+        {t("lobby.seatsFilled", {
+          current: joined || filledSeats,
+          total: total || config.podSize,
+        })}
       </div>
 
       {/* Seat grid — 4x2 for 8 seats */}
@@ -243,7 +249,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
               onChange={toggleBotFill}
               className="accent-emerald-400"
             />
-            Fill empty seats with bots
+            {t("lobby.fillWithBots")}
           </label>
 
           <div className="flex-1" />
@@ -253,7 +259,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
             onClick={handleLeave}
             className={menuButtonClass({ tone: "red", size: "sm" })}
           >
-            Leave
+            {t("lobby.leave")}
           </button>
 
           {/* Start Draft button */}
@@ -266,7 +272,7 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
               disabled: !canStart,
             })}
           >
-            Start Draft
+            {t("lobby.startDraft")}
           </button>
         </div>
       )}
@@ -275,14 +281,14 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
       {!isHost && (
         <div className="flex items-center gap-4">
           <p className="text-sm italic text-white/50">
-            Waiting for host to start the draft...
+            {t("lobby.waitingForHost")}
           </p>
           <div className="flex-1" />
           <button
             onClick={handleLeave}
             className={menuButtonClass({ tone: "red", size: "sm" })}
           >
-            Leave
+            {t("lobby.leave")}
           </button>
         </div>
       )}

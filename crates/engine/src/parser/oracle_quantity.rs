@@ -8,11 +8,12 @@
 
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::value;
-use nom::sequence::{pair, terminated};
+use nom::combinator::{all_consuming, eof, opt, value};
+use nom::multi::separated_list1;
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
@@ -57,6 +58,44 @@ pub(crate) fn parse_quantity_ref_with_context(
     }
 
     // Complex patterns requiring type phrase parsing or counter normalization.
+
+    // CR 608.2c + CR 122.1: "the number of [kind] counter[s] removed this way"
+    // is a dynamic amount from the preceding RemoveCounter effect, not an
+    // object count over a battlefield type phrase.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(trimmed) {
+        if try_parse_counters_removed_this_way(rest) {
+            return Some(QuantityRef::PreviousEffectAmount);
+        }
+    }
+
+    if all_consuming(pair(
+        tag::<_, _, OracleError<'_>>("the number of"),
+        alt((tag(" counters on ~"), tag(" counters on it"))),
+    ))
+    .parse(trimmed)
+    .is_ok()
+    {
+        return Some(QuantityRef::CountersOn {
+            scope: ObjectScope::Source,
+            counter_type: None,
+        });
+    }
+
+    if all_consuming(pair(
+        tag::<_, _, OracleError<'_>>("the number of"),
+        alt((
+            tag(" counters on that creature"),
+            tag(" counters on that permanent"),
+        )),
+    ))
+    .parse(trimmed)
+    .is_ok()
+    {
+        return Some(QuantityRef::CountersOn {
+            scope: ObjectScope::Target,
+            counter_type: None,
+        });
+    }
 
     // "[counter type] counter(s) on ~" / "[counter type] counter(s) on it"
     // Handles both plural ("counters on ~") and singular ("counter on ~") forms.
@@ -124,7 +163,10 @@ pub(crate) fn parse_quantity_ref_with_context(
             }
             let counter_type = normalize_counter_type(counter_text);
             let (filter, remainder) = parse_type_phrase_with_ctx(after_filter, ctx);
-            if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            if remainder.trim().is_empty()
+                && !matches!(filter, TargetFilter::Any)
+                && !is_empty_typed_filter(&filter)
+            {
                 return Some(QuantityRef::CountersOnObjects {
                     counter_type: Some(counter_type),
                     filter,
@@ -169,7 +211,7 @@ pub(crate) fn parse_quantity_ref_with_context(
     .parse(trimmed)
     {
         let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
-        if !matches!(filter, TargetFilter::Any) {
+        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
             return Some(QuantityRef::Aggregate {
                 function: func,
                 property: prop,
@@ -186,8 +228,26 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::Opponent,
             });
         }
+        // CR 120.1 + CR 510.1: "opponents that were dealt combat damage
+        // [this turn]". The trailing " this turn" suffix is optional because
+        // upstream callers may strip durations before this parser sees the
+        // phrase. PlayerCount{OpponentDealtCombatDamage} is inherently scoped
+        // to this turn through `state.damage_dealt_this_turn`.
+        if parse_opponent_dealt_combat_damage_clause(rest).is_ok() {
+            return Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage,
+            });
+        }
         let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
-        if !matches!(filter, TargetFilter::Any) {
+        // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
+        // including the empty-shaped form (no `type_filters`, no `controller`, no
+        // `properties`) when the input has no recognized type word (e.g.
+        // "opponents that were dealt combat damage this turn"). The empty shape
+        // matches every battlefield object, so emitting an `ObjectCount` against
+        // it would silently drain every permanent. Treat the empty shape as
+        // "no type-phrase match" and fall through to the next pattern (or
+        // surface `Unimplemented`) instead.
+        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
             return Some(QuantityRef::ObjectCount { filter });
         }
     }
@@ -210,6 +270,23 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
     None
+}
+
+/// CR 109.1: `parse_type_phrase` always returns `TargetFilter::Typed`, even
+/// when no type word was matched — in that case all three of `type_filters`,
+/// `controller`, and `properties` are empty. An empty-shaped `Typed` matches
+/// *every* battlefield object, so callers that interpret a non-`Any` filter
+/// as "type phrase recognized" must reject this shape explicitly. The
+/// building-block guard lives here so every quantity parser that wraps
+/// `parse_type_phrase` shares one consistent rejection rule.
+pub(crate) fn is_empty_typed_filter(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(typed)
+            if typed.type_filters.is_empty()
+                && typed.controller.is_none()
+                && typed.properties.is_empty()
+    )
 }
 
 pub(crate) fn canonicalize_quantity_ref(qty: QuantityRef) -> QuantityRef {
@@ -381,6 +458,12 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    if let Ok((rest, expr)) = parse_owned_cards_in_zones_quantity(text) {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
+
     // "the number of card types among cards in all graveyards"
     // "the number of cards in your opponents' graveyards" / "cards in opponents' graveyards"
     if text.contains("cards in your opponents' graveyards")
@@ -443,18 +526,122 @@ pub(crate) fn parse_cda_quantity_with_context(
 
     None
 }
+
+// CR 604.3: Characteristic-defining abilities can define power/toughness using
+// card-count quantities.
+// CR 404.2: Cards in graveyards and exile are scoped by owner, not controller.
+fn parse_owned_cards_in_zones_quantity(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    let (rest, _) = alt((tag("the total number of "), tag("the number of "))).parse(input)?;
+    let (rest, card_types) = nom_quantity::parse_type_filter_list(rest)?;
+    let (rest, _) = nom_quantity::parse_card_word(rest)?;
+    let (rest, _) = tag(" you own in ").parse(rest)?;
+    let (rest, zones) = separated_list1(
+        alt((tag(" and in "), tag(", and in "), tag(", in "))),
+        preceded(opt(tag("your ")), nom_quantity::parse_zone_ref_singular),
+    )
+    .parse(rest)?;
+    let (rest, _) = eof(rest)?;
+
+    let mut exprs: Vec<QuantityExpr> = zones
+        .into_iter()
+        .map(|zone| QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone,
+                card_types: card_types.clone(),
+                scope: CountScope::Owner,
+            },
+        })
+        .collect();
+
+    let expr = if exprs.len() == 1 {
+        exprs.remove(0)
+    } else {
+        QuantityExpr::Sum { exprs }
+    };
+    Ok((rest, expr))
+}
+
+fn parse_previous_effect_amount_this_way(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    all_consuming(value(
+        (),
+        terminated(
+            (
+                opt(tag("the ")),
+                alt((
+                    parse_life_paid_or_lost_phrase,
+                    parse_damage_dealt_phrase,
+                    parse_dealt_damage_phrase,
+                    parse_counters_removed_phrase,
+                )),
+            ),
+            tag(" this way"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_life_paid_or_lost_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = opt(take_until("life ")).parse(input)?;
+    let (input, _) = tag("life ").parse(input)?;
+    let (input, _) = alt((tag("lost"), tag("paid"))).parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_damage_dealt_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = opt(take_until("damage dealt")).parse(input)?;
+    let (input, _) = tag("damage dealt").parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_dealt_damage_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = opt(take_until("dealt damage")).parse(input)?;
+    let (input, _) = tag("dealt damage").parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_counters_removed_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = opt(take_until("counter")).parse(input)?;
+    let (input, _) = alt((tag("counters removed"), tag("counter removed"))).parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_opponent_dealt_combat_damage_clause(
+    input: &str,
+) -> nom::IResult<&str, (), OracleError<'_>> {
+    all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("opponents"), tag("opponent"))),
+        tag(" "),
+        alt((tag("that"), tag("who"))),
+        tag(" "),
+        alt((tag("were"), tag("was"))),
+        tag(" dealt combat damage"),
+        opt(tag(" this turn")),
+    ))
+    .parse(input)
+    .map(|(rest, _)| (rest, ()))
+}
+
 /// Parse event-context quantity references from Oracle text fragments.
 /// Returns None for unrecognized patterns (caller falls back to Variable).
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
-    // CR 609.3: "the life/damage lost/dealt this way" — numeric result from preceding effect.
-    // Must check before "that much" to avoid false match on "this way" vs. "this turn".
-    if lower.ends_with("this way")
-        && (lower.contains("life lost")
-            || lower.contains("damage dealt")
-            || lower.contains("life paid"))
-    {
+    // CR 608.2c + CR 608.2h: "the X <verb>ed/<verb> this way" — numeric result from the
+    // preceding effect (or trigger event) in the same resolution. Must check
+    // before "that much" to avoid false match on "this way" vs. "this turn".
+    // Verb-phrase combinators cover:
+    //   - life-payment/loss: "life lost", "life paid"
+    //   - combat-damage triggers: "damage dealt" (active voice),
+    //     "dealt damage" (passive voice — e.g. Hordewing Skaab's
+    //     "opponents dealt damage this way")
+    //   - counter-removal chains: "counters removed", "counter removed"
+    //     (Sensational Spider-Man's "stun counters removed this way";
+    //     `state.last_effect_amount` is stamped by the preceding RemoveCounter).
+    // PreviousEffectAmount reads `state.last_effect_amount`, which the
+    // upstream effect (damage / counter removal / life loss) stamps.
+    if parse_previous_effect_amount_this_way(lower).is_ok() {
         return Some(QuantityExpr::Ref {
             qty: QuantityRef::PreviousEffectAmount,
         });
@@ -583,45 +770,40 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     }
 
     // CR 603.7c: Decompose possessive noun phrases: "{referent}'s {property}".
-    // CR 608.2k: an explicit participle-possessive ("the sacrificed creature's
-    // power") yields `CostPaidObject` and is NEVER rewritten by the
-    // subject-injection / "itself" remaps — unlike the bare anaphoric "its"
-    // arms above, which emit `Anaphoric` precisely so they can be remapped.
+    // The prefix classifier (`classify_possessive_referent`) picks the
+    // ObjectScope per the prefix's grammatical role:
+    //   - participle adjective + type ("the sacrificed creature's power",
+    //     "the destroyed creature's power", "the revealed card's mana value")
+    //     → `CostPaidObject` (CR 608.2k cost / trigger-condition referent).
+    //   - bare anaphoric ("that card's mana value", "that creature's power",
+    //     "that spell's mana value", "the creature's toughness") → `Anaphoric`
+    //     (CR 608.2c earlier-instruction referent — Yuriko / Dark Confidant
+    //     issue #511 class).
+    // The participle form is NEVER rewritten by the subject-injection /
+    // "itself" remaps — unlike the bare anaphoric "its" arms above, which emit
+    // `Anaphoric` precisely so they can be remapped.
     if let Some((prefix, suffix)) = lower.split_once("'s ") {
         let suffix = suffix.trim();
-        // CR 608.2k: the trailing property word maps to the cost-paid /
-        // trigger-referenced object's characteristic. Nom `alt` over the
-        // property keywords (longest-match first for "mana value" variants).
-        let qty = alt((
-            value(
-                QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::CostPaidObject,
-                },
-                alt((
-                    tag::<_, _, OracleError<'_>>("mana value"),
-                    tag("converted mana cost"),
-                )),
-            ),
-            value(
-                QuantityRef::Power {
-                    scope: ObjectScope::CostPaidObject,
-                },
-                tag("power"),
-            ),
-            value(
-                QuantityRef::Toughness {
-                    scope: ObjectScope::CostPaidObject,
-                },
-                tag("toughness"),
-            ),
-        ))
-        .parse(suffix)
-        .ok()
-        .filter(|(rest, _): &(&str, QuantityRef)| rest.is_empty())
-        .map(|(_, qty)| qty);
-        if let Some(qty) = qty {
-            let prefix = prefix.trim();
-            if is_event_context_referent(prefix) {
+        if let Some(scope) = classify_possessive_referent(prefix.trim()) {
+            // CR 608.2k / 608.2c: the trailing property word maps to the
+            // referenced object's characteristic. Nom `alt` over the property
+            // keywords (longest-match first for "mana value" variants).
+            let qty = alt((
+                value(
+                    QuantityRef::ObjectManaValue { scope },
+                    alt((
+                        tag::<_, _, OracleError<'_>>("mana value"),
+                        tag("converted mana cost"),
+                    )),
+                ),
+                value(QuantityRef::Power { scope }, tag("power")),
+                value(QuantityRef::Toughness { scope }, tag("toughness")),
+            ))
+            .parse(suffix)
+            .ok()
+            .filter(|(rest, _): &(&str, QuantityRef)| rest.is_empty())
+            .map(|(_, qty)| qty);
+            if let Some(qty) = qty {
                 return Some(QuantityExpr::Ref { qty });
             }
         }
@@ -713,46 +895,166 @@ fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
     .map(|(_, qty)| qty)
 }
 
-/// CR 603.7c: Check if a possessive prefix refers to the triggering event's source object.
-/// Matches event-context anaphoric referents like "the destroyed creature", "that spell", etc.
+/// CR 603.7c: Classify the prefix of a `"<referent>'s <property>"` possessive
+/// noun phrase and return the appropriate `ObjectScope` for the property's
+/// owning object — or `None` if the prefix is not a recognized referent.
 ///
-/// Note: `sacrificed`/`exiled`/`discarded` participle-possessives are deliberately
-/// NOT here — those refer to a *cost-paid object* (CR 608.2k), not an event-context
-/// source. Excluding them lets the possessive block fall through to
-/// `parse_quantity_ref` → `parse_cost_paid_object_ref`, which yields
-/// `Power { ObjectScope::CostPaidObject }` (Greater Good, issue #338).
-fn is_event_context_referent(prefix: &str) -> bool {
-    let event_adjectives = [
-        "destroyed",
-        "countered",
-        "returned",
-        "targeted",
-        "revealed",
-        "drawn",
-        "copied",
-    ];
-    if prefix.starts_with("that ") || prefix.starts_with("the ") {
-        let rest = prefix.split_once(' ').map_or("", |x| x.1);
-        // "the sacrificed creature", "the exiled card" — [adjective] [type]
-        if event_adjectives.iter().any(|adj| rest.starts_with(adj)) {
-            return true;
-        }
-        // "that creature", "that spell", "the creature" — bare anaphoric
-        let bare_types = [
-            "creature",
-            "spell",
-            "card",
-            "permanent",
-            "artifact",
-            "enchantment",
-            "planeswalker",
-            "land",
-        ];
-        if bare_types.contains(&rest) {
-            return true;
-        }
+/// Two distinct classes share the same possessive grammar but differ in the CR
+/// rule that licenses the reference and therefore in the runtime fallback order
+/// (`game/quantity.rs`):
+///
+/// - **Participle adjective + type** ("the sacrificed creature", "the exiled
+///   card", "the revealed creature") → [`ObjectScope::CostPaidObject`].
+///   CR 608.2k authorizes references to "a specific untargeted object that has
+///   been previously referred to by [the] ability's cost or trigger
+///   condition." The participle names which earlier event introduced the
+///   referent (sacrificed = cost, destroyed = trigger condition, etc.), so
+///   slot 1 (`cost_paid_object`) is the canonical first slot, with the trigger
+///   source and `effect_context_object` as later fallbacks. Greater Good
+///   (issue #338) and the cost-referent class depend on this priority.
+///
+/// - **Bare anaphoric** ("that creature", "that card", "that spell", "the
+///   creature") → [`ObjectScope::Anaphoric`]. CR 608.2c (the "follow
+///   instructions in the order written / apply the rules of English to the
+///   text" anaphora rule) makes the antecedent the *most recent earlier
+///   effect instruction* in the same ability. The runtime `Anaphoric` arm
+///   inverts the slot order accordingly: slot 1 is `effect_context_object`
+///   (the revealed / moved / effect-sacrificed object), then the trigger
+///   source (CR 608.2k trigger-condition referent), then `cost_paid_object`.
+///   This is the Yuriko, the Tiger's Shadow / Dark Confidant class
+///   (issue #511): a reveal earlier in the same ability binds "that card's"
+///   to the revealed card, not to the trigger source.
+///
+/// Picking the scope at parse time (rather than always emitting one or the
+/// other) lets the runtime consult the right slot priority for each
+/// grammatical form without per-card resolution rules.
+fn classify_possessive_referent(prefix: &str) -> Option<ObjectScope> {
+    // Consume the determiner ("that " or "the ") via nom `alt(tag(...))`.
+    // Anything that doesn't begin with one of these determiners is not an
+    // anaphoric possessive — return None.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that "),
+        tag::<_, _, OracleError<'_>>("the "),
+    ))
+    .parse(prefix)
+    .ok()?;
+
+    // CR 608.2k: a participle-possessive adjective ("the destroyed creature",
+    // "the revealed card") binds the referent to the cost-paid /
+    // trigger-condition object. Each adjective names an earlier cost
+    // (sacrifice/exile/discard) or trigger-condition (destroy, counter,
+    // return, target, reveal, draw, copy) event in the same ability. The
+    // adjective MUST be followed by a full object type phrase — otherwise
+    // `"the targeted player"` would match the `targeted` participle even
+    // though CR 608.2k object references do not apply to players.
+    if all_consuming((
+        parse_possessive_participle,
+        tag(" "),
+        parse_possessive_object_type,
+    ))
+    .parse(rest)
+    .is_ok()
+    {
+        return Some(ObjectScope::CostPaidObject);
     }
-    false
+
+    // CR 608.2c: bare anaphoric — "that <type>" / "the <type>" with no
+    // participle adjective in between. The type word must be the entire
+    // remainder (no trailing modifiers), which `all_consuming` enforces.
+    if nom::combinator::all_consuming(parse_possessive_object_type)
+        .parse(rest)
+        .is_ok()
+    {
+        return Some(ObjectScope::Anaphoric);
+    }
+
+    None
+}
+
+/// CR 608.2k: Recognize a participle adjective that names an earlier cost or
+/// trigger-condition event in the same ability. The participle binds the
+/// possessive referent to the cost-paid / event-condition object:
+///
+/// - cost participles: `sacrificed`, `exiled`, `discarded`, `milled`, `targeted`
+/// - trigger-condition participles: `destroyed`, `countered`, `returned`,
+///   `revealed`, `drawn`, `copied`, `discovered`
+///
+/// The combinator only consumes the participle word; callers MUST follow with
+/// a whitespace boundary + an object type (via [`parse_possessive_object_type`])
+/// to avoid matching prefixes like `"targeter"` or `"revealed cards face down"`.
+fn parse_possessive_participle(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            // alt() has an arity limit; group cost vs. trigger-condition forms.
+            alt((
+                tag("sacrificed"),
+                tag("exiled"),
+                tag("discarded"),
+                tag("milled"),
+                tag("targeted"),
+            )),
+            alt((
+                tag("destroyed"),
+                tag("countered"),
+                tag("returned"),
+                tag("revealed"),
+                tag("drawn"),
+                tag("copied"),
+                tag("discovered"),
+            )),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 603.7c / CR 205: Recognize the object-type phrase that follows the
+/// determiner (and optional participle) in a possessive prefix.
+///
+/// Decomposes as `opt(supertype) + type_word`, reusing the shared
+/// `oracle_nom::target::parse_supertype_prefix` building block (CR 205.4a
+/// supertypes) for the optional adjective. This covers both bare single-word
+/// forms (`"creature"`, `"artifact"`, `"permanent"`) and composed forms
+/// (`"legendary creature"`, `"snow land"`, `"basic land"`) without
+/// enumerating verbatim multi-word strings.
+///
+/// The bare type word is a *singular* card type or the `token` referent:
+///
+/// - Card types per CR 205.2/205.3: `creature`, `artifact`, `enchantment`,
+///   `card`, `spell`, `permanent`, `planeswalker`, `land`, `battle`,
+///   `instant`, `sorcery`.
+/// - Token referent per CR 109.1 / CR 110.5: a non-card object that can still
+///   anchor a possessive reference. Not a CR 205 type, so listed explicitly.
+///
+/// Plural forms (`creatures'`) are rejected — Oracle text possessives are
+/// always singular (`the sacrificed creature's`). Plurals also cannot reach
+/// this combinator through `parse_event_context_quantity` because the caller
+/// splits on `"'s "` (apostrophe + s + space), and `creatures' power` has
+/// `s' ` (no `'s ` substring) — but listing only singular forms here pins the
+/// invariant at the parser layer, not the caller.
+fn parse_possessive_object_type(input: &str) -> OracleResult<'_, ()> {
+    // Optional supertype prefix consumes a trailing space.
+    let (rest, _) = opt(nom_target::parse_supertype_prefix).parse(input)?;
+    // Singular object-type words. Order matters where one is a prefix of
+    // another: none of these share a prefix, so any order works.
+    value(
+        (),
+        alt((
+            tag("creature"),
+            tag("artifact"),
+            tag("enchantment"),
+            tag("planeswalker"),
+            tag("permanent"),
+            tag("battle"),
+            tag("instant"),
+            tag("sorcery"),
+            tag("land"),
+            tag("spell"),
+            tag("card"),
+            tag("token"),
+        )),
+    )
+    .parse(rest)
 }
 
 /// CR 400.7 + CR 608.2c: Match "<noun> exiled from <possessive> hand this way"
@@ -773,7 +1075,7 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
     })
 }
 
-/// CR 609.3 + CR 122.1: Detect "counter[s] removed this way" — the for-each
+/// CR 608.2c + CR 122.1: Detect "counter[s] removed this way" — the for-each
 /// quantifier shape produced by cards that drain self-counters and reference
 /// the count in a downstream effect (Coalition Relic, Storage Counter cycle).
 ///
@@ -1028,7 +1330,7 @@ fn parse_for_each_clause_with_they_controller(
                 });
             }
         }
-        // CR 609.3 + CR 122.1: "[counter-type] counter[s] removed this way" — the
+        // CR 608.2c + CR 122.1: "[counter-type] counter[s] removed this way" — the
         // numeric amount of counters removed by the preceding `Effect::RemoveCounter`
         // in the sub-ability chain. The parent-effect-aware scan in
         // `effects/mod.rs` reads `GameEvent::CounterRemoved` for RemoveCounter
@@ -1063,6 +1365,16 @@ fn parse_for_each_clause_with_they_controller(
     if clause.contains("opponent") && clause.contains("gained life") {
         return Some(QuantityRef::PlayerCount {
             filter: PlayerFilter::OpponentGainedLife,
+        });
+    }
+
+    // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
+    // / "opponent who was dealt combat damage this turn". Mirrors the
+    // lost-life / gained-life arms above, but consumes the full clause instead
+    // of doing substring dispatch.
+    if parse_opponent_dealt_combat_damage_clause(clause).is_ok() {
+        return Some(QuantityRef::PlayerCount {
+            filter: PlayerFilter::OpponentDealtCombatDamage,
         });
     }
 
@@ -1232,7 +1544,7 @@ fn parse_for_each_clause_with_they_controller(
     None
 }
 
-/// CR 608.2c + CR 609.3: Parse the object set named by a "for each [object]"
+/// CR 608.2c: Parse the object set named by a "for each [object]"
 /// clause when the following instruction acts on each object itself rather than
 /// only needing the count. This preserves object identity for patterns such as
 /// "for each token you control that entered this turn, create a token that's a
@@ -1428,6 +1740,40 @@ mod tests {
     }
 
     #[test]
+    fn quantity_ref_all_counters_on_normalized_self() {
+        for phrase in [
+            "the number of counters on ~",
+            "the number of counters on it",
+        ] {
+            let qty = parse_quantity_ref(phrase).unwrap();
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: None,
+                } => {}
+                other => panic!("Expected CountersOn{{Source, any}} for {phrase}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn quantity_ref_all_counters_on_that_object() {
+        for phrase in [
+            "the number of counters on that creature",
+            "the number of counters on that permanent",
+        ] {
+            let qty = parse_quantity_ref(phrase).unwrap();
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Target,
+                    counter_type: None,
+                } => {}
+                other => panic!("Expected CountersOn{{Target, any}} for {phrase}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn for_each_singular_counter_on_self() {
         // Singular "counter on ~" (not "counters on ~")
         let qty = parse_for_each_clause("blight counter on it").unwrap();
@@ -1470,7 +1816,7 @@ mod tests {
         assert_eq!(qty, QuantityRef::ExiledFromHandThisResolution);
     }
 
-    /// CR 609.3 + CR 122.1: "[type] counter[s] removed this way" must dispatch
+    /// CR 608.2c + CR 122.1: "[type] counter[s] removed this way" must dispatch
     /// to `PreviousEffectAmount` so the resolver picks up the actual count of
     /// counters removed by the parent `Effect::RemoveCounter`. Coalition Relic
     /// and the Storage Counter cycle depend on this dispatch — without it, the
@@ -1503,6 +1849,30 @@ mod tests {
         // counter type. Must produce the same dispatch.
         let qty = parse_for_each_clause("storage counter removed this way").unwrap();
         assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn quantity_ref_number_of_counters_removed_this_way_is_previous_effect_amount() {
+        let qty = parse_quantity_ref("the number of study counters removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_opponent_dealt_combat_damage_is_player_count() {
+        for phrase in [
+            "opponent that was dealt combat damage this turn",
+            "opponent who was dealt combat damage this turn",
+            "opponents that were dealt combat damage this turn",
+            "opponents who were dealt combat damage",
+        ] {
+            assert_eq!(
+                parse_for_each_clause(phrase),
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                }),
+                "phrase {phrase:?} must consume as OpponentDealtCombatDamage"
+            );
+        }
     }
 
     #[test]
@@ -1577,6 +1947,16 @@ mod tests {
         assert!(
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
+        );
+    }
+
+    #[test]
+    fn parse_quantity_ref_that_creature_card_toughness() {
+        assert_eq!(
+            parse_quantity_ref("that creature card's toughness"),
+            Some(QuantityRef::Toughness {
+                scope: ObjectScope::Target
+            })
         );
     }
 
@@ -1689,6 +2069,105 @@ mod tests {
                 }
             }
         ));
+    }
+
+    /// CR 120.1 + CR 510.1: Tymna the Weaver — "the number of opponents that
+    /// were dealt combat damage this turn" must route to the dedicated
+    /// `PlayerCount { OpponentDealtCombatDamage }` and NOT fall through into
+    /// the generic type-phrase fallback that produces an empty `ObjectCount`
+    /// (the latter matched every battlefield object and drained the deck).
+    #[test]
+    fn cda_quantity_opponents_dealt_combat_damage() {
+        let qty =
+            parse_cda_quantity("the number of opponents that were dealt combat damage this turn")
+                .unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                }
+            }
+        );
+    }
+
+    /// Symmetric singular form ("opponent that was dealt combat damage this
+    /// turn") must hit the same `PlayerFilter::OpponentDealtCombatDamage` arm.
+    #[test]
+    fn cda_quantity_opponent_singular_dealt_combat_damage() {
+        let qty =
+            parse_cda_quantity("the number of opponent that was dealt combat damage this turn")
+                .unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                }
+            }
+        );
+    }
+
+    /// CR 120.1 + CR 510.1: Upstream `strip_trailing_duration` removes the
+    /// "this turn" suffix before the draw-count parser path reaches
+    /// `parse_quantity_ref`. The phrase must still resolve to
+    /// `PlayerFilter::OpponentDealtCombatDamage` without the suffix —
+    /// otherwise cards like Moonshae Pixie ("draw cards equal to the number
+    /// of opponents who were dealt combat damage this turn") regress to
+    /// `Effect::Unimplemented`. The "this turn" tail is informational at
+    /// this layer: `PlayerCount{OpponentDealtCombatDamage}` already queries
+    /// `state.damage_dealt_this_turn`.
+    #[test]
+    fn cda_quantity_opponents_dealt_combat_damage_strip_suffix() {
+        for phrase in [
+            "the number of opponents who were dealt combat damage",
+            "the number of opponents that were dealt combat damage",
+            "the number of opponent who was dealt combat damage",
+            "the number of opponent that was dealt combat damage",
+        ] {
+            let qty = parse_cda_quantity(phrase)
+                .unwrap_or_else(|| panic!("phrase {phrase:?} must parse to PlayerCount"));
+            assert_eq!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::OpponentDealtCombatDamage,
+                    }
+                },
+                "phrase {phrase:?} must route to OpponentDealtCombatDamage",
+            );
+        }
+    }
+
+    /// CR 109.1: Defense-in-depth — when `parse_type_phrase` returns an
+    /// empty-shaped `Typed` filter (no type words, no controller, no
+    /// properties), `parse_quantity_ref` must decline rather than emit an
+    /// `ObjectCount` that would match every battlefield permanent.
+    ///
+    /// The exact text exercised here ("opponents that were dealt combat
+    /// damage this turn", without the `the number of` prefix) is the
+    /// substring that flows into `parse_type_phrase` for Tymna's body. If
+    /// `parse_quantity_ref` is ever called on it directly (e.g. by a future
+    /// quantity context that didn't bind the `PlayerCount` arm), the
+    /// empty-Typed guard ensures it declines rather than returning an
+    /// `ObjectCount` against an empty filter.
+    #[test]
+    fn parse_quantity_ref_empty_typed_filter_falls_through() {
+        // Strip "the number of " then exercise the empty-Typed guard via a
+        // remainder that produces a Typed filter with no type predicates.
+        let result = parse_quantity_ref("the number of  ");
+        assert!(
+            !matches!(
+                result,
+                Some(QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(ref typed),
+                }) if typed.type_filters.is_empty()
+                    && typed.controller.is_none()
+                    && typed.properties.is_empty(),
+            ),
+            "empty Typed filter must not produce ObjectCount, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1904,6 +2383,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_event_context_quantity_previous_effect_this_way_variants() {
+        for phrase in [
+            "the life lost this way",
+            "the amount of life paid this way",
+            "the damage dealt this way",
+            "the amount of excess damage dealt this way",
+            "opponents dealt damage this way",
+            "the number of stun counters removed this way",
+        ] {
+            assert_eq!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                }),
+                "phrase {phrase:?} must map to PreviousEffectAmount"
+            );
+        }
+    }
+
     /// CR 614.1a: "that much life plus N" — Heron of Hope / Angel of Vitality /
     /// Leyline of Hope class. Issue #317 follow-up: parser must emit the typed
     /// `Offset { inner: EventContextAmount, offset: N }` shape the runtime now
@@ -2007,13 +2506,71 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: bare anaphoric "that spell" inside a triggered ability or
+    /// delayed-trigger continuation is an instruction-order referent — it
+    /// points at the spell introduced by an earlier instruction in the same
+    /// ability (typically a counter / copy / reveal), not at the cost-paid
+    /// object. Slot priority differs from `CostPaidObject`
+    /// (effect_context_object first vs. cost_paid_object first); see
+    /// `classify_possessive_referent` and `resolve_object_mana_value`'s
+    /// `Anaphoric` arm. Mana Drain is the canonical delayed-trigger member of
+    /// this class — `snapshot_quantity_ref`
+    /// (`game/effects/delayed_trigger.rs`) bakes the resolved value into
+    /// `Fixed` at delayed-trigger creation time using the parent's target
+    /// snapshot, so slot priority at firing time is irrelevant for that card.
     #[test]
     fn parse_event_context_quantity_spell_mana_value() {
         assert_eq!(
             parse_event_context_quantity("that spell's mana value"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::CostPaidObject
+                    scope: ObjectScope::Anaphoric
+                }
+            })
+        );
+    }
+
+    /// CR 608.2c — Yuriko, the Tiger's Shadow / Dark Confidant class
+    /// (issue #511). A reveal in an earlier instruction binds "that card's
+    /// mana value" to the revealed card. The bare anaphoric prefix "that
+    /// card" must select `ObjectScope::Anaphoric` so the runtime resolver
+    /// reads `effect_context_object` (the revealed card) before the trigger
+    /// source (the Ninja that dealt combat damage).
+    #[test]
+    fn parse_event_context_possessive_that_card_mana_value_anaphoric() {
+        assert_eq!(
+            parse_event_context_quantity("that card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Anaphoric
+                }
+            })
+        );
+    }
+
+    /// CR 608.2c — bare anaphoric "that permanent" inside a triggered ability
+    /// is an instruction-order referent like "that card" / "that creature".
+    #[test]
+    fn parse_event_context_possessive_that_permanent_power_anaphoric() {
+        assert_eq!(
+            parse_event_context_quantity("that permanent's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Anaphoric
+                }
+            })
+        );
+    }
+
+    /// CR 608.2c — battles are objects and can be referenced by bare
+    /// anaphoric possessives the same way cards, permanents, and spells are.
+    #[test]
+    fn parse_event_context_possessive_that_battle_mana_value_anaphoric() {
+        assert_eq!(
+            parse_event_context_quantity("that battle's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Anaphoric
                 }
             })
         );
@@ -2023,6 +2580,41 @@ mod tests {
     fn parse_event_context_quantity_unrecognized_returns_none() {
         assert_eq!(
             parse_event_context_quantity("the number of creatures you control"),
+            None
+        );
+    }
+
+    /// Negative guard for `classify_possessive_referent`'s `bare_types`
+    /// allowlist — an unknown type word ("wizard") must NOT silently classify
+    /// as anaphoric just because it follows a `"that "` / `"the "` determiner.
+    /// Pairs with the positive `parse_event_context_possessive_that_card_*`
+    /// tests to lock both sides of the classifier.
+    #[test]
+    fn parse_event_context_possessive_unknown_type_returns_none() {
+        assert_eq!(
+            parse_event_context_quantity("that wizard's mana value"),
+            None
+        );
+        assert_eq!(parse_event_context_quantity("the wizard's power"), None);
+    }
+
+    /// Negative guard for the participle word-boundary fix: a prefix like
+    /// `"the targeted player"` must NOT classify as `CostPaidObject` just
+    /// because it begins with `"targeted"`. CR 608.2k only references
+    /// objects, not players, so a player-possessive must be rejected here
+    /// and fall through to `parse_quantity_ref` (or remain unmatched).
+    /// Without the trailing-space guard in `classify_possessive_referent`,
+    /// `tag("targeted")` would match `"targeted player"` and silently emit
+    /// `Power { CostPaidObject }` for any combination of (participle root
+    /// prefix) + (non-type-word suffix) — a regression vector that the old
+    /// `starts_with(adj)` shape also shared.
+    #[test]
+    fn parse_event_context_possessive_participle_requires_word_boundary() {
+        // Concocted to flex the word-boundary guard — the bare phrase has no
+        // existing card today, but the failure mode it prevents is real.
+        assert_eq!(parse_event_context_quantity("the targeter's power"), None);
+        assert_eq!(
+            parse_event_context_quantity("the targeted player's power"),
             None
         );
     }
@@ -2051,11 +2643,14 @@ mod tests {
         );
     }
 
-    // Issue #338: `sacrificed`/`exiled`/`discarded` participle-possessives are
-    // cost-paid-object referents (CR 608.2k), not event-context referents.
-    // They must fall through `parse_event_context_quantity`'s possessive block
-    // to the `parse_quantity_ref` → `parse_cost_paid_object_ref` fallback,
-    // yielding `ObjectScope::CostPaidObject`-scoped refs.
+    // CR 608.2k — Greater Good / issue #338: `sacrificed`/`exiled`/`discarded`
+    // and the other participle-possessive prefixes (`destroyed`, `countered`,
+    // `returned`, `targeted`, `revealed`, `drawn`, `copied`) are positively
+    // classified as `ObjectScope::CostPaidObject` by
+    // `classify_possessive_referent`. They are siblings to the
+    // bare-anaphoric / `Anaphoric` tests above (`that card's mana value`,
+    // `that creature's toughness`) and together pin both halves of the
+    // possessive classifier.
     #[test]
     fn parse_event_context_possessive_sacrificed_creature_power() {
         assert_eq!(
@@ -2080,13 +2675,22 @@ mod tests {
         );
     }
 
+    /// CR 608.2c — "that creature" is a bare anaphoric pronoun: it points at
+    /// the most recent earlier-instruction object (a revealed / sacrificed-by-
+    /// effect / moved permanent), so the parser emits
+    /// `ObjectScope::Anaphoric`. The runtime resolver consults
+    /// `effect_context_object` first, then the trigger source, then
+    /// `cost_paid_object` — the inverse of `CostPaidObject`'s slot order.
+    /// Participle-possessive forms (`the sacrificed creature's toughness`,
+    /// `the destroyed creature's power`) continue to map to `CostPaidObject`
+    /// — see the sibling regression tests below.
     #[test]
-    fn parse_event_context_possessive_that_creature_toughness() {
+    fn parse_event_context_possessive_that_creature_toughness_anaphoric() {
         assert_eq!(
             parse_event_context_quantity("that creature's toughness"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::Toughness {
-                    scope: ObjectScope::CostPaidObject
+                    scope: ObjectScope::Anaphoric
                 }
             })
         );
@@ -2142,6 +2746,132 @@ mod tests {
         // Player possessives are not event context
         assert_eq!(
             parse_event_context_quantity("each opponent's life total"),
+            None
+        );
+    }
+
+    /// CR 608.2k — `milled` is a participle-possessive cost referent
+    /// (Patchwork Automaton, Demilich, Court of Cunning class). The mill
+    /// resolves to an event-context object whose mana value is then queried.
+    #[test]
+    fn parse_event_context_possessive_milled_card_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the milled card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// CR 608.2k — `discovered` is a participle-possessive trigger-condition
+    /// referent (LCI mechanic). The discovered card's mana value is queried
+    /// in the same instruction that introduced it.
+    #[test]
+    fn parse_event_context_possessive_discovered_card_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the discovered card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// CR 608.2k — sacrificed-`artifact` and sacrificed-`enchantment`
+    /// participle-possessives (Krark-Clan Ironworks family, Goblin Welder
+    /// adjacent). Locks the type-word axis: any single-word card type
+    /// (`creature`/`artifact`/`enchantment`/`card`/`spell`/`permanent`/
+    /// `land`/`battle`/`planeswalker`) must classify as `CostPaidObject` when
+    /// preceded by a participle, not just `creature`.
+    #[test]
+    fn parse_event_context_possessive_sacrificed_artifact_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed artifact's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_sacrificed_enchantment_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed enchantment's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// CR 608.2k + CR 205.4a — supertype composition: the participle prefix is
+    /// `participle + opt(supertype) + type_word`. Real Oracle text does not
+    /// presently use forms like `"the sacrificed legendary creature's power"`,
+    /// but the grammar accepts it via decomposition from
+    /// `parse_supertype_prefix` + `parse_type_filter_word`. This test pins the
+    /// composition contract so future printings of multi-word possessives are
+    /// covered the moment they ship.
+    #[test]
+    fn parse_event_context_possessive_legendary_creature_supertype_composition() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed legendary creature's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// CR 109.1 / CR 110.5 — tokens are objects and can anchor possessive
+    /// references. The `token` referent is accepted explicitly (it is not a
+    /// CR 205 card type so `parse_type_filter_word` would not match it).
+    #[test]
+    fn parse_event_context_possessive_sacrificed_token_power() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed token's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// Negative guard — a player-possessive prefix (one that does not begin
+    /// with the `"that "` / `"the "` determiner) must NOT be classified as
+    /// either `CostPaidObject` or `Anaphoric`. The determiner gate in
+    /// `classify_possessive_referent` is the load-bearing rejection: without
+    /// it, `"an opponent's"` would split to prefix `"an opponent"` and
+    /// silently fall through to the player-possessive parser. Locking this
+    /// behavior at the classifier boundary prevents future regressions if the
+    /// determiner alt is ever loosened.
+    #[test]
+    fn parse_event_context_possessive_rejects_an_opponent_prefix() {
+        assert_eq!(
+            parse_event_context_quantity("an opponent's life total"),
+            None
+        );
+    }
+
+    /// Negative guard — plural possessive (`creatures'`) is ungrammatical in
+    /// Oracle text. `parse_type_filter_word` accepts plural forms for the
+    /// targeting branch, but the possessive object-type combinator must
+    /// reject them so `"the sacrificed creatures' power"` does NOT classify.
+    #[test]
+    fn parse_event_context_possessive_rejects_plural_type() {
+        // Real possessives are always singular. Split happens on "'s ", so a
+        // plural-with-apostrophe form like `creatures'` won't even reach
+        // `classify_possessive_referent` — this test belt-and-suspenders the
+        // singular-only contract via the trailing-'s' guard.
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed creatures' power"),
             None
         );
     }
@@ -2388,6 +3118,35 @@ mod tests {
                 assert_eq!(scope, CountScope::Controller);
             }
             other => panic!("Expected ZoneCardCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cda_owned_instant_and_sorcery_exile_plus_graveyard_count() {
+        let result = parse_cda_quantity(
+            "the total number of instant and sorcery cards you own in exile and in your graveyard",
+        );
+        let Some(QuantityExpr::Sum { exprs }) = result else {
+            panic!("expected summed zone counts, got {result:?}");
+        };
+        assert_eq!(exprs.len(), 2);
+        for (expr, expected_zone) in [(&exprs[0], ZoneRef::Exile), (&exprs[1], ZoneRef::Graveyard)]
+        {
+            match expr {
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            zone,
+                            card_types,
+                            scope,
+                        },
+                } => {
+                    assert_eq!(*zone, expected_zone);
+                    assert_eq!(card_types, &vec![TypeFilter::Instant, TypeFilter::Sorcery]);
+                    assert_eq!(*scope, CountScope::Owner);
+                }
+                other => panic!("expected ZoneCardCount segment, got {other:?}"),
+            }
         }
     }
 
@@ -2696,6 +3455,23 @@ mod tests {
         // no partial-credit Sum that would silently undercount.
         let result = parse_for_each_clause_expr("card in your hand and each blorgon you control");
         assert_eq!(result, None);
+    }
+
+    /// CR 701.17a + CR 701.17c + CR 400.7j: "the milled card's mana value"
+    /// resolves to `ObjectManaValue { CostPaidObject }` via the existing
+    /// previously-referenced-object quantity path.
+    /// Heed the Mists: "draw cards equal to the milled card's mana value."
+    #[test]
+    fn event_context_milled_card_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the milled card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+            "milled card's mana value must resolve to ObjectManaValue{{CostPaidObject}}"
+        );
     }
 
     /// CR 119.3 + CR 700.1: "for each of your opponents who lost life this

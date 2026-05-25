@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -52,6 +53,7 @@ const HOVER_CLOSE_DELAY_MS = 80;
  * DialogHost.tsx:113-122 for the contract.
  */
 export function EnchantmentsBadge({ playerId }: Props) {
+  const { t } = useTranslation("game");
   const auraIds = useGameStore(
     (s) => s.gameState?.derived?.auras_attached_to_player?.[String(playerId)] ?? STABLE_EMPTY,
   );
@@ -88,12 +90,8 @@ export function EnchantmentsBadge({ playerId }: Props) {
   if (auraIds.length === 0) return null;
 
   const count = auraIds.length;
-  const ariaLabel =
-    count === 1 ? "1 enchantment on this player" : `${count} enchantments on this player`;
-  const tooltip =
-    count === 1
-      ? "Hover to preview, click to view"
-      : `${count} enchantments — hover to preview, click to view`;
+  const ariaLabel = t("enchantmentsBadge.ariaLabel", { count });
+  const tooltip = t("enchantmentsBadge.tooltip", { count });
 
   return (
     <>

@@ -1,5 +1,6 @@
 import { motion, useMotionValue, useTransform, animate } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { CARD_SLAM_FLIGHT_MS } from "../../animation/types.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
@@ -13,6 +14,7 @@ interface LifeTotalProps {
 }
 
 export function LifeTotal({ playerId, size = "default", hideLabel = false }: LifeTotalProps) {
+  const { t } = useTranslation("game");
   const life = useGameStore(
     (s) => s.gameState?.players[playerId]?.life ?? 20,
   );
@@ -107,7 +109,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
 
   return (
     <div className="flex items-baseline gap-2">
-      {!hideLabel && <span className="text-xs text-slate-400">P{playerId + 1}</span>}
+      {!hideLabel && <span className="text-xs text-slate-400">{t("lifeTotal.playerLabel", { seat: playerId + 1 })}</span>}
       <motion.span
         key={life}
         initial={{ scale: 1.3 }}

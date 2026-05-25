@@ -30,7 +30,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .flat_map(|opp| filtered.players[opp.0 as usize].hand.iter().copied())
         .collect();
     for obj_id in opp_hand_ids {
-        if !state.revealed_cards.contains(&obj_id) {
+        if !is_visible_revealed_card(state, obj_id) {
             hide_card(&mut filtered, obj_id);
         }
     }
@@ -114,17 +114,24 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
-    let hidden_foretold_exile_ids: Vec<ObjectId> = filtered
+    // CR 406.3: A card exiled face down can't be examined by any player
+    // except when an instruction allows it. Foretell is the only modeled
+    // face-down-exile look permission today; other face-down exile classes
+    // (Necropotence / Asmodeus by default, Bomat-style look permissions until
+    // their static is modeled) fail closed and redact the card for every
+    // viewer.
+    let hidden_facedown_exile_ids: Vec<ObjectId> = filtered
         .exile
         .iter()
         .copied()
         .filter(|obj_id| {
             state.objects.get(obj_id).is_some_and(|obj| {
-                obj.foretold && obj.face_down && !can_view_private_for_player(obj.owner)
+                let viewer_can_examine = obj.foretold && can_view_private_for_player(obj.owner);
+                obj.face_down && !viewer_can_examine
             })
         })
         .collect();
-    for obj_id in hidden_foretold_exile_ids {
+    for obj_id in hidden_facedown_exile_ids {
         hide_card(&mut filtered, obj_id);
     }
 
@@ -139,6 +146,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::DigChoice {
         player,
+        library_owner,
         ref cards,
         keep_count,
         up_to,
@@ -151,6 +159,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::DigChoice {
                 player,
+                library_owner,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 keep_count,
                 up_to,
@@ -182,6 +191,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         reveal,
         up_to,
         ref constraint,
+        ref split,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -192,6 +202,32 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 reveal,
                 up_to,
                 constraint: constraint.clone(),
+                split: split.clone(),
+            };
+        }
+    }
+
+    // CR 701.23a: The cultivate-class partition pick exposes the found set only
+    // to the searcher; opponents see opaque ids (mirrors SearchChoice above).
+    if let WaitingFor::SearchPartitionChoice {
+        player,
+        ref cards,
+        primary_destination,
+        primary_count,
+        primary_enter_tapped,
+        rest_destination,
+        source_id,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::SearchPartitionChoice {
+                player,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                primary_destination,
+                primary_count,
+                primary_enter_tapped,
+                rest_destination,
+                source_id,
             };
         }
     }
@@ -396,6 +432,13 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
 }
 
+fn is_visible_revealed_card(state: &GameState, obj_id: ObjectId) -> bool {
+    state.revealed_cards.contains(&obj_id)
+        || state.objects.get(&obj_id).is_some_and(|obj| {
+            state.public_revealed_cards.contains(&obj_id) && obj.zone != Zone::Library
+        })
+}
+
 fn hide_card(state: &mut GameState, obj_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         obj.face_down = true;
@@ -412,6 +455,10 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.replacement_definitions.clear();
         obj.static_definitions.clear();
         obj.casting_permissions.clear();
+        obj.printed_ref = None;
+        obj.base_printed_ref = None;
+        obj.token_image_ref = None;
+        obj.source_related_token_ids.clear();
         obj.foretold = false;
     }
 }
@@ -493,6 +540,35 @@ mod tests {
     }
 
     #[test]
+    fn hidden_cards_redact_source_token_metadata() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Token Source".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&card_id).unwrap();
+            obj.source_related_token_ids = vec!["secret-token-id".to_string()];
+            obj.token_image_ref = Some(crate::types::card::TokenImageRef {
+                scryfall_id: "secret-scryfall-id".to_string(),
+                scryfall_oracle_id: Some("secret-oracle-id".to_string()),
+                face_name: None,
+                preset_id: "secret-preset-id".to_string(),
+            });
+        }
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        let hidden = filtered.objects.get(&card_id).unwrap();
+
+        assert_eq!(hidden.name, "Hidden Card");
+        assert!(hidden.source_related_token_ids.is_empty());
+        assert!(hidden.token_image_ref.is_none());
+    }
+
+    #[test]
     fn search_choice_is_visible_to_turn_controller() {
         let mut state = GameState::new_two_player(42);
         let card_id = create_object(
@@ -511,6 +587,7 @@ mod tests {
             reveal: false,
             up_to: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
@@ -522,6 +599,46 @@ mod tests {
         assert_eq!(
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Tutor Target")
+        );
+    }
+
+    #[test]
+    fn public_reveal_memory_keeps_opponent_hand_card_visible() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Known Hand Card".to_string(),
+            Zone::Hand,
+        );
+        state.public_revealed_cards.insert(card_id);
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(
+            filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
+            Some("Known Hand Card")
+        );
+    }
+
+    #[test]
+    fn public_reveal_memory_does_not_expose_library_order() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Known Library Card".to_string(),
+            Zone::Library,
+        );
+        state.public_revealed_cards.insert(card_id);
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(
+            filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
+            Some("Hidden Card")
         );
     }
 
@@ -577,6 +694,7 @@ mod tests {
             reveal: false,
             up_to: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(2));
@@ -1009,5 +1127,28 @@ mod tests {
         assert!(!opponent_obj.foretold);
         assert!(opponent_obj.face_down);
         assert!(opponent_obj.casting_permissions.is_empty());
+    }
+
+    #[test]
+    fn generic_face_down_exile_card_identity_hidden_from_everyone() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Necropotence Exile".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&card_id).unwrap().face_down = true;
+
+        let owner_view = filter_state_for_viewer(&state, PlayerId(0));
+        let owner_obj = owner_view.objects.get(&card_id).unwrap();
+        assert_eq!(owner_obj.name, "Hidden Card");
+        assert!(owner_obj.face_down);
+
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+        let opponent_obj = opponent_view.objects.get(&card_id).unwrap();
+        assert_eq!(opponent_obj.name, "Hidden Card");
+        assert!(opponent_obj.face_down);
     }
 }

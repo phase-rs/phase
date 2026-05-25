@@ -231,6 +231,7 @@ fn redundancy_delta(
         | Effect::GainControl { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }
@@ -310,12 +311,14 @@ fn redundancy_delta(
         | Effect::PutOnTopOrBottom { .. }
         | Effect::GiftDelivery { .. }
         | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
         | Effect::Detain { .. }
         | Effect::ExchangeControl { .. }
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
         | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
@@ -372,6 +375,12 @@ fn redundancy_delta(
         // target later triggers the replacement event — no static redundancy
         // signal available.
         | Effect::AddTargetReplacement { .. }
+        // CR 614.1 + CR 615: CreateDamageReplacement installs a one-shot
+        // damage "shield" (modify/prevent/redirect the next matching damage
+        // event this turn). Its value depends on whether that damage event
+        // later occurs — no static redundancy signal, same as the target
+        // replacement above.
+        | Effect::CreateDamageReplacement { .. }
         | Effect::ProcessRadCounters => None,
     }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import type { Toast } from "../../stores/multiplayerStore";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
@@ -85,6 +86,7 @@ function ToastBanner({
   onSettings,
   onDismiss,
 }: ToastBannerProps) {
+  const { t } = useTranslation("multiplayer");
   // Stack countdown toasts from the top and plain toasts from the bottom,
   // offsetting each by its index so multiple concurrent disconnects don't
   // overlap. 72px ≈ one toast row + breathing room.
@@ -112,7 +114,7 @@ function ToastBanner({
         <span
           aria-hidden="true"
           className="text-amber-400"
-          title="Opponent disconnected"
+          title={t("connectionToast.opponentDisconnected")}
         >
           !
         </span>
@@ -121,7 +123,9 @@ function ToastBanner({
         {toast.message}
         {toast.showCountdown && (
           <span className="ml-2 font-mono text-amber-200">
-            — {secondsRemaining(toast.expiresAt)}s to forfeit
+            {t("connectionToast.forfeitCountdown", {
+              seconds: secondsRemaining(toast.expiresAt),
+            })}
           </span>
         )}
       </span>
@@ -135,7 +139,7 @@ function ToastBanner({
               }}
               className="rounded bg-red-600/80 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-red-500"
             >
-              Retry
+              {t("connectionToast.retry")}
             </button>
           )}
           {onSettings && (
@@ -146,7 +150,7 @@ function ToastBanner({
               }}
               className="rounded bg-gray-700 px-2.5 py-1 text-xs font-semibold text-gray-300 transition hover:bg-gray-600"
             >
-              Settings
+              {t("connectionToast.settings")}
             </button>
           )}
         </div>

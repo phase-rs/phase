@@ -68,6 +68,12 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("AbilityDefinition", "activation_restrictions"),
         OrderingClass::SetEquivalent,
     ),
+    // Target constraints are independent legality predicates ANDed together.
+    // Reordering does not alter the target set accepted by validation.
+    (
+        ("AbilityDefinition", "target_constraints"),
+        OrderingClass::SetEquivalent,
+    ),
     // ----- TargetFilter -----
     // Or/And conjunctions are commutative (CR 700.2 / set semantics).
     // Keyed by both the enum name (for the manifest_coverage test) and
@@ -157,6 +163,16 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     // Parse warnings are diagnostic strings; not rules-meaningful.
     // Order is set-equivalent for diff purposes.
     (("CardFace", "parse_warnings"), OrderingClass::SetEquivalent),
+    // ----- CardMetadata -----
+    // Display/catalog identifiers generated from sets; only membership matters.
+    (
+        ("CardMetadata", "related_token_ids"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("CardMetadata", "source_printing_ids"),
+        OrderingClass::SetEquivalent,
+    ),
     // ----- ChooseFromZoneConstraint -----
     // Categories form a multiset of allowed types.
     (
@@ -190,9 +206,9 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         OrderingClass::SetEquivalent,
     ),
     (("ManaProduction", "options"), OrderingClass::SetEquivalent),
-    // ----- GameRestriction allowed_zones -----
+    // ----- ProhibitedActivity allowed_zones -----
     (
-        ("GameRestriction", "allowed_zones"),
+        ("ProhibitedActivity", "allowed_zones"),
         OrderingClass::SetEquivalent,
     ),
     // ----- FilterProp variants with embedded Vec<...> -----
@@ -332,6 +348,10 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     ),
     (
         ("SpellContext", "kickers_paid"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("SpellContext", "controller_controlled_as_cast"),
         OrderingClass::SetEquivalent,
     ),
     // ----- Trigger cause filters -----

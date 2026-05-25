@@ -10,7 +10,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::{Keyword, ProtectionTarget};
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::statics::{BlockExceptionKind, StaticMode};
@@ -240,6 +240,16 @@ pub fn place_attacking_alongside(
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;
 
+    // CR 508.1c: Attack restrictions make the declaration illegal if disobeyed.
+    if let Some(max) = max_attackers_each_combat(state) {
+        if attacker_ids.len() as u32 > max {
+            return Err(format!(
+                "No more than {} creature(s) can attack each combat",
+                max
+            ));
+        }
+    }
+
     for &id in attacker_ids {
         let obj = state
             .objects
@@ -309,6 +319,15 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
     }
 
     Ok(())
+}
+
+fn max_attackers_each_combat(state: &GameState) -> Option<u32> {
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(_, def)| match def.mode {
+            StaticMode::MaxAttackersEachCombat { max } => Some(max),
+            _ => None,
+        })
+        .min()
 }
 
 /// Iterate every battlefield `StaticDefinition` whose mode is a block-restriction
@@ -382,6 +401,26 @@ pub fn validate_blockers_for_player(
     player: PlayerId,
     assignments: &[(ObjectId, ObjectId)],
 ) -> Result<(), String> {
+    // CR 509.1b: Block restrictions make the declaration illegal if disobeyed.
+    if let Some(max) = max_blockers_each_combat(state) {
+        let already_declared = state
+            .combat
+            .as_ref()
+            .map(|combat| combat.blocker_to_attacker.keys().count())
+            .unwrap_or(0);
+        let newly_declared = assignments
+            .iter()
+            .map(|(blocker_id, _)| *blocker_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if (already_declared + newly_declared) as u32 > max {
+            return Err(format!(
+                "No more than {} creature(s) can block each combat",
+                max
+            ));
+        }
+    }
+
     // Detect duplicate (blocker, attacker) pairs — the Vec-based blocker_to_attacker
     // no longer prevents this implicitly like the old HashMap<ObjectId, ObjectId> did.
     {
@@ -519,43 +558,17 @@ pub fn validate_blockers_for_player(
             }
         }
 
-        // CR 702.16e: Protection — a creature with protection can't be blocked by
-        // creatures with the specified quality.
+        // CR 702.16f: Protection — an attacking creature with protection can't
+        // be blocked by creatures with the stated quality.
         for kw in &attacker.keywords {
-            match kw {
-                Keyword::Protection(ProtectionTarget::Color(color))
-                    if blocker.color.contains(color) =>
-                {
+            if let Keyword::Protection(target) = kw {
+                if crate::game::keywords::source_matches_protection_target(
+                    target, attacker, blocker,
+                ) {
                     return Err(format!(
-                        "{:?} cannot block {:?} (protection from {:?})",
-                        blocker_id, attacker_id, color
+                        "{blocker_id:?} cannot block {attacker_id:?} (protection)",
                     ));
                 }
-                Keyword::Protection(ProtectionTarget::Multicolored) if blocker.color.len() > 1 => {
-                    return Err(format!(
-                        "{:?} cannot block {:?} (protection from multicolored)",
-                        blocker_id, attacker_id
-                    ));
-                }
-                // CR 702.16: ChosenColor resolves from the source permanent's chosen_attributes
-                Keyword::Protection(ProtectionTarget::ChosenColor) => {
-                    if let Some(color) = attacker.chosen_color() {
-                        if blocker.color.contains(&color) {
-                            return Err(format!(
-                                "{:?} cannot block {:?} (protection from chosen color {:?})",
-                                blocker_id, attacker_id, color
-                            ));
-                        }
-                    }
-                }
-                // CR 702.16j: Protection from everything — blocked by no creature.
-                Keyword::Protection(ProtectionTarget::Everything) => {
-                    return Err(format!(
-                        "{:?} cannot block {:?} (protection from everything)",
-                        blocker_id, attacker_id
-                    ));
-                }
-                _ => {}
             }
         }
 
@@ -1569,6 +1582,15 @@ pub fn declare_blockers_for_player(
     Ok(())
 }
 
+fn max_blockers_each_combat(state: &GameState) -> Option<u32> {
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(_, def)| match def.mode {
+            StaticMode::MaxBlockersEachCombat { max } => Some(max),
+            _ => None,
+        })
+        .min()
+}
+
 /// CR 509.1h + CR 702.49a: Returns ObjectIds of attackers that were never blocked.
 /// Per CR 509.1h, a creature remains blocked for the rest of combat even if all
 /// blockers are removed. This function checks the `blocked` flag set at blocker
@@ -1818,28 +1840,10 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         }
     }
     for kw in &attacker.keywords {
-        match kw {
-            Keyword::Protection(ProtectionTarget::Color(color))
-                if blocker.color.contains(color) =>
-            {
+        if let Keyword::Protection(target) = kw {
+            if crate::game::keywords::source_matches_protection_target(target, attacker, blocker) {
                 return false;
             }
-            Keyword::Protection(ProtectionTarget::Multicolored) if blocker.color.len() > 1 => {
-                return false;
-            }
-            // CR 702.16: ChosenColor resolves from the source permanent's chosen_attributes
-            Keyword::Protection(ProtectionTarget::ChosenColor) => {
-                if let Some(color) = attacker.chosen_color() {
-                    if blocker.color.contains(&color) {
-                        return false;
-                    }
-                }
-            }
-            // CR 702.16j: Protection from everything — blocked by no creature.
-            Keyword::Protection(ProtectionTarget::Everything) => {
-                return false;
-            }
-            _ => {}
         }
     }
     if attacker.has_keyword(&Keyword::Flying)
@@ -2179,6 +2183,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::StaticDefinition;
     use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
 
     fn setup() -> GameState {
@@ -3276,6 +3281,35 @@ mod tests {
         assert!(validate_blockers(&state, &[(green_blocker, attacker)]).is_ok());
     }
 
+    #[test]
+    fn protection_from_artifacts_prevents_artifact_creature_blocking() {
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::ProtectionTarget;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Protected Attacker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::CardType(
+                "artifacts".to_string(),
+            )));
+
+        let artifact_blocker = create_creature(&mut state, PlayerId(1), "Artifact Blocker", 1, 1);
+        state
+            .objects
+            .get_mut(&artifact_blocker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        assert!(!can_block_pair(&state, artifact_blocker, attacker));
+        assert!(validate_blockers(&state, &[(artifact_blocker, attacker)]).is_err());
+    }
+
     // --- Fear tests ---
 
     #[test]
@@ -3452,6 +3486,48 @@ mod tests {
 
         // Blocking two attackers should succeed with ExtraBlockers { count: Some(1) }
         assert!(validate_blockers(&state, &[(blocker, attacker1), (blocker, attacker2)]).is_ok());
+    }
+
+    #[test]
+    fn max_blockers_each_combat_counts_previous_defending_players() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        let attacker1 = create_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        let attacker2 = create_creature(&mut state, PlayerId(0), "Bear B", 2, 2);
+        let blocker1 = create_creature(&mut state, PlayerId(1), "Guard A", 1, 1);
+        let blocker2 = create_creature(&mut state, PlayerId(2), "Guard B", 1, 1);
+        let arbiter_card_id = CardId(state.next_object_id);
+        let arbiter = create_object(
+            &mut state,
+            arbiter_card_id,
+            PlayerId(0),
+            "Silent Arbiter".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&arbiter)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MaxBlockersEachCombat {
+                max: 1,
+            }));
+
+        let mut combat = CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(attacker1, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker2, PlayerId(2)),
+            ],
+            blockers_declared_by: vec![PlayerId(1)],
+            ..Default::default()
+        };
+        combat.blocker_to_attacker.insert(blocker1, vec![attacker1]);
+        state.combat = Some(combat);
+
+        assert!(
+            validate_blockers_for_player(&state, PlayerId(2), &[(blocker2, attacker2)]).is_err()
+        );
     }
 
     #[test]

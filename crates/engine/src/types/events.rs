@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::counter::CounterType;
 
-use super::ability::{EffectKind, TargetRef};
+use super::ability::{AbilityTag, EffectKind, TargetRef};
 use super::game_state::ZoneChangeRecord;
 use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaType;
@@ -83,6 +83,10 @@ pub enum PlayerActionKind {
     Scry,
     Surveil,
     CollectEvidence,
+    /// CR 701.24a: A player shuffled their library.
+    ShuffledLibrary,
+    /// CR 701.34a: A player proliferated.
+    Proliferate,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.
@@ -129,7 +133,21 @@ pub enum GameEvent {
         object_id: ObjectId,
         value: u32,
     },
+    /// CR 602.1 + CR 605.3b: An activated ability has been activated and put on
+    /// the stack. **Not emitted for mana abilities** (CR 605.3b: mana abilities
+    /// resolve immediately without using the stack and follow a separate code
+    /// path that never reaches this event). This invariant — `AbilityActivated`
+    /// fires only for non-mana activations — is what makes
+    /// `TriggerCondition::ActivatedAbilityIsNonMana` trivially satisfied when
+    /// matched against this event, and is what lets the generic
+    /// "Whenever a player activates an ability that isn't a mana ability"
+    /// trigger class (Burning-Tree Shaman, Flamescroll Celebrant) listen here.
     AbilityActivated {
+        /// CR 602.2a: "Its controller is the player who activated the ability."
+        /// Required so `extract_player_from_event` can resolve "that player" /
+        /// `TargetFilter::TriggeringPlayer` references in the resolving
+        /// ability's effect (Burning-Tree Shaman, Flamescroll Celebrant).
+        player_id: PlayerId,
         source_id: ObjectId,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
@@ -328,6 +346,12 @@ pub enum GameEvent {
     EffectResolved {
         kind: EffectKind,
         source_id: ObjectId,
+    },
+    /// CR 701.3d: An Aura, Equipment, or Fortification became unattached from
+    /// the object or player it was attached to.
+    Unattached {
+        attachment_id: ObjectId,
+        old_target: TargetRef,
     },
     AttackersDeclared {
         attacker_ids: Vec<ObjectId>,
@@ -536,18 +560,13 @@ pub enum GameEvent {
         source_id: ObjectId,
     },
 
-    /// CR 702.142b: A boast ability was activated. Emitted alongside AbilityActivated
-    /// when the activated ability has `ability_tag == Some(AbilityTag::Boast)`.
-    /// Enables "whenever you activate a boast ability" triggers.
-    BoastAbilityActivated {
-        player_id: PlayerId,
-        source_id: ObjectId,
-    },
-
-    /// CR 702.177a: An exhaust ability was activated. Emitted alongside
-    /// AbilityActivated for stack-using abilities and from the inline mana
-    /// ability path for mana abilities.
-    ExhaustAbilityActivated {
+    /// CR 702.107a + CR 702.142b + CR 702.177a: A keyword ability was activated.
+    /// Emitted alongside `AbilityActivated` when the activated ability has a recognized
+    /// `ability_tag`. `is_mana_ability` is `true` only for exhaust mana abilities; it is
+    /// always `false` for boast and outlast activations. Parameterized to avoid per-keyword
+    /// variant proliferation (boast, exhaust, outlast share identical event structure).
+    KeywordAbilityActivated {
+        ability_tag: AbilityTag,
         player_id: PlayerId,
         source_id: ObjectId,
         is_mana_ability: bool,

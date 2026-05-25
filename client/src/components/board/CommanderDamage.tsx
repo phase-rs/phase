@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
@@ -26,6 +28,7 @@ const DEFAULT_COMMANDER_DAMAGE_LETHAL = 21;
  * envelope on every state snapshot.
  */
 export function CommanderDamage({ playerId }: CommanderDamageProps) {
+  const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const playerNames = useMultiplayerStore((s) => s.playerNames);
   const localPlayerId = usePlayerId();
@@ -57,7 +60,7 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
       {entriesForVictim.map(({ attacker, views }) => {
         const attackerId = Number(attacker) as PlayerId;
         const attackerLabel = attackerId === localPlayerId
-          ? "You"
+          ? t("player.you")
           : playerNames.get(attackerId) ?? getPlayerDisplayName(attackerId, localPlayerId);
         const attackerSeatColor = getSeatColor(attackerId, gameState?.seat_order);
         const total = views.reduce((n, e) => n + e.damage, 0);
@@ -65,7 +68,7 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
           <div
             key={`from-${attacker}`}
             className="flex flex-wrap items-center gap-1"
-            title={`Commander damage from ${attackerLabel}: ${total}/${threshold}`}
+            title={t("player.commanderDamageFrom", { source: attackerLabel, damage: total, threshold })}
           >
             <span
               className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wide"
@@ -93,7 +96,7 @@ export function CommanderDamage({ playerId }: CommanderDamageProps) {
                         ? "bg-yellow-900/60 text-yellow-200"
                         : "bg-gray-800/80 text-gray-300"
                   }`}
-                  title={`Commander damage from ${name}: ${view.damage}/${threshold}`}
+                  title={t("player.commanderDamageFrom", { source: name, damage: view.damage, threshold })}
                 >
                   <span className="max-w-[60px] truncate">{name}</span>
                   <span className="tabular-nums font-bold">{view.damage}</span>

@@ -1,0 +1,130 @@
+{
+  "modal": {
+    "title": "Settings",
+    "subtitle": "Tune gameplay, visuals, audio, and multiplayer defaults."
+  },
+  "tabs": {
+    "gameplay": "Gameplay",
+    "visual": "Visual",
+    "combat": "Pacing",
+    "audio": "Audio",
+    "multiplayer": "Multiplayer",
+    "data": "Data",
+    "experimental": "Experimental"
+  },
+  "gameplay": {
+    "title": "Gameplay",
+    "language": "Language",
+    "cardSize": "Card Size",
+    "logDefault": "Log Default",
+    "spellPayment": "Spell Payment",
+    "manualManaPayment": "Manual mana payment for spells",
+    "boardBackground": "Board Background",
+    "boardBackgroundGroups": {
+      "automatic": "Automatic",
+      "battlefields": "Battlefields",
+      "plain": "Plain",
+      "custom": "Custom",
+      "off": "Off"
+    },
+    "boardBackgroundOptions": {
+      "autoMatchDeck": "Auto (match deck)",
+      "random": "Random",
+      "customUrl": "Custom URL",
+      "none": "None"
+    }
+  },
+  "visual": {
+    "title": "Visual",
+    "vfxQuality": "VFX Quality",
+    "keywordStrip": "Keyword Strip",
+    "showKeywords": "Show keywords on battlefield cards",
+    "opponentHoverPreview": "Opponent Hover Preview",
+    "showOpponentBoard": "Show opponent's board on HUD hover",
+    "cardArtPreferences": "Card Art Preferences",
+    "clearArtOverrides_one": "Clear All Art Overrides ({{count}})",
+    "clearArtOverrides_other": "Clear All Art Overrides ({{count}})",
+    "clearArtOverridesConfirm_one": "Clear all {{count}} art override?",
+    "clearArtOverridesConfirm_other": "Clear all {{count}} art overrides?"
+  },
+  "audio": {
+    "title": "Audio",
+    "muteAll": "Mute All",
+    "muteAllAudio": "Mute all audio",
+    "globalVolume": "Global Volume",
+    "sfxVolume": "SFX Volume",
+    "musicVolume": "Music Volume"
+  },
+  "audioTheme": {
+    "title": "Audio Theme",
+    "theme": "Theme",
+    "importTheme": "Import Theme",
+    "loading": "Loading...",
+    "import": "Import",
+    "importFailed": "Failed to import theme",
+    "customThemes": "Custom Themes",
+    "remove": "Remove"
+  },
+  "multiplayer": {
+    "title": "Multiplayer",
+    "displayName": "Display Name",
+    "displayNamePlaceholder": "Enter your name",
+    "serverSelectionNote": "Server selection moved to the lobby — open Multiplayer and use the server chip (or \"Pick server\" in P2P mode) to switch regions, configure a self-hosted instance, or test connectivity."
+  },
+  "experimental": {
+    "title": "Experimental",
+    "description": "These features are still in development. They may be incomplete, buggy, or change without notice. Enable them to try things out early.",
+    "draftExperiments": "Draft Experiments",
+    "enableDraftFeatures": "Enable experimental draft features",
+    "draftFeaturesDescription": "Unlocks Cube Draft and Pod Draft. Quick Draft vs AI is always available."
+  },
+  "data": {
+    "title": "Backup & Restore",
+    "description": "Export bundles your preferences, imported decks, and feed subscriptions into a single JSON file. Import restores them on another machine. IndexedDB caches (feed cache, audio cache, saved games) are not included — those rebuild automatically.",
+    "exportBackup": "Export backup…",
+    "importBackup": "Import backup…",
+    "importConfirm": "Overwrite existing preferences and decks?\n\nOK: replace everything with the backup (destructive).\nCancel: merge — keep existing decks, add new ones from the backup.",
+    "backupDownloaded": "Backup downloaded.",
+    "imported_one": "Imported {{count}} deck.",
+    "imported_other": "Imported {{count}} decks.",
+    "importedWithPreferences_one": "Imported {{count}} deck and preferences.",
+    "importedWithPreferences_other": "Imported {{count}} decks and preferences.",
+    "skippedMalformed_one": "Skipped {{count}} malformed entry.",
+    "skippedMalformed_other": "Skipped {{count}} malformed entries."
+  },
+  "resetAll": {
+    "confirm": "Reset all preferences to defaults? This clears every setting in this dialog.",
+    "button": "Reset all preferences"
+  },
+  "pacing": {
+    "title": "Pacing",
+    "resetSection": "Reset section",
+    "animationSpeed": "Animation Speed",
+    "animationSpeedDescription": "Master speed — higher is faster. Full-right skips animations entirely.",
+    "hint": "Per-category sliders multiply on top of Animation Speed. Double-click any slider — or tap the <glyph>↺</glyph> next to it — to reset.",
+    "instant": "Instant",
+    "slowest": "Slowest",
+    "resetSliderLabel": "Reset {{label}} to default",
+    "atDefault": "At default",
+    "resetToDefault": "Reset to default"
+  },
+  "artChain": {
+    "emptyState": "Using default Scryfall art. Add rules below to customize.",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "remove": "Remove",
+    "unreachable": "Rules below \"{{rule}}\" are unreachable — it always matches.",
+    "addRule": "Add Rule",
+    "setInputPlaceholder": "Set code or name…",
+    "addSet": "Add Set",
+    "rulesPriorityNote": "Rules are tried top-to-bottom. The first match wins. “Source Printing” uses the set from a draft pack or deck import when available. Per-card overrides (right-click in deck builder) always take priority.",
+    "setEntry": "Set: {{name}} ({{code}})",
+    "rules": {
+      "sourcePrinting": "Source Printing",
+      "newest": "Newest Printing",
+      "oldest": "Oldest Printing",
+      "preferBorderless": "Prefer Borderless",
+      "preferExtended": "Prefer Extended Art"
+    }
+  }
+}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useDraftStore } from "../../stores/draftStore";
 
@@ -33,6 +34,7 @@ const DIFFICULTY_LABELS = [
 // ── Component ───────────────────────────────────────────────────────────
 
 export function SetSelector({ onStartDraft }: SetSelectorProps) {
+  const { t } = useTranslation("draft");
   const difficulty = useDraftStore((s) => s.difficulty);
   const setDifficulty = useDraftStore((s) => s.setDifficulty);
 
@@ -90,7 +92,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
       {/* Difficulty selector — single-axis scale, so a segmented control rather than per-level colors */}
       <div className="flex flex-col gap-2">
         <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-          Bot Difficulty
+          {t("setSelector.botDifficulty")}
         </h3>
         <div className="flex w-full max-w-md rounded-xl border border-white/10 bg-black/18 p-1 backdrop-blur-md">
           {DIFFICULTY_LABELS.map((label, idx) => {
@@ -117,7 +119,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
       {/* Set grid */}
       <div className="flex flex-col gap-2">
         <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-          Choose a Set
+          {t("setSelector.chooseSet")}
         </h3>
 
         {error && (
@@ -126,7 +128,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
 
         {!loading && !error && sets.length === 0 && (
           <div className="py-8 text-center text-sm text-white/40">
-            No draft pools available. Run the draft data pipeline first.
+            {t("setSelector.noPools")}
           </div>
         )}
 
@@ -150,7 +152,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
                   {icon ? (
                     <img
                       src={icon}
-                      alt={`${name} set icon`}
+                      alt={t("setSelector.setIconAlt", { name })}
                       className="h-10 w-10 invert opacity-80"
                     />
                   ) : (

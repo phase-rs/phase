@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
@@ -38,6 +39,7 @@ function TopCard({ cardName }: { cardName: string }) {
 }
 
 export function LibraryPile({ playerId, size }: LibraryPileProps) {
+  const { t } = useTranslation("game");
   const myId = usePlayerId();
   const count = useGameStore(
     (s) => s.gameState?.players[playerId]?.library?.length ?? 0,
@@ -115,18 +117,15 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
 
   const stackDepth = Math.min(count - 1, 4);
   const isPeeking = (canPeek || isRevealed) && topCardName;
-  const cardCountLabel = `${count} ${count === 1 ? "card" : "cards"}`;
+  const libraryLabel = t("zone.libraryCount", { count });
+  const playLabel = t("zone.playFromTop", { name: topCardName ?? t("zone.topOfLibrary") });
   const w = size?.width ?? "var(--card-w)";
   const h = size?.height ?? "var(--card-h)";
 
   return (
     <div
       className="relative"
-      title={
-        canPlay
-          ? `Play ${topCardName ?? "top of library"} from top of library`
-          : `Library (${cardCountLabel})`
-      }
+      title={canPlay ? playLabel : libraryLabel}
       data-library-pile={playerId}
       style={{ width: w, height: h }}
     >
@@ -155,11 +154,7 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
           if (canPlay) handlePlay();
         }}
         disabled={!canPlay && topCardName == null}
-        aria-label={
-          canPlay
-            ? `Play ${topCardName ?? "top of library"} from top of library`
-            : `Library (${cardCountLabel})`
-        }
+        aria-label={canPlay ? playLabel : libraryLabel}
         data-library-top-cast={canPlay ? "true" : "false"}
         {...longPressHandlers}
         className={`relative block h-full w-full overflow-hidden rounded-lg border shadow-md ${
@@ -177,7 +172,7 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
         ) : (
           <img
             src={CARD_BACK_URL}
-            alt="Library"
+            alt={t("zone.libraryAlt")}
             className="h-full w-full rounded-lg object-cover"
             draggable={false}
           />

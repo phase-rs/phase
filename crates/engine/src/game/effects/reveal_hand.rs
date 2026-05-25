@@ -1,3 +1,5 @@
+use rand::seq::SliceRandom;
+
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
@@ -17,14 +19,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (card_filter, count, choice_optional) = match &ability.effect {
+    let (card_filter, count, random, choice_optional) = match &ability.effect {
         Effect::RevealHand {
             card_filter,
             count,
+            random,
             choice_optional,
             ..
-        } => (card_filter.clone(), count.clone(), *choice_optional),
-        _ => (TargetFilter::Any, None, false),
+        } => (
+            card_filter.clone(),
+            count.clone(),
+            *random,
+            *choice_optional,
+        ),
+        _ => (TargetFilter::Any, None, false, false),
     };
 
     // Find the target player from resolved targets
@@ -44,13 +52,15 @@ pub fn resolve(
         .map(|p| p.hand.iter().copied().collect())
         .unwrap_or_default();
 
+    let mut hand = full_hand;
+    if random {
+        hand.shuffle(&mut state.rng);
+    }
     // CR 701.20a: If a count is specified, reveal only that many cards.
-    let hand = if let Some(count_expr) = &count {
+    if let Some(count_expr) = &count {
         let n = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
-        full_hand.into_iter().take(n).collect()
-    } else {
-        full_hand
-    };
+        hand.truncate(n);
+    }
 
     if hand.is_empty() {
         events.push(GameEvent::EffectResolved {
@@ -125,6 +135,7 @@ mod tests {
                 target: TargetFilter::Any,
                 card_filter: TargetFilter::Any,
                 count: None,
+                random: false,
                 choice_optional: false,
             },
             vec![TargetRef::Player(target_player)],
@@ -215,6 +226,56 @@ mod tests {
 
         // Should not set RevealChoice — no cards to choose from
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn random_count_reveal_limits_choice_to_one_card() {
+        let mut state = GameState::new_two_player(42);
+        let card1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bolt".to_string(),
+            Zone::Hand,
+        );
+        let card2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Hand,
+        );
+        let card3 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
+                count: Some(crate::types::ability::QuantityExpr::Fixed { value: 1 }),
+                random: true,
+                choice_optional: false,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::RevealChoice { cards, .. } => {
+                assert_eq!(cards.len(), 1);
+                assert!([card1, card2, card3].contains(&cards[0]));
+            }
+            other => panic!("Expected RevealChoice, got {:?}", other),
+        }
+        assert_eq!(state.revealed_cards.len(), 1);
     }
 
     #[test]

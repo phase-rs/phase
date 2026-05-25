@@ -1,3 +1,6 @@
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
+
 import type {
   GameAction,
   ManaCost,
@@ -16,55 +19,61 @@ type AlternativeCastChoice = Extract<
 >;
 type Keyword = AlternativeCastChoice["data"]["keyword"]["type"];
 
+interface KeywordCopy {
+  eyebrow: string;
+  normalLabel: string;
+  altLabel: string;
+  altSuffix?: string;
+  /** True when the card's printed Oracle text is helpful context. Warp's
+   * rider lives on the keyword itself; the other three meaningfully change
+   * the spell's behavior. */
+  showOracleText: boolean;
+  subtitle: string;
+}
+
 // Per-keyword display copy. Driven by the engine-provided `keyword` axis;
 // the modal itself is a pure display layer per CLAUDE.md frontend rules.
-const KEYWORD_COPY: Record<
-  Keyword,
-  {
-    eyebrow: string;
-    normalLabel: string;
-    altLabel: string;
-    altSuffix?: string;
-    /** True when the card's printed Oracle text is helpful context. Warp's
-     * rider lives on the keyword itself; the other three meaningfully change
-     * the spell's behavior. */
-    showOracleText: boolean;
-    subtitle: (cardName: string) => string;
+function keywordCopy(
+  keyword: Keyword,
+  cardName: string,
+  t: TFunction<"game">,
+): KeywordCopy {
+  switch (keyword) {
+    case "Warp":
+      return {
+        eyebrow: t("alternativeCost.warpEyebrow"),
+        normalLabel: t("alternativeCost.warpNormalLabel"),
+        altLabel: t("alternativeCost.warpAltLabel"),
+        altSuffix: t("alternativeCost.warpAltSuffix"),
+        showOracleText: false,
+        subtitle: t("alternativeCost.warpSubtitle", { name: cardName }),
+      };
+    case "Evoke":
+      return {
+        eyebrow: t("alternativeCost.evokeEyebrow"),
+        normalLabel: t("alternativeCost.evokeNormalLabel"),
+        altLabel: t("alternativeCost.evokeAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.evokeSubtitle", { name: cardName }),
+      };
+    case "Overload":
+      return {
+        eyebrow: t("alternativeCost.overloadEyebrow"),
+        normalLabel: t("alternativeCost.overloadNormalLabel"),
+        altLabel: t("alternativeCost.overloadAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.overloadSubtitle", { name: cardName }),
+      };
+    case "Bestow":
+      return {
+        eyebrow: t("alternativeCost.bestowEyebrow"),
+        normalLabel: t("alternativeCost.bestowNormalLabel"),
+        altLabel: t("alternativeCost.bestowAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.bestowSubtitle", { name: cardName }),
+      };
   }
-> = {
-  Warp: {
-    eyebrow: "Warp",
-    normalLabel: "Cast Normally",
-    altLabel: "Cast with Warp",
-    altSuffix: "(exiles at end step)",
-    showOracleText: false,
-    subtitle: (cardName) => `Cast ${cardName} normally or use its Warp cost.`,
-  },
-  Evoke: {
-    eyebrow: "Evoke",
-    normalLabel: "Cast Normally",
-    altLabel: "Cast with Evoke",
-    showOracleText: true,
-    subtitle: (cardName) =>
-      `Cast ${cardName} normally or cast it for its Evoke cost.`,
-  },
-  Overload: {
-    eyebrow: "Overload",
-    normalLabel: "Cast Normally",
-    altLabel: "Cast with Overload",
-    showOracleText: true,
-    subtitle: (cardName) =>
-      `Cast ${cardName} normally targeting a single permanent, or pay its Overload cost to affect all valid targets.`,
-  },
-  Bestow: {
-    eyebrow: "Bestow",
-    normalLabel: "Cast as Creature",
-    altLabel: "Cast with Bestow",
-    showOracleText: true,
-    subtitle: (cardName) =>
-      `Cast ${cardName} normally as a creature, or pay its Bestow cost to cast it as an Aura.`,
-  },
-};
+}
 
 /**
  * CR 702.74a + CR 601.2h: Compact display copy for the non-mana portion of
@@ -73,20 +82,23 @@ const KEYWORD_COPY: Record<
  * discriminant `type` field — the FE does not interpret game state, it just
  * renders the engine-provided variant.
  */
-function describeAdditionalCost(cost: SerializedAbilityCost): string {
+function describeAdditionalCost(
+  cost: SerializedAbilityCost,
+  t: TFunction<"game">,
+): string {
   switch (cost.type) {
     case "Exile":
-      return "+ Exile a card";
+      return t("alternativeCost.additionalExile");
     case "Sacrifice":
-      return "+ Sacrifice a permanent";
+      return t("alternativeCost.additionalSacrifice");
     case "PayLife":
-      return "+ Pay life";
+      return t("alternativeCost.additionalPayLife");
     case "Discard":
-      return "+ Discard a card";
+      return t("alternativeCost.additionalDiscard");
     case "TapCreatures":
-      return "+ Tap creatures";
+      return t("alternativeCost.additionalTapCreatures");
     default:
-      return `+ ${cost.type}`;
+      return t("alternativeCost.additionalGeneric", { type: cost.type });
   }
 }
 
@@ -133,18 +145,19 @@ function AlternativeCostContent({
   alternativeAdditionalCost: SerializedAbilityCost | null;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
+  const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 
   if (!obj) return null;
 
   const cardName = obj.name;
-  const copy = KEYWORD_COPY[keyword];
+  const copy = keywordCopy(keyword, cardName, t);
 
   return (
     <DialogShell
       eyebrow={copy.eyebrow}
-      title="Choose Casting Cost"
-      subtitle={copy.subtitle(cardName)}
+      title={t("alternativeCost.title")}
+      subtitle={copy.subtitle}
     >
       {copy.showOracleText && (
         <div className="px-3 pt-3 lg:px-5 lg:pt-4">
@@ -183,7 +196,7 @@ function AlternativeCostContent({
           )}
           {alternativeAdditionalCost && (
             <span className="ml-2 text-xs text-slate-300">
-              {describeAdditionalCost(alternativeAdditionalCost)}
+              {describeAdditionalCost(alternativeAdditionalCost, t)}
             </span>
           )}
           {copy.altSuffix && (

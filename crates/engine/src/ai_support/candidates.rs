@@ -625,6 +625,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                         candidate(
                             GameAction::ChooseManaColor {
                                 choice: ManaChoice::SingleColor(color),
+                                count: 1,
                             },
                             TacticalClass::Mana,
                             Some(*player),
@@ -637,6 +638,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                         candidate(
                             GameAction::ChooseManaColor {
                                 choice: ManaChoice::Combination(combo.clone()),
+                                count: 1,
                             },
                             TacticalClass::Mana,
                             Some(*player),
@@ -652,6 +654,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                             candidate(
                                 GameAction::ChooseManaColor {
                                     choice: ManaChoice::Combination(combo),
+                                    count: 1,
                                 },
                                 TacticalClass::Mana,
                                 Some(*player),
@@ -748,6 +751,25 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 })
                 .collect()
         }
+        // CR 701.23a + CR 608.2c: Cultivate-class partition pick — choose exactly
+        // `primary_count` of the found cards for the battlefield (the rest go to
+        // hand). C(found, primary_count) is small (found <= 4), so enumerate every
+        // exact-size combination as a candidate.
+        WaitingFor::SearchPartitionChoice {
+            player,
+            cards,
+            primary_count,
+            ..
+        } => combinations(cards, *primary_count as usize)
+            .into_iter()
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::OutsideGameChoice {
             player,
             choices,
@@ -1223,12 +1245,41 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             permanents,
             ..
         } => bounded_select_card_candidates(*player, permanents, [*count]),
+        // CR 118.12a: AI selects a branch of a disjunctive activation cost.
+        WaitingFor::ActivationCostOneOfChoice {
+            player,
+            costs,
+            pending_cast,
+        } => costs
+            .iter()
+            .enumerate()
+            .filter(|(_, cost)| cost.is_payable(state, *player, pending_cast.object_id))
+            .map(|(i, _)| {
+                candidate(
+                    GameAction::ChooseActivationCostBranch { index: i },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ReturnToHandForCost {
             player,
             count,
             permanents,
             ..
         } => bounded_select_card_candidates(*player, permanents, [*count]),
+        WaitingFor::RemoveCounterForCost {
+            player, permanents, ..
+        } => permanents
+            .iter()
+            .map(|id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![*id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 701.68a: AI selects exactly one creature to put N -1/-1 counters on as cost.
         WaitingFor::BlightChoice {
             player, creatures, ..
@@ -1767,16 +1818,20 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     )
                 })
                 .collect();
-            out.push(candidate(
-                GameAction::ChooseTarget { target: None },
-                TacticalClass::Selection,
-                Some(*player),
-            ));
-            out.push(candidate(
-                GameAction::KeepAllCopyTargets,
-                TacticalClass::Selection,
-                Some(*player),
-            ));
+            if slot.current.is_some() {
+                out.push(candidate(
+                    GameAction::ChooseTarget { target: None },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            if target_slots.iter().all(|slot| slot.current.is_some()) {
+                out.push(candidate(
+                    GameAction::KeepAllCopyTargets,
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
             out
         }
         // CR 510.1c/d: Assign combat damage — greedy (lethal to each in order, remainder to last).
@@ -4321,6 +4376,7 @@ mod tests {
             reveal: false,
             up_to: false,
             constraint: SearchSelectionConstraint::None,
+            split: None,
         };
         let baseline = candidate_actions_broad(&state);
         assert_eq!(
@@ -4342,6 +4398,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            split: None,
         };
         let filtered = candidate_actions_broad(&state);
         assert_eq!(
@@ -4400,6 +4457,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            split: None,
         };
         let actions = candidate_actions_broad(&state);
         // Σ_{k=0..=4} C(8, k) = 1 + 8 + 28 + 56 + 70 = 163.

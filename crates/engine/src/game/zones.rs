@@ -71,6 +71,10 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                 name: obj.name.clone(),
                 power: obj.power,
                 toughness: obj.toughness,
+                // CR 208.4b + CR 613.4b: Capture the layer-7b base values so
+                // base-scope P/T look-back filters read the base, not current.
+                base_power: obj.base_power,
+                base_toughness: obj.base_toughness,
                 mana_value: obj.mana_cost.mana_value(),
                 controller: obj.controller,
                 owner: obj.owner,
@@ -273,6 +277,12 @@ pub fn move_to_zone(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
+    let unattached_from = if from == Zone::Battlefield {
+        obj.attached_to
+            .map(super::effects::attach::target_ref_from_attach_target)
+    } else {
+        None
+    };
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), to);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
@@ -352,6 +362,13 @@ pub fn move_to_zone(
     }
 
     super::restrictions::record_zone_change(state, zone_change_record.clone());
+
+    if let Some(old_target) = unattached_from {
+        events.push(GameEvent::Unattached {
+            attachment_id: object_id,
+            old_target,
+        });
+    }
 
     events.push(GameEvent::ZoneChanged {
         object_id,
@@ -437,6 +454,12 @@ pub fn move_to_library_at_index(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
+    let unattached_from = if from == Zone::Battlefield {
+        obj.attached_to
+            .map(super::effects::attach::target_ref_from_attach_target)
+    } else {
+        None
+    };
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), Zone::Library);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
@@ -466,6 +489,13 @@ pub fn move_to_library_at_index(
 
     super::restrictions::record_zone_change(state, zone_change_record.clone());
 
+    if let Some(old_target) = unattached_from {
+        events.push(GameEvent::Unattached {
+            attachment_id: object_id,
+            old_target,
+        });
+    }
+
     events.push(GameEvent::ZoneChanged {
         object_id,
         from: Some(from),
@@ -491,7 +521,10 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
             }
         }
         Zone::Battlefield => state.battlefield.retain(|id| *id != object_id),
-        Zone::Stack => state.stack.retain(|e| e.id != object_id),
+        Zone::Stack => {
+            state.stack.retain(|e| e.id != object_id);
+            state.stack_paid_facts.remove(&object_id);
+        }
         Zone::Exile => state.exile.retain(|id| *id != object_id),
         Zone::Command => state.command_zone.retain(|id| *id != object_id),
     }

@@ -62,6 +62,11 @@ pub fn find_legal_targets(
         add_players(state, &mut targets, source_id);
     }
 
+    if let TargetFilter::SpecificPlayer { id } = filter {
+        add_specific_player(state, &mut targets, *id, source_id);
+        return targets;
+    }
+
     // Typed filter with no type_filters targets players, not permanents.
     // e.g. "target opponent" → Typed { type_filters: [], controller: Opponent }
     if let TargetFilter::Typed(ref tf) = filter {
@@ -385,6 +390,12 @@ pub fn resolved_targets(
             .map(|snap| TargetRef::Object(snap.object_id))
             .collect();
     }
+    if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
+        if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
+        {
+            return vec![target];
+        }
+    }
     let use_self = matches!(
         target_filter,
         TargetFilter::None | TargetFilter::ParentTarget
@@ -396,6 +407,74 @@ pub fn resolved_targets(
         return vec![target];
     }
     ability.targets.clone()
+}
+
+/// Resolve a `TargetFilter` to object ids for effects that operate over every
+/// object in the resolved set rather than a single target slot.
+pub(crate) fn resolved_object_ids_for_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    match filter {
+        TargetFilter::SelfRef => vec![ability.source_id],
+        TargetFilter::ParentTarget => object_targets(&ability.targets).collect(),
+        TargetFilter::ParentTargetSlot { index } => ability
+            .targets
+            .get(*index)
+            .and_then(target_ref_object)
+            .into_iter()
+            .collect(),
+        TargetFilter::LastCreated => state.last_created_token_ids.clone(),
+        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+            resolve_event_context_target(state, filter, ability.source_id)
+                .and_then(|target| target_ref_object(&target))
+                .into_iter()
+                .collect()
+        }
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
+            let effective_filter = resolve_tracked_set_sentinel(state, filter.clone());
+            let ctx = super::filter::FilterContext::from_ability(ability);
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| {
+                    super::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
+                })
+                .collect()
+        }
+        TargetFilter::Any | TargetFilter::None | TargetFilter::Player => {
+            object_targets(&ability.targets).collect()
+        }
+        _ => {
+            let ctx = super::filter::FilterContext::from_ability(ability);
+            let explicit_targets: Vec<ObjectId> = object_targets(&ability.targets)
+                .filter(|id| super::filter::matches_target_filter(state, *id, filter, &ctx))
+                .collect();
+            if !explicit_targets.is_empty() {
+                return explicit_targets;
+            }
+
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| super::filter::matches_target_filter(state, *id, filter, &ctx))
+                .collect()
+        }
+    }
+}
+
+fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
+    targets.iter().filter_map(target_ref_object)
+}
+
+fn target_ref_object(target: &TargetRef) -> Option<ObjectId> {
+    match target {
+        TargetRef::Object(id) => Some(*id),
+        TargetRef::Player(_) => None,
+    }
 }
 
 pub(crate) fn resolve_event_context_target_for_event_or_state(
@@ -426,6 +505,10 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let event = event?;
             let obj_id = extract_source_from_event(event)?;
             Some(TargetRef::Object(obj_id))
+        }
+        TargetFilter::ParentTarget => {
+            let event = event?;
+            blocked_attacker_from_event(event, source_id).map(TargetRef::Object)
         }
         // CR 506.3d: "defending player" — look up from combat state using the source creature.
         TargetFilter::DefendingPlayer => {
@@ -488,6 +571,20 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target.clone(),
         _ => None,
     }
+}
+
+fn blocked_attacker_from_event(
+    event: &crate::types::events::GameEvent,
+    source_id: ObjectId,
+) -> Option<ObjectId> {
+    let crate::types::events::GameEvent::BlockersDeclared { assignments } = event else {
+        return None;
+    };
+    let mut attackers = assignments
+        .iter()
+        .filter_map(|(blocker, attacker)| (*blocker == source_id).then_some(*attacker));
+    let first = attackers.next()?;
+    attackers.all(|attacker| attacker == first).then_some(first)
 }
 
 /// Resolve a player reference carried in an effect target slot.
@@ -571,7 +668,7 @@ pub(crate) fn extract_source_from_event(
         GameEvent::BecomesTarget { source_id, .. } => Some(*source_id),
         GameEvent::SpellCast { object_id, .. } => Some(*object_id),
         GameEvent::DamageDealt { source_id, .. } => Some(*source_id),
-        GameEvent::AbilityActivated { source_id } => Some(*source_id),
+        GameEvent::AbilityActivated { source_id, .. } => Some(*source_id),
         GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
         GameEvent::PermanentTapped { object_id, .. } => Some(*object_id),
         GameEvent::PermanentUntapped { object_id } => Some(*object_id),
@@ -586,6 +683,10 @@ pub(crate) fn extract_source_from_event(
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
         GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+        GameEvent::Unattached {
+            old_target: TargetRef::Object(object_id),
+            ..
+        } => Some(*object_id),
         GameEvent::Discarded { object_id, .. } => Some(*object_id),
         GameEvent::Transformed { object_id } => Some(*object_id),
         GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
@@ -634,7 +735,17 @@ pub(crate) fn extract_player_from_event(
         GameEvent::Discarded { player_id, .. } => Some(*player_id),
         GameEvent::LandPlayed { player_id, .. } => Some(*player_id),
         GameEvent::SpellCast { controller, .. } => Some(*controller),
+        // CR 602.2a: "Its controller is the player who activated the ability."
+        // For "Whenever a player activates an ability, … deals 1 damage to that
+        // player" triggers (Burning-Tree Shaman, Flamescroll Celebrant),
+        // `TriggeringPlayer` / "that player" binds to the activating player
+        // carried on the event.
+        GameEvent::AbilityActivated { player_id, .. } => Some(*player_id),
         GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
+        GameEvent::Unattached {
+            old_target: TargetRef::Player(player_id),
+            ..
+        } => Some(*player_id),
         GameEvent::Cycled { player_id, .. } => Some(*player_id),
         GameEvent::PlayerPerformedAction { player_id, .. } => Some(*player_id),
         GameEvent::CrimeCommitted { player_id, .. } => Some(*player_id),
@@ -1024,6 +1135,24 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: Objec
     }
 }
 
+fn add_specific_player(
+    state: &GameState,
+    targets: &mut Vec<TargetRef>,
+    player_id: PlayerId,
+    source_id: ObjectId,
+) {
+    let Some(player) = state.players.iter().find(|player| player.id == player_id) else {
+        return;
+    };
+    if player.is_phased_out() || player.is_eliminated {
+        return;
+    }
+    if super::static_abilities::player_protection_from(state, player.id, Some(source_id)) {
+        return;
+    }
+    targets.push(TargetRef::Player(player.id));
+}
+
 /// CR 702.16b: Protection prevents targeting from sources with the relevant quality.
 fn is_protected_from(
     obj: &crate::game::game_object::GameObject,
@@ -1237,6 +1366,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Comparator, QuantityExpr};
     use crate::types::card_type::CoreType;
     use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::CardId;
@@ -1686,6 +1816,31 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+    }
+
+    #[test]
+    fn find_legal_targets_specific_player_returns_only_that_player() {
+        let (state, _c0, _c1, _land) = setup_with_typed_creatures();
+        let targets = find_legal_targets(
+            &state,
+            &TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            PlayerId(0),
+            ObjectId(99),
+        );
+        assert_eq!(targets, vec![TargetRef::Player(PlayerId(1))]);
+    }
+
+    #[test]
+    fn find_legal_targets_specific_player_excludes_ineligible_player() {
+        let (mut state, _c0, _c1, _land) = setup_with_typed_creatures();
+        state.players[1].is_eliminated = true;
+        let targets = find_legal_targets(
+            &state,
+            &TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            PlayerId(0),
+            ObjectId(99),
+        );
+        assert!(targets.is_empty());
     }
 
     /// CR 800.4a: Eliminated players are not legal targets in multiplayer.
@@ -2537,6 +2692,52 @@ mod tests {
         assert!(!can_target(obj, PlayerId(0), source_id, &state));
     }
 
+    #[test]
+    fn protection_from_mana_value_filter_blocks_targeting() {
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Filter(
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }])),
+            )));
+
+        let low_mv_source = create_object(
+            &mut state,
+            CardId(103),
+            PlayerId(0),
+            "Small Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&low_mv_source).unwrap().mana_cost =
+            crate::types::mana::ManaCost::Cost {
+                generic: 3,
+                shards: vec![],
+            };
+
+        let high_mv_source = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(0),
+            "Large Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&high_mv_source).unwrap().mana_cost =
+            crate::types::mana::ManaCost::Cost {
+                generic: 4,
+                shards: vec![],
+            };
+
+        let obj = state.objects.get(&c1).unwrap();
+        assert!(!can_target(obj, PlayerId(0), low_mv_source, &state));
+        assert!(can_target(obj, PlayerId(0), high_mv_source, &state));
+    }
+
     /// CR 702.16b + CR 702.16j: A player with protection from everything
     /// cannot be a legal target of any spell or ability from any source.
     /// `find_legal_targets` must exclude that player from the "any target"
@@ -2702,6 +2903,22 @@ mod tests {
         let _ = &mut state;
     }
 
+    /// CR 509.1g + CR 608.2c: for "When this creature blocks a creature,
+    /// destroy that creature", `ParentTarget` resolves to the blocked attacker
+    /// carried by the split `BlockersDeclared` trigger event.
+    #[test]
+    fn resolved_targets_parent_target_for_block_event_returns_blocked_attacker() {
+        let (mut state, blocker, attacker) = setup_with_creatures();
+        state.current_trigger_event = Some(crate::types::events::GameEvent::BlockersDeclared {
+            assignments: vec![(blocker, attacker)],
+        });
+        let ability = make_resolved_with_targets(vec![], blocker);
+
+        let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
+
+        assert_eq!(result, vec![TargetRef::Object(attacker)]);
+    }
+
     /// CR 601.2c: Tier 3 — when neither self-ref nor event-context applies,
     /// fall through to the ability's pre-selected targets.
     #[test]
@@ -2727,5 +2944,20 @@ mod tests {
             result: 7,
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
+    }
+
+    /// CR 602.2a: For Burning-Tree Shaman / Flamescroll Celebrant's "deals 1
+    /// damage to that player" effect, `TriggeringPlayer` must resolve to the
+    /// player who activated the ability — carried directly on the event, not
+    /// inferred from the source object's controller (which would be wrong
+    /// when an opponent activates a granted ability).
+    #[test]
+    fn extract_player_from_ability_activated_returns_activator() {
+        let (state, _c0, _c1) = setup_with_creatures();
+        let event = crate::types::events::GameEvent::AbilityActivated {
+            player_id: PlayerId(1),
+            source_id: ObjectId(99),
+        };
+        assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
 }

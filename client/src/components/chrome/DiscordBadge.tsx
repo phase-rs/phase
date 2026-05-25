@@ -1,3 +1,5 @@
+import { openExternal } from "../../services/openExternal";
+
 const DISCORD_INVITE_URL = "https://discord.gg/dUZwhYHUyk";
 
 type DiscordBadgeProps = {
@@ -10,13 +12,20 @@ export function DiscordBadge({ className }: DiscordBadgeProps) {
       href={DISCORD_INVITE_URL}
       target="_blank"
       rel="noopener noreferrer"
+      onClick={(e) => {
+        e.preventDefault();
+        openExternal(DISCORD_INVITE_URL);
+      }}
+      aria-label="Discord"
       className={
-        "flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-3 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-[#5865F2]/30 hover:text-[#5865F2]" +
+        // Icon-only on mobile so the top-left social cluster doesn't collide
+        // with the top-right chrome cluster on narrow screens; label returns at sm.
+        "flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-2 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-[#5865F2]/30 hover:text-[#5865F2] sm:px-3" +
         (className ? ` ${className}` : "")
       }
     >
       <DiscordIcon />
-      Discord
+      <span className="hidden sm:inline">Discord</span>
     </a>
   );
 }

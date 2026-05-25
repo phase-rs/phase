@@ -1,4 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 interface PausedBannerProps {
   isVisible: boolean;
@@ -12,6 +13,7 @@ interface PausedBannerProps {
  * banner.
  */
 export function PausedBanner({ isVisible, reason }: PausedBannerProps) {
+  const { t } = useTranslation();
   return (
     <AnimatePresence>
       {isVisible && (
@@ -23,7 +25,7 @@ export function PausedBanner({ isVisible, reason }: PausedBannerProps) {
           transition={{ duration: 0.18 }}
         >
           <div className="rounded-full bg-amber-500/20 px-4 py-1.5 text-xs font-semibold text-amber-200 ring-1 ring-amber-300/40 backdrop-blur">
-            Game paused — {reason}
+            {t("pausedBanner.message", { reason })}
           </div>
         </motion.div>
       )}

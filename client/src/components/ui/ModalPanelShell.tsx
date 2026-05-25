@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 interface ModalPanelShellProps {
   title: string;
@@ -15,10 +16,12 @@ export function ModalPanelShell({
   subtitle,
   onClose,
   children,
-  eyebrow = "Workspace Tool",
+  eyebrow,
   maxWidthClassName = "max-w-4xl",
   bodyClassName = "",
 }: ModalPanelShellProps) {
+  const { t } = useTranslation();
+  const resolvedEyebrow = eyebrow ?? t("modal.defaultEyebrow");
   return (
     <AnimatePresence>
       <motion.div
@@ -32,7 +35,7 @@ export function ModalPanelShell({
           type="button"
           className="absolute inset-0 bg-black/68 backdrop-blur-[2px]"
           onClick={onClose}
-          aria-label={`Close ${title}`}
+          aria-label={t("actions.closeNamed", { name: title })}
         />
 
         <motion.div
@@ -44,9 +47,9 @@ export function ModalPanelShell({
         >
           <div className="flex items-start justify-between gap-2 border-b border-white/10 px-2 py-1.5 lg:gap-4 lg:px-6 lg:py-5">
             <div className="min-w-0">
-              {eyebrow && (
+              {resolvedEyebrow && (
                 <div className="text-[0.55rem] uppercase tracking-[0.22em] text-slate-500 lg:text-[0.68rem]">
-                  {eyebrow}
+                  {resolvedEyebrow}
                 </div>
               )}
               <h2 className="mt-0.5 text-sm font-semibold text-white lg:mt-1 lg:text-xl">{title}</h2>
@@ -57,7 +60,7 @@ export function ModalPanelShell({
             <button
               onClick={onClose}
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] border border-white/10 bg-black/18 text-slate-400 transition hover:bg-white/6 hover:text-white lg:h-11 lg:w-11 lg:rounded-[16px]"
-              aria-label={`Close ${title}`}
+              aria-label={t("actions.closeNamed", { name: title })}
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5 lg:h-5 lg:w-5">
                 <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />

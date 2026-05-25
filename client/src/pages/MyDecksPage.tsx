@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useNavigate } from "react-router";
 
 import { useAudioContext } from "../audio/useAudioContext";
@@ -5,10 +6,17 @@ import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
+import { useCardDataStore } from "../stores/cardDataStore";
 
 export function MyDecksPage() {
   const navigate = useNavigate();
   useAudioContext("deck_builder");
+
+  // Warm the shared card DB so deck compat/coverage scans below are instant.
+  // Idempotent; closes the deep-link hole when opening /my-decks directly.
+  useEffect(() => {
+    void useCardDataStore.getState().warm();
+  }, []);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">

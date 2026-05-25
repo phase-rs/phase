@@ -1,0 +1,1317 @@
+{
+  "card": {
+    "faceDownName": "Face-down card",
+    "loading": "Loading {{name}}",
+    "unimplemented": "Unimplemented: {{mechanics}}",
+    "dfc": "DFC"
+  },
+  "preview": {
+    "holdCtrlBack": "Hold Ctrl for back face",
+    "holdCtrlFront": "Hold Ctrl for front face",
+    "altParsedAbilities": "Alt: parsed abilities",
+    "debugId": "ID: {{id}}",
+    "engineParse": "Engine Parse",
+    "altKey": "Alt",
+    "parse": "Parse",
+    "rulings": "Rulings",
+    "rulingCount_one": "{{count}} ruling",
+    "rulingCount_other": "{{count}} rulings",
+    "vanilla": "Vanilla — no parsed abilities",
+    "unsupported": "unsupported",
+    "showMore": "Show {{count}} more",
+    "showLess": "Show less",
+    "fromSource": "(from {{source}})",
+    "basePT": "(base {{power}}/{{toughness}})",
+    "damage": "Damage: {{amount}}",
+    "ptDeltaFrom": "{{delta}} from {{source}}",
+    "colors": "Colors: {{colors}}",
+    "colorless": "Colorless"
+  },
+  "actionButton": {
+    "clearAttackers": "Clear Attackers",
+    "attackWithAll": "Attack with All",
+    "confirmAttackers": "Confirm Attackers ({{count}})",
+    "attackWithNone": "Attack with None",
+    "attackWithNoneConfirm": "Tap Again: Attack with None",
+    "confirmBlockers": "Confirm Blockers ({{count}})",
+    "resetBlocks": "Reset Blocks",
+    "blockWithNone": "Block with None",
+    "blockWithNoneConfirm": "Tap Again: Block with None",
+    "selectAttackerForBlocker": "Select the attacker this blocker should defend against",
+    "companionToHand": "Companion to Hand",
+    "resolve": "Resolve",
+    "resolveTooltip": "Pass priority so the top stack item can resolve if every player also passes. Shortcut: Space.",
+    "resolveAll": "Resolve All",
+    "resolveAllTooltip": "Keep passing priority while the stack resolves. A required choice or stop can interrupt it.",
+    "waiting": "Waiting",
+    "priorityTooltip": "Pass priority. If the stack is empty, this advances through the current priority window. Shortcut: Space.",
+    "pass": "Pass",
+    "passToEndTooltip": "Auto-pass until the end step unless a choice, stop, or Full Control interrupts. Shortcut: Enter.",
+    "autoPassing": "Auto-Passing to End Step..."
+  },
+  "board": {
+    "regroupCreatures": "Regroup duplicate creature groups",
+    "changeBackground": "Change background…",
+    "gameLog": "Game log",
+    "debugLog": "Debug log",
+    "waitingForGame": "Waiting for game...",
+    "clickOpponent": "Click an opponent to view their board",
+    "undo": "Undo"
+  },
+  "permanent": {
+    "expandGroup": "Expand {{name}} group",
+    "chooseToken": "Choose {{name}} token",
+    "pick": "Pick",
+    "close": "close",
+    "eligibleCount": "{{count}} legal",
+    "attackingCount": "atk {{count}}",
+    "selectedCount": "sel {{count}}",
+    "pickAll": "All",
+    "pickNone": "None",
+    "underAttack_one": "Attacked by {{count}} creature",
+    "underAttack_other": "Attacked by {{count}} creatures",
+    "target": "Target",
+    "copy": "Copy",
+    "copyTooltip": "Token copy of a real card"
+  },
+  "player": {
+    "opponent": "Opp {{seat}}",
+    "cardsInHand": "Cards in hand",
+    "hand": "Hand",
+    "creaturesAbbr": "Crt",
+    "landsAbbr": "Lnd",
+    "otherAbbr": "Oth",
+    "out": "OUT",
+    "eliminated": "Eliminated",
+    "phasedOut": "Phased Out",
+    "you": "You",
+    "commanderDamageFrom": "Commander damage from {{source}}: {{damage}}/{{threshold}}"
+  },
+  "attackTargetPicker": {
+    "heading": "Choose Attack Target",
+    "attackAll": "Attack All",
+    "splitAttacks": "Split Attacks",
+    "confirmSplitAttacks": "Confirm Split Attacks",
+    "attackWith_one": "Attack <name>{{label}}</name> with {{count}} creature",
+    "attackWith_other": "Attack <name>{{label}}</name> with {{count}} creatures",
+    "allTo": "All → <name>{{label}}</name>",
+    "creatureFallback": "Creature #{{id}}",
+    "planeswalkerFallback": "Planeswalker #{{id}}",
+    "you": "You",
+    "ally": "Ally",
+    "restoreDialog": "Restore dialog",
+    "restoreDialogTitle": "Restore attack target dialog"
+  },
+  "fullControl": {
+    "on": "Full Control On",
+    "off": "Full Control Off",
+    "tooltip": "Hold priority windows instead of letting quiet spots auto-pass. Shortcut: F."
+  },
+  "passButton": {
+    "resolve": "Resolve",
+    "done": "Done"
+  },
+  "lifeTotal": {
+    "playerLabel": "P{{seat}}"
+  },
+  "phaseStop": {
+    "untapLabel": "Untap step",
+    "untapDescription": "Your tapped permanents untap here.",
+    "upkeepLabel": "Upkeep step",
+    "upkeepDescription": "Upkeep triggers and recurring costs happen here.",
+    "drawLabel": "Draw step",
+    "drawDescription": "You draw for turn here.",
+    "preCombatMainLabel": "First main phase",
+    "preCombatMainDescription": "Play lands and cast spells before combat.",
+    "beginCombatLabel": "Beginning of combat step",
+    "beginCombatDescription": "Last priority window before attackers are chosen.",
+    "declareAttackersLabel": "Declare attackers step",
+    "declareAttackersDescription": "The attacking player chooses attackers.",
+    "declareBlockersLabel": "Declare blockers step",
+    "declareBlockersDescription": "Defending players choose blockers.",
+    "combatDamageLabel": "Combat damage step",
+    "combatDamageDescription": "Creatures assign and deal combat damage.",
+    "endCombatLabel": "End of combat step",
+    "endCombatDescription": "Last combat priority window after damage.",
+    "postCombatMainLabel": "Second main phase",
+    "postCombatMainDescription": "Play lands or cast spells after combat.",
+    "endLabel": "End step",
+    "endDescription": "End-step triggers and end-of-turn actions happen here.",
+    "cleanupLabel": "Cleanup step",
+    "cleanupDescription": "Damage wears off and maximum hand size is checked.",
+    "tooltipStopSet": "Stop set: click to remove this auto-pass stop.",
+    "tooltipNoStop": "No stop set: click to pause auto-pass here.",
+    "tooltipCurrentPhase": "Current phase.",
+    "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}"
+  },
+  "phaseTracker": {
+    "turn": "Turn {{number}}"
+  },
+  "attachments": {
+    "enchantmentsOnPlayer": "Enchantments on Player",
+    "attachedTo": "Attached to",
+    "attachedCount_one": "{{count}} attached permanent",
+    "attachedCount_other": "{{count}} attached permanents",
+    "unknownHost": "Unknown",
+    "target": "Target"
+  },
+  "battlefieldPeek": {
+    "boardOf": "{{name}}'s board",
+    "noNonlandPermanents": "No nonland permanents",
+    "morePermanents_one": "+{{count}} more permanent",
+    "morePermanents_other": "+{{count}} more permanents",
+    "notTargetable": " (not targetable)"
+  },
+  "disconnectDialog": {
+    "title": "{{name}} disconnected",
+    "reconnecting": "Reconnecting… <seconds>{{seconds}}s</seconds> remaining",
+    "pauseAndWait": "Pause and wait",
+    "continueWithout": "Continue without them"
+  },
+  "kickDialog": {
+    "title": "Kick {{name}}?",
+    "body": "They will forfeit the game and cannot rejoin.",
+    "kick": "Kick"
+  },
+  "enchantmentsBadge": {
+    "ariaLabel_one": "1 enchantment on this player",
+    "ariaLabel_other": "{{count}} enchantments on this player",
+    "tooltip_one": "Hover to preview, click to view",
+    "tooltip_other": "{{count}} enchantments — hover to preview, click to view"
+  },
+  "badges": {
+    "monarch": "Monarch",
+    "monarchTooltip": "The Monarch — draws an extra card at end of turn",
+    "initiative": "Initiative",
+    "initiativeTooltip": "Has the Initiative — ventures into Undercity at start of upkeep",
+    "cityBlessing": "City's Blessing",
+    "cityBlessingTooltip": "City's Blessing — controls ten or more permanents (Ascend)",
+    "dungeonAriaLabel": "Venturing in {{name}}, room {{room}}",
+    "dungeonTooltip": "Venturing in {{name}} — room {{room}}",
+    "poisonAriaLabel_one": "{{count}} poison counter",
+    "poisonAriaLabel_other": "{{count}} poison counters",
+    "poisonTooltip": "Poison counters: {{count}}",
+    "energyAriaLabel_one": "{{count}} energy counter",
+    "energyAriaLabel_other": "{{count}} energy counters",
+    "energyTooltip": "Energy: {{count}}",
+    "ringAriaLabel": "The Ring tempts you (level {{level}})",
+    "ringTooltip": "The Ring tempts you — level {{level}}",
+    "radAriaLabel_one": "{{count}} rad counter",
+    "radAriaLabel_other": "{{count}} rad counters",
+    "radTooltip": "Rad counters: {{count}}",
+    "speedAriaLabel": "Speed {{value}}",
+    "speedTooltip": "Speed: {{value}}",
+    "companion": "Companion"
+  },
+  "avatar": {
+    "underAttack": "{{name}} is under attack"
+  },
+  "incomingAttackers": {
+    "summary": "⚔×{{count}} incoming from {{name}}",
+    "clickToFocus": "click to focus"
+  },
+  "manaPool": {
+    "onlyForSpellType": "Spend only to cast spells of a specific type",
+    "onlyForCreatureType": "Spend only to cast a creature spell of the chosen type",
+    "onlyForTypeSpellsOrAbilities": "Spend only on spells or abilities of a specific type",
+    "onlyForSpellWithKeywordKind": "Spend only to cast spells with a specific keyword",
+    "onlyForSpellWithKeywordKindFromZone": "Spend only to cast keyword spells from a graveyard",
+    "onlyForActivation": "Spend only to activate abilities",
+    "onlyForXCosts": "Spend only on costs that include {X}",
+    "convokePayment": "Convoke payment",
+    "grantsProperty": "Grants a property to the spell"
+  },
+  "zone": {
+    "emblem": "Emblem",
+    "emblemFallback": "Emblem",
+    "commander": "Commander",
+    "commanderTitle": "Commander: {{name}}",
+    "commanderTitleTax": "Commander: {{name}} (Tax: +{{tax}})",
+    "castCommander": "Cast {{name}} — double-click or drag to play",
+    "castCommanderTax": "Cast {{name}} (Tax: +{{tax}}) — double-click or drag to play",
+    "tax": "Tax: +{{tax}}",
+    "companion": "Companion",
+    "companionTitle": "Companion: {{name}}",
+    "companionTitleUsed": "Companion: {{name}} (Used)",
+    "companionActivate": "Pay {3}: Put {{name}} into your hand",
+    "used": "Used",
+    "exile": "Exile",
+    "exileTitle": "Exile ({{count}})",
+    "graveyard": "Graveyard",
+    "graveyardShort": "GY",
+    "graveyardTitle": "Graveyard ({{count}})",
+    "libraryAlt": "Library",
+    "libraryCount_one": "Library ({{count}} card)",
+    "libraryCount_other": "Library ({{count}} cards)",
+    "playFromTop": "Play {{name}} from top of library",
+    "topOfLibrary": "top of library",
+    "indicatorOpponentPrefix": "Opp ",
+    "graveyardLower": "graveyard",
+    "exileLower": "exile",
+    "zoneTitle": "{{zone}} ({{count}})",
+    "noCardsIn": "No cards in {{zone}}",
+    "castFromZone": "Cast from {{zone}}: {{name}}",
+    "viewCount": "View {{count}}",
+    "castableCount": "{{zone}} — {{count}} castable"
+  },
+  "mana": {
+    "free": "Free",
+    "chooseXTitle": "Choose a value for X",
+    "chooseXAria": "Choose X value",
+    "xEquals": "X = {{value}}",
+    "minMax": "min {{min}} / max {{max}}",
+    "maxOnly": "max {{max}}",
+    "confirmX": "Confirm X = {{value}}",
+    "payMana": "Pay Mana Cost",
+    "convokeHint": "Tap creatures to help pay.",
+    "improviseHint": "Tap artifacts to help pay.",
+    "convokeOrImproviseHint": "Tap creatures or artifacts to help pay.",
+    "lifeAmount": "2 life",
+    "lifeCostSummary": "({{count}} life)",
+    "paymentPending": "Payment is still pending. Tap permanents or cancel this action.",
+    "poolLabel": "Pool:",
+    "poolEmpty": "Empty",
+    "pay": "Pay",
+    "chooseAmountTitle": "Choose amount to pay",
+    "chooseAmountAria": "Choose amount to pay",
+    "payAmount": "Pay {{value}} {{resource}}",
+    "resourceEnergy": "energy",
+    "resourceMana": "mana"
+  },
+  "hand": {
+    "viewFullHand_one": "View full hand ({{count}} card)",
+    "viewFullHand_other": "View full hand ({{count}} cards)",
+    "handLabel": "Hand {{count}}",
+    "handTitle": "Hand ({{count}})",
+    "cardBack": "Card back"
+  },
+  "opponentHud": {
+    "ally": "Ally",
+    "out": "Out",
+    "phased": "Phased",
+    "followingActiveOpponent": "Following active opponent. Focus switches to the opponent whose turn it is.",
+    "followActiveOpponent": "Follow active opponent. Focus will switch to the opponent whose turn it is.",
+    "targetPlayer": "Target {{name}}",
+    "viewBoardThenTarget": "View {{name}}'s board (click again to target {{name}})",
+    "viewBoard": "View {{name}}'s board",
+    "clickToTarget": "Click to target {{name}}",
+    "clickToViewThenTarget": "Click to view {{name}}'s board, then click again to target {{name}}",
+    "clickToViewBoard": "Click to view {{name}}'s board",
+    "underAttack": "{{name}} is under attack",
+    "kickPlayer": "Kick player {{seat}}",
+    "kickPlayerTooltip": "Kick player (forfeit)",
+    "incomingAttackers_one": "{{count}} creature attacking you",
+    "incomingAttackers_other": "{{count}} creatures attacking you",
+    "disconnected": "Disconnected",
+    "connected": "Connected",
+    "statHand": "Hand",
+    "statCreatures": "Creatures",
+    "statLands": "Lands",
+    "statOther": "Other"
+  },
+  "combat": {
+    "attackAll": "Attack All",
+    "skip": "Skip",
+    "confirmAttackers": "Confirm Attackers ({{count}})",
+    "confirmBlockers": "Confirm Blockers ({{count}})",
+    "clickAttackerToAssignBlocker": "Click an attacker to assign blocker",
+    "assignDamageTitle": "Assign {{amount}} Combat Damage",
+    "assignDamageSubtitle": "{{name}} — Remaining: {{remaining}}",
+    "assignDamageButton": "Assign Damage",
+    "lethalLabel": "lethal: {{amount}}",
+    "lethalBadge": "Lethal",
+    "planeswalkerLoyalty": "Planeswalker (loyalty: {{loyalty}})",
+    "defendingPlayerTrample": "Defending Player (Trample)",
+    "pwControllerTrample": "PW Controller (Trample Over PW)"
+  },
+  "stack": {
+    "title": "Stack",
+    "collapsePanel": "Collapse stack panel",
+    "expandPanel": "Expand stack panel",
+    "dockLeft": "Dock stack on the left",
+    "dockRight": "Dock stack on the right",
+    "casting": "Casting…",
+    "next": "Next",
+    "activated": "Activated",
+    "triggered": "Triggered",
+    "triggeredFrom": "Triggered — From {{source}}",
+    "controllerYou": "You",
+    "controllerOpp": "Opp",
+    "controllerInitialYou": "Y",
+    "controllerInitialOpp": "P{{seat}}",
+    "targetingLabel": "Targeting {{label}}",
+    "titleTargets": "Targets: {{targets}}",
+    "titlePaid": "Paid: {{paid}}",
+    "titleContext": "Context: {{context}}",
+    "paidXValue": "X={{value}}",
+    "paidManaSpent": "{{amount}} mana",
+    "paidColorsSpent": "{{count}} colors",
+    "paidKicked": "kicked",
+    "paidKickedTimes": "kicked ×{{count}}",
+    "paidAdditionalCost": "extra cost",
+    "paidConvoked": "convoked ×{{count}}"
+  },
+  "targeting": {
+    "choosePermanentToCopy": "Choose a permanent to copy",
+    "retargetCopySlot": "Retarget copy: slot {{current}} of {{total}}",
+    "chooseTargetForCopySlot": "Choose target for copy: slot {{current}} of {{total}}",
+    "chooseNewTargetForCopy": "Choose new target for copy",
+    "chooseTargetForCopy": "Choose target for copy",
+    "chooseCreatureToExplore": "Choose which creature explores next",
+    "tapUntappedCreatures_one": "Tap {{count}} untapped creature",
+    "tapUntappedCreatures_other": "Tap {{count}} untapped creatures",
+    "chooseTargetOf": "Choose target {{current}} of {{total}}",
+    "chooseTarget": "Choose a target",
+    "noLegalTargets": "No legal targets available",
+    "upToOne": "up to one {{target}}",
+    "one": "a {{target}}",
+    "nounPlayer": "player",
+    "nounNonlandPermanent": "nonland permanent",
+    "nounCreature": "creature",
+    "nounPlaneswalker": "planeswalker",
+    "nounTargetPermanent": "target permanent",
+    "nounTarget": "target",
+    "confirmTap": "Confirm Tap ({{selected}}/{{count}})",
+    "keepCurrentTargets": "Keep Current Targets",
+    "skip": "Skip"
+  },
+  "log": {
+    "title": "Game Log",
+    "noEvents": "No events yet",
+    "closeLog": "Close game log",
+    "verbosityFull": "full",
+    "verbosityCompact": "compact",
+    "verbosityMinimal": "minimal",
+    "gameStarted": "Game started",
+    "turnStarted": "Turn {{turn}} -- {{player}}",
+    "phaseChanged": "Phase: {{phase}}",
+    "priorityPassed": "{{player}} passed priority",
+    "spellCast": "Spell cast by {{player}}",
+    "abilityActivated": "Ability activated (source {{sourceId}})",
+    "zoneChangedMoved": "Object {{objectId}} moved {{from}} -> {{to}}",
+    "zoneChangedEnters": "Object {{objectId}} enters {{to}}",
+    "lifeChanged": "{{player}} life: {{sign}}{{amount}}",
+    "manaAdded": "{{player}} added {{manaType}} mana",
+    "permanentTapped": "Permanent {{objectId}} tapped",
+    "permanentUntapped": "Permanent {{objectId}} untapped",
+    "playerLost": "{{player}} lost the game",
+    "mulliganStarted": "Mulligan phase",
+    "cardsDrawn_one": "{{player}} drew {{count}} card",
+    "cardsDrawn_other": "{{player}} drew {{count}} cards",
+    "cardDrawn": "{{player}} drew a card",
+    "landPlayed": "{{player}} played a land",
+    "stackPushed": "Object {{objectId}} pushed to stack",
+    "stackResolved": "Stack entry {{objectId}} resolved",
+    "discarded": "{{player}} discarded",
+    "damageCleared": "Damage cleared from {{objectId}}",
+    "gameOverWinner": "Game over -- {{player}} wins!",
+    "gameOverDraw": "Game over -- Draw",
+    "damageDealtPlayer": "Source {{sourceId}} deals {{amount}} damage to {{player}}",
+    "damageDealtObject": "Source {{sourceId}} deals {{amount}} damage to object {{objectId}}",
+    "spellCountered": "Object {{objectId}} countered by {{counteredBy}}",
+    "counterAdded": "{{counterType}} x{{count}} added to {{objectId}}",
+    "counterRemoved": "{{counterType}} x{{count}} removed from {{objectId}}",
+    "tokenCreated": "Token \"{{name}}\" created",
+    "creatureDestroyed": "Creature {{objectId}} destroyed",
+    "permanentSacrificed": "{{player}} sacrificed {{objectId}}",
+    "effectResolved": "Effect {{kind}} resolved",
+    "attackersDeclared_one": "{{count}} attacker declared",
+    "attackersDeclared_other": "{{count}} attackers declared",
+    "blockersDeclared_one": "{{count}} blocker assigned",
+    "blockersDeclared_other": "{{count}} blockers assigned",
+    "becomesTarget": "Object {{objectId}} targeted by {{sourceId}}",
+    "replacementApplied": "Replacement applied: {{eventType}}",
+    "companionRevealed": "{{player}} revealed companion: {{cardName}}",
+    "companionMovedToHand": "{{player}} put companion {{cardName}} into hand",
+    "powerToughnessChanged": "Object {{objectId}} is now {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
+    "genericEvent": "Event: {{type}}"
+  },
+  "coverage": {
+    "engineTools": "Engine Tools",
+    "title": "Card Coverage",
+    "subtitle": "Inspect implementation coverage and supported engine handlers.",
+    "tabCardCoverage": "Card Coverage",
+    "tabBySet": "By Set",
+    "tabGapAnalysis": "Gap Analysis",
+    "tabSupportedHandlers": "Supported Handlers",
+    "noDataAvailable": "No coverage data available.",
+    "generateHint": "Generate it with: cargo run --bin coverage-report -- /path/to/cards --all > client/public/coverage-data.json",
+    "emptyData": "Coverage data is empty (0 cards analyzed).",
+    "runHint": "Run: cargo run --bin coverage-report -- /path/to/cards --all > client/public/coverage-data.json",
+    "searchCards": "Search cards...",
+    "filterAll": "All",
+    "filterSupported": "Supported",
+    "filterUnsupported": "Unsupported",
+    "sortAz": "Sort: A-Z",
+    "sortMostGaps": "Sort: Most Gaps",
+    "sortFewestGaps": "Sort: Fewest Gaps",
+    "shownOfTotal": "{{shown}} of {{total}} shown",
+    "noMatches": "No matches",
+    "matchesCount": "{{shown}} of {{total}} matches",
+    "cardsCount": "{{count}} cards",
+    "selectCardPrompt": "Select a card to inspect its parse breakdown",
+    "navHint": "Use arrow keys to navigate, Escape to deselect",
+    "coverageByFormat": "Coverage by Format",
+    "allFormats": "All Formats",
+    "setThresholdHint": "Sets with ≥{{minCards}} cards and ≥{{minCoverage}}% fully supported. Expand a set to inspect remaining gaps.",
+    "setsCount": "({{count}} sets)",
+    "noSetsMeetThreshold": "No sets meet the threshold yet.",
+    "setMembershipMissing": "Set membership data is not in this coverage export.",
+    "regenerateHint": "Regenerate with: ./scripts/gen-card-data.sh",
+    "gapCount_one": "{{count}} gap",
+    "gapCount_other": "{{count}} gaps",
+    "noUnsupportedInSet": "No unsupported cards in this set.",
+    "unsupportedCardsHint": "Unsupported cards ({{count}}) — click one to inspect parse tree",
+    "noGapDetails": "no gap details",
+    "noGapAnalysis": "No gap analysis data available.",
+    "filterByFormat": "Filter by format:",
+    "topGaps": "Top Gaps by Impact (Top 50)",
+    "copyAsTsv": "Copy as TSV",
+    "totalLabel": "{{count}} total",
+    "unlockLabel": "{{count}} unlock",
+    "indLabel": "{{ratio}} ind",
+    "exampleCard": "e.g. {{name}}",
+    "oraclePatterns": "Oracle Patterns",
+    "coOccurringGaps": "Co-occurring Gaps",
+    "singleGapUnlockByFormat": "Single-Gap Unlock by Format",
+    "twoGapBundles": "2-Gap Bundles (implement both to unlock cards)",
+    "threeGapBundles": "3-Gap Bundles (implement all three to unlock cards)",
+    "bundleCards": "{{count}} cards",
+    "backToList": "Back to list",
+    "supported": "Supported",
+    "unsupported": "Unsupported",
+    "copyOracle": "Copy Oracle",
+    "unresolvedGaps": "Unresolved Gaps ({{count}})",
+    "vanillaCard": "No parsed items (vanilla card).",
+    "additionalParseItems": "Additional Parse Items",
+    "itemUnsupported": "unsupported",
+    "categoryKeyword": "Keyword",
+    "categoryAbility": "Ability",
+    "categoryTrigger": "Trigger",
+    "categoryStatic": "Static",
+    "categoryReplacement": "Replacement",
+    "categoryCost": "Cost",
+    "copied": "Copied!",
+    "handlersObserved": "{{count}} handlers observed on supported cards",
+    "derivedFrom": "derived from parser output · stubs & unused variants excluded",
+    "tabEffects": "Effects",
+    "tabTriggers": "Triggers",
+    "tabKeywords": "Keywords",
+    "tabStatics": "Statics",
+    "tabReplacements": "Replacements",
+    "search": "Search...",
+    "cardCount_one": "{{formattedCount}} card",
+    "cardCount_other": "{{formattedCount}} cards",
+    "noMatchesFound": "No matches found for “{{query}}”",
+    "noHandlersInCategory": "No handlers in this category are produced by the parser on fully supported cards.",
+    "footerSummary": "{{handlers}} handlers across {{categories}} categories · engine-derived from {{cards}} supported cards"
+  },
+  "gamePage": {
+    "actions": {
+      "returnToMenu": "Return to Menu",
+      "returnToMenuLower": "Return to menu",
+      "concedeGame": "Concede game",
+      "ok": "OK"
+    },
+    "toasts": {
+      "playerDisconnected": "{{name}} disconnected",
+      "gamePausedPlayerDisconnected": "Game paused — {{name}} disconnected",
+      "roomFull": "Room full — ready to start!",
+      "hostReconnecting": "Host disconnected — reconnecting (attempt {{attempt}})…",
+      "roomStillClaimed": "Your previous room is still winding down on the signaling server. Wait about a minute, then try Resume again."
+    },
+    "sandbox": {
+      "banner": "Sandbox Mode — debug actions enabled",
+      "bannerAria": "Sandbox mode banner"
+    },
+    "reconnect": {
+      "banner": "Reconnecting… (attempt {{attempt}})",
+      "bannerWithMax": "Reconnecting… (attempt {{attempt}}/{{maxAttempts}})",
+      "connectionLost": "Connection lost"
+    },
+    "opponentDisconnected": {
+      "title": "Opponent Disconnected",
+      "body": "Waiting for opponent to reconnect..."
+    },
+    "resumeReset": {
+      "message": "{{reason}} A new game was started."
+    },
+    "playDraw": {
+      "title": "Game {{gameNumber}}: Choose Play or Draw",
+      "matchScore": "Match score {{p0Wins}}-{{p1Wins}}",
+      "playFirst": "Play First",
+      "playFirstDescription": "Take the first turn",
+      "drawFirst": "Draw First",
+      "drawFirstDescription": "Take the extra draw on your first turn"
+    },
+    "mulligan": {
+      "opponentDeciding": "Opponent is deciding their opening hand…",
+      "londonTitle": "London Mulligan ({{count}} taken)",
+      "keepHand": "Keep Hand",
+      "putOnBottom": "Put {{count}} on the bottom",
+      "noCardsToBottom": "No cards to the bottom",
+      "mulligan": "Mulligan",
+      "freeMulligan": "Free Mulligan",
+      "mulliganTo": "Mulligan to {{count}}",
+      "shuffleDrawSevenFree": "Shuffle and draw 7 — no cards to the bottom",
+      "shuffleDrawSevenAgain": "Shuffle and draw 7 again",
+      "usePowder": "Use {{name}}",
+      "powderDescription": "Exile every card in hand, draw the same number — not a mulligan",
+      "powderTooltip": "Exile every card in your hand and draw the same number. Not a mulligan — count and bottoms unaffected.",
+      "eyebrowMulligan": "Mulligan {{count}} · London",
+      "eyebrowOpening": "Opening Hand · London Mulligan",
+      "reviewTitle": "Review your opening hand",
+      "subtitleKeepWithBottom": "Keep this hand (you'll put {{count}} on the bottom) or mulligan again for a fresh 7.",
+      "subtitleKeepFree": "Keep this hand (free mulligan — no cards to the bottom) or mulligan again for a fresh 7.",
+      "subtitleOpeningFree": "Keep this hand or take a free mulligan (no cards to the bottom).",
+      "subtitleOpeningOne": "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep)."
+    },
+    "companion": {
+      "eyebrow": "Pre-Game",
+      "title": "Reveal Companion?",
+      "subtitle": "You may reveal a companion from your sideboard. It will be placed in the companion zone and can be put into your hand once during the game by paying {3}.",
+      "decline": "Decline",
+      "reveal": "Reveal {{name}}"
+    },
+    "bottomCards": {
+      "eyebrowTinyLeaders": "Tiny Leaders",
+      "eyebrowLondon": "London Mulligan",
+      "title_one": "Put {{count}} card on the bottom",
+      "title_other": "Put {{count}} cards on the bottom",
+      "subtitleOpening_one": "Select {{count}} card from your opening hand before mulligans begin.",
+      "subtitleOpening_other": "Select {{count}} cards from your opening hand before mulligans begin.",
+      "subtitleMulligan_one": "Select {{count}} card from your hand. They will be returned to the bottom of your library in the order you choose here.",
+      "subtitleMulligan_other": "Select {{count}} cards from your hand. They will be returned to the bottom of your library in the order you choose here.",
+      "selectedOf": "Selected {{selected}} of {{count}}",
+      "confirmSelection": "Confirm Selection"
+    },
+    "gameOver": {
+      "draw": "DRAW",
+      "victory": "VICTORY",
+      "defeat": "DEFEAT",
+      "lifeSummary": "You: <player>{{playerLife}}</player> <sep>/</sep> Opponent: <opponent>{{opponentLife}}</opponent>",
+      "turns": "Turns: {{count}}",
+      "duration": "Duration: {{time}}",
+      "backToDraft": "Back to Draft",
+      "continueRun": "Continue Run",
+      "backToLobby": "Back to Lobby",
+      "rematch": "Rematch"
+    },
+    "abilityChoice": {
+      "subtitleSneak": "Choose which attacker to return (Sneak cost)",
+      "subtitlePreparedCopy": "Cast the prepared spell?",
+      "subtitleActivate": "Activate this ability?",
+      "subtitlePlay": "Choose how to play this card",
+      "subtitleChoose": "Choose an ability to activate"
+    },
+    "defiler": {
+      "title": "Defiler Cost Reduction",
+      "subtitle": "Pay {{lifeCost}} life to reduce the mana cost?",
+      "payLife": "Pay {{lifeCost}} life",
+      "decline": "Decline"
+    },
+    "untap": {
+      "permanentFallback": "Permanent",
+      "title": "Untap {{name}}?",
+      "subtitle": "Choose whether this permanent untaps during your untap step.",
+      "untap": "Untap",
+      "untapDescription": "{{name}} untaps now.",
+      "keepTapped": "Keep tapped",
+      "keepTappedDescription": "{{name}} stays tapped this untap step."
+    },
+    "cost": {
+      "discardCard": "discard a card",
+      "life": "{{amount}} life",
+      "sacrifice_one": "sacrifice a permanent",
+      "sacrifice_other": "sacrifice {{count}} permanents",
+      "returnToHand_one": "return a permanent to hand",
+      "returnToHand_other": "return {{count}} permanents to hand",
+      "energy": "{{amount}} energy",
+      "generic": "a cost",
+      "pay": "Pay {{cost}}"
+    },
+    "unlessPayment": {
+      "defaultEffect": "Counter Unless You Pay",
+      "defaultChooseCost": "Choose a cost",
+      "title": "{{effect}} Unless You Pay",
+      "titleChooseOne": "{{effect}} Unless You Pay One",
+      "dontPay": "Don’t Pay",
+      "takeEffect": "Take the Effect"
+    },
+    "activationCost": {
+      "title": "Choose Activation Cost"
+    },
+    "debug": {
+      "modeBanner": "DEBUG MODE - Click any card"
+    }
+  },
+  "gameProvider": {
+    "passwordPrompt": "This room requires a password:",
+    "toasts": {
+      "connectionFailed": "Connection failed. Retry or change server in Settings.",
+      "eliminatedSpectating": "You have been eliminated. Now spectating."
+    },
+    "resumeReset": {
+      "appUpdated": "The app was updated and your saved game is incompatible with the new version.",
+      "restoreFailed": "Could not restore saved game: {{error}}"
+    },
+    "notification": {
+      "title": "Opponent joined",
+      "opponentJoined": "Your opponent has joined the game. Come back and play!",
+      "opponentJoinedNamed": "{{name}} joined your game. Come back and play!"
+    },
+    "noLegalAiDecks": {
+      "withFormat": "No legal AI decks are available for {{format}}.",
+      "generic": "No legal AI decks are available for the selected format."
+    }
+  },
+  "gameSetup": {
+    "eyebrow": "Match Setup",
+    "title": "Start a match.",
+    "startMatch": "Start Match",
+    "startMatchWithOpponents": "Start Match ({{count}} opp.)",
+    "deckNotLegal": "Deck is not legal in {{format}}.",
+    "selectDeckPrompt": "Select a deck",
+    "commanderNote": "Commander: 100-card singleton, commander damage at {{threshold}}",
+    "formatChip": {
+      "kicker": "Format",
+      "choosePlaceholder": "Choose format",
+      "ariaLabel": "Format: {{label}} ({{group}}). Tap to change.",
+      "ariaLabelEmpty": "Choose match format"
+    },
+    "formatPicker": {
+      "title": "Choose a format",
+      "subtitle": "Pick the rules everyone at the table will play by."
+    },
+    "deckPreview": {
+      "editDeck": "Edit {{name}}",
+      "cardCount_one": "{{count}} card",
+      "cardCount_other": "{{count}} cards",
+      "unknownBadge": "Unknown {{count}}",
+      "unknownCardsTitle": "Unknown cards:\n{{cards}}"
+    },
+    "config": {
+      "startingLife": "Starting Life",
+      "players": "Players",
+      "whoGoesFirst": "Who Goes First",
+      "firstPlayer": {
+        "random": "Random",
+        "play": "Play",
+        "draw": "Draw"
+      }
+    },
+    "noLegalAiDecks": {
+      "withFormat": "Add or import a deck legal in {{format}} for the AI to use.",
+      "generic": "Add or import a deck legal in this format for the AI to use."
+    }
+  },
+  "cardChoice": {
+    "badges": {
+      "choose": "Choose",
+      "selected": "Selected",
+      "keep": "Keep",
+      "top": "Top",
+      "bottom": "Bottom",
+      "graveyard": "Graveyard",
+      "put": "Put",
+      "sacrifice": "Sacrifice",
+      "exile": "Exile",
+      "battlefield": "Battlefield",
+      "target": "Target",
+      "return": "Return",
+      "discard": "Discard",
+      "evidence": "Evidence",
+      "manifest": "Manifest",
+      "crew": "Crew ({{power}})",
+      "saddle": "Saddle ({{power}})",
+      "station": "Station (+{{power}})"
+    },
+    "buttons": {
+      "confirm": "Confirm",
+      "decline": "Decline",
+      "pass": "Pass",
+      "skip": "Skip",
+      "repeat": "Repeat",
+      "stop": "Stop",
+      "confirmCount": "Confirm ({{selected}}/{{count}})",
+      "confirmOrder": "Confirm Order ({{selected}}/{{count}})",
+      "sacrificeCount": "Sacrifice ({{selected}}/{{count}})",
+      "exileCount": "Exile ({{selected}}/{{count}})",
+      "discardCount": "Discard ({{selected}}/{{count}})",
+      "collectCount": "Collect ({{total}}/{{minimum}})",
+      "labelCount": "{{label}} ({{selected}}/{{count}})"
+    },
+    "ringBearer": {
+      "title": "Choose Ring-bearer",
+      "subtitle": "Choose a creature you control"
+    },
+    "scry": {
+      "title": "Scry",
+      "subtitle_one": "Look at the top {{count}} card of your library",
+      "subtitle_other": "Look at the top {{count}} cards of your library"
+    },
+    "dig": {
+      "titleReorder": "Reorder Cards",
+      "title": "Choose Cards",
+      "subtitleReorder": "Select all {{count}} cards in top-to-bottom order",
+      "subtitleExact_one": "Select {{count}} card to put {{destination}}",
+      "subtitleExact_other": "Select {{count}} cards to put {{destination}}",
+      "subtitleUpTo_one": "Select up to {{count}} card to put {{destination}}",
+      "subtitleUpTo_other": "Select up to {{count}} cards to put {{destination}}",
+      "destinationTop": "on top of your library",
+      "destinationBattlefield": "onto the battlefield",
+      "destinationHand": "into your hand"
+    },
+    "surveil": {
+      "title": "Surveil",
+      "subtitle_one": "Look at the top {{count}} card of your library",
+      "subtitle_other": "Look at the top {{count}} cards of your library"
+    },
+    "reveal": {
+      "titleReveal": "Reveal from Hand",
+      "titleOpponentHand": "Opponent's Hand",
+      "subtitleReveal": "Choose a card to reveal, or decline",
+      "subtitleChoose": "Choose a card"
+    },
+    "search": {
+      "title": "Search Library",
+      "subtitleExact_one": "Choose {{count}} card",
+      "subtitleExact_other": "Choose {{count}} cards",
+      "subtitleUpTo_one": "Choose up to {{count}} card",
+      "subtitleUpTo_other": "Choose up to {{count}} cards",
+      "subtitleMatchExact_one": "Choose {{count}} card matching the listed search requirements",
+      "subtitleMatchExact_other": "Choose {{count}} cards matching the listed search requirements",
+      "subtitleMatchUpTo_one": "Choose up to {{count}} card matching the listed search requirements",
+      "subtitleMatchUpTo_other": "Choose up to {{count}} cards matching the listed search requirements",
+      "subtitleDistinctExact_one": "Choose {{count}} card with distinct qualities",
+      "subtitleDistinctExact_other": "Choose {{count}} cards with distinct qualities",
+      "subtitleDistinctUpTo_one": "Choose up to {{count}} card with distinct qualities",
+      "subtitleDistinctUpTo_other": "Choose up to {{count}} cards with distinct qualities",
+      "subtitleManaValueExact_one": "Choose {{count}} card within the mana value limit",
+      "subtitleManaValueExact_other": "Choose {{count}} cards within the mana value limit",
+      "subtitleManaValueUpTo_one": "Choose up to {{count}} card within the mana value limit",
+      "subtitleManaValueUpTo_other": "Choose up to {{count}} cards within the mana value limit"
+    },
+    "searchPartition": {
+      "title": "Choose Cards for the Battlefield",
+      "subtitle_one": "Choose {{count}} card to put onto the battlefield{{tapped}}; the rest go to your hand",
+      "subtitle_other": "Choose {{count}} cards to put onto the battlefield{{tapped}}; the rest go to your hand",
+      "tapped": " tapped"
+    },
+    "outsideGame": {
+      "title": "Choose From Sideboard",
+      "subtitleExact": "Choose {{count}}",
+      "subtitleUpTo": "Choose up to {{count}}"
+    },
+    "chooseFromZone": {
+      "title": "Choose Cards",
+      "subtitleExact_one": "Choose {{count}} card",
+      "subtitleExact_other": "Choose {{count}} cards",
+      "subtitleUpTo_one": "Choose up to {{count}} card",
+      "subtitleUpTo_other": "Choose up to {{count}} cards",
+      "subtitleDistinctCardTypes": "Choose up to {{count}} cards with distinct card types"
+    },
+    "pair": {
+      "title": "Choose Soulbond Partner",
+      "subtitle": "Pair with an unpaired creature you control"
+    },
+    "effectZone": {
+      "titleSacrifice": "Sacrifice",
+      "titleTopdeck": "Put on Library",
+      "titleBattlefield": "Put onto Battlefield",
+      "subtitleSacrificeExact_one": "Choose {{count}} permanent to sacrifice",
+      "subtitleSacrificeExact_other": "Choose {{count}} permanents to sacrifice",
+      "subtitleSacrificeUpTo_one": "Choose up to {{count}} permanent to sacrifice",
+      "subtitleSacrificeUpTo_other": "Choose up to {{count}} permanents to sacrifice",
+      "subtitleSacrificeRange_one": "Choose {{min}}-{{count}} permanent to sacrifice",
+      "subtitleSacrificeRange_other": "Choose {{min}}-{{count}} permanents to sacrifice",
+      "subtitleTopdeckExact_one": "Choose {{count}} card to put on top of your library",
+      "subtitleTopdeckExact_other": "Choose {{count}} cards to put on top of your library",
+      "subtitleTopdeckUpTo_one": "Choose up to {{count}} card to put on top of your library",
+      "subtitleTopdeckUpTo_other": "Choose up to {{count}} cards to put on top of your library",
+      "subtitleTopdeckRange_one": "Choose {{min}}-{{count}} card to put on top of your library",
+      "subtitleTopdeckRange_other": "Choose {{min}}-{{count}} cards to put on top of your library",
+      "subtitleBattlefieldExact_one": "Choose {{count}} card to put onto the battlefield",
+      "subtitleBattlefieldExact_other": "Choose {{count}} cards to put onto the battlefield",
+      "subtitleBattlefieldUpTo_one": "Choose up to {{count}} card to put onto the battlefield",
+      "subtitleBattlefieldUpTo_other": "Choose up to {{count}} cards to put onto the battlefield",
+      "subtitleBattlefieldRange_one": "Choose {{min}}-{{count}} card to put onto the battlefield",
+      "subtitleBattlefieldRange_other": "Choose {{min}}-{{count}} cards to put onto the battlefield",
+      "labelSkip": "Skip",
+      "labelDecline": "Decline",
+      "labelPutOnTop": "Put on top ({{order}})",
+      "labelConfirm": "Confirm ({{selected}}/{{count}})",
+      "labelTop": "Top ({{selected}}/{{count}})",
+      "labelPut": "Put ({{selected}}/{{count}})",
+      "orderTop": "Top"
+    },
+    "drawnThisTurn": {
+      "title": "Drawn This Turn",
+      "subtitle": "Put up to {{count}} on top; pay {{life}} life for each kept",
+      "labelPayLife": "Pay {{life}} life",
+      "labelConfirm": "Confirm ({{selected}}/{{count}})"
+    },
+    "sacrifice": {
+      "title": "Sacrifice",
+      "subtitle_one": "Choose {{count}} permanent to sacrifice",
+      "subtitle_other": "Choose {{count}} permanents to sacrifice"
+    },
+    "exileBattlefield": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} permanent to exile",
+      "subtitle_other": "Choose {{count}} permanents to exile"
+    },
+    "multiTarget": {
+      "title": "Choose Targets",
+      "subtitleExact_one": "Choose {{count}} target",
+      "subtitleExact_other": "Choose {{count}} targets",
+      "subtitleRange": "Choose {{min}}–{{max}} targets"
+    },
+    "paradigm": {
+      "title": "Paradigm",
+      "subtitle": "Cast a copy of one of these spells without paying its mana cost, or pass."
+    },
+    "payManaAbility": {
+      "title": "Pay Mana Ability Cost",
+      "subtitle": "Select which mana to spend"
+    },
+    "returnToHand": {
+      "title": "Return",
+      "subtitle_one": "Choose {{count}} permanent to return",
+      "subtitle_other": "Choose {{count}} permanents to return"
+    },
+    "removeCounter": {
+      "title": "Remove Counter",
+      "subtitle": "Choose a permanent to remove a counter from",
+      "label": "Remove"
+    },
+    "blight": {
+      "title": "Blight",
+      "subtitle_one": "Put a -1/-1 counter on {{count}} creature you control",
+      "subtitle_other": "Put a -1/-1 counter on {{count}} creatures you control"
+    },
+    "crew": {
+      "title": "Crew Vehicle",
+      "subtitle": "Tap creatures with total power {{power}} or greater",
+      "label": "Crew ({{total}}/{{power}})"
+    },
+    "station": {
+      "title": "Station",
+      "subtitle": "Tap another untapped creature you control. Charge counters added equals its power.",
+      "labelWithCharge": "Station (+{{charge}} charge)",
+      "label": "Station"
+    },
+    "saddle": {
+      "title": "Saddle Mount",
+      "subtitle": "Tap creatures with total power {{power}} or greater",
+      "label": "Saddle ({{total}}/{{power}})"
+    },
+    "wardSacrifice": {
+      "title_one": "Ward — Sacrifice a permanent",
+      "title_other": "Ward — Sacrifice {{count}} permanents",
+      "subtitle": "Choose a permanent to sacrifice"
+    },
+    "unlessBounce": {
+      "title_one": "Return a permanent to hand",
+      "title_other": "Return {{count}} permanents to hand",
+      "subtitle": "Choose a permanent to return to its owner's hand"
+    },
+    "exileForCost": {
+      "titleAlternative": "Alternative cost",
+      "titleEscape": "Escape",
+      "sourceHand": "your hand",
+      "sourceGraveyard": "your graveyard",
+      "subtitle_one": "Exile {{count}} card from {{source}}",
+      "subtitle_other": "Exile {{count}} cards from {{source}}"
+    },
+    "behold": {
+      "title": "Behold",
+      "subtitleExile": "Exile a matching permanent or card",
+      "subtitleChoose": "Choose a matching permanent or reveal a matching card",
+      "labelExile": "Exile",
+      "labelBehold": "Behold"
+    },
+    "collectEvidence": {
+      "title": "Collect Evidence",
+      "subtitle": "Exile cards from your graveyard with total mana value {{minimum}} or greater"
+    },
+    "discard": {
+      "title": "Discard",
+      "titleAdditionalCost": "Discard as additional cost",
+      "titleManaAbility": "Discard for mana ability",
+      "titleConnive_one": "Connive — Discard a card",
+      "titleConnive_other": "Connive — Discard {{count}} cards",
+      "titleUpTo": "Discard up to {{count}} cards",
+      "titleExact_one": "Discard a card",
+      "titleExact_other": "Discard {{count}} cards",
+      "titleWard": "Ward — Discard a card",
+      "subtitleUpTo_one": "Choose up to {{count}} card to discard",
+      "subtitleUpTo_other": "Choose up to {{count}} cards to discard",
+      "subtitleUnless": "Choose {{count}} cards or 1 matching card to discard",
+      "subtitleExact_one": "Choose {{count}} card to discard",
+      "subtitleExact_other": "Choose {{count}} cards to discard"
+    },
+    "harmonize": {
+      "title": "Harmonize",
+      "subtitle": "Tap a creature to reduce casting cost by its power, or skip",
+      "labelSkip": "Skip (pay full cost)"
+    },
+    "legend": {
+      "title": "Legend Rule",
+      "subtitle": "Choose which \"{{name}}\" to keep",
+      "keepAria": "Keep {{name}} ({{status}})",
+      "statusJustEntered": "Just entered",
+      "statusAlready": "Already on battlefield"
+    },
+    "commanderZone": {
+      "title": "Commander Zone",
+      "subtitle": "{{name}} was put into the {{zone}}. Return to the Command Zone?",
+      "commanderFallback": "Commander",
+      "labelCommandZone": "Command Zone",
+      "labelLeave": "Leave in {{zone}}"
+    },
+    "revealUntil": {
+      "title": "Reveal Until",
+      "subtitle": "Put {{name}} onto the battlefield?",
+      "cardFallback": "the revealed card",
+      "labelBattlefield": "Onto the battlefield",
+      "labelInto": "Into {{zone}}"
+    },
+    "repeatProcess": {
+      "title": "Repeat This Process",
+      "subtitle": "Repeat the process again?"
+    },
+    "damageSource": {
+      "title": "Damage Source",
+      "subtitle": "Choose a source"
+    },
+    "manifestDread": {
+      "title": "Manifest Dread",
+      "subtitle": "Choose a card to manifest face-down. The other goes to your graveyard.",
+      "label": "Confirm Manifest"
+    },
+    "manaColor": {
+      "title": "Choose Mana Color",
+      "subtitleBatch": "Select a color, then how many sources to tap",
+      "subtitle": "Select which color of mana to produce",
+      "howMany": "How many?",
+      "tapFewer": "Tap fewer",
+      "tapMore": "Tap more",
+      "labelAdd": "Add {{count}}",
+      "labelConfirm": "Confirm"
+    },
+    "manaCombination": {
+      "title": "Choose Mana Combination",
+      "subtitleAny": "Select each mana color to produce",
+      "subtitle": "Select which combination of mana to produce"
+    }
+  },
+  "dialogShell": {
+    "eyebrow": "Game Choice",
+    "restoreDialog": "Restore dialog",
+    "peekAria": "Move dialog out of the way",
+    "peekTitle": "Peek at the battlefield",
+    "close": "Close",
+    "closeTitle": "Close (Esc)"
+  },
+  "choiceOverlay": {
+    "eyebrow": "Game Choice",
+    "scrollLeft": "Scroll left",
+    "scrollRight": "Scroll right",
+    "confirm": "Confirm",
+    "cancel": "Cancel"
+  },
+  "adventureCast": {
+    "eyebrow": "Adventure",
+    "title": "Choose a Face",
+    "subtitle": "Cast as the creature or as the Adventure spell.",
+    "adventureFallback": "Adventure",
+    "castNamed": "Cast {{name}}",
+    "creatureTag": "(Creature)",
+    "adventureTag": "(Adventure)"
+  },
+  "alternativeCost": {
+    "title": "Choose Casting Cost",
+    "warpEyebrow": "Warp",
+    "warpNormalLabel": "Cast Normally",
+    "warpAltLabel": "Cast with Warp",
+    "warpAltSuffix": "(exiles at end step)",
+    "warpSubtitle": "Cast {{name}} normally or use its Warp cost.",
+    "evokeEyebrow": "Evoke",
+    "evokeNormalLabel": "Cast Normally",
+    "evokeAltLabel": "Cast with Evoke",
+    "evokeSubtitle": "Cast {{name}} normally or cast it for its Evoke cost.",
+    "overloadEyebrow": "Overload",
+    "overloadNormalLabel": "Cast Normally",
+    "overloadAltLabel": "Cast with Overload",
+    "overloadSubtitle": "Cast {{name}} normally targeting a single permanent, or pay its Overload cost to affect all valid targets.",
+    "bestowEyebrow": "Bestow",
+    "bestowNormalLabel": "Cast as Creature",
+    "bestowAltLabel": "Cast with Bestow",
+    "bestowSubtitle": "Cast {{name}} normally as a creature, or pay its Bestow cost to cast it as an Aura.",
+    "additionalExile": "+ Exile a card",
+    "additionalSacrifice": "+ Sacrifice a permanent",
+    "additionalPayLife": "+ Pay life",
+    "additionalDiscard": "+ Discard a card",
+    "additionalTapCreatures": "+ Tap creatures",
+    "additionalGeneric": "+ {{type}}"
+  },
+  "battleProtector": {
+    "title": "Choose a Protector",
+    "battleFallback": "Battle",
+    "subtitle": "{{name}} needs a new protector. Choose which opponent will defend it."
+  },
+  "cardDataMissing": {
+    "title": "Card Data Missing",
+    "body": "<code>card-data.json</code> was not found. The game needs card definitions to play with real cards.",
+    "generatePrompt": "Generate it by running:",
+    "placeFile": "Then place the output file in <code>client/public/card-data.json</code> and reload.",
+    "continueAnyway": "Continue anyway"
+  },
+  "cascadeChoice": {
+    "cascadeEyebrow": "Cascade",
+    "discoverEyebrow": "Discover",
+    "title": "Cast {{name}}?",
+    "subtitleCascade": "Cascade exiled {{name}} (mana value below {{sourceMv}}). Cast it without paying its mana cost, or decline and shuffle all {{total}} exiled cards to the bottom of your library.",
+    "subtitleDiscover": "Discover exiled {{name}}. Cast it without paying its mana cost, or put it into your hand and shuffle the other {{missCount}} exiled cards to the bottom of your library.",
+    "castNamed": "Cast {{name}}",
+    "castSuffix": "(without paying its mana cost)",
+    "putIntoHand": "Put into hand",
+    "decline": "Decline",
+    "discoverDeclineSuffix": "(put the rest on the bottom)",
+    "cascadeDeclineSuffix": "(shuffle all exiled cards to the bottom)"
+  },
+  "castingVariant": {
+    "eyebrow": "Cast",
+    "title": "Choose Cast",
+    "variantNormal": "Cast Normally",
+    "variantAdventure": "Cast as Adventure",
+    "variantOmen": "Cast as Omen",
+    "variantWarp": "Cast with Warp",
+    "variantEscape": "Cast with Escape",
+    "variantRetrace": "Cast with Retrace",
+    "variantHarmonize": "Cast with Harmonize",
+    "variantFlashback": "Cast with Flashback",
+    "variantAftermath": "Cast with Aftermath",
+    "variantGraveyardPermission": "Cast from Graveyard",
+    "variantHandPermission": "Cast from Hand",
+    "variantMiracle": "Cast with Miracle",
+    "variantMadness": "Cast with Madness",
+    "variantEvoke": "Cast with Evoke",
+    "variantSuspend": "Cast from Suspend",
+    "variantPlot": "Cast from Plot",
+    "variantForetell": "Cast from Foretell",
+    "variantOverload": "Cast with Overload",
+    "variantBestow": "Cast with Bestow",
+    "variantFallback": "Cast with {{type}}"
+  },
+  "categoryChoice": {
+    "title": "Choose Permanents to Keep",
+    "subtitleOpponent": "Choose one permanent of each type from among the nonland permanents {{name}} controls; the rest are sacrificed.",
+    "subtitleSelf": "Choose one permanent of each type from among the nonland permanents you control; the rest are sacrificed.",
+    "noneToKeep": "No {{category}} — none to keep",
+    "objectFallback": "Object {{id}}"
+  },
+  "chooseOneOfBranch": {
+    "eyebrow": "Choice",
+    "title": "Choose one",
+    "subtitle": "Select the option to resolve.",
+    "optionFallback": "Option {{number}}"
+  },
+  "combatTax": {
+    "eyebrow": "Combat Tax",
+    "titleAttack": "Pay to Attack",
+    "titleBlock": "Pay to Block",
+    "subtitleAttack": "One or more attackers are taxed. Pay the total or remove them from the attack.",
+    "subtitleBlock": "One or more blockers are taxed. Pay the total or remove them from the block.",
+    "declineAttack": "Decline (remove taxed attackers)",
+    "declineBlock": "Decline (remove taxed blockers)",
+    "perCreatureBreakdown": "Per-Creature Breakdown",
+    "total": "Total",
+    "pay": "Pay",
+    "creatureFallback": "Creature {{id}}"
+  },
+  "distributeAmong": {
+    "unitCounter": "{{counter}} counter",
+    "unitDamage": "damage",
+    "unitLife": "life",
+    "title": "Distribute {{total}} {{unit}}",
+    "subtitle": "Assign at least 1 {{unit}} to each target. Remaining: {{remaining}}"
+  },
+  "dungeonChoice": {
+    "title": "Choose a Dungeon",
+    "subtitle": "Select a dungeon to venture into",
+    "roomTitle": "Choose a Room",
+    "roomSubtitle": "Advance in {{name}}"
+  },
+  "engineLost": {
+    "crashTitle": "Engine crashed",
+    "crashBody": "phase.rs hit an internal error and can’t safely continue this action. Your last saved turn is preserved — reload to restore the game. <strong>Please report this</strong> so we can fix it.",
+    "connectionTitle": "Engine connection lost",
+    "connectionBody": "phase.rs lost its link to the game engine — most often caused by a background update activating mid-game. Your last saved turn is preserved; reload to restore the game.",
+    "diagnostic": "diagnostic: {{reason}}",
+    "showDetails": "Show details",
+    "copyDiagnostic": "Copy diagnostic",
+    "copied": "Copied!",
+    "reportOnGithub": "Report on GitHub",
+    "reload": "Reload",
+    "reportTitle": "Engine crash: {{summary}}",
+    "reportConnectionSummary": "Engine connection lost",
+    "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```",
+    "copyPrompt": "Copy this diagnostic:"
+  },
+  "miracleReveal": {
+    "eyebrowMiracle": "Miracle",
+    "eyebrowMadness": "Madness",
+    "titleReveal": "Reveal {{name}}?",
+    "titleCast": "Cast {{name}}?",
+    "subtitleReveal": "You may reveal this card to cast it for its miracle cost.",
+    "subtitleCastMiracle": "You may cast this card for its miracle cost.",
+    "subtitleCastMadness": "You may cast this card for its madness cost.",
+    "reveal": "Reveal",
+    "cast": "Cast",
+    "decline": "Decline"
+  },
+  "modalFace": {
+    "eyebrow": "Modal DFC",
+    "title": "Choose a Face",
+    "subtitle": "Pick which face to play or cast.",
+    "backFaceFallback": "Back Face",
+    "labelFront": "Front",
+    "labelBack": "Back",
+    "play": "Play {{name}}",
+    "cast": "Cast {{name}}"
+  },
+  "modeChoice": {
+    "eyebrowAbility": "Ability Modes",
+    "eyebrowSpell": "Spell Modes",
+    "subtitle": "Select the mode or modes to apply.",
+    "chooseExact": "Choose {{count}}",
+    "chooseRange": "Choose {{min}} to {{max}}",
+    "confirm": "Confirm ({{selected}}/{{count}})",
+    "clear": "Clear",
+    "alreadyChosen": "(already chosen)"
+  },
+  "namedChoice": {
+    "title": {
+      "creatureType": "Choose a Creature Type",
+      "color": "Choose a Color",
+      "oddOrEven": "Choose Odd or Even",
+      "basicLandType": "Choose a Basic Land Type",
+      "cardType": "Choose a Card Type",
+      "cardName": "Name a Card",
+      "landType": "Choose a Land Type",
+      "opponent": "Choose an Opponent",
+      "player": "Choose a Player",
+      "twoColors": "Choose Two Colors",
+      "numberRange": "Choose a Number",
+      "labeled": "Make a Choice",
+      "keyword": "Choose an Ability",
+      "fallback": "Make a Choice"
+    },
+    "searchSubtitle": "Type to search all cards",
+    "searchPlaceholder": "Search by name...",
+    "noCardsFound": "No cards found",
+    "buttonSubtitle": "Select one option"
+  },
+  "nonFatalPanic": {
+    "heading": "Engine warning (non-fatal)",
+    "dismiss": "Dismiss",
+    "body": "phase.rs hit an internal warning but recovered. The game is still safe to continue. Please <report>report it</report> so we can investigate.",
+    "dontShowAgain": "Don’t show again this session",
+    "reportTitle": "Non-fatal engine panic: {{summary}}",
+    "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
+  "optionalEffect": {
+    "sourceFallback": "Effect",
+    "title": "{{name}} - Optional Effect",
+    "yes": "Yes",
+    "no": "No",
+    "dontAskAgain": "Don't ask again this game"
+  },
+  "permanentTypeSlot": {
+    "eyebrow": "Permanent Type",
+    "title": "Choose Type Slot",
+    "subtitle": "{{name}} has multiple permanent types. Choose which type slot to use."
+  },
+  "proliferate": {
+    "proliferateTitle": "Proliferate",
+    "proliferateSubtitle": "Choose any number of permanents and players with counters. Each chosen target gets one more counter of each kind already there.",
+    "chooseObjectsTitle": "Choose Permanents",
+    "chooseObjectsSubtitle": "Choose any number of permanents. You pay a cost for each one chosen.",
+    "confirm": "Confirm"
+  },
+  "replacement": {
+    "eyebrow": "Resolution Order",
+    "title": "Replacement Effects",
+    "subtitle": "Choose which replacement effect applies first.",
+    "candidateFallback": "Replacement Effect {{number}}"
+  },
+  "retargetChoice": {
+    "title": "Change Target",
+    "scopeSingle": "Choose a new target for the spell",
+    "scopeMulti": "Choose new targets for the spell",
+    "subtitle": "{{scope}}. Current: {{current}}",
+    "confirm": "Confirm"
+  },
+  "separatePiles": {
+    "chooserName": "Player {{number}}",
+    "partitionTitle": "Separate into Two Piles",
+    "partitionSubtitle": "Separate your creatures into two piles. {{chooser}} will choose one.",
+    "partitionSubtitleRemaining_one": "Separate your creatures into two piles. {{chooser}} will choose one. ({{count}} more player after you)",
+    "partitionSubtitleRemaining_other": "Separate your creatures into two piles. {{chooser}} will choose one. ({{count}} more players after you)",
+    "pileALabel": "Pile A:",
+    "pileBLabel": "Pile B:",
+    "pileAria": "{{name}} — pile {{pile}}",
+    "pileBadge": "Pile {{pile}}",
+    "chooseTitle": "Choose a Pile",
+    "chooseSubtitle": "Choose one of {{subject}}'s piles.",
+    "chooseSubtitleRemaining_one": "Choose one of {{subject}}'s piles. ({{count}} more partition after this)",
+    "chooseSubtitleRemaining_other": "Choose one of {{subject}}'s piles. ({{count}} more partitions after this)",
+    "pileHeader": "Pile {{pile}} ({{count}})",
+    "empty": "(empty)",
+    "choosePileA": "Choose Pile A",
+    "choosePileB": "Choose Pile B"
+  },
+  "tribute": {
+    "sourceFallback": "Tribute creature",
+    "title": "Tribute — {{name}}",
+    "subtitle_one": "Place {{count}} +1/+1 counter on {{name}}?",
+    "subtitle_other": "Place {{count}} +1/+1 counters on {{name}}?",
+    "payLabel": "Pay Tribute",
+    "payDescription_one": "Put {{count}} +1/+1 counter on {{name}}.",
+    "payDescription_other": "Put {{count}} +1/+1 counters on {{name}}.",
+    "declineLabel": "Decline",
+    "declineDescription": "Refuse tribute. Triggers \"if tribute wasn't paid\"."
+  },
+  "triggerOrder": {
+    "eyebrow": "Resolution Order",
+    "title": "Order Your Triggered Abilities",
+    "subtitle": "Choose the order in which these triggers go on the stack. The top of this list resolves last (CR 405.3).",
+    "confirmOrder": "Confirm Order",
+    "resolvesLast": "Resolves last (bottom of stack)",
+    "resolvesFirst": "Resolves first (top of stack)",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "triggerFallback": "Trigger {{number}}"
+  },
+  "unhandledWaitingFor": {
+    "title": "Action required, but UI is missing",
+    "body": "The game is waiting on you for an action, but this version of phase.rs does not yet have a UI for it. This is a bug — please report it so we can fix it. Use the button below to leave the game.",
+    "missingState": "Missing state",
+    "copyDiagnostic": "Copy diagnostic",
+    "copied": "Copied!",
+    "reportOnGithub": "Report on GitHub",
+    "copyPrompt": "Copy this diagnostic:",
+    "reportTitle": "Unhandled WaitingFor: {{type}}",
+    "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
+  "voteChoice": {
+    "subjectName": "Player {{number}}",
+    "titleLabel": "Label Player",
+    "titleVote": "Vote",
+    "subtitleLabel": "Choose a label for {{name}}",
+    "subtitleVoteRemaining": "Cast a vote ({{count}} remaining)",
+    "subtitleVote": "Cast your vote"
+  }
+}
