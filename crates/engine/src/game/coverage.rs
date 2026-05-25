@@ -71,6 +71,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::SuppressTriggers { .. }
             // CR 603.2d: DoubleTriggers carries the `TriggerCause` predicate.
             | StaticMode::DoubleTriggers { .. }
+            // CR 508.1c + CR 509.1b: Combat declaration caps carry the maximum
+            // count and are enforced by combat.rs declaration validation.
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
@@ -9715,6 +9719,34 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "CantBeBlockedExceptBy variants should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 508.1c + CR 509.1b: declaration-cap statics carry the maximum
+    /// creature count and are enforced by combat declaration validation rather
+    /// than exact registry-key lookup. Silent Arbiter is the canonical paired
+    /// attacker/blocker cap card.
+    #[test]
+    fn max_combat_creature_statics_have_no_coverage_gap() {
+        let mut face = make_face();
+        face.oracle_text = Some(
+            "No more than one creature can attack each combat.\nNo more than one creature can block each combat."
+                .to_string(),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxAttackersEachCombat { max: 1 })
+                .description("No more than one creature can attack each combat.".to_string()),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxBlockersEachCombat { max: 1 })
+                .description("No more than one creature can block each combat.".to_string()),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "Max combat creature statics should be fully supported, but got gaps: {:?}",
             gaps
         );
     }
