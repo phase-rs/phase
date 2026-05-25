@@ -1116,9 +1116,11 @@ fn capture_clause_minimum_snapshot(state: &mut GameState, scoped_template: &Reso
     // the field must become a Vec stack and this unconditional clear must
     // become a stack push.
     state.clause_minimum_snapshot = None;
+    let mut exprs = Vec::new();
+    collect_ability_quantity_exprs(scoped_template, &mut exprs);
     let mut refs: Vec<&QuantityRef> = Vec::new();
-    if let Some(count) = effect_count_expr(&scoped_template.effect) {
-        collect_clause_minimum_refs(count, &mut refs);
+    for expr in exprs {
+        collect_clause_minimum_refs(expr, &mut refs);
     }
     if refs.is_empty() {
         return;
@@ -1135,13 +1137,104 @@ fn capture_clause_minimum_snapshot(state: &mut GameState, scoped_template: &Reso
     state.clause_minimum_snapshot = Some(snapshot);
 }
 
-/// The dynamic count expression of an effect, if it carries one whose
-/// equalization extrema must be clause-snapshot. Restricted to the effects
-/// Balance / Restore Balance / Balancing Act lower to.
-fn effect_count_expr(effect: &Effect) -> Option<&QuantityExpr> {
+fn collect_ability_quantity_exprs<'a>(
+    ability: &'a ResolvedAbility,
+    out: &mut Vec<&'a QuantityExpr>,
+) {
+    let mut current = Some(ability);
+    while let Some(node) = current {
+        collect_effect_quantity_exprs(&node.effect, out);
+        current = node.sub_ability.as_deref();
+    }
+}
+
+/// The dynamic quantity expressions of an effect, if it carries any whose
+/// equalization extrema must be clause-snapshot.
+fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a QuantityExpr>) {
     match effect {
-        Effect::Sacrifice { count, .. } | Effect::Discard { count, .. } => Some(count),
-        _ => None,
+        Effect::ChangeSpeed { amount, .. }
+        | Effect::DealDamage { amount, .. }
+        | Effect::Draw { count: amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. }
+        | Effect::AddCounter { count: amount, .. }
+        | Effect::Sacrifice { count: amount, .. }
+        | Effect::Mill { count: amount, .. }
+        | Effect::Scry { count: amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
+        | Effect::Dig { count: amount, .. }
+        | Effect::Surveil { count: amount, .. }
+        | Effect::Discard { count: amount, .. }
+        | Effect::SearchLibrary { count: amount, .. }
+        | Effect::SearchOutsideGame { count: amount, .. }
+        | Effect::ExileTop { count: amount, .. }
+        | Effect::CopyTokenOf { count: amount, .. }
+        | Effect::PutCounter { count: amount, .. }
+        | Effect::PutCounterAll { count: amount, .. }
+        | Effect::AddPendingETBCounters { count: amount, .. }
+        | Effect::FlipCoins { count: amount, .. }
+        | Effect::Seek { count: amount, .. }
+        | Effect::SetLifeTotal { amount, .. }
+        | Effect::Manifest { count: amount, .. }
+        | Effect::GivePlayerCounter { count: amount, .. }
+        | Effect::GainEnergy { amount, .. }
+        | Effect::Discover {
+            mana_value_limit: amount,
+        }
+        | Effect::PutAtLibraryPosition { count: amount, .. }
+        | Effect::GrantExtraLoyaltyActivations { amount, .. }
+        | Effect::SkipNextTurn { count: amount, .. }
+        | Effect::SkipNextStep { count: amount, .. }
+        | Effect::Incubate { count: amount, .. }
+        | Effect::Amass { count: amount, .. }
+        | Effect::Monstrosity { count: amount, .. }
+        | Effect::Bolster { count: amount, .. }
+        | Effect::Adapt { count: amount, .. } => out.push(amount),
+        Effect::Token {
+            count,
+            enter_with_counters,
+            ..
+        } => {
+            out.push(count);
+            for (_, count) in enter_with_counters {
+                out.push(count);
+            }
+        }
+        Effect::Conjure { cards, .. } => {
+            for card in cards {
+                out.push(&card.count);
+            }
+        }
+        Effect::ChooseDrawnThisTurnPayOrTopdeck {
+            count,
+            life_payment,
+            ..
+        } => {
+            out.push(count);
+            out.push(life_payment);
+        }
+        Effect::PreventDamage { amount_dynamic, .. }
+        | Effect::RevealHand {
+            count: amount_dynamic,
+            ..
+        }
+        | Effect::BounceAll {
+            count: amount_dynamic,
+            ..
+        } => {
+            if let Some(amount) = amount_dynamic {
+                out.push(amount);
+            }
+        }
+        Effect::MoveCounters {
+            count: Some(count), ..
+        } => out.push(count),
+        Effect::ExileFromTopUntil {
+            until: crate::types::ability::UntilCondition::CumulativeThreshold { threshold, .. },
+            ..
+        } => out.push(threshold),
+        _ => {}
     }
 }
 
@@ -2542,12 +2635,12 @@ fn resolve_chain_body(
         if next_sub_needs_tracked_set(ability) {
             publish_tracked_set(state, affected_ids);
         }
-        // CR 608.2e: the `after_scope` recursion (the next clause) re-enters
-        // this driver and `capture_clause_minimum_snapshot` overwrites the
-        // snapshot — to its own extremum, or to `None` if it has none — so no
-        // explicit clear is needed here. The board it captures against is the
-        // post-this-clause board, since every fan-out player has resolved.
         if !paused {
+            // CR 608.2e: this `player_scope` clause has completed. Clear its
+            // frozen values before running any following instruction; if the
+            // tail is another `player_scope` clause, that recursive entry will
+            // capture its own fresh snapshot against the post-this-clause board.
+            state.clause_minimum_snapshot = None;
             if let Some(after_scope) = after_scope {
                 resolve_ability_chain(state, &after_scope, events, depth + 1)?;
             }
