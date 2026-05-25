@@ -8234,6 +8234,27 @@ pub enum AbilityCondition {
     AdditionalCostPaidInstead,
     /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
     IfYouDo,
+    /// CR 101.3 + CR 608.2c: True when the current player-scope iteration's
+    /// mandatory instruction produced its outcome (i.e. was NOT "impossible to
+    /// perform" per CR 101.3). Reads `!state.cost_payment_failed_flag` at
+    /// condition-evaluation time, which is correct for the same-iteration
+    /// sub_ability dispatch pattern used by "for each opponent who can't, ..."
+    /// decline tails: the flag is reset at the top of each scope iteration
+    /// (effects/mod.rs:2237 — the missing fourth resumption boundary
+    /// alongside engine_payment_choices.rs:30/97/661), set to `true` by
+    /// mandatory-impossible handlers (discard.rs:162, sacrifice.rs:205,
+    /// change_zone.rs:469) during the iteration, and consulted by this
+    /// condition when the parent's sub_ability is dispatched (synchronous
+    /// path) OR drained from pending_continuation after an interactive
+    /// pause (DiscardChoice path; the auto-resolve and interactive-success
+    /// branches do not touch the flag, so success ≡ flag-stayed-false).
+    ///
+    /// Distinct from `IfYouDo`, which reads
+    /// `ability.context.optional_effect_performed` for voluntary/optional
+    /// parents (CR 118.12 optional-cost branch + CR 608.2d). Stamped by the parser on the
+    /// "for each opponent who can't / cannot" decline tail — the mandatory
+    /// counterpart to `IfYouDo`'s "who doesn't / does not" reading.
+    IfCurrentScopeSucceeded,
     /// CR 603.12: "When you do" — reflexive trigger that fires based on whether the
     /// parent's trigger event actually occurred. For a non-cost parent (e.g. a
     /// `BecomeCopy` reflexive or a copy/exile replacement sub-ability) the "do"

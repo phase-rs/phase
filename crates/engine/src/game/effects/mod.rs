@@ -818,19 +818,33 @@ pub(super) fn resolve_optional_effect_decision(
     Ok(())
 }
 
-/// Whether a sub-ability condition references a "was the effect performed" gate
-/// (`IfYouDo` / `IfAPlayerDoes`), including a `Not`-wrapped form or a composite
-/// `And`/`Or` that contains one. Such conditions cannot be evaluated while the
-/// parent effect is suspended for a player choice — the answer is not yet
-/// known — so the sub-ability must be deferred as a continuation rather than
-/// gated eagerly. A composite like `Or { [IfYouDo, QuantityCheck] }` (Armored
-/// Kincaller) also qualifies: declining the optional effect leaves `IfYouDo`
-/// false, but the sibling disjunct may still be satisfied, so the sub-ability
-/// must be re-evaluated rather than dropped. Predicate helper, not
-/// rule-implementing code.
+/// Whether a sub-ability condition references a per-iteration outcome gate —
+/// "was the effect performed" (`IfYouDo` / `IfAPlayerDoes`, CR 118.12
+/// optional-cost branch) or "did the current scope iteration succeed"
+/// (`IfCurrentScopeSucceeded`, CR 101.3 + CR 118.12 mandatory-cost branch),
+/// including a `Not`-wrapped form or a composite `And`/`Or` that contains
+/// one. Such conditions cannot be evaluated while the parent effect is
+/// suspended for a player choice — the answer is not yet known — so the
+/// sub-ability must be deferred as a continuation rather than gated eagerly.
+/// They are also load-bearing for `detach_after_player_scope_local_chain`:
+/// a per-iteration outcome gate has meaning ONLY relative to its surrounding
+/// scoped iteration, so the sub-ability must stay inside the scoped template
+/// rather than detach as an unscoped post-loop tail. A composite like
+/// `Or { [IfYouDo, QuantityCheck] }` (Armored Kincaller) also qualifies:
+/// declining the optional effect leaves `IfYouDo` false, but the sibling
+/// disjunct may still be satisfied, so the sub-ability must be re-evaluated
+/// rather than dropped. Predicate helper, not rule-implementing code.
 fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
     match condition {
+        // CR 118.12 optional-cost branch — voluntary performed signal.
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => true,
+        // CR 101.3 + CR 118.12 mandatory-cost branch — mandatory success
+        // signal. Same per-iteration scope lifecycle as `IfYouDo`: meaningful
+        // only inside the surrounding scoped iteration; cannot be evaluated
+        // while a player choice is suspended; must stay inside the scoped
+        // template under `detach_after_player_scope_local_chain`. Refurbished
+        // Familiar / Aclazotz, Deepest Betrayal route through this arm.
+        AbilityCondition::IfCurrentScopeSucceeded => true,
         AbilityCondition::Not { condition } => condition_depends_on_effect_performed(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(condition_depends_on_effect_performed)
@@ -918,7 +932,13 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::NthResolutionThisTurn { .. }
-            | AbilityCondition::SourceLacksKeyword { .. },
+            | AbilityCondition::SourceLacksKeyword { .. }
+            // CR 101.3 + CR 608.2c: The mandatory-impossible decline-tail
+            // condition has its own dispatch path in `evaluate_condition`
+            // (reads `!state.cost_payment_failed_flag`) and is not an
+            // optional-decline branch. Declining an optional effect does not
+            // select an `IfCurrentScopeSucceeded`-gated sub-ability.
+            | AbilityCondition::IfCurrentScopeSucceeded,
         ) => false,
     }
 }
@@ -2235,6 +2255,19 @@ fn resolve_chain_body(
         let mut paused = false;
         for (i, pid) in matching_players.iter().enumerate() {
             let mut scoped = scoped_template.clone();
+            // CR 608.2c + CR 101.3: Each scoped iteration is a fresh
+            // sub-resolution of the scoped template — read the whole
+            // instruction per iteration. The cost-payment-failed signal is
+            // per-iteration; this is the missing fourth resumption boundary
+            // alongside the three at engine_payment_choices.rs:30
+            // (OptionalEffectChoice), :97 (OpponentMayChoice), and :661
+            // (UnlessPay success). Without this, an earlier opponent's
+            // mandatory failure leaks into a later opponent's
+            // `IfCurrentScopeSucceeded` read for cards like Refurbished
+            // Familiar and Aclazotz, Deepest Betrayal. Audit-2 verified
+            // safety: no corpus card relies on cross-iteration carry-over
+            // of this flag.
+            state.cost_payment_failed_flag = false;
             scoped.set_original_controller_recursive(controller);
             scoped.controller = *pid;
             scoped.set_scoped_player_recursive(*pid);
@@ -3361,6 +3394,16 @@ fn evaluate_condition(
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag
         }
+        // CR 101.3 + CR 608.2c: "For each opponent who can't ..." — the
+        // mandatory-parent counterpart to `IfYouDo`. Reads
+        // `cost_payment_failed_flag` at gate time. Flag is reset per scope
+        // iteration at effects/mod.rs (the player-scope driver loop) and set
+        // by mandatory-impossible handlers (discard.rs:162, sacrifice.rs:205,
+        // change_zone.rs:469) during the iteration. At sub_ability dispatch
+        // time (synchronous descent path, OR resumption path via
+        // drain_pending_continuation), the flag reflects exactly this
+        // iteration's mandatory-success bit.
+        AbilityCondition::IfCurrentScopeSucceeded => !state.cost_payment_failed_flag,
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
         // the resolution" of the parent. For a cost-payment parent
