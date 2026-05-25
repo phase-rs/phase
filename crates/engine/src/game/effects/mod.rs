@@ -2897,6 +2897,11 @@ fn resolve_chain_body(
         // optional ("may") trigger's effect resolves `TriggeringPlayer` and
         // other event-context refs exactly as a non-optional trigger would.
         state.pending_optional_trigger_event = state.current_trigger_event.clone();
+        // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
+        // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
+        // permanent-from-hand sub-effect) resumes with the same
+        // `EventContextAmount` the pre-pause resolution observed.
+        state.pending_optional_trigger_match_count = state.current_trigger_match_count;
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: prompt_player,
             source_id: ability.source_id,
@@ -3561,6 +3566,7 @@ fn resolve_chain_body(
                         mode_abilities: vec![],
                         description: trigger_description.clone(),
                         may_trigger_origin: None,
+                        subject_match_count: None,
                     });
                     state.waiting_for = WaitingFor::TriggerTargetSelection {
                         player: ability.controller,

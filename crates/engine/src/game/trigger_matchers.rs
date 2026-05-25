@@ -585,6 +585,137 @@ pub(super) fn target_filter_matches_object(
     }
 }
 
+/// CR 603.2c: Count subjects matching `valid_card` in the events that fired a
+/// batched trigger. Building block for "Whenever one or more <FILTER>
+/// <verb>, do <X> that many <thing>" patterns (The Ur-Dragon's attack-and-draw
+/// trigger, etc.).
+///
+/// Returns `None` when the count is undefined — `valid_card` is absent or is
+/// `SelfRef` (the trigger source is its own subject and the "that many" math
+/// degenerates to 1). Callers fall back to the existing
+/// `EventContextAmount` cascade in `quantity.rs`.
+pub(crate) fn count_trigger_subjects_in_batch(
+    state: &GameState,
+    valid_card: Option<&TargetFilter>,
+    source_id: ObjectId,
+    events: &[GameEvent],
+) -> Option<u32> {
+    let filter = match valid_card {
+        Some(f) if !matches!(f, TargetFilter::SelfRef) => f,
+        _ => return None,
+    };
+    let count = events
+        .iter()
+        .flat_map(trigger_event_subject_ids)
+        .filter(|&id| target_filter_matches_object(state, id, filter, source_id))
+        .count();
+    Some(count as u32)
+}
+
+/// Subject `ObjectId`s carried by a single `GameEvent` for trigger filter
+/// matching. Grows by event family as new "one or more <FILTER> <verb>"
+/// patterns land. Variants without an object subject return an empty iterator.
+fn trigger_event_subject_ids(event: &GameEvent) -> Box<dyn Iterator<Item = ObjectId> + '_> {
+    match event {
+        GameEvent::AttackersDeclared { attacker_ids, .. } => Box::new(attacker_ids.iter().copied()),
+        GameEvent::ZoneChanged { object_id, .. } => Box::new(std::iter::once(*object_id)),
+        GameEvent::Discarded { object_id, .. } => Box::new(std::iter::once(*object_id)),
+        GameEvent::SpellCast { object_id, .. } => Box::new(std::iter::once(*object_id)),
+        GameEvent::GameStarted
+        | GameEvent::TurnStarted { .. }
+        | GameEvent::PhaseChanged { .. }
+        | GameEvent::PriorityPassed { .. }
+        | GameEvent::SpellCopied { .. }
+        | GameEvent::XValueChosen { .. }
+        | GameEvent::AbilityActivated { .. }
+        | GameEvent::LifeChanged { .. }
+        | GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaRecolored { .. }
+        | GameEvent::PermanentTapped { .. }
+        | GameEvent::PlayerLost { .. }
+        | GameEvent::MulliganStarted
+        | GameEvent::CardsDrawn { .. }
+        | GameEvent::CardDrawn { .. }
+        | GameEvent::PermanentUntapped { .. }
+        | GameEvent::PermanentPhasedOut { .. }
+        | GameEvent::PermanentPhasedIn { .. }
+        | GameEvent::PlayerPhasedOut { .. }
+        | GameEvent::PlayerPhasedIn { .. }
+        | GameEvent::LandPlayed { .. }
+        | GameEvent::StackPushed { .. }
+        | GameEvent::StackResolved { .. }
+        | GameEvent::DamageCleared { .. }
+        | GameEvent::GameOver { .. }
+        | GameEvent::DamageDealt { .. }
+        | GameEvent::DamagePrevented { .. }
+        | GameEvent::SpellCountered { .. }
+        | GameEvent::CounterAdded { .. }
+        | GameEvent::CounterRemoved { .. }
+        | GameEvent::TokenCreated { .. }
+        | GameEvent::ObjectConjured { .. }
+        | GameEvent::CreatureDestroyed { .. }
+        | GameEvent::PermanentSacrificed { .. }
+        | GameEvent::EffectResolved { .. }
+        | GameEvent::Unattached { .. }
+        | GameEvent::BlockersDeclared { .. }
+        | GameEvent::CombatTaxPaid { .. }
+        | GameEvent::CombatTaxDeclined { .. }
+        | GameEvent::BecomesTarget { .. }
+        | GameEvent::VehicleCrewed { .. }
+        | GameEvent::Stationed { .. }
+        | GameEvent::Saddled { .. }
+        | GameEvent::ReplacementApplied { .. }
+        | GameEvent::Transformed { .. }
+        | GameEvent::DayNightChanged { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::CombatDamageDealtToPlayer { .. }
+        | GameEvent::PlayerEliminated { .. }
+        | GameEvent::CrimeCommitted { .. }
+        | GameEvent::Cycled { .. }
+        | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::Regenerated { .. }
+        | GameEvent::CreatureSuspected { .. }
+        | GameEvent::BecamePrepared { .. }
+        | GameEvent::BecameUnprepared { .. }
+        | GameEvent::CaseSolved { .. }
+        | GameEvent::ClassLevelGained { .. }
+        | GameEvent::MonarchChanged { .. }
+        | GameEvent::CityBlessingGained { .. }
+        | GameEvent::DieRolled { .. }
+        | GameEvent::CoinFlipped { .. }
+        | GameEvent::RingTemptsYou { .. }
+        | GameEvent::RoomEntered { .. }
+        | GameEvent::RoomDoorUnlocked { .. }
+        | GameEvent::BecomesPlotted { .. }
+        | GameEvent::DungeonCompleted { .. }
+        | GameEvent::InitiativeTaken { .. }
+        | GameEvent::Firebend { .. }
+        | GameEvent::Airbend { .. }
+        | GameEvent::Earthbend { .. }
+        | GameEvent::Waterbend { .. }
+        | GameEvent::CompanionRevealed { .. }
+        | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::NinjutsuActivated { .. }
+        | GameEvent::KeywordAbilityActivated { .. }
+        | GameEvent::CreatureExploited { .. }
+        | GameEvent::EnergyChanged { .. }
+        | GameEvent::SpeedChanged { .. }
+        | GameEvent::PlayerCounterChanged { .. }
+        | GameEvent::ManaExpended { .. }
+        | GameEvent::Clash { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. }
+        | GameEvent::PowerToughnessChanged { .. }
+        | GameEvent::CascadeMissed { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => Box::new(std::iter::empty()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core Trigger Matchers (~20 with real logic)
 // ---------------------------------------------------------------------------
@@ -7661,5 +7792,109 @@ mod tests {
             match_changes_zone(&opp_milled_event, &trigger, source, &state),
             "parsed Undead Alchemist trigger must fire when an opponent's creature is milled"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // count_trigger_subjects_in_batch — building block for "one or more
+    // <FILTER> <verb>" batched-trigger subject counting (issue #707).
+    // -----------------------------------------------------------------------
+
+    fn make_dragon(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Dragon".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    fn make_non_dragon(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Soldier".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    /// CR 603.2c: `count_trigger_subjects_in_batch` filters
+    /// `AttackersDeclared.attacker_ids` against the trigger's `valid_card`
+    /// and returns the count — three Dragons among four attackers ⇒ 3.
+    #[test]
+    fn count_trigger_subjects_filters_attack_batch_by_subtype() {
+        let mut state = setup();
+        let source = make_dragon(&mut state, PlayerId(0), "Ur-Dragon");
+        let d2 = make_dragon(&mut state, PlayerId(0), "Helper A");
+        let d3 = make_dragon(&mut state, PlayerId(0), "Helper B");
+        let non = make_non_dragon(&mut state, PlayerId(0), "Lowly Soldier");
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![source, d2, d3, non],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+        let filter = TargetFilter::Typed(
+            TypedFilter::card()
+                .controller(ControllerRef::You)
+                .subtype("Dragon".to_string()),
+        );
+        let count = count_trigger_subjects_in_batch(
+            &state,
+            Some(&filter),
+            source,
+            std::slice::from_ref(&event),
+        );
+        assert_eq!(count, Some(3));
+    }
+
+    /// CR 603.2c: no `valid_card` ⇒ "that many" is undefined; callers fall
+    /// back to the existing `EventContextAmount` cascade.
+    #[test]
+    fn count_trigger_subjects_returns_none_without_filter() {
+        let state = setup();
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(1), ObjectId(2)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+        let count = count_trigger_subjects_in_batch(
+            &state,
+            None,
+            ObjectId(99),
+            std::slice::from_ref(&event),
+        );
+        assert_eq!(count, None);
+    }
+
+    /// CR 603.2c: `SelfRef` is the "this permanent" reference — the trigger
+    /// source is its own subject and "that many" degenerates. The caller's
+    /// fallback chain (event-amount, then last_effect_count) is the right
+    /// path for self-referential batched triggers.
+    #[test]
+    fn count_trigger_subjects_returns_none_for_self_ref_filter() {
+        let state = setup();
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(1)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+        let count = count_trigger_subjects_in_batch(
+            &state,
+            Some(&TargetFilter::SelfRef),
+            ObjectId(99),
+            std::slice::from_ref(&event),
+        );
+        assert_eq!(count, None);
     }
 }

@@ -43,8 +43,16 @@ pub(super) fn handle_optional_effect_choice(
         let pending_event = state.pending_optional_trigger_event.take();
         let previous_trigger_event = state.current_trigger_event.clone();
         state.current_trigger_event = pending_event;
+        // CR 603.2c + CR 608.2: mirror restoration of the batched-trigger
+        // subject count so a `QuantityRef::EventContextAmount` resolved during
+        // the resumed sub-ability reads the same "that many" the pre-pause
+        // resolution would have observed.
+        let pending_count = state.pending_optional_trigger_match_count.take();
+        let previous_trigger_match_count = state.current_trigger_match_count;
+        state.current_trigger_match_count = pending_count;
         let result = effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
         state.current_trigger_event = previous_trigger_event;
+        state.current_trigger_match_count = previous_trigger_match_count;
         result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     }
 

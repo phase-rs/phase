@@ -139,6 +139,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.current_trigger_events = trigger_events;
     }
 
+    // CR 603.2c: Lift the filtered subject count of a batched trigger into
+    // resolution scope so `QuantityRef::EventContextAmount` resolves "that
+    // many" against the count, not against zero. Set in lockstep with
+    // `current_trigger_event` and cleared at every reset site below.
+    if let StackEntryKind::TriggeredAbility {
+        subject_match_count,
+        ..
+    } = entry.kind
+    {
+        state.current_trigger_match_count = subject_match_count;
+    }
+
     // Extract the resolved ability from the stack entry. `KeywordAction` is
     // handled by the early return above and never reaches this match.
     let (ability, is_spell, casting_variant, actual_mana_spent) = match &entry.kind {
@@ -240,6 +252,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 });
                 state.current_trigger_event = None;
                 state.current_trigger_events.clear();
+                state.current_trigger_match_count = None;
                 return;
             }
             execute_effect(state, &validated, events);
@@ -640,6 +653,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     });
                     state.current_trigger_event = None;
                     state.current_trigger_events.clear();
+                    state.current_trigger_match_count = None;
                     return;
                 }
             }
@@ -860,6 +874,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.7c: Clear trigger event context after resolution completes.
     state.current_trigger_event = None;
     state.current_trigger_events.clear();
+    state.current_trigger_match_count = None;
 
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
@@ -1453,6 +1468,7 @@ mod tests {
                 trigger_event: Some(trigger_event.clone()),
                 description: None,
                 source_name: String::new(),
+                subject_match_count: None,
             },
         });
 
@@ -2213,6 +2229,7 @@ mod tests {
                     trigger_event: None,
                     description: Some("landfall copy trigger".to_string()),
                     source_name: String::new(),
+                    subject_match_count: None,
                 },
             });
         }
@@ -2262,6 +2279,7 @@ mod tests {
                 trigger_event: None,
                 description: None,
                 source_name: String::new(),
+                subject_match_count: None,
             },
         };
         state.stack.push_back(mk_entry(s1));
@@ -2313,6 +2331,7 @@ mod tests {
                 trigger_event: None,
                 description: Some("target player loses 1 life".to_string()),
                 source_name: String::new(),
+                subject_match_count: None,
             },
         };
         state
@@ -2367,6 +2386,7 @@ mod tests {
                     trigger_event: None,
                     description: Some("then target player loses 1 life".to_string()),
                     source_name: String::new(),
+                    subject_match_count: None,
                 },
             }
         };
