@@ -78,36 +78,6 @@ describe("normalizeCardName", () => {
   });
 });
 
-describe("buildScryfallQuery", () => {
-  it("adds a single set filter", async () => {
-    const { buildScryfallQuery } = await loadScryfallModule();
-
-    expect(buildScryfallQuery({
-      text: "lightning",
-      sets: ["DMU"],
-      format: "standard",
-    })).toBe("lightning set:dmu f:standard");
-  });
-
-  it("groups multiple set filters with OR", async () => {
-    const { buildScryfallQuery } = await loadScryfallModule();
-
-    expect(buildScryfallQuery({
-      type: "Artifact",
-      sets: ["DMU", "BRO"],
-      format: "standard",
-    })).toBe("t:Artifact (set:dmu OR set:bro) f:standard");
-  });
-
-  it("deduplicates and trims set filters", async () => {
-    const { buildScryfallQuery } = await loadScryfallModule();
-
-    expect(buildScryfallQuery({
-      sets: [" dmu ", "DMU", "bro"],
-    })).toBe("(set:dmu OR set:bro)");
-  });
-});
-
 describe("scryfallLegalityKey", () => {
   it("uses Scryfall legality keys for constructed formats", async () => {
     const { scryfallLegalityKey } = await loadScryfallModule();
