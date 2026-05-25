@@ -178,6 +178,15 @@ pub fn resolve(
         // guaranteed present here — `compute_current_copiable_values` above
         // already returned `Ok` for this id.
         let copy_source_display = state.objects[&copy_source_id].display_source;
+        // The Scryfall image hint (`oracle_id` + displayed `face_name`) also
+        // propagates from the copy source so the synthesized copy resolves to
+        // the same art as the permanent it copies. This is purely a display
+        // pointer, not a CR 707.2 copiable characteristic, so carrying it
+        // forward does not affect game state. A copy of a real-card permanent
+        // (including an MDFC face like The Prismatic Bridge) keeps its
+        // canonical oracle-id lookup; a copy of a true generic token has
+        // `None` here, leaving the token-art path untouched.
+        let copy_source_printed_ref = state.objects[&copy_source_id].printed_ref.clone();
         for _ in 0..count {
             // Step 3: Create a new token object on the battlefield.
             let token_id = zones::create_object(
@@ -192,6 +201,12 @@ pub fn resolve(
             let token = state.objects.get_mut(&token_id).unwrap();
             token.is_token = true;
             token.display_source = copy_source_display;
+            // Set both the live and baseline display pointer: the token is a
+            // permanent copy, and `base_printed_ref` is what the layer reset
+            // restores `printed_ref` from each pass (without it, the reset would
+            // wipe the token's art to None).
+            token.printed_ref = copy_source_printed_ref.clone();
+            token.base_printed_ref = copy_source_printed_ref.clone();
             token.name = values.name.clone();
             token.base_name = values.name.clone();
             token.mana_cost = values.mana_cost.clone();
@@ -535,6 +550,67 @@ mod tests {
                 .players_who_created_token_this_turn
                 .contains(&PlayerId(0)),
             "should record token creation"
+        );
+    }
+
+    #[test]
+    fn copy_token_propagates_printed_ref_for_image_lookup() {
+        // A copy of a real-card permanent must carry the source's Scryfall
+        // image hint (oracle_id + displayed face_name) so the frontend resolves
+        // the same art. Regression: copying an MDFC face (The Prismatic Bridge)
+        // produced a token with `printed_ref: None`, which rendered blank in the
+        // legend-rule chooser because the back-face name is absent from the
+        // front-face-only image index.
+        let mut state = GameState::new_two_player(42);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Prismatic Bridge".to_string(),
+            Zone::Battlefield,
+        );
+        let source_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "92023a5d-a143-4950-a71b-d736e6b8e959".to_string(),
+            face_name: "The Prismatic Bridge".to_string(),
+        };
+        state.objects.get_mut(&source_id).unwrap().printed_ref = Some(source_ref.clone());
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        assert!(state.objects[&token_id].is_token);
+        assert_eq!(
+            state.objects[&token_id].printed_ref,
+            Some(source_ref.clone()),
+            "token copy must carry the source's printed_ref for image lookup"
+        );
+
+        // The fix is only durable if the token also carries `base_printed_ref`:
+        // the layer reset restores `printed_ref` from the baseline each pass, so
+        // without it the next `evaluate_layers` would wipe the art back to None.
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&token_id].printed_ref,
+            Some(source_ref),
+            "token copy's printed_ref must survive a layer evaluation pass"
         );
     }
 

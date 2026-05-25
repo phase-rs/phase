@@ -20,6 +20,7 @@ const IMPERATIVE_EXTRA_VERBS: &[&str] = &[
     "destroy",
     "prevent",
     "attach",
+    "unattach",
     "seek",
     "amass",
     "incubate",

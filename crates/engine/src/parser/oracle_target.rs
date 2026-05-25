@@ -1187,6 +1187,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();
+    let mut keyword_disjunction_range: Option<(usize, usize)> = None;
     let lower_trimmed = lower.trim_start();
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
@@ -1596,6 +1597,26 @@ pub fn parse_type_phrase_with_ctx<'a>(
     pos +=
         parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller, ctx);
 
+    // Grammar normalization: strip the distributive-"each" linker between a
+    // collective type word and a per-object property suffix —
+    // "creatures, each with power 1 or less" /
+    // "creatures, each with base power or toughness 1 or less" (Angelic
+    // Aberration class; #967). Consuming the entire `, [space]each ` token
+    // normalizes the remaining input to the bare suffix form ("with …") so
+    // that all downstream suffix parsers (power/toughness via CR 208,
+    // mana-value via CR 202.3, counters via CR 122.1, keywords via CR 702)
+    // receive the same input regardless of whether the Oracle text used the
+    // distributive linker or the comma-less phrasing.
+    if let Ok((rem, _)) = (
+        tag::<_, _, OracleError<'_>>(","),
+        opt(tag::<_, _, OracleError<'_>>(" ")),
+        tag::<_, _, OracleError<'_>>("each "),
+    )
+        .parse(&lower[pos..])
+    {
+        pos += lower[pos..].len() - rem.len();
+    }
+
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..], ctx) {
         properties.push(prop);
@@ -1617,8 +1638,11 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Some((keyword_props, consumed)) = parse_without_keyword_suffix(&lower[pos..]) {
         properties.extend(keyword_props);
         pos += consumed;
-    } else if let Some((keyword_props, consumed)) = parse_keyword_suffix(&lower[pos..]) {
-        properties.extend(keyword_props);
+    } else if let Some((suffix, consumed)) = parse_keyword_suffix(&lower[pos..]) {
+        if suffix.disjunctive && suffix.properties.len() > 1 {
+            keyword_disjunction_range = Some((properties.len(), suffix.properties.len()));
+        }
+        properties.extend(suffix.properties);
         pos += consumed;
     }
 
@@ -1782,19 +1806,43 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    let filter = TargetFilter::Typed(TypedFilter {
-        type_filters: [
-            card_type.map(|ct| vec![ct]).unwrap_or_default(),
-            extra_core_type_filters,
-            subtype
-                .map(|s| vec![TypeFilter::Subtype(s)])
-                .unwrap_or_default(),
-            neg_type_filters,
-        ]
-        .concat(),
-        controller,
-        properties,
-    });
+    let type_filters = [
+        card_type.map(|ct| vec![ct]).unwrap_or_default(),
+        extra_core_type_filters,
+        subtype
+            .map(|s| vec![TypeFilter::Subtype(s)])
+            .unwrap_or_default(),
+        neg_type_filters,
+    ]
+    .concat();
+    let filter = if let Some((start, len)) = keyword_disjunction_range {
+        let keyword_props = properties[start..start + len].to_vec();
+        let common_props = properties[..start]
+            .iter()
+            .chain(properties[start + len..].iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        TargetFilter::Or {
+            filters: keyword_props
+                .into_iter()
+                .map(|keyword_prop| {
+                    let mut branch_props = common_props.clone();
+                    branch_props.push(keyword_prop);
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: type_filters.clone(),
+                        controller: controller.clone(),
+                        properties: branch_props,
+                    })
+                })
+                .collect(),
+        }
+    } else {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        })
+    };
     let filter = if exclude_chosen_type {
         TargetFilter::And {
             filters: vec![
@@ -2135,7 +2183,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
     )
 }
 
-/// Distribute trailing filter properties (CmcLE, CmcGE, PowerLE, PowerGE, etc.)
+/// Distribute trailing filter properties (Cmc, PtComparison, etc.)
 /// from the last `Typed` element in an `Or` filter to all preceding `Typed`
 /// elements that lack a property of the same kind.
 /// Handles "artifacts and creatures with mana value 2 or less" where only the
@@ -2390,159 +2438,33 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
 
 /// Parse "with power [or toughness] N or less/greater", "with toughness N or
 /// less/greater", and "with greater power" suffixes. Returns `(FilterProp,
-/// bytes consumed from the original text)`. CR 208.1 governs P/T comparisons;
+/// bytes consumed from the original text)`. CR 208 governs P/T comparisons;
 /// CR 509.1b covers the source-relative "greater power" form.
 ///
-/// The disjunctive form "with power or toughness N or less" produces
-/// `FilterProp::AnyOf { [PowerLE(N), ToughnessLE(N)] }` so the composite
-/// matches when *either* property is at or below N — matching the natural-
-/// language semantics of "power or toughness". Used by Arnyn Deathbloom
-/// Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail, etc.
+/// The P/T-comparison grammar (including the disjunctive "power or toughness"
+/// form and the optional "base " scope marker per CR 208.4b) is delegated in
+/// full to the single shared combinator `nom_filter::parse_pt_comparison`, so
+/// this function holds no duplicate grammar — it only handles the source-
+/// relative "greater power" leaf and adapts the combinator's `&str` remainder
+/// into the byte-offset return contract this call site expects. Used by Arnyn
+/// Deathbloom Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail,
+/// etc.
 fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
 
-    // CR 509.1b: "with greater power" — relative to the source object.
+    // CR 509.1b: "with greater power" — relative to the source object. This is
+    // source-relative (not a numeric threshold) and is not part of the shared
+    // P/T-comparison combinator, so it is handled here.
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("with greater power").parse(trimmed) {
         return Some((FilterProp::PowerGTSource, text.len() - after.len()));
     }
 
-    // Longest-match first: disjunctive "with power or toughness N or {less,greater}".
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with power or toughness ").parse(trimmed) {
-        if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
-            let props = if comparator == Comparator::LE {
-                vec![
-                    FilterProp::PowerLE {
-                        value: value.clone(),
-                    },
-                    FilterProp::ToughnessLE { value },
-                ]
-            } else {
-                vec![
-                    FilterProp::PowerGE {
-                        value: value.clone(),
-                    },
-                    FilterProp::ToughnessGE { value },
-                ]
-            };
-            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
-        }
-
-        let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
-        let after_num = rest.trim_start();
-        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
-            let props = vec![
-                FilterProp::PowerLE {
-                    value: value.clone(),
-                },
-                FilterProp::ToughnessLE { value },
-            ];
-            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
-        }
-        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
-            let props = vec![
-                FilterProp::PowerGE {
-                    value: value.clone(),
-                },
-                FilterProp::ToughnessGE { value },
-            ];
-            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
-        }
-        return None;
-    }
-
-    // "with toughness N or less/greater" — CR 208.1, mirrors the power form.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with toughness ").parse(trimmed) {
-        if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
-            let prop = if comparator == Comparator::LE {
-                FilterProp::ToughnessLE { value }
-            } else {
-                FilterProp::ToughnessGE { value }
-            };
-            return Some((prop, text.len() - after.len()));
-        }
-
-        let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
-        let after_num = rest.trim_start();
-        let (prop, after) =
-            if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
-                (FilterProp::ToughnessLE { value }, a)
-            } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
-                (FilterProp::ToughnessGE { value }, a)
-            } else {
-                return None;
-            };
-        return Some((prop, text.len() - after.len()));
-    }
-
-    let (rest, _) = tag::<_, _, OracleError<'_>>("with power ")
-        .parse(trimmed)
-        .ok()?;
-    if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
-        let prop = if comparator == Comparator::LE {
-            FilterProp::PowerLE { value }
-        } else {
-            FilterProp::PowerGE { value }
-        };
-        return Some((prop, text.len() - after.len()));
-    }
-
-    // CR 208.1 + CR 107.3a: Accept literal N or the variable X — X emits
-    // `QuantityRef::Variable { "X" }` resolved at effect time against the
-    // resolving ability's `chosen_x` via `FilterContext::from_ability`.
-    let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
-    let after_num = rest.trim_start();
-    let (prop, after) = if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num)
-    {
-        (FilterProp::PowerLE { value }, a)
-    } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
-        (FilterProp::PowerGE { value }, a)
-    } else {
-        return None;
-    };
-    Some((prop, text.len() - after.len()))
-}
-
-fn parse_pt_quantity_comparison_tail(input: &str) -> Option<(Comparator, QuantityExpr, &str)> {
-    type Vbe<'a> = OracleError<'a>;
-    let input = input.trim_start();
-    let (after_cmp, comparator) = alt((
-        value(Comparator::LT, tag::<_, _, Vbe>("less than")),
-        value(Comparator::GT, tag("greater than")),
-    ))
-    .parse(input)
-    .ok()?;
-    let after_cmp = after_cmp.trim_start();
-    let (after_eq, includes_equal) =
-        if let Ok((rest, _)) = tag::<_, _, Vbe>("or equal to").parse(after_cmp) {
-            (rest.trim_start(), true)
-        } else {
-            (after_cmp, false)
-        };
-    let (after_qty, qty) = nom_quantity::parse_quantity_ref(after_eq).ok()?;
-    let value = QuantityExpr::Ref { qty };
-    let comparator = match (comparator, includes_equal) {
-        (Comparator::LT, true) => Comparator::LE,
-        (Comparator::GT, true) => Comparator::GE,
-        (comparator, false) => comparator,
-        _ => return None,
-    };
-    let value = match comparator {
-        Comparator::LT => QuantityExpr::Offset {
-            inner: Box::new(value),
-            offset: -1,
-        },
-        Comparator::GT => QuantityExpr::Offset {
-            inner: Box::new(value),
-            offset: 1,
-        },
-        _ => value,
-    };
-    let comparator = match comparator {
-        Comparator::LT => Comparator::LE,
-        Comparator::GT => Comparator::GE,
-        comparator => comparator,
-    };
-    Some((comparator, value, after_qty))
+    // Delegate the full P/T-comparison grammar to the canonical combinator. It
+    // consumes the leading "with " itself (optional prefix), so pass `trimmed`.
+    // Recompute the consumed-byte offset against the original `text` from the
+    // combinator's remainder (`text.len() - rest.len()`).
+    let (rest, prop) = nom_filter::parse_pt_comparison(trimmed).ok()?;
+    Some((prop, text.len() - rest.len()))
 }
 
 /// CR 202.3 + CR 608.2h: Postnominal superlative mana-value qualifier —
@@ -2972,6 +2894,26 @@ fn parse_cost_paid_mana_value_reference(
     ))
 }
 
+fn parse_bare_any_counter_suffix(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("any "),
+        tag::<_, _, OracleError<'_>>("a "),
+    )))
+    .parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("counters"),
+        tag::<_, _, OracleError<'_>>("counter"),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>(" on it"),
+        tag::<_, _, OracleError<'_>>(" on them"),
+    ))
+    .parse(input)?;
+
+    Ok((input, ()))
+}
+
 /// Parse a counter-presence suffix ("with [count] [counter] counter(s) on
 /// it/them", "with no counters on them", "without a +1/+1 counter on it")
 /// using pure nom combinators. Returns (FilterProp, bytes consumed).
@@ -3034,22 +2976,20 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         // the typed suffix loop below. The article-derived count is discarded —
         // negation always means exactly 0 counters of that type.
     } else {
-        // CR 122.1: Bare "with a counter on it" / "with a counter on them" — any
-        // counter of any type. Distinct from typed "with a +1/+1 counter on it".
-        // Must precede the typed-counter branch so the empty-counter-type guard
-        // there doesn't fire.
-        for prefix in ["a counter on it", "a counter on them", "any counter on it"] {
-            if let Ok((after, _)) = tag_e::<_, _, OracleError<'_>>(prefix).parse(rest) {
-                let consumed = leading_ws + lead_len + (rest.len() - after.len());
-                return Some((
-                    FilterProp::Counters {
-                        counters: CounterMatch::Any,
-                        comparator: Comparator::GE,
-                        count: QuantityExpr::Fixed { value: 1 },
-                    },
-                    consumed,
-                ));
-            }
+        // CR 122.1: Bare "with a counter on it" / "with counters on them" —
+        // any counter of any type. Distinct from typed "with a +1/+1 counter on
+        // it". Must precede the typed-counter branch so the empty-counter-type
+        // guard there doesn't fire.
+        if let Ok((after, _)) = parse_bare_any_counter_suffix(rest) {
+            let consumed = leading_ws + lead_len + (rest.len() - after.len());
+            return Some((
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                consumed,
+            ));
         }
     }
 
@@ -3111,13 +3051,19 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     None
 }
 
-fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+struct KeywordSuffix {
+    properties: Vec<FilterProp>,
+    disjunctive: bool,
+}
+
+fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let (after_with, _) = tag::<_, _, OracleError<'_>>("with ").parse(trimmed).ok()?;
     let mut remaining = after_with;
     let mut consumed = leading_ws + "with ".len();
     let mut properties = Vec::new();
+    let mut disjunctive = false;
 
     while let Some((keyword_match, keyword_len)) = parse_leading_keyword_match(remaining) {
         match keyword_match {
@@ -3135,6 +3081,9 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
+                if matches!(*sep, ", or " | " or ") {
+                    disjunctive = true;
+                }
                 consumed += sep.len();
                 remaining = rest;
                 found_sep = true;
@@ -3149,7 +3098,13 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     if properties.is_empty() {
         None
     } else {
-        Some((properties, consumed))
+        Some((
+            KeywordSuffix {
+                properties,
+                disjunctive,
+            },
+            consumed,
+        ))
     }
 }
 
@@ -3695,6 +3650,23 @@ fn parse_color_relative_clause_suffix(
         } else {
             return None;
         };
+
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("one or more colors").parse(after_intro) {
+        let next_char_is_boundary = rest
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if next_char_is_boundary {
+            let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+            return Some((
+                vec![FilterProp::ColorCount {
+                    comparator: Comparator::GE,
+                    count: 1,
+                }],
+                consumed,
+            ));
+        }
+    }
 
     let (rest, colors) = parse_color_disjunction(after_intro).ok()?;
     let next_char_is_boundary = rest
@@ -4361,14 +4333,30 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
     .parse(i)
 }
 
-fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult<'_, Zone> {
-    // Longer (plural) variants precede singular so `tag` doesn't prefix-match "graveyard"
-    // out of "graveyards" and leave a stray "s" that peek_zone_boundary would reject.
+/// Recognize a bare zone word (lowercased). Returns the typed `Zone`.
+///
+/// Canonical entry for zone-token parsing — shared by `parse_zone_suffix_nom`
+/// (origin/destination zone phrases in target filters) and by the
+/// source-referential condition parser in `oracle_nom/condition.rs`. New zone
+/// tokens MUST be added here, not duplicated at call sites.
+///
+/// "command zone" (CR 408) is recognized as a two-word token — `Zone::Command`
+/// is a shared zone that always appears with the qualifier "the " in printed
+/// Oracle text ("the command zone"), so it composes the same way as the
+/// bare-word zones at every call site that already strips a `ZoneQual`.
+pub(crate) fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult<'_, Zone> {
+    // Longer (plural / multi-word) variants precede shorter ones so `tag` doesn't
+    // prefix-match "graveyard" out of "graveyards" and leave a stray "s" that
+    // peek_zone_boundary would reject.
     alt((
         value(
             Zone::Battlefield,
             alt((tag("battlefields"), tag("battlefield"))),
         ),
+        // CR 408: the command zone — multi-word zone token. Placed before the
+        // bare-word arms because it has no shared prefix with them and the
+        // longest-prefix-first convention keeps additions ordered by length.
+        value(Zone::Command, tag("command zone")),
         value(Zone::Graveyard, alt((tag("graveyards"), tag("graveyard")))),
         value(Zone::Exile, alt((tag("exiles"), tag("exile")))),
         value(Zone::Hand, alt((tag("hands"), tag("hand")))),
@@ -4379,7 +4367,7 @@ fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult<'_, Zone> 
 
 /// Peek that the next character is a word boundary (end-of-string, space, comma, period).
 /// Prevents matches like "graveyardkeeper" from succeeding as "graveyard".
-fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
     match i.chars().next() {
         None | Some(' ' | ',' | '.') => Ok((i, ())),
         _ => Err(nom::Err::Error(nom::error::Error::new(
@@ -4394,6 +4382,7 @@ mod tests {
     use super::*;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
 
     fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
@@ -4425,6 +4414,26 @@ mod tests {
         let (f, rest) = parse_target("any target");
         assert_eq!(f, TargetFilter::Any);
         assert_eq!(rest, "");
+    }
+
+    /// CR 408: `parse_zone_word` recognizes "command zone" as the typed
+    /// `Zone::Command` token. Locks the canonical zone vocabulary so any
+    /// caller composing on top of `parse_zone_word` (e.g., the
+    /// source-referential condition parser in `oracle_nom/condition.rs`)
+    /// picks up the command zone without duplicating its spelling.
+    #[test]
+    fn parse_zone_word_recognizes_command_zone() {
+        let (rest, zone) = parse_zone_word("command zone").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(zone, Zone::Command);
+    }
+
+    /// Sanity: existing single-word zone tokens still resolve through the
+    /// same combinator after the `Command` extension.
+    #[test]
+    fn parse_zone_word_recognizes_graveyard_and_battlefield() {
+        assert_eq!(parse_zone_word("graveyard").unwrap().1, Zone::Graveyard);
+        assert_eq!(parse_zone_word("battlefield").unwrap().1, Zone::Battlefield);
     }
 
     #[test]
@@ -5137,6 +5146,49 @@ mod tests {
     }
 
     #[test]
+    fn distributive_each_linker_preserves_mana_value_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with mana value 2 or less");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }]))
+        );
+    }
+
+    #[test]
+    fn distributive_each_linker_preserves_counter_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with ice counters on them");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic("ice".to_string())),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }])
+            )
+        );
+    }
+
+    #[test]
+    fn distributive_each_linker_preserves_keyword_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }
+            ]))
+        );
+    }
+
+    #[test]
     fn colorless_adjective_does_not_distribute_across_or() {
         let (f, rest) = parse_type_phrase("artifact or colorless creature");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -5196,10 +5248,10 @@ mod tests {
         );
     }
 
-    /// CR 208.1: "creature with power or toughness N or less" produces a
-    /// disjunctive `AnyOf { [PowerLE, ToughnessLE] }` property. Used by
-    /// Arnyn Deathbloom Botanist's dies-trigger subject filter, Stern
-    /// Scolding's counter target, Warping Wail mode 1, etc.
+    /// CR 208: "creature with power or toughness N or less" produces a
+    /// disjunctive `AnyOf { [PtComparison(Power,LE,N), PtComparison(Toughness,LE,N)] }`
+    /// property. Used by Arnyn Deathbloom Botanist's dies-trigger subject
+    /// filter, Stern Scolding's counter target, Warping Wail mode 1, etc.
     #[test]
     fn creature_with_power_or_toughness_1_or_less() {
         let (f, _) = parse_type_phrase("creature with power or toughness 1 or less");
@@ -5207,10 +5259,16 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
                 props: vec![
-                    FilterProp::PowerLE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 1 },
                     },
-                    FilterProp::ToughnessLE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 1 },
                     },
                 ],
@@ -5226,10 +5284,16 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
                 props: vec![
-                    FilterProp::PowerGE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 3 },
                     },
-                    FilterProp::ToughnessGE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 3 },
                     },
                 ],
@@ -5237,15 +5301,44 @@ mod tests {
         );
     }
 
-    /// Standalone "with toughness N or less" — new parser branch, mirror of
-    /// the pre-existing "with power N or less" form.
+    /// Disjunctive "base" form — CR 208.4b. "creature with base power or
+    /// toughness 1 or less" reads base P/T (after layer 7b, ignoring counters).
+    #[test]
+    fn creature_with_base_power_or_toughness_1_or_less() {
+        let (f, _) = parse_type_phrase("creature with base power or toughness 1 or less");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                    FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }]))
+        );
+    }
+
+    /// Standalone "with toughness N or less" — mirror of the "with power N or
+    /// less" form, routed through the shared combinator.
     #[test]
     fn creature_with_toughness_2_or_less() {
         let (f, _) = parse_type_phrase("creature with toughness 2 or less");
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                FilterProp::ToughnessLE {
+                FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Fixed { value: 2 },
                 }
             ]))
@@ -5261,7 +5354,10 @@ mod tests {
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                FilterProp::ToughnessLE {
+                FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Offset {
                         inner: Box::new(QuantityExpr::Ref {
                             qty: QuantityRef::BasicLandTypeCount {
@@ -5283,8 +5379,11 @@ mod tests {
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
         assert_eq!(
             f,
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::PowerLE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LE,
                     value: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
                             filter: TargetFilter::Typed(TypedFilter {
@@ -5294,8 +5393,8 @@ mod tests {
                             }),
                         },
                     },
-                }])
-            )
+                }
+            ]))
         );
     }
 
@@ -5545,7 +5644,10 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::PowerLE {
+                    .properties(vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 2 }
                     }])
             )
@@ -5559,11 +5661,14 @@ mod tests {
         let (f, _) = parse_type_phrase("creature with power 3 or greater");
         assert_eq!(
             f,
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::PowerGE {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { value: 3 }
-                }])
-            )
+                }
+            ]))
         );
     }
 
@@ -5574,7 +5679,10 @@ mod tests {
         let (prop, _) = parse_power_suffix("with power x or less").expect("parses");
         assert_eq!(
             prop,
-            FilterProp::PowerLE {
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string()
@@ -5589,7 +5697,10 @@ mod tests {
         let (prop, _) = parse_power_suffix("with power x or greater").expect("parses");
         assert_eq!(
             prop,
-            FilterProp::PowerGE {
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string()
@@ -5740,16 +5851,21 @@ mod tests {
         let (f, rest) =
             parse_type_phrase("card with flashback or disturb, put it into your graveyard");
         assert_eq!(rest, "put it into your graveyard");
-        let TargetFilter::Typed(typed) = f else {
-            panic!("expected typed filter, got {f:?}");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
         };
-        assert!(typed.type_filters.contains(&TypeFilter::Card));
-        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
-            value: KeywordKind::Flashback,
-        }));
-        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
-            value: KeywordKind::Disturb,
-        }));
+        assert_eq!(filters.len(), 2);
+        for kind in [KeywordKind::Flashback, KeywordKind::Disturb] {
+            assert!(
+                filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                        if type_filters.contains(&TypeFilter::Card)
+                            && properties.contains(&FilterProp::HasKeywordKind { value: kind })
+                )),
+                "missing {kind:?} branch in {filters:?}"
+            );
+        }
     }
 
     #[test]
@@ -5797,15 +5913,36 @@ mod tests {
     }
 
     #[test]
+    fn creature_with_trample_or_haste_is_keyword_disjunction() {
+        let (f, _) = parse_type_phrase("creature with trample or haste");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                if type_filters.contains(&TypeFilter::Creature)
+                    && properties.contains(&FilterProp::WithKeyword { value: Keyword::Trample })
+        )));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                if type_filters.contains(&TypeFilter::Creature)
+                    && properties.contains(&FilterProp::WithKeyword { value: Keyword::Haste })
+        )));
+    }
+
+    #[test]
     fn creature_with_keyword_list_or_separator() {
         let (f, rest) = parse_type_phrase(
             "creature with deathtouch, hexproof, reach, or trample and reveal it",
         );
         assert_eq!(rest, "reveal it");
-        let TargetFilter::Typed(typed) = f else {
-            panic!("expected typed filter, got {f:?}");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
         };
-        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(filters.len(), 4);
         for keyword in [
             Keyword::Deathtouch,
             Keyword::Hexproof,
@@ -5813,11 +5950,15 @@ mod tests {
             Keyword::Trample,
         ] {
             assert!(
-                typed.properties.contains(&FilterProp::WithKeyword {
-                    value: keyword.clone()
-                }),
-                "missing {keyword:?} in {:?}",
-                typed.properties
+                filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                        if type_filters.contains(&TypeFilter::Creature)
+                            && properties.contains(&FilterProp::WithKeyword {
+                                value: keyword.clone()
+                            })
+                )),
+                "missing {keyword:?} in {filters:?}"
             );
         }
     }
@@ -6534,15 +6675,24 @@ mod tests {
     /// Regression — bare positive "with a counter on it" → any-counter GE 1.
     #[test]
     fn parse_counter_suffix_bare_positive_any() {
-        let (prop, _consumed) = parse_counter_suffix(" with a counter on it").expect("must parse");
-        assert_eq!(
-            prop,
-            FilterProp::Counters {
-                counters: CounterMatch::Any,
-                comparator: Comparator::GE,
-                count: QuantityExpr::Fixed { value: 1 },
-            }
-        );
+        for phrase in [
+            " with a counter on it",
+            " with a counter on them",
+            " with any counter on it",
+            " with any counter on them",
+            " with counters on it",
+            " with counters on them",
+        ] {
+            let (prop, _consumed) = parse_counter_suffix(phrase).expect("must parse");
+            assert_eq!(
+                prop,
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            );
+        }
     }
 
     #[test]
@@ -7071,6 +7221,32 @@ mod tests {
                     .controller(ControllerRef::You)
             )
         );
+    }
+
+    #[test]
+    fn spacecraft_artifact_subtype() {
+        let (f, _) = parse_type_phrase("Spacecraft");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::default().subtype("Spacecraft".to_string()))
+        );
+    }
+
+    #[test]
+    fn creatures_and_spacecraft_type_union() {
+        let (f, rest) = parse_type_phrase("creatures and Spacecraft");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(filters[0], TargetFilter::Typed(TypedFilter::creature()));
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(TypedFilter::default().subtype("Spacecraft".to_string()))
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest.trim(), "");
     }
 
     #[test]
@@ -7972,6 +8148,24 @@ mod tests {
     }
 
     #[test]
+    fn permanents_that_are_one_or_more_colors_full_target() {
+        let (filter, rest) = parse_target("all permanents that are one or more colors");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(
+            tf.properties.contains(&FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 1,
+            }),
+            "must require colored permanents, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
     fn target_spell_or_permanent_thats_red_or_green_distributes_color_to_both_legs() {
         let (filter, rest) = parse_target("target spell or permanent that's red or green");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -8272,11 +8466,14 @@ mod tests {
             assert!(
                 tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::PowerGE {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
                         value: QuantityExpr::Fixed { value: 3 }
                     }
                 )),
-                "Expected PowerGE(3) in {:?}",
+                "Expected PtComparison(Power, GE, 3) in {:?}",
                 tf.properties
             );
         } else {

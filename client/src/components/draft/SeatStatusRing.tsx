@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { SeatPublicView } from "../../adapter/draft-adapter";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 
@@ -27,6 +29,7 @@ interface SeatBadgeProps {
 }
 
 function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
+  const { t } = useTranslation("draft");
   const borderColor = isLocal
     ? "border-emerald-400/40"
     : PICK_STATUS_BORDER[seat.pick_status];
@@ -37,7 +40,7 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
     >
       <div className={`h-1.5 w-1.5 rounded-full ${PICK_STATUS_DOT[seat.pick_status]}`} />
       <span className="truncate text-xs text-white/70">
-        {seat.display_name || `Seat ${seat.seat_index + 1}`}
+        {seat.display_name || t("seat.label", { number: seat.seat_index + 1 })}
       </span>
     </div>
   );
@@ -47,6 +50,7 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
 
 /** 8-seat status ring showing each player's name and pick status with pass direction. */
 export function SeatStatusRing() {
+  const { t } = useTranslation("draft");
   const seats = useMultiplayerDraftStore((s) => s.view?.seats ?? EMPTY_SEATS);
   const passDirection = useMultiplayerDraftStore((s) => s.view?.pass_direction);
   const localSeat = useMultiplayerDraftStore((s) => s.seatIndex);
@@ -71,8 +75,8 @@ export function SeatStatusRing() {
       {/* Pass direction indicator */}
       <div className="flex justify-center text-white/40 text-sm">
         {passDirection === "Left"
-          ? "→ Passing Left →"
-          : "← Passing Right ←"}
+          ? t("seat.passingLeft")
+          : t("seat.passingRight")}
       </div>
       <div className="grid grid-cols-4 gap-2">
         {bottomRow.map((seat) => (

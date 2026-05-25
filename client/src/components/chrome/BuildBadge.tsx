@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useCardDataMeta, formatRelativeDate } from "../../hooks/useCardDataMeta";
 import { checkForServiceWorkerUpdate } from "../../pwa/registerServiceWorker";
@@ -21,6 +22,7 @@ interface BuildBadgeProps {
 }
 
 export function BuildBadge({ className = "", inline = false }: BuildBadgeProps = {}) {
+  const { t } = useTranslation();
   const [showUpdatedLabel, setShowUpdatedLabel] = useState(didAutoUpdate);
   const cardDataMeta = useCardDataMeta();
   const updateStatus = useUpdateStatus();
@@ -34,13 +36,13 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
   }, [showUpdatedLabel]);
 
   const statusLabel = updateStatus === "downloading"
-    ? `downloading… ${downloadProgress}%`
+    ? t("buildBadge.downloading", { progress: downloadProgress })
     : updateStatus === "checking"
-      ? "checking…"
+      ? t("buildBadge.checking")
       : updateStatus === "activating"
-        ? "updating…"
+        ? t("buildBadge.updating")
         : updateStatus === "deferred"
-          ? "update pending after game"
+          ? t("buildBadge.updatePending")
           : null;
 
   const isActive = updateStatus !== "idle";
@@ -89,9 +91,12 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
               target="_blank"
               rel="noopener noreferrer"
               className="text-slate-500 transition-colors hover:text-white"
-              title={`Card data generated ${cardDataMeta.generated_at} from ${cardDataMeta.commit_short}`}
+              title={t("buildBadge.cardDataTitle", {
+                date: cardDataMeta.generated_at,
+                commit: cardDataMeta.commit_short,
+              })}
             >
-              cards {cardDataAge} ({cardDataMeta.commit_short})
+              {t("buildBadge.cards", { age: cardDataAge, commit: cardDataMeta.commit_short })}
             </a>
           </>
         )}
@@ -100,8 +105,8 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
           type="button"
           onClick={handleCheckUpdate}
           className={`ml-0.5 text-slate-500 hover:text-white transition-colors cursor-pointer ${isActive ? "animate-spin" : ""}`}
-          aria-label="Check for updates"
-          title="Check for updates"
+          aria-label={t("buildBadge.checkForUpdates")}
+          title={t("buildBadge.checkForUpdates")}
         >
           ↻
         </button>
@@ -111,16 +116,16 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
             type="button"
             onClick={handleShowUpdateDebug}
             className="ml-0.5 rounded px-1 text-[11px] font-semibold text-rose-300 hover:text-rose-100 hover:bg-rose-600/25 transition-colors cursor-pointer"
-            aria-label="Updater debug info"
-            title={`Updater issue: ${updateError}`}
+            aria-label={t("buildBadge.updaterDebugInfo")}
+            title={t("buildBadge.updaterIssue", { error: updateError })}
           >
             x
           </button>
         )}
 
         {statusLabel && <span className="ml-0.5 text-cyan-300">{statusLabel}</span>}
-        {hasUpdateIssue && !statusLabel && <span className="ml-0.5 text-rose-300">update issue</span>}
-        {showUpdatedLabel && !statusLabel && <span className="ml-0.5 text-emerald-300">updated</span>}
+        {hasUpdateIssue && !statusLabel && <span className="ml-0.5 text-rose-300">{t("buildBadge.updateIssue")}</span>}
+        {showUpdatedLabel && !statusLabel && <span className="ml-0.5 text-emerald-300">{t("buildBadge.updated")}</span>}
 
         {isDownloading && (
           <div className="absolute bottom-0 left-0 right-0 h-[2px]">

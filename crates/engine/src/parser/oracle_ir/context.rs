@@ -76,6 +76,11 @@ pub(crate) struct ParseContext {
     /// (`TargetFilter::CostPaidObject`) when the ability has a non-self exile
     /// cost, an effect-exiled tracked-set reference (`TrackedSet`) otherwise.
     pub current_ability_exile_cost_zone: Option<Zone>,
+    /// CR 608.2c: The current effect-chain chunk has an earlier typed object
+    /// referent that `ParentTarget` can legally bind to. Standalone clause
+    /// parsing leaves this false so bare "it" defaults to SelfRef instead of
+    /// inventing a parent target.
+    pub parent_target_available: bool,
 }
 
 impl ParseContext {

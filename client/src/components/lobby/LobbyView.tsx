@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { FormatGroup, GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
-import { parseJoinCode } from "../../services/serverDetection";
+import { flagForServer, parseJoinCode } from "../../services/serverDetection";
 import { FORMAT_DEFAULTS, isLobbyEntryCompatible, useMultiplayerStore } from "../../stores/multiplayerStore";
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { GameListItem } from "./GameListItem";
 import type { LobbyGame } from "./GameListItem";
+import { ServerFlag } from "./ServerFlag";
 import { ServerPicker } from "./ServerPicker";
 
 interface LobbyViewProps {
@@ -51,11 +53,11 @@ const FILTER_ALL_SENTINEL = "__all__";
 
 type RoomTypeFilter = "all" | "p2p" | "server" | "draft";
 
-const ROOM_TYPE_FILTERS: { value: RoomTypeFilter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "draft", label: "Draft" },
-  { value: "p2p", label: "P2P" },
-  { value: "server", label: "Server" },
+const ROOM_TYPE_FILTERS: { value: RoomTypeFilter; labelKey: string }[] = [
+  { value: "all", labelKey: "lobbyView.roomTypeAll" },
+  { value: "draft", labelKey: "lobbyView.roomTypeDraft" },
+  { value: "p2p", labelKey: "lobbyView.roomTypeP2P" },
+  { value: "server", labelKey: "lobbyView.roomTypeServer" },
 ];
 
 export function LobbyView({
@@ -66,9 +68,12 @@ export function LobbyView({
   connectionMode,
   onServerOffline,
 }: LobbyViewProps) {
+  const { t } = useTranslation("multiplayer");
   const isServer = connectionMode !== "p2p";
   const isP2P = connectionMode === "p2p";
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
+  // Flag for the connected region, or null for self-hosted/custom servers.
+  const serverFlag = flagForServer(serverAddress);
   const [games, setGames] = useState<LobbyGame[]>([]);
   const gamesRef = useRef<LobbyGame[]>([]);
   const [playerCount, setPlayerCount] = useState(0);
@@ -247,7 +252,7 @@ export function LobbyView({
     <MenuPanel className="relative z-10 mx-auto flex w-full max-w-xl flex-col gap-6 px-4 py-5">
       <div className="flex w-full items-center justify-between gap-3">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
-          {isP2P ? "Direct Connection" : "Online Lobby"}
+          {isP2P ? t("lobbyView.directConnection") : t("lobbyView.onlineLobby")}
         </div>
         <div className="flex items-center gap-2">
           {isServer && (
@@ -255,8 +260,14 @@ export function LobbyView({
               type="button"
               onClick={() => setServerPickerOpen(true)}
               title={serverAddress}
-              className="rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
+              className="flex items-center gap-1.5 rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
             >
+              {serverFlag && (
+                <ServerFlag
+                  flag={serverFlag}
+                  className="h-2.5 w-auto rounded-[1px] ring-1 ring-black/20"
+                />
+              )}
               {serverAddress.replace(/^wss?:\/\//, "").split("/")[0]}
             </button>
           )}
@@ -268,15 +279,15 @@ export function LobbyView({
             <button
               type="button"
               onClick={() => setServerPickerOpen(true)}
-              title="Pick a server to use online lobby mode"
+              title={t("lobbyView.pickServerTitle")}
               className="rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
             >
-              Pick server
+              {t("lobbyView.pickServer")}
             </button>
           )}
           {isServer && playerCount > 0 && (
             <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-medium text-emerald-300">
-              {playerCount} online
+              {t("lobbyView.online", { count: playerCount })}
             </span>
           )}
         </div>
@@ -293,7 +304,7 @@ export function LobbyView({
           className="flex min-h-[44px] items-center gap-2 self-start rounded-[16px] bg-black/18 px-3 py-1 ring-1 ring-white/10"
         >
           <span className="text-[0.62rem] font-medium uppercase tracking-[0.18em] text-gray-500">
-            Format
+            {t("lobbyView.format")}
           </span>
           <select
             id="lobby-format-filter"
@@ -306,7 +317,7 @@ export function LobbyView({
             className="bg-transparent py-1.5 text-base font-medium text-white outline-none"
           >
             <option value={FILTER_ALL_SENTINEL} className="bg-[#0a0f1b] text-slate-100">
-              All formats
+              {t("lobbyView.allFormats")}
             </option>
             {FORMAT_FILTER_GROUPS.map(({ group, items }) => (
               <optgroup key={group} label={group} className="bg-[#0a0f1b] text-slate-100">
@@ -333,7 +344,7 @@ export function LobbyView({
                   : "text-gray-400 hover:text-gray-200"
               }`}
             >
-              {opt.label}
+              {t(opt.labelKey)}
             </button>
           ))}
         </div>
@@ -341,13 +352,13 @@ export function LobbyView({
 
       {isServer && (
         <div className="w-full space-y-3">
-          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Open Tables</div>
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("lobbyView.openTables")}</div>
           {filteredGames.length === 0 ? (
             <div className="flex flex-col items-center gap-3 rounded-[18px] border border-dashed border-white/10 px-4 py-6 text-center">
               <p className="text-sm text-gray-400">
                 {formatFilter
-                  ? `No ${formatFilter} games right now.`
-                  : "No open games right now."}
+                  ? t("lobbyView.noFormatGames", { format: formatFilter })
+                  : t("lobbyView.noOpenGames")}
               </p>
               {formatFilter && (
                 <button
@@ -355,7 +366,7 @@ export function LobbyView({
                   onClick={() => setFormatFilter(null)}
                   className={menuButtonClass({ tone: "neutral", size: "sm" })}
                 >
-                  Show all formats
+                  {t("lobbyView.showAllFormats")}
                 </button>
               )}
             </div>
@@ -376,13 +387,13 @@ export function LobbyView({
 
       {isP2P && (
         <div className="w-full rounded-[18px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-3 text-sm leading-6 text-cyan-100">
-          Dedicated server unavailable. You can still host or join directly with a 5-character room code.
+          {t("lobbyView.p2pNotice")}
         </div>
       )}
 
       <div className="w-full space-y-3">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
-          {isP2P ? "Join by Code" : "Join a Table"}
+          {isP2P ? t("lobbyView.joinByCode") : t("lobbyView.joinATable")}
         </div>
         <div className="flex w-full items-center gap-2">
         <input
@@ -390,7 +401,7 @@ export function LobbyView({
           value={joinCode}
           onChange={(e) => setJoinCode(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
-          placeholder={isP2P ? "Enter 5-character P2P code" : "Enter code or CODE@IP:PORT"}
+          placeholder={isP2P ? t("lobbyView.p2pCodePlaceholder") : t("lobbyView.serverCodePlaceholder")}
           maxLength={isP2P ? 5 : 50}
           className="flex-1 rounded-[18px] bg-black/18 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
         />
@@ -403,16 +414,16 @@ export function LobbyView({
             disabled: !joinCode.trim(),
           })}
         >
-          Join
+          {t("lobbyView.join")}
         </button>
         </div>
       </div>
 
       <div className="flex w-full flex-col gap-3 border-t border-white/8 pt-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
-          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Host</div>
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("lobbyView.host")}</div>
           <div className="mt-1 text-sm text-slate-400">
-            {isP2P ? "Create a direct room for one opponent." : "Open a room and wait for players."}
+            {isP2P ? t("lobbyView.hostP2PDescription") : t("lobbyView.hostServerDescription")}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -421,7 +432,7 @@ export function LobbyView({
               onClick={onHostDraft}
               className={menuButtonClass({ tone: "purple", size: "md" })}
             >
-              Host Draft
+              {t("lobbyView.hostDraft")}
             </button>
           )}
           {isServer && (
@@ -429,7 +440,7 @@ export function LobbyView({
               onClick={handleHost}
               className={menuButtonClass({ tone: "emerald", size: "md" })}
             >
-              Host Game
+              {t("lobbyView.hostGame")}
             </button>
           )}
           {isP2P && (
@@ -437,7 +448,7 @@ export function LobbyView({
               onClick={onHostP2P}
               className={menuButtonClass({ tone: "cyan", size: "md" })}
             >
-              Host P2P Game
+              {t("lobbyView.hostP2PGame")}
             </button>
           )}
         </div>
@@ -461,14 +472,14 @@ export function LobbyView({
           />
           <div className="relative z-10 w-full max-w-xs rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md">
             <h3 className="mb-3 text-sm font-semibold text-white">
-              Password Required
+              {t("lobbyView.passwordRequired")}
             </h3>
             <form onSubmit={handlePasswordSubmit}>
               <input
                 type="password"
                 value={passwordInput}
                 onChange={(e) => setPasswordInput(e.target.value)}
-                placeholder="Enter password"
+                placeholder={t("lobbyView.passwordPlaceholder")}
                 className="mb-4 w-full rounded-lg bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
                 autoFocus
               />
@@ -478,7 +489,7 @@ export function LobbyView({
                   onClick={() => setPasswordModal(null)}
                   className={menuButtonClass({ tone: "neutral", size: "sm" })}
                 >
-                  Cancel
+                  {t("common:actions.cancel")}
                 </button>
                 <button
                   type="submit"
@@ -489,7 +500,7 @@ export function LobbyView({
                     disabled: !passwordInput,
                   })}
                 >
-                  Join
+                  {t("lobbyView.join")}
                 </button>
               </div>
             </form>

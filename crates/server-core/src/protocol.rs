@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::format::{FormatConfig, GameFormat};
+use engine::types::format::FormatConfig;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
@@ -49,67 +49,12 @@ pub struct AiSeatRequest {
     pub deck_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LobbyGame {
-    pub game_code: String,
-    pub host_name: String,
-    pub created_at: u64,
-    pub has_password: bool,
-    /// Display string (e.g. `"0.1.11"`). Human-readable; not a compatibility gate.
-    #[serde(default)]
-    pub host_version: String,
-    /// Git short-hash of the host's build. The compatibility gate — clients on
-    /// a different commit cannot join because GameState / rules may have diverged.
-    #[serde(default)]
-    pub host_build_commit: String,
-    /// Number of seats currently occupied (host + joined guests, including AI
-    /// if present). Updated as players join/leave.
-    #[serde(default)]
-    pub current_players: u32,
-    /// Configured seat count for this game. For 1v1 formats this is 2; for
-    /// Commander it ranges 2–4.
-    #[serde(default)]
-    pub max_players: u32,
-    /// Game format (Standard, Commander, etc.) — lets lobby UIs filter or
-    /// badge the row. Optional because older persisted entries predate the
-    /// field.
-    #[serde(default)]
-    pub format: Option<GameFormat>,
-    /// Optional per-match label distinct from the host's player name. When
-    /// set, lobby UIs render this as the row's primary title ("Friday Night
-    /// Commander") and the host's name as secondary metadata. `None` means
-    /// "use the host's name as the room label" — the behavior before this
-    /// field existed, preserved for backward compatibility.
-    #[serde(default)]
-    pub room_name: Option<String>,
-    /// True when this room is P2P-brokered (host runs the engine). False for
-    /// server-run rooms. Derived from `host_peer_id` presence at publish
-    /// time. This field is populated by the server, never by clients.
-    #[serde(default)]
-    pub is_p2p: bool,
-    /// True when the host enabled Sandbox mode for this game. Populated by
-    /// the publisher from `format_config.allow_debug_actions`. Lobby UIs
-    /// render a SANDBOX badge and prompt joiners to confirm.
-    #[serde(default)]
-    pub is_sandbox: bool,
-    /// When present, this lobby entry is a draft pod rather than a
-    /// constructed-play room. Contains set code and draft kind so the
-    /// lobby UI can badge the row appropriately.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft_metadata: Option<DraftLobbyMetadata>,
-}
-
-/// Metadata attached to a lobby entry when the room is a draft pod.
-/// Lightweight — only the fields the lobby listing needs to render a
-/// meaningful row. The full draft state lives in the host's WASM engine.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DraftLobbyMetadata {
-    /// Three-letter set code (e.g. "MKM", "OTJ").
-    pub set_code: String,
-    /// Draft kind label: "Quick", "Premier", or "Traditional".
-    pub draft_kind: String,
-}
+// `LobbyGame` and `DraftLobbyMetadata` are now DEFINED in `lobby-broker`
+// (the WASM-safe broker crate owns the lobby-listing wire types) and
+// re-exported here so `ServerMessage::LobbyUpdate { games: Vec<LobbyGame> }`
+// and the broker reference the same struct. The serde shape is unchanged —
+// wire bytes are byte-identical (guarded by tests/lobby_wire_contract.rs).
+pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame};
 
 pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatView};
 
@@ -120,6 +65,10 @@ pub struct PlayerSlotInfo {
     pub player_id: u8,
     pub name: String,
     pub kind: SeatKind,
+    #[serde(default)]
+    pub reserved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_expires_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,18 +126,31 @@ pub enum ClientMessage {
         /// as a draft pod instead of a constructed-play room.
         #[serde(default)]
         draft_metadata: Option<DraftLobbyMetadata>,
+        /// When true, the server/host starts the game as soon as every seat is
+        /// occupied. Defaulted so older clients keep the new intended behavior
+        /// without requiring a protocol-version bump.
+        #[serde(default = "default_true")]
+        start_when_full: bool,
     },
     JoinGameWithPassword {
         game_code: String,
         deck: DeckData,
         display_name: String,
         password: Option<String>,
+        #[serde(default)]
+        reservation_token: Option<String>,
     },
     /// Read-only lookup used by typed-code joins before deck selection.
     /// Returns room metadata (`JoinTargetInfo`) without consuming a seat.
     LookupJoinTarget {
         game_code: String,
         password: Option<String>,
+        #[serde(default)]
+        reserve: bool,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        release_reservation_token: Option<String>,
     },
     Concede,
     Emote {
@@ -208,6 +170,8 @@ pub enum ClientMessage {
         game_code: String,
         current_players: u8,
         max_players: u8,
+        #[serde(default)]
+        consumed_reservation_tokens: Vec<String>,
     },
     SeatMutate {
         mutation: SeatMutation,
@@ -252,6 +216,10 @@ pub enum ClientMessage {
 
 fn default_player_count() -> u8 {
     2
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,6 +343,10 @@ pub enum ServerMessage {
         match_config: MatchConfig,
         player_count: u8,
         filled_seats: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reservation_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reservation_expires_at_ms: Option<u64>,
     },
     PlayerSlotsUpdate {
         slots: Vec<PlayerSlotInfo>,
@@ -407,6 +379,8 @@ pub enum ServerMessage {
         match_config: MatchConfig,
         player_count: u8,
         filled_seats: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reservation_token: Option<String>,
     },
     DraftCreated {
         draft_code: String,
@@ -447,6 +421,7 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::format::GameFormat;
     use serde_json::Value;
 
     fn load_fixture(path: &str) -> Value {
@@ -586,6 +561,7 @@ mod tests {
             room_name: Some("Friday Night Commander".to_string()),
             host_peer_id: None,
             draft_metadata: None,
+            start_when_full: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -645,6 +621,7 @@ mod tests {
             },
             display_name: "Bob".to_string(),
             password: None,
+            reservation_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -668,6 +645,9 @@ mod tests {
         let msg = ClientMessage::LookupJoinTarget {
             game_code: "ABC123".to_string(),
             password: Some("pw".to_string()),
+            reserve: false,
+            display_name: None,
+            release_reservation_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -675,9 +655,15 @@ mod tests {
             ClientMessage::LookupJoinTarget {
                 game_code,
                 password,
+                reserve,
+                display_name,
+                release_reservation_token,
             } => {
                 assert_eq!(game_code, "ABC123");
                 assert_eq!(password, Some("pw".to_string()));
+                assert!(!reserve);
+                assert_eq!(display_name, None);
+                assert_eq!(release_reservation_token, None);
             }
             _ => panic!("wrong variant"),
         }
@@ -1008,6 +994,7 @@ mod tests {
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
+            start_when_full: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1183,6 +1170,7 @@ mod tests {
             match_config: MatchConfig::default(),
             player_count: 4,
             filled_seats: 2,
+            reservation_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1212,6 +1200,8 @@ mod tests {
             match_config: MatchConfig::default(),
             player_count: 4,
             filled_seats: 2,
+            reservation_token: None,
+            reservation_expires_at_ms: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1268,6 +1258,7 @@ mod tests {
             room_name: None,
             host_peer_id: Some("peer-host-abc".to_string()),
             draft_metadata: None,
+            start_when_full: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();

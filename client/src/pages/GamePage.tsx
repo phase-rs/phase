@@ -8,8 +8,10 @@ import {
 } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
+import { Trans, useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
-import type { DeckCardCount, GameFormat, MatchConfig } from "../adapter/types";
+import type { DeckCardCount, GameFormat, MatchConfig, SerializedAbilityCost } from "../adapter/types";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -25,6 +27,7 @@ import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
+import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
@@ -36,6 +39,7 @@ import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
 import { HandBadge } from "../components/hand/HandBadge.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { FlowHelpNudge } from "../components/help/FlowHelpNudge.tsx";
+import { SandboxToolsNudge } from "../components/help/SandboxToolsNudge.tsx";
 import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
@@ -94,7 +98,7 @@ import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { usePreviewDismiss } from "../hooks/usePreviewDismiss.ts";
-import { clearGame, useGameStore } from "../stores/gameStore.ts";
+import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import {
@@ -107,7 +111,7 @@ import {
 } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
-import { abilityChoiceLabel } from "../viewmodel/costLabel.ts";
+import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
 import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { cardImageLookup } from "../services/cardImageLookup.ts";
@@ -118,21 +122,21 @@ type ZoneRailStyle = CSSProperties & {
 };
 
 /**
- * User-facing messages keyed by `P2PAdapterEvent.hostingFailed.reason`.
- * Typed as `Record<ReasonUnion, string>` so adding a new reason to the
- * adapter event union without adding a message here is a compile error —
- * the idiomatic TS replacement for a `switch`-with-`never`-default when
- * the union has a single arm today but will grow.
+ * i18n keys for user-facing messages keyed by
+ * `P2PAdapterEvent.hostingFailed.reason`. Typed as `Record<ReasonUnion, string>`
+ * so adding a new reason to the adapter event union without adding a key here is
+ * a compile error — the idiomatic TS replacement for a `switch`-with-`never`-default
+ * when the union has a single arm today but will grow.
  */
-const HOSTING_FAILURE_MESSAGES: Record<
+const HOSTING_FAILURE_MESSAGE_KEYS: Record<
   Extract<P2PAdapterEvent, { type: "hostingFailed" }>["reason"],
   string
 > = {
-  room_still_claimed:
-    "Your previous room is still winding down on the signaling server. Wait about a minute, then try Resume again.",
+  room_still_claimed: "gamePage.toasts.roomStillClaimed",
 };
 
 export function GamePage() {
+  const { t } = useTranslation("game");
   const navigate = useNavigate();
   const { id: gameId } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
@@ -160,6 +164,14 @@ export function GamePage() {
   const sourceParam = searchParams.get("source") ?? undefined;
   const draftIdParam = searchParams.get("draftId") ?? undefined;
   const playerCount = playersParam ? Number(playersParam) : undefined;
+  const activeGameMeta = useMemo(
+    () => (gameId ? loadActiveGame() : null),
+    [gameId],
+  );
+  const savedFormatConfig =
+    activeGameMeta && activeGameMeta.id === gameId
+      ? activeGameMeta.formatConfig
+      : undefined;
   // Memoize so the `GameProvider` `useEffect` dep array doesn't
   // tear-down/rebuild the P2P session on every parent re-render. Without
   // `useMemo`, each render constructs a fresh object reference from
@@ -168,8 +180,8 @@ export function GamePage() {
   // treats as new). The explicit memo makes the stability guarantee
   // self-documenting.
   const formatConfig = useMemo(
-    () => (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined),
-    [formatParam],
+    () => savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined),
+    [formatParam, savedFormatConfig],
   );
   // CR 103.1: 0 = play first, 1 = draw first, undefined = random
   const firstPlayer = firstParam === "play" ? 0 : firstParam === "draw" ? 1 : undefined;
@@ -236,10 +248,13 @@ export function GamePage() {
         const myId = useMultiplayerStore.getState().activePlayerId ?? 0;
         const oppId = myId === 0 ? 1 : 0;
         useMultiplayerStore.getState().setPlayerDisconnected(oppId);
-        useMultiplayerStore.getState().showToast(`${getOpponentDisplayName(oppId)} disconnected`, {
-          countdownSeconds: event.graceSeconds,
-          key: playerToastKey(oppId),
-        });
+        useMultiplayerStore.getState().showToast(
+          t("gamePage.toasts.playerDisconnected", { name: getOpponentDisplayName(oppId) }),
+          {
+            countdownSeconds: event.graceSeconds,
+            key: playerToastKey(oppId),
+          },
+        );
         break;
       }
       case "opponentReconnected": {
@@ -307,7 +322,7 @@ export function GamePage() {
         setOpponentDisconnected(true);
         useMultiplayerStore.getState().setPlayerDisconnected(event.playerId);
         useMultiplayerStore.getState().showToast(
-          `${getPlayerDisplayName(event.playerId)} disconnected`,
+          t("gamePage.toasts.playerDisconnected", { name: getPlayerDisplayName(event.playerId) }),
           {
             countdownSeconds: event.graceSeconds,
             key: playerToastKey(event.playerId),
@@ -325,7 +340,9 @@ export function GamePage() {
         setOpponentDisconnected(true);
         useMultiplayerStore.getState().setPlayerDisconnected(event.disconnectedPlayer);
         useMultiplayerStore.getState().showToast(
-          `Game paused — ${getPlayerDisplayName(event.disconnectedPlayer)} disconnected`,
+          t("gamePage.toasts.gamePausedPlayerDisconnected", {
+            name: getPlayerDisplayName(event.disconnectedPlayer),
+          }),
           {
             countdownSeconds: event.timeoutSeconds,
             key: playerToastKey(event.disconnectedPlayer),
@@ -357,7 +374,7 @@ export function GamePage() {
         });
         break;
     }
-  }, [gameId, navigate, joinCode]);
+  }, [gameId, navigate, joinCode, t]);
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
@@ -396,7 +413,7 @@ export function GamePage() {
       case "guestConnected":
         break;
       case "roomFull":
-        useMultiplayerStore.getState().showToast("Room full — ready to start!");
+        useMultiplayerStore.getState().showToast(t("gamePage.toasts.roomFull"));
         break;
       case "opponentDisconnected":
         setOpponentDisconnected(true);
@@ -406,7 +423,9 @@ export function GamePage() {
           playerId: event.playerId,
           gracePeriodMs: event.gracePeriodMs,
         });
-        setPauseReason(`${getPlayerDisplayName(event.playerId)} disconnected`);
+        setPauseReason(
+          t("gamePage.toasts.playerDisconnected", { name: getPlayerDisplayName(event.playerId) }),
+        );
         break;
       case "playerReconnected":
         // Dismiss the disconnect modal if it was waiting on this player.
@@ -454,7 +473,7 @@ export function GamePage() {
           maxAttempts: 0,
         });
         useMultiplayerStore.getState().showToast(
-          `Host disconnected — reconnecting (attempt ${event.attempt})…`,
+          t("gamePage.toasts.hostReconnecting", { attempt: event.attempt }),
         );
         break;
       case "reconnectFailed":
@@ -492,17 +511,17 @@ export function GamePage() {
         // `clearP2PHostSession` was NOT called — the persisted state is
         // still valid, the signaling server just needs a moment.
         //
-        // `HOSTING_FAILURE_MESSAGES` is typed as `Record<ReasonUnion, string>`
+        // `HOSTING_FAILURE_MESSAGE_KEYS` is typed as `Record<ReasonUnion, string>`
         // so adding a new `reason` to the P2PAdapterEvent union without
-        // adding a message here is a compile error.
+        // adding a key here is a compile error.
         useMultiplayerStore
           .getState()
-          .showToast(HOSTING_FAILURE_MESSAGES[event.reason]);
+          .showToast(t(HOSTING_FAILURE_MESSAGE_KEYS[event.reason]));
         navigate("/");
         break;
       }
     }
-  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode]);
+  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode, t]);
 
   const handleReady = useCallback(() => {
     setWaitingForOpponent(false);
@@ -632,6 +651,7 @@ function GamePageContent({
   pauseReason,
   isP2PHost,
 }: GamePageContentProps) {
+  const { t } = useTranslation("game");
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -669,6 +689,8 @@ function GamePageContent({
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
+  const dismissedSandboxToolsNudge = usePreferencesStore((s) => s.dismissedSandboxToolsNudge);
+  const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
@@ -890,6 +912,29 @@ function GamePageContent({
     canActForWaitingState &&
     stackLength === 0;
 
+  // Sequenced after the flow nudge (requires it dismissed first) so the two
+  // first-run hints never stack. Same calm-moment guards as the flow nudge,
+  // plus: hidden once the panel is already open (nothing left to advertise).
+  const showSandboxToolsNudge =
+    !dismissedSandboxToolsNudge &&
+    dismissedFlowHelpNudge &&
+    !debugPanelOpen &&
+    !helpSheetOpen &&
+    (mode === "ai" || mode === "local") &&
+    viewingZone == null &&
+    preferencesOpen == null &&
+    boardContextMenu == null &&
+    !showCardDataMissing &&
+    resumeResetReason == null &&
+    !showConcedeDialog &&
+    disconnectChoice == null &&
+    pauseReason == null &&
+    reconnectState.status === "idle" &&
+    waitingFor?.type === "Priority" &&
+    waitingFor.data.player === playerId &&
+    canActForWaitingState &&
+    stackLength === 0;
+
   return (
     <div
       ref={containerRef}
@@ -919,31 +964,33 @@ function GamePageContent({
         <div
           className="pointer-events-none fixed left-0 right-0 top-0 z-30 select-none bg-amber-600 px-4 py-1 text-center text-xs font-bold uppercase tracking-wider text-white shadow-md"
           role="status"
-          aria-label="Sandbox mode banner"
+          aria-label={t("gamePage.sandbox.bannerAria")}
         >
-          Sandbox Mode — debug actions enabled
+          {t("gamePage.sandbox.banner")}
         </div>
       )}
 
       {/* Reconnecting banner */}
       {reconnectState.status === "reconnecting" && (
         <div className="fixed left-0 right-0 top-0 z-40 bg-amber-600 px-4 py-2 text-center text-sm font-semibold text-white">
-          Reconnecting…{" "}
           {reconnectState.maxAttempts > 0
-            ? `(attempt ${reconnectState.attempt}/${reconnectState.maxAttempts})`
-            : `(attempt ${reconnectState.attempt})`}
+            ? t("gamePage.reconnect.bannerWithMax", {
+                attempt: reconnectState.attempt,
+                maxAttempts: reconnectState.maxAttempts,
+              })
+            : t("gamePage.reconnect.banner", { attempt: reconnectState.attempt })}
         </div>
       )}
 
       {/* Connection lost banner */}
       {reconnectState.status === "failed" && (
         <div className="fixed left-0 right-0 top-0 z-40 flex items-center justify-center gap-4 bg-red-700 px-4 py-2 text-sm font-semibold text-white">
-          <span>Connection lost</span>
+          <span>{t("gamePage.reconnect.connectionLost")}</span>
           <button
             onClick={() => navigate("/")}
             className="rounded bg-white/20 px-3 py-1 text-xs font-semibold hover:bg-white/30"
           >
-            Return to Menu
+            {t("gamePage.actions.returnToMenu")}
           </button>
         </div>
       )}
@@ -1051,6 +1098,7 @@ function GamePageContent({
         }}
       >
         {showFlowHelpNudge && <FlowHelpNudge />}
+        {showSandboxToolsNudge && <SandboxToolsNudge />}
         <CombatPhaseIndicator />
         <div className="flex items-center gap-1.5">
           <HandBadge />
@@ -1072,6 +1120,8 @@ function GamePageContent({
         onSettingsClick={() => setPreferencesOpen({})}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
+        showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
+        onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
       />
       <HelpSheet />
 
@@ -1096,10 +1146,10 @@ function GamePageContent({
           <div className="absolute inset-0 bg-black/60" />
           <div className="relative z-10 w-full max-w-sm rounded-[24px] border border-yellow-400/30 bg-[#0b1020]/96 p-6 text-center shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
             <h2 className="mb-2 text-lg font-bold text-yellow-400">
-              Opponent Disconnected
+              {t("gamePage.opponentDisconnected.title")}
             </h2>
             <p className="text-sm text-gray-300">
-              Waiting for opponent to reconnect...
+              {t("gamePage.opponentDisconnected.body")}
             </p>
           </div>
         </div>
@@ -1154,12 +1204,14 @@ function GamePageContent({
             exit={{ opacity: 0, y: -20 }}
             transition={{ duration: 0.25 }}
           >
-            <span className="text-sm text-amber-200">{resumeResetReason} A new game was started.</span>
+            <span className="text-sm text-amber-200">
+              {t("gamePage.resumeReset.message", { reason: resumeResetReason })}
+            </span>
             <button
               onClick={onDismissResumeReset}
               className="rounded bg-amber-800 px-2.5 py-1 text-xs font-semibold text-amber-100 transition hover:bg-amber-700"
             >
-              OK
+              {t("gamePage.actions.ok")}
             </button>
           </motion.div>
         )}
@@ -1206,6 +1258,10 @@ function GamePageContent({
       {/* Combat SVG overlays: blocker assignments + attack target arrows */}
       <BlockAssignmentLines />
       <AttackTargetLines />
+      {/* Per-attacker "needs N blockers" badges (menace / "blocked by N or more").
+          Self-gates: renders nothing unless the local player is assigning blockers
+          to attackers that carry a minimum-blocker requirement. */}
+      <BlockRequirementBadges />
 
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />
@@ -1288,6 +1344,10 @@ function GamePageContent({
           canActForWaitingState && (
             <UnlessPaymentChooseCostModal />
           )}
+        {waitingFor?.type === "ActivationCostOneOfChoice" &&
+          canActForWaitingState && (
+            <ActivationCostOneOfChoiceModal />
+          )}
       </DialogHost>
 
       {waitingFor?.type === "CompanionReveal" &&
@@ -1321,7 +1381,9 @@ function GamePageContent({
           <div className="fixed inset-0 z-50 flex items-center justify-center">
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
             <div className="relative text-center">
-              <p className="text-base font-semibold text-white">Opponent is deciding their opening hand…</p>
+              <p className="text-base font-semibold text-white">
+                {t("gamePage.mulligan.opponentDeciding")}
+              </p>
             </div>
           </div>
         )}
@@ -1361,18 +1423,21 @@ function GamePageContent({
       {waitingFor?.type === "BetweenGamesChoosePlayDraw" &&
         waitingFor.data.player === playerId && (
           <ChoiceModal
-            title={`Game ${waitingFor.data.game_number}: Choose Play or Draw`}
-            subtitle={`Match score ${waitingFor.data.score.p0_wins}-${waitingFor.data.score.p1_wins}`}
+            title={t("gamePage.playDraw.title", { gameNumber: waitingFor.data.game_number })}
+            subtitle={t("gamePage.playDraw.matchScore", {
+              p0Wins: waitingFor.data.score.p0_wins,
+              p1Wins: waitingFor.data.score.p1_wins,
+            })}
             options={[
               {
                 id: "play",
-                label: "Play First",
-                description: "Take the first turn",
+                label: t("gamePage.playDraw.playFirst"),
+                description: t("gamePage.playDraw.playFirstDescription"),
               },
               {
                 id: "draw",
-                label: "Draw First",
-                description: "Take the extra draw on your first turn",
+                label: t("gamePage.playDraw.drawFirst"),
+                description: t("gamePage.playDraw.drawFirstDescription"),
               },
             ]}
             onChoose={(id) => handleChoosePlayDraw(id === "play")}
@@ -1425,7 +1490,7 @@ function GamePageContent({
           with no way to escape — see UnhandledWaitingForModal for details. */}
       <UnhandledWaitingForModal
         onExit={handleUnhandledExit}
-        exitLabel={isOnlineMode ? "Concede game" : "Return to menu"}
+        exitLabel={isOnlineMode ? t("gamePage.actions.concedeGame") : t("gamePage.actions.returnToMenuLower")}
       />
     </div>
   );
@@ -1503,6 +1568,7 @@ function MulliganDecisionPrompt({
   freeFirstMulligan,
   onChoose,
 }: MulliganDecisionPromptProps) {
+  const { t } = useTranslation("game");
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActions = useGameStore((s) => s.legalActions);
@@ -1540,31 +1606,35 @@ function MulliganDecisionPrompt({
     const fallbackOptions = [
       {
         id: "keep",
-        label: "Keep Hand",
+        label: t("gamePage.mulligan.keepHand"),
         description:
           bottomOnKeep > 0
-            ? `Put ${bottomOnKeep} on the bottom`
-            : "No cards to the bottom",
+            ? t("gamePage.mulligan.putOnBottom", { count: bottomOnKeep })
+            : t("gamePage.mulligan.noCardsToBottom"),
       },
       {
         id: "mulligan",
-        label: nextMulliganFree ? "Free Mulligan" : "Mulligan",
+        label: nextMulliganFree
+          ? t("gamePage.mulligan.freeMulligan")
+          : t("gamePage.mulligan.mulligan"),
         description: nextMulliganFree
-          ? "Shuffle and draw 7 — no cards to the bottom"
-          : "Shuffle and draw 7 again",
+          ? t("gamePage.mulligan.shuffleDrawSevenFree")
+          : t("gamePage.mulligan.shuffleDrawSevenAgain"),
       },
       // CR 103.5b: A Powder option per legal `UseSerumPowder` candidate the
       // engine emitted. The button label uses the object's engine-provided
       // name so the FE never re-evaluates which hand objects qualify.
       ...serumPowderIds.map((oid) => ({
         id: `powder:${oid}`,
-        label: `Use ${objects?.[oid]?.name ?? "Serum Powder"}`,
-        description: "Exile every card in hand, draw the same number — not a mulligan",
+        label: t("gamePage.mulligan.usePowder", {
+          name: objects?.[oid]?.name ?? "Serum Powder",
+        }),
+        description: t("gamePage.mulligan.powderDescription"),
       })),
     ];
     return (
       <ChoiceModal
-        title={`London Mulligan (${mulliganCount} taken)`}
+        title={t("gamePage.mulligan.londonTitle", { count: mulliganCount })}
         options={fallbackOptions}
         onChoose={onChoose}
       />
@@ -1574,16 +1644,20 @@ function MulliganDecisionPrompt({
   const handObjects = player.hand.map((id) => objects[id]).filter(Boolean);
   return (
     <MulliganPanel
-      eyebrow={mulliganCount > 0 ? `Mulligan ${mulliganCount} · London` : "Opening Hand · London Mulligan"}
-      title="Review your opening hand"
+      eyebrow={
+        mulliganCount > 0
+          ? t("gamePage.mulligan.eyebrowMulligan", { count: mulliganCount })
+          : t("gamePage.mulligan.eyebrowOpening")
+      }
+      title={t("gamePage.mulligan.reviewTitle")}
       subtitle={
         mulliganCount > 0
           ? bottomOnKeep > 0
-            ? `Keep this hand (you'll put ${bottomOnKeep} on the bottom) or mulligan again for a fresh 7.`
-            : "Keep this hand (free mulligan — no cards to the bottom) or mulligan again for a fresh 7."
+            ? t("gamePage.mulligan.subtitleKeepWithBottom", { count: bottomOnKeep })
+            : t("gamePage.mulligan.subtitleKeepFree")
           : nextMulliganFree
-            ? "Keep this hand or take a free mulligan (no cards to the bottom)."
-            : "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep)."
+            ? t("gamePage.mulligan.subtitleOpeningFree")
+            : t("gamePage.mulligan.subtitleOpeningOne")
       }
       footer={
         <AnimatePresence>
@@ -1598,7 +1672,9 @@ function MulliganDecisionPrompt({
                 onClick={() => onChoose("mulligan")}
                 className="rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
               >
-                {nextMulliganFree ? "Free Mulligan" : `Mulligan to ${nextHandSize}`}
+                {nextMulliganFree
+                  ? t("gamePage.mulligan.freeMulligan")
+                  : t("gamePage.mulligan.mulliganTo", { count: nextHandSize })}
               </button>
               {/* CR 103.5b: One button per legal `UseSerumPowder` candidate
                   the engine surfaced. Name comes from engine-provided state. */}
@@ -1607,16 +1683,18 @@ function MulliganDecisionPrompt({
                   key={oid}
                   onClick={() => onChoose(`powder:${oid}`)}
                   className="rounded-[10px] border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20 hover:text-amber-100 lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
-                  title="Exile every card in your hand and draw the same number. Not a mulligan — count and bottoms unaffected."
+                  title={t("gamePage.mulligan.powderTooltip")}
                 >
-                  {`Use ${objects?.[oid]?.name ?? "Serum Powder"}`}
+                  {t("gamePage.mulligan.usePowder", {
+                    name: objects?.[oid]?.name ?? "Serum Powder",
+                  })}
                 </button>
               ))}
               <button
                 onClick={() => onChoose("keep")}
                 className="rounded-[10px] bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-slate-950 shadow-[0_14px_34px_rgba(6,182,212,0.28)] transition hover:bg-cyan-400 lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
               >
-                Keep Hand
+                {t("gamePage.mulligan.keepHand")}
               </button>
             </motion.div>
           )}
@@ -1677,15 +1755,16 @@ function CompanionRevealPrompt({
   eligibleCompanions,
   onChoose,
 }: CompanionRevealPromptProps) {
+  const { t } = useTranslation("game");
   const [buttonsVisible, setButtonsVisible] = useState(
     eligibleCompanions.length === 0,
   );
 
   return (
     <MulliganPanel
-      eyebrow="Pre-Game"
-      title="Reveal Companion?"
-      subtitle="You may reveal a companion from your sideboard. It will be placed in the companion zone and can be put into your hand once during the game by paying {3}."
+      eyebrow={t("gamePage.companion.eyebrow")}
+      title={t("gamePage.companion.title")}
+      subtitle={t("gamePage.companion.subtitle")}
       footer={
         <AnimatePresence>
           {buttonsVisible && (
@@ -1699,7 +1778,7 @@ function CompanionRevealPrompt({
                 onClick={() => onChoose(null)}
                 className="rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
               >
-                Decline
+                {t("gamePage.companion.decline")}
               </button>
               {eligibleCompanions.map(([name], i) => (
                 <button
@@ -1707,7 +1786,7 @@ function CompanionRevealPrompt({
                   onClick={() => onChoose(i)}
                   className="min-h-11 rounded-[16px] bg-amber-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_14px_34px_rgba(245,158,11,0.28)] transition hover:bg-amber-400 sm:text-base"
                 >
-                  Reveal {name}
+                  {t("gamePage.companion.reveal", { name })}
                 </button>
               ))}
             </motion.div>
@@ -1766,6 +1845,7 @@ function MulliganBottomCardsPrompt({
   openingHandBottom = false,
   onChoose,
 }: MulliganBottomCardsPromptProps) {
+  const { t } = useTranslation("game");
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
@@ -1783,12 +1863,16 @@ function MulliganBottomCardsPrompt({
 
   return (
     <MulliganPanel
-      eyebrow={openingHandBottom ? "Tiny Leaders" : "London Mulligan"}
-      title={`Put ${count} card${count > 1 ? "s" : ""} on the bottom`}
+      eyebrow={
+        openingHandBottom
+          ? t("gamePage.bottomCards.eyebrowTinyLeaders")
+          : t("gamePage.bottomCards.eyebrowLondon")
+      }
+      title={t("gamePage.bottomCards.title", { count })}
       subtitle={
         openingHandBottom
-          ? `Select ${count} card${count > 1 ? "s" : ""} from your opening hand before mulligans begin.`
-          : `Select ${count} card${count > 1 ? "s" : ""} from your hand. They will be returned to the bottom of your library in the order you choose here.`
+          ? t("gamePage.bottomCards.subtitleOpening", { count })
+          : t("gamePage.bottomCards.subtitleMulligan", { count })
       }
       footer={
         <motion.div
@@ -1798,7 +1882,10 @@ function MulliganBottomCardsPrompt({
           transition={{ delay: 0.12, duration: 0.22 }}
         >
           <div className="text-sm text-slate-400">
-            Selected {selectedCardIds.length} of {count}
+            {t("gamePage.bottomCards.selectedOf", {
+              selected: selectedCardIds.length,
+              count,
+            })}
           </div>
           <button
             onClick={handleConfirm}
@@ -1809,7 +1896,7 @@ function MulliganBottomCardsPrompt({
                 : "cursor-not-allowed border border-white/8 bg-white/5 text-slate-500"
             }`}
           >
-            Confirm Selection
+            {t("gamePage.bottomCards.confirmSelection")}
           </button>
         </motion.div>
       }
@@ -1921,6 +2008,7 @@ function GameOverScreen({
   isOnlineMode?: boolean;
   gameStartedAt?: number | null;
 }) {
+  const { t } = useTranslation("game");
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const difficulty = searchParams.get("difficulty") ?? "Medium";
@@ -1943,7 +2031,11 @@ function GameOverScreen({
     ? Math.floor((Date.now() - gameStartedAt) / 1000)
     : null;
 
-  const titleText = isDraw ? "DRAW" : isVictory ? "VICTORY" : "DEFEAT";
+  const titleText = isDraw
+    ? t("gamePage.gameOver.draw")
+    : isVictory
+      ? t("gamePage.gameOver.victory")
+      : t("gamePage.gameOver.defeat");
   const titleColor = isDraw ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
 
   const glowColor = isDraw
@@ -2028,21 +2120,28 @@ function GameOverScreen({
             transition={{ duration: 0.4 }}
           >
             <p className="text-base text-gray-200 sm:text-lg">
-              You: <span className="font-bold text-white">{playerLife}</span>
-              <span className="mx-3 text-gray-500">/</span>
-              Opponent:{" "}
-              <span className="font-bold text-white">{opponentLife}</span>
+              <Trans
+                i18nKey="gamePage.gameOver.lifeSummary"
+                t={t}
+                values={{ playerLife, opponentLife }}
+                components={{
+                  player: <span className="font-bold text-white" />,
+                  sep: <span className="mx-3 text-gray-500" />,
+                  opponent: <span className="font-bold text-white" />,
+                }}
+              />
             </p>
             {(turnCount > 0 || gameDuration !== null) && (
               <p className="mt-2 text-xs text-gray-400 sm:text-sm">
-                {turnCount > 0 && <span>Turns: {turnCount}</span>}
+                {turnCount > 0 && <span>{t("gamePage.gameOver.turns", { count: turnCount })}</span>}
                 {turnCount > 0 && gameDuration !== null && (
                   <span className="mx-2 text-gray-600">|</span>
                 )}
                 {gameDuration !== null && (
                   <span>
-                    Duration: {Math.floor(gameDuration / 60)}:
-                    {String(gameDuration % 60).padStart(2, "0")}
+                    {t("gamePage.gameOver.duration", {
+                      time: `${Math.floor(gameDuration / 60)}:${String(gameDuration % 60).padStart(2, "0")}`,
+                    })}
                   </span>
                 )}
               </p>
@@ -2070,7 +2169,9 @@ function GameOverScreen({
                   className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
                 })}
               >
-                {runOver ? "Back to Draft" : "Continue Run"}
+                {runOver
+                  ? t("gamePage.gameOver.backToDraft")
+                  : t("gamePage.gameOver.continueRun")}
               </button>
             ) : isOnlineMode ? (
               <button
@@ -2081,7 +2182,7 @@ function GameOverScreen({
                   className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
                 })}
               >
-                Back to Lobby
+                {t("gamePage.gameOver.backToLobby")}
               </button>
             ) : (
               <>
@@ -2093,7 +2194,7 @@ function GameOverScreen({
                     className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
                   })}
                 >
-                  Return to Menu
+                  {t("gamePage.actions.returnToMenu")}
                 </button>
                 <button
                   onClick={handleRematch}
@@ -2103,7 +2204,7 @@ function GameOverScreen({
                     className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
                   })}
                 >
-                  Rematch
+                  {t("gamePage.gameOver.rematch")}
                 </button>
               </>
             )}
@@ -2117,6 +2218,7 @@ function GameOverScreen({
 // ── Ability Choice Modal ──────────────────────────────────────────────────
 
 function AbilityChoiceModal() {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const pending = useUiStore((s) => s.pendingAbilityChoice);
   const setPending = useUiStore((s) => s.setPendingAbilityChoice);
@@ -2130,6 +2232,8 @@ function AbilityChoiceModal() {
   // CR 702.190a: When every pending action is a Sneak cast, reframe the
   // modal's subtitle — the user is choosing which attacker to return as the
   // cost-payment creature, not activating an ability.
+  const onlyPreparedCopy =
+    pending.actions.length === 1 && pending.actions[0]?.type === "CastPreparedCopy";
   const allSneak = pending.actions.every((a) => a.type === "CastSpellAsSneak");
   const allPlayOrCast = pending.actions.every((a) =>
     a.type === "CastSpell"
@@ -2138,18 +2242,21 @@ function AbilityChoiceModal() {
     || a.type === "CastSpellAsMadness"
     || a.type === "CastSpellAsSneak"
     || a.type === "CastSpellAsWebSlinging"
+    || a.type === "CastPreparedCopy"
     || a.type === "PlayLand"
   );
   // #506: a single pending action is a confirmation, not a choice — the modal
   // surfaces a lone card-consuming ability (cycling / Channel) so the player
   // explicitly opts in rather than auto-firing it.
   const subtitle = allSneak
-    ? "Choose which attacker to return (Sneak cost)"
-    : pending.actions.length === 1
-      ? "Activate this ability?"
-      : allPlayOrCast
-        ? "Choose how to play this card"
-        : "Choose an ability to activate";
+    ? t("gamePage.abilityChoice.subtitleSneak")
+    : onlyPreparedCopy
+      ? t("gamePage.abilityChoice.subtitlePreparedCopy")
+      : pending.actions.length === 1
+        ? t("gamePage.abilityChoice.subtitleActivate")
+        : allPlayOrCast
+          ? t("gamePage.abilityChoice.subtitlePlay")
+          : t("gamePage.abilityChoice.subtitleChoose");
 
   return (
     <ChoiceModal
@@ -2188,6 +2295,7 @@ function OptionalCostModal() {
 // ── Defiler Payment Modal ────────────────────────────────────────────
 
 function DefilerPaymentModal() {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
 
@@ -2197,11 +2305,11 @@ function DefilerPaymentModal() {
 
   return (
     <ChoiceModal
-      title="Defiler Cost Reduction"
-      subtitle={`Pay ${life_cost} life to reduce the mana cost?`}
+      title={t("gamePage.defiler.title")}
+      subtitle={t("gamePage.defiler.subtitle", { lifeCost: life_cost })}
       options={[
-        { id: "pay", label: `Pay ${life_cost} life` },
-        { id: "skip", label: "Decline" },
+        { id: "pay", label: t("gamePage.defiler.payLife", { lifeCost: life_cost }) },
+        { id: "skip", label: t("gamePage.defiler.decline") },
       ]}
       onChoose={(id) =>
         dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
@@ -2226,6 +2334,7 @@ function OptionalEffectModal() {
 // ── Untap Choice Modal ─────────────────────────────────────────────────
 
 function UntapChoiceModal() {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -2236,24 +2345,24 @@ function UntapChoiceModal() {
   if (objectId == null) return null;
 
   const object = objects?.[objectId];
-  const name = object?.name ?? "Permanent";
+  const name = object?.name ?? t("gamePage.untap.permanentFallback");
 
   return (
     <ChoiceModal
-      title={`Untap ${name}?`}
-      subtitle="Choose whether this permanent untaps during your untap step."
+      title={t("gamePage.untap.title", { name })}
+      subtitle={t("gamePage.untap.subtitle")}
       previewCardName={object?.name}
       previewCardTypes={object?.card_types}
       options={[
         {
           id: "untap",
-          label: "Untap",
-          description: `${name} untaps now.`,
+          label: t("gamePage.untap.untap"),
+          description: t("gamePage.untap.untapDescription", { name }),
         },
         {
           id: "keep-tapped",
-          label: "Keep tapped",
-          description: `${name} stays tapped this untap step.`,
+          label: t("gamePage.untap.keepTapped"),
+          description: t("gamePage.untap.keepTappedDescription", { name }),
         },
       ]}
       onChoose={(id) =>
@@ -2278,57 +2387,61 @@ function formatManaCost(cost: { type: string; shards?: string[]; generic?: numbe
   return parts.join("") || "0";
 }
 
-function formatUnlessCost(cost: { type: string; cost?: { type: string; shards?: string[]; generic?: number }; amount?: number; count?: number }): string {
+function formatUnlessCost(
+  cost: { type: string; cost?: { type: string; shards?: string[]; generic?: number }; amount?: number; count?: number },
+  t: TFunction<"game">,
+): string {
   switch (cost.type) {
     // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
     // saved-game compat.
     case "Fixed":
       return cost.cost ? formatManaCost(cost.cost) : "0";
     case "DiscardCard":
-      return "discard a card";
+      return t("gamePage.cost.discardCard");
     // Unified `AbilityCost` JSON (post-fold). Used by all newly produced
     // unless-payments, including the per-branch entries of `OneOf`.
     case "Mana":
       return cost.cost ? formatManaCost(cost.cost) : "0";
     case "Discard":
-      return "discard a card";
+      return t("gamePage.cost.discardCard");
     case "PayLife": {
       const amount = typeof cost.amount === "number"
         ? cost.amount
         : (cost as { amount?: { type: string; value?: number } }).amount?.value ?? 0;
-      return `${amount} life`;
+      return t("gamePage.cost.life", { amount });
     }
     case "Sacrifice": {
       const n = cost.count ?? 1;
-      return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
+      return t("gamePage.cost.sacrifice", { count: n });
     }
     case "ReturnToHand": {
       const n = cost.count ?? 1;
-      return n > 1 ? `return ${n} permanents to hand` : "return a permanent to hand";
+      return t("gamePage.cost.returnToHand", { count: n });
     }
     case "PayEnergy":
-      return `${cost.amount ?? 0} energy`;
+      return t("gamePage.cost.energy", { amount: cost.amount ?? 0 });
     default:
-      return "a cost";
+      return t("gamePage.cost.generic");
   }
 }
 
 function UnlessPaymentModal() {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
-  const costDisplay = formatUnlessCost(waitingFor.data.cost);
-  const description = waitingFor.data.effect_description ?? "Counter Unless You Pay";
-  const title = description.charAt(0).toUpperCase() + description.slice(1);
+  const costDisplay = formatUnlessCost(waitingFor.data.cost, t);
+  const description = waitingFor.data.effect_description ?? t("gamePage.unlessPayment.defaultEffect");
+  const effect = description.charAt(0).toUpperCase() + description.slice(1);
 
   return (
     <ChoiceModal
-      title={`${title} Unless You Pay`}
+      title={t("gamePage.unlessPayment.title", { effect })}
       options={[
-        { id: "pay", label: `Pay ${costDisplay}` },
-        { id: "decline", label: "Don\u2019t Pay" },
+        { id: "pay", label: t("gamePage.cost.pay", { cost: costDisplay }) },
+        { id: "decline", label: t("gamePage.unlessPayment.dontPay") },
       ]}
       onChoose={(id) =>
         dispatch({ type: "PayUnlessCost", data: { pay: id === "pay" } })
@@ -2343,6 +2456,7 @@ function UnlessPaymentModal() {
 // decline. Drives Tergrid's Lantern's "sacrifice ... or discard ..."
 // punisher pattern.
 function UnlessPaymentChooseCostModal() {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
 
@@ -2354,20 +2468,20 @@ function UnlessPaymentChooseCostModal() {
     amount?: number;
     count?: number;
   }>;
-  const description = waitingFor.data.effect_description ?? "Choose a cost";
-  const title = description.charAt(0).toUpperCase() + description.slice(1);
+  const description = waitingFor.data.effect_description ?? t("gamePage.unlessPayment.defaultChooseCost");
+  const effect = description.charAt(0).toUpperCase() + description.slice(1);
 
   const branchOptions = costs.map((cost, idx) => ({
     id: String(idx),
-    label: formatUnlessCost(cost),
+    label: formatUnlessCost(cost, t),
   }));
 
   return (
     <ChoiceModal
-      title={`${title} Unless You Pay One`}
+      title={t("gamePage.unlessPayment.titleChooseOne", { effect })}
       options={[
         ...branchOptions,
-        { id: "decline", label: "Take the Effect" },
+        { id: "decline", label: t("gamePage.unlessPayment.takeEffect") },
       ]}
       onChoose={(id) => {
         // CR 118.12a: Typed `UnlessCostBranch` discriminant — `Decline`
@@ -2386,7 +2500,34 @@ function UnlessPaymentChooseCostModal() {
   );
 }
 
+function ActivationCostOneOfChoiceModal() {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+
+  if (waitingFor?.type !== "ActivationCostOneOfChoice") return null;
+
+  const branchOptions = waitingFor.data.costs.map((cost: SerializedAbilityCost, idx: number) => ({
+    id: String(idx),
+    label: formatAbilityCost(cost),
+  }));
+
+  return (
+    <ChoiceModal
+      title={t("gamePage.activationCost.title")}
+      options={branchOptions}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseActivationCostBranch",
+          data: { index: Number.parseInt(id, 10) },
+        })
+      }
+    />
+  );
+}
+
 function DebugModeBanner() {
+  const { t } = useTranslation("game");
   const active = useUiStore((s) => s.debugInteractionMode);
   const toggle = useUiStore((s) => s.toggleDebugInteractionMode);
 
@@ -2398,7 +2539,7 @@ function DebugModeBanner() {
         onClick={toggle}
         className="rounded-full border border-amber-500/40 bg-amber-950/80 px-4 py-1.5 font-mono text-xs font-semibold text-amber-300 shadow-lg backdrop-blur-sm transition-colors hover:bg-amber-900/80"
       >
-        DEBUG MODE - Click any card
+        {t("gamePage.debug.modeBanner")}
       </button>
     </div>
   );

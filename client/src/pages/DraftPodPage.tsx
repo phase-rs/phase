@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { CardPreview } from "../components/card/CardPreview";
@@ -39,6 +40,7 @@ import { useDraftPodStore } from "../stores/draftPodStore";
 type SetupMode = "choose" | "host" | "join";
 
 function PodSetup() {
+  const { t } = useTranslation("draft");
   const [mode, setMode] = useState<SetupMode>("choose");
 
   const config = useDraftPodStore((s) => s.config);
@@ -54,23 +56,23 @@ function PodSetup() {
   const configError = useDraftPodStore((s) => s.configError);
   const loadingPool = useDraftPodStore((s) => s.loadingPool);
   const kindDescription = config.kind === "Premier"
-    ? "Best-of-one tournament matches after deckbuilding. Faster rounds, no sideboarding between games."
-    : "Best-of-three tournament matches after deckbuilding, with sideboarding between games.";
+    ? t("podSetup.kindPremierDesc")
+    : t("podSetup.kindTraditionalDesc");
   const tournamentDescription = config.tournamentFormat === "Swiss"
-    ? "Everyone keeps playing through three rounds, even after a loss."
-    : "Players are eliminated after a match loss until one winner remains.";
+    ? t("podSetup.tournamentSwissDesc")
+    : t("podSetup.tournamentEliminationDesc");
   const policyDescription = config.podPolicy === "Competitive"
-    ? "Timed picks, automatic picks on timeout, and automatic round advancement."
-    : "Untimed picks, manual round advancement, and host controls for resolving issues.";
-  const podSizeDescription = `${config.podSize} total seats. Empty seats can be filled with bots from the lobby before the draft starts.`;
+    ? t("podSetup.policyCompetitiveDesc")
+    : t("podSetup.policyCasualDesc");
+  const podSizeDescription = t("podSetup.podSizeDesc", { count: config.podSize });
 
   if (mode === "choose") {
     return (
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-8">
         <div className="flex flex-col items-center gap-2">
-          <h1 className="menu-display text-3xl text-white">Pod Draft</h1>
+          <h1 className="menu-display text-3xl text-white">{t("podSetup.title")}</h1>
           <p className="text-sm text-white/50">
-            Draft with friends — open packs, pick cards, and play tournament matches.
+            {t("podSetup.subtitle")}
           </p>
         </div>
 
@@ -80,11 +82,9 @@ function PodSetup() {
             onClick={() => setMode("host")}
             className="group flex flex-col gap-3 rounded-[16px] border border-emerald-300/18 bg-emerald-400/5 p-6 text-left backdrop-blur-md transition-colors hover:border-emerald-300/30 hover:bg-emerald-400/10"
           >
-            <div className="text-lg font-semibold text-emerald-100">Host a Pod</div>
+            <div className="text-lg font-semibold text-emerald-100">{t("podSetup.hostCardTitle")}</div>
             <p className="text-sm leading-relaxed text-white/50 group-hover:text-white/60">
-              Create a new draft room. You choose the set, format, and pod
-              size — then share the room code with your friends. Empty seats
-              can be filled with bots.
+              {t("podSetup.hostCardDesc")}
             </p>
           </button>
 
@@ -93,24 +93,22 @@ function PodSetup() {
             onClick={() => setMode("join")}
             className="group flex flex-col gap-3 rounded-[16px] border border-blue-300/18 bg-blue-400/5 p-6 text-left backdrop-blur-md transition-colors hover:border-blue-300/30 hover:bg-blue-400/10"
           >
-            <div className="text-lg font-semibold text-blue-100">Join a Pod</div>
+            <div className="text-lg font-semibold text-blue-100">{t("podSetup.joinCardTitle")}</div>
             <p className="text-sm leading-relaxed text-white/50 group-hover:text-white/60">
-              Enter a room code from the host to join an existing draft.
-              You'll be seated in the next open slot and draft alongside
-              everyone in real time.
+              {t("podSetup.joinCardDesc")}
             </p>
           </button>
         </div>
 
         <div className="rounded-[16px] border border-white/8 bg-white/3 px-5 py-4 backdrop-blur-md">
           <div className="mb-2 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            How Pod Draft works
+            {t("podSetup.howItWorksTitle")}
           </div>
           <ul className="space-y-1.5 text-sm leading-relaxed text-white/50">
-            <li>Each player opens 3 packs of 14 cards — pick one, pass the rest</li>
-            <li>Packs alternate direction each round (left → right → left)</li>
-            <li>After drafting, everyone builds a 40-card deck from their pool</li>
-            <li>Then play Swiss or single-elimination tournament matches</li>
+            <li>{t("podSetup.howItWorks1")}</li>
+            <li>{t("podSetup.howItWorks2")}</li>
+            <li>{t("podSetup.howItWorks3")}</li>
+            <li>{t("podSetup.howItWorks4")}</li>
           </ul>
         </div>
       </div>
@@ -125,21 +123,21 @@ function PodSetup() {
             onClick={() => setMode("choose")}
             className="text-sm text-white/50 hover:text-white/80"
           >
-            &larr; Back
+            {t("podSetup.back")}
           </button>
-          <h1 className="menu-display text-3xl text-white">Host a Pod</h1>
+          <h1 className="menu-display text-3xl text-white">{t("podSetup.hostTitle")}</h1>
         </div>
 
         {/* Display name */}
         <div className="flex flex-col gap-1">
           <label className="text-sm font-medium text-white/60">
-            Display Name
+            {t("podSetup.displayName")}
           </label>
           <input
             type="text"
             value={hostDisplayName}
             onChange={(e) => setHostDisplayName(e.target.value)}
-            placeholder="Enter your name..."
+            placeholder={t("podSetup.namePlaceholder")}
             className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
           />
         </div>
@@ -147,7 +145,7 @@ function PodSetup() {
         {/* Draft type */}
         <div className="flex flex-col gap-1">
           <label className="text-sm font-medium text-white/60">
-            Draft Type
+            {t("podSetup.draftType")}
           </label>
           <div className="flex gap-4">
             <label className="flex items-center gap-2 text-sm text-white/70">
@@ -158,7 +156,7 @@ function PodSetup() {
                 onChange={() => setConfig({ kind: "Premier" })}
                 className="accent-emerald-400"
               />
-              Premier (best-of-1)
+              {t("podSetup.kindPremier")}
             </label>
             <label className="flex items-center gap-2 text-sm text-white/70">
               <input
@@ -168,7 +166,7 @@ function PodSetup() {
                 onChange={() => setConfig({ kind: "Traditional" })}
                 className="accent-emerald-400"
               />
-              Traditional (best-of-3)
+              {t("podSetup.kindTraditional")}
             </label>
           </div>
           <p className="text-xs text-white/40">{kindDescription}</p>
@@ -177,7 +175,7 @@ function PodSetup() {
         {/* Tournament Format (D-04) */}
         <div className="flex flex-col gap-1">
           <label className="text-sm font-medium text-white/60">
-            Tournament Format
+            {t("podSetup.tournamentFormat")}
           </label>
           <div className="flex gap-4">
             <label className="flex items-center gap-2 text-sm text-white/70">
@@ -188,7 +186,7 @@ function PodSetup() {
                 onChange={() => setConfig({ tournamentFormat: "Swiss" })}
                 className="accent-emerald-400"
               />
-              Swiss (3 rounds)
+              {t("podSetup.tournamentSwiss")}
             </label>
             <label className="flex items-center gap-2 text-sm text-white/70">
               <input
@@ -200,7 +198,7 @@ function PodSetup() {
                 }
                 className="accent-emerald-400"
               />
-              Single Elimination
+              {t("podSetup.tournamentElimination")}
             </label>
           </div>
           <p className="text-xs text-white/40">{tournamentDescription}</p>
@@ -209,7 +207,7 @@ function PodSetup() {
         {/* Pod Policy (D-07) */}
         <div className="flex flex-col gap-1">
           <label className="text-sm font-medium text-white/60">
-            Pod Policy
+            {t("podSetup.podPolicy")}
           </label>
           <div className="flex gap-4">
             <label className="flex items-center gap-2 text-sm text-white/70">
@@ -220,7 +218,7 @@ function PodSetup() {
                 onChange={() => setConfig({ podPolicy: "Competitive" })}
                 className="accent-emerald-400"
               />
-              Competitive
+              {t("podSetup.policyCompetitive")}
             </label>
             <label className="flex items-center gap-2 text-sm text-white/70">
               <input
@@ -230,7 +228,7 @@ function PodSetup() {
                 onChange={() => setConfig({ podPolicy: "Casual" })}
                 className="accent-emerald-400"
               />
-              Casual
+              {t("podSetup.policyCasual")}
             </label>
           </div>
           <p className="text-xs text-white/40">{policyDescription}</p>
@@ -238,7 +236,7 @@ function PodSetup() {
 
         {/* Pod size */}
         <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-white/60">Pod Size</label>
+          <label className="text-sm font-medium text-white/60">{t("podSetup.podSize")}</label>
           <select
             value={config.podSize}
             onChange={(e) => setConfig({ podSize: Number(e.target.value) })}
@@ -246,7 +244,7 @@ function PodSetup() {
           >
             {[4, 6, 8].map((n) => (
               <option key={n} value={n}>
-                {n} players
+                {t("podSetup.playerCount", { count: n })}
               </option>
             ))}
           </select>
@@ -255,7 +253,7 @@ function PodSetup() {
 
         {/* Set selector — reuse the Quick Draft component */}
         <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
-          Choose the draft set last. Selecting a set loads its card pool and creates the pod room.
+          {t("podSetup.setSelectorHint")}
         </div>
         <SetSelector
           onStartDraft={(setCode) => {
@@ -273,7 +271,7 @@ function PodSetup() {
 
         {/* Loading */}
         {loadingPool && (
-          <div className="text-sm text-white/50">Loading set pool data...</div>
+          <div className="text-sm text-white/50">{t("podSetup.loadingPool")}</div>
         )}
       </div>
     );
@@ -287,33 +285,33 @@ function PodSetup() {
           onClick={() => setMode("choose")}
           className="text-sm text-white/50 hover:text-white/80"
         >
-          &larr; Back
+          {t("podSetup.back")}
         </button>
-        <h1 className="menu-display text-3xl text-white">Join a Pod</h1>
+        <h1 className="menu-display text-3xl text-white">{t("podSetup.joinTitle")}</h1>
       </div>
 
       {/* Display name */}
       <div className="flex flex-col gap-1">
         <label className="text-sm font-medium text-white/60">
-          Display Name
+          {t("podSetup.displayName")}
         </label>
         <input
           type="text"
           value={guestDisplayName}
           onChange={(e) => setGuestDisplayName(e.target.value)}
-          placeholder="Enter your name..."
+          placeholder={t("podSetup.namePlaceholder")}
           className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
         />
       </div>
 
       {/* Room code */}
       <div className="flex flex-col gap-1">
-        <label className="text-sm font-medium text-white/60">Room Code</label>
+        <label className="text-sm font-medium text-white/60">{t("podSetup.roomCode")}</label>
         <input
           type="text"
           value={joinCode}
           onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-          placeholder="Enter room code..."
+          placeholder={t("podSetup.roomCodePlaceholder")}
           className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 font-mono text-lg tracking-wider text-white placeholder-white/30 outline-none focus:border-blue-400/40"
         />
       </div>
@@ -334,7 +332,7 @@ function PodSetup() {
           disabled: !joinCode.trim() || !guestDisplayName.trim(),
         })}
       >
-        Join Pod
+        {t("podSetup.joinPod")}
       </button>
     </div>
   );
@@ -354,10 +352,11 @@ function FormatStandings() {
 }
 
 function PairingPhaseView() {
+  const { t } = useTranslation("draft");
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
       <h2 className="text-center text-xl font-medium text-white">
-        Tournament Pairings
+        {t("podPhaseView.tournamentPairings")}
       </h2>
       <FormatStandings />
     </div>
@@ -365,29 +364,30 @@ function PairingPhaseView() {
 }
 
 function MatchInProgressView() {
+  const { t } = useTranslation("draft");
   const matchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
   const [showPool, setShowPool] = useState(false);
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
       <h2 className="text-center text-xl font-medium text-white">
-        Matches In Progress
+        {t("podPhaseView.matchesInProgress")}
       </h2>
       {matchPairing ? (
         <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/5 p-4 text-center">
-          <div className="text-sm text-white/50">Your match</div>
+          <div className="text-sm text-white/50">{t("podPhaseView.yourMatch")}</div>
           <div className="text-lg text-white">
-            vs {matchPairing.opponentName}
+            {t("podPhaseView.versusOpponent", { name: matchPairing.opponentName })}
           </div>
           <div className="mt-1 text-sm text-white/40">
             {matchPairing.isMatchHost
-              ? "You are hosting"
-              : "Connecting to opponent..."}
+              ? t("podPhaseView.youAreHosting")
+              : t("podPhaseView.connectingOpponent")}
           </div>
         </div>
       ) : (
         <div className="text-center text-white/50">
-          Waiting for match results...
+          {t("podPhaseView.waitingResults")}
         </div>
       )}
       <FormatStandings />
@@ -397,7 +397,7 @@ function MatchInProgressView() {
           onClick={() => setShowPool((v) => !v)}
           className="text-sm text-emerald-400 transition-colors hover:text-emerald-300"
         >
-          {showPool ? "Hide Pool" : "Review Pool"}
+          {showPool ? t("podPhaseView.hidePool") : t("podPhaseView.reviewPool")}
         </button>
         {showPool && <PoolPanel />}
       </div>
@@ -406,18 +406,19 @@ function MatchInProgressView() {
 }
 
 function RoundCompleteView() {
+  const { t } = useTranslation("draft");
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
       <h2 className="text-center text-xl font-medium text-white">
-        Round Complete
+        {t("podPhaseView.roundComplete")}
       </h2>
       <FormatStandings />
       <p className="text-center text-sm text-white/50">
         {podPolicy === "Casual"
-          ? "Waiting for host to start next round..."
-          : "Next round starting shortly..."}
+          ? t("podPhaseView.waitingNextRound")
+          : t("podPhaseView.nextRoundShortly")}
       </p>
     </div>
   );
@@ -426,6 +427,7 @@ function RoundCompleteView() {
 // ── Between Games View (Bo3) ─────────────────────────────────────────
 
 function BetweenGamesView() {
+  const { t } = useTranslation("draft");
   const sideboardPrompt = useMultiplayerDraftStore((s) => s.sideboardPrompt);
   const playDrawPrompt = useMultiplayerDraftStore((s) => s.playDrawPrompt);
   const sideboardSubmitted = useMultiplayerDraftStore((s) => s.sideboardSubmitted);
@@ -441,24 +443,24 @@ function BetweenGamesView() {
     const timerSec = timerRemainingMs != null ? Math.ceil(timerRemainingMs / 1000) : null;
     return (
       <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
-        <h2 className="text-xl font-medium text-white">Game {playDrawPrompt.gameNumber}</h2>
+        <h2 className="text-xl font-medium text-white">{t("betweenGames.game", { number: playDrawPrompt.gameNumber })}</h2>
         <ScoreBadge score={playDrawPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
-        <p className="text-sm text-white/60">You lost the previous game. Choose:</p>
+        <p className="text-sm text-white/60">{t("betweenGames.lostPreviousGame")}</p>
         {timerSec != null && (
-          <span className="text-xs tabular-nums text-amber-300">{timerSec}s</span>
+          <span className="text-xs tabular-nums text-amber-300">{t("betweenGames.seconds", { count: timerSec })}</span>
         )}
         <div className="flex gap-4">
           <button
             onClick={() => choosePlayDraw(playDrawPrompt.matchId, true)}
             className={menuButtonClass({ tone: "emerald", size: "md" })}
           >
-            Play First
+            {t("betweenGames.playFirst")}
           </button>
           <button
             onClick={() => choosePlayDraw(playDrawPrompt.matchId, false)}
             className={menuButtonClass({ tone: "blue", size: "md" })}
           >
-            Draw First
+            {t("betweenGames.drawFirst")}
           </button>
         </div>
       </div>
@@ -469,12 +471,12 @@ function BetweenGamesView() {
   if (sideboardSubmitted) {
     return (
       <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
-        <h2 className="text-xl font-medium text-white">Sideboarding</h2>
+        <h2 className="text-xl font-medium text-white">{t("betweenGames.sideboarding")}</h2>
         {sideboardPrompt && (
           <ScoreBadge score={sideboardPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
         )}
         <p className="text-sm text-white/60">
-          Waiting for opponent to submit sideboard...
+          {t("betweenGames.waitingSideboard")}
         </p>
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-emerald-400" />
       </div>
@@ -491,16 +493,16 @@ function BetweenGamesView() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-xl font-medium text-white">
-              Sideboard — Game {sideboardPrompt.gameNumber}
+              {t("betweenGames.sideboardGame", { number: sideboardPrompt.gameNumber })}
             </h2>
             <ScoreBadge score={sideboardPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
           </div>
           {timerSec != null && (
-            <span className="text-sm tabular-nums text-amber-300">{timerSec}s remaining</span>
+            <span className="text-sm tabular-nums text-amber-300">{t("betweenGames.secondsRemaining", { count: timerSec })}</span>
           )}
         </div>
         <p className="text-sm text-white/50">
-          Make sideboard changes, then submit. Your pool is available below.
+          {t("betweenGames.sideboardHint")}
         </p>
         {/* Reuse the LimitedDeckBuilder for sideboard editing */}
         <LimitedDeckBuilder />
@@ -511,7 +513,7 @@ function BetweenGamesView() {
           }}
           className={menuButtonClass({ tone: "emerald", size: "md" })}
         >
-          Submit Sideboard
+          {t("betweenGames.submitSideboard")}
         </button>
       </div>
     );
@@ -520,7 +522,7 @@ function BetweenGamesView() {
   // Fallback — should not reach here
   return (
     <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
-      <p className="text-sm text-white/60">Preparing next game...</p>
+      <p className="text-sm text-white/60">{t("betweenGames.preparingNext")}</p>
     </div>
   );
 }
@@ -586,6 +588,49 @@ function PodDeckBuilder() {
   );
 }
 
+function CompleteView({ onLeave }: { onLeave: () => void }) {
+  const { t } = useTranslation("draft");
+  return (
+    <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 py-8">
+      <h1 className="menu-display text-3xl text-white">{t("podComplete.title")}</h1>
+      <FormatStandings />
+      <button
+        onClick={onLeave}
+        className={menuButtonClass({ tone: "emerald", size: "md" })}
+      >
+        {t("podComplete.returnToMenu")}
+      </button>
+    </div>
+  );
+}
+
+function PodErrorView({
+  phase,
+  onLeave,
+}: {
+  phase: "error" | "kicked" | "hostLeft";
+  onLeave: () => void;
+}) {
+  const { t } = useTranslation("draft");
+  const message =
+    phase === "kicked"
+      ? t("podError.kicked")
+      : phase === "hostLeft"
+        ? t("podError.hostLeft")
+        : t("podError.connection");
+  return (
+    <div className="flex flex-col items-center justify-center gap-4 py-24">
+      <div className="text-xl font-medium text-red-300">{message}</div>
+      <button
+        onClick={onLeave}
+        className={menuButtonClass({ tone: "neutral", size: "md" })}
+      >
+        {t("podComplete.returnToMenu")}
+      </button>
+    </div>
+  );
+}
+
 // ── Phase-based Content ───────────────────────────────────────────────
 
 function phaseContent(
@@ -611,38 +656,11 @@ function phaseContent(
     case "roundComplete":
       return <RoundCompleteView />;
     case "complete":
-      return (
-        <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 py-8">
-          <h1 className="menu-display text-3xl text-white">Draft Complete</h1>
-          <FormatStandings />
-          <button
-            onClick={onLeave}
-            className={menuButtonClass({ tone: "emerald", size: "md" })}
-          >
-            Return to Menu
-          </button>
-        </div>
-      );
+      return <CompleteView onLeave={onLeave} />;
     case "error":
     case "kicked":
     case "hostLeft":
-      return (
-        <div className="flex flex-col items-center justify-center gap-4 py-24">
-          <div className="text-xl font-medium text-red-300">
-            {phase === "kicked"
-              ? "You were kicked from the pod"
-              : phase === "hostLeft"
-                ? "Host left the draft"
-                : "Connection Error"}
-          </div>
-          <button
-            onClick={onLeave}
-            className={menuButtonClass({ tone: "neutral", size: "md" })}
-          >
-            Return to Menu
-          </button>
-        </div>
-      );
+      return <PodErrorView phase={phase} onLeave={onLeave} />;
   }
 }
 

@@ -347,6 +347,11 @@ fn collect_matching_triggers(
                     .into_iter()
                     .map(|trigger_event| vec![trigger_event])
                     .collect()
+            } else if matches!(trig_def.mode, TriggerMode::Blocks) {
+                super::trigger_matchers::matching_block_events(event, trig_def, obj_id, state)
+                    .into_iter()
+                    .map(|trigger_event| vec![trigger_event])
+                    .collect()
             } else {
                 vec![vec![event.clone()]]
             };
@@ -363,7 +368,11 @@ fn collect_matching_triggers(
                         condition: trig_def.condition.clone(),
                         ability: ability.clone(),
                         timestamp,
-                        target_constraints: Vec::new(),
+                        target_constraints: trig_def
+                            .execute
+                            .as_ref()
+                            .map(|execute| execute.target_constraints.clone())
+                            .unwrap_or_default(),
                         distribute: trig_def
                             .execute
                             .as_ref()
@@ -411,20 +420,24 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
                 | StackEntryKind::KeywordAction { .. } => None,
             })
             .collect(),
-        // CR 114.4: Abilities of emblems function in the command zone.
-        // Non-emblem command-zone objects (commanders before casting, etc.)
-        // do NOT have their abilities function per CR 114.4, so this filter
-        // is the single authority — mirrored by `object_functions` in
-        // `functioning_abilities`.
+        // CR 114.4 + CR 113.6b: Abilities of emblems function in the command
+        // zone by default. Non-emblem command-zone objects contribute only
+        // triggers that explicitly opt in via `trigger_zones` (Eminence).
+        // `active_trigger_definitions` performs the per-definition filtering;
+        // this source scan only needs to include objects that might have at
+        // least one command-zone trigger.
         Zone::Command => state
             .command_zone
             .iter()
             .copied()
             .filter(|id| {
-                state
-                    .objects
-                    .get(id)
-                    .is_some_and(|o| o.is_emblem && !o.is_phased_out())
+                state.objects.get(id).is_some_and(|o| {
+                    !o.is_phased_out()
+                        && (o.is_emblem
+                            || o.trigger_definitions
+                                .iter_all()
+                                .any(super::functioning_abilities::trigger_opts_in_to_command_zone))
+                })
             })
             .collect(),
         Zone::Hand | Zone::Library => Vec::new(),
@@ -966,7 +979,7 @@ fn collect_pending_triggers(
                                     let unless_cost = ward_cost_to_ability_cost(ward);
                                     let counter_effect = Effect::Counter {
                                         target: TargetFilter::TriggeringSource,
-                                        source_static: None,
+                                        source_rider: None,
                                     };
                                     let mut ward_ability = ResolvedAbility::new(
                                         counter_effect,
@@ -1053,14 +1066,11 @@ fn collect_pending_triggers(
         }
 
         // CR 113.6k + CR 114.4: Non-battlefield trigger zones are opt-in via
-        // `trigger_zones`. CR 114.4: abilities of emblems function in the
-        // command zone, so emblem-hosted triggers whose `trigger_zones`
-        // include `Zone::Command` are picked up here. Non-emblem command-
-        // zone objects (commanders pre-cast) are filtered out by
-        // `trigger_source_ids_for_zone(Zone::Command)` which applies the
-        // `is_emblem` gate. Synthetic battlefield-only keyword triggers
-        // (prowess / ward / firebending / exploit) deliberately do NOT run
-        // in this loop — emblems have no keywords.
+        // `trigger_zones`. Command-zone emblems function by default; non-emblem
+        // command-zone sources require a trigger-level `Zone::Command` opt-in
+        // (CR 113.6b), enforced by `active_trigger_definitions`.
+        // Synthetic battlefield-only keyword triggers (prowess / ward /
+        // firebending / exploit) deliberately do NOT run in this loop.
         for zone in [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command] {
             for obj_id in trigger_source_ids_for_zone(state, zone) {
                 let matched_triggers = {
@@ -2348,6 +2358,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     )
                 });
 
+                let target_constraints = execute.target_constraints.clone();
                 let ability = build_resolved_from_def(&execute, obj_id, controller);
                 pending.push(PendingTrigger {
                     source_id: obj_id,
@@ -2355,7 +2366,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     condition: trigger.condition.clone(),
                     ability,
                     timestamp,
-                    target_constraints: Vec::new(),
+                    target_constraints,
                     distribute: trigger
                         .execute
                         .as_ref()
@@ -2846,10 +2857,18 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
+        // CR 605.1a: "that isn't a mana ability" gate on activated-ability
+        // trigger events. `KeywordAbilityActivated` carries the explicit flag
+        // (Exhaust mana abilities still emit this event). `AbilityActivated`
+        // is emitted only by stack-using activations (CR 605.3b: mana
+        // abilities never reach the stack-pushing emission sites), so it
+        // trivially satisfies the qualifier; the explicit arm keeps the
+        // AST-level qualifier honest if the event family ever widens.
         TriggerCondition::ActivatedAbilityIsNonMana => match trigger_event {
-            Some(GameEvent::ExhaustAbilityActivated {
+            Some(GameEvent::KeywordAbilityActivated {
                 is_mana_ability, ..
             }) => !*is_mana_ability,
+            Some(GameEvent::AbilityActivated { .. }) => true,
             _ => false,
         },
         // CR 700.4 + CR 120.1: True when the dying creature was dealt damage by the
@@ -2899,6 +2918,15 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceMatchesFilter { filter } => source_id.is_some_and(|id| {
             matches_target_filter(state, id, filter, &FilterContext::from_source(state, id))
         }),
+        // CR 614.12c + CR 607.2d + CR 603.4: True iff the trigger source's
+        // persisted `ChosenAttribute::Label` (set when the anchor-word
+        // permanent entered the battlefield) matches the linked anchor word.
+        // Case-insensitive to match the persistence canonicalisation used by
+        // `StaticCondition::ChosenLabelIs`.
+        TriggerCondition::ChosenLabelIs { label } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .and_then(|obj| obj.chosen_label())
+            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
         // "if you control a [type]" — check for presence of matching permanent.
         TriggerCondition::ControlsType { filter } => {
             let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
@@ -2949,6 +2977,9 @@ pub(crate) fn check_trigger_condition(
             PlayerFilter::DefendingPlayer
             | PlayerFilter::OpponentLostLife
             | PlayerFilter::OpponentGainedLife
+            // CR 120.1 + CR 510.1: a set-valued combat-damaged-this-turn
+            // predicate has no single-player "whose turn" semantic.
+            | PlayerFilter::OpponentDealtCombatDamage
             | PlayerFilter::All
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay
@@ -3579,6 +3610,41 @@ pub mod tests {
             &TriggerCondition::ControlsCommander {
                 ownership: CommanderOwnership::Any,
             },
+            PlayerId(0),
+            None,
+            None,
+        ));
+    }
+
+    /// CR 605.1a + CR 605.3b: `AbilityActivated` is emitted only by stack-using
+    /// activations (mana abilities never reach those emission sites), so the
+    /// "that isn't a mana ability" qualifier on Burning-Tree Shaman /
+    /// Flamescroll Celebrant is trivially satisfied — the explicit arm keeps
+    /// the AST-level gate honest if the event family ever widens.
+    #[test]
+    fn activated_ability_is_non_mana_accepts_ability_activated_event() {
+        let state = setup();
+        let event = GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: ObjectId(1),
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::ActivatedAbilityIsNonMana,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
+    }
+
+    /// CR 605.1a: With no trigger event present, the non-mana qualifier
+    /// cannot be evaluated — and so must conservatively return false.
+    #[test]
+    fn activated_ability_is_non_mana_rejects_missing_event() {
+        let state = setup();
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::ActivatedAbilityIsNonMana,
             PlayerId(0),
             None,
             None,
@@ -5304,6 +5370,8 @@ pub mod tests {
                 name: "Countered Dead".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
                 mana_value: 2,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6545,7 +6613,9 @@ pub mod tests {
         );
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
-            let mut trigger = make_trigger(TriggerMode::CommitCrime);
+            // "whenever you commit a crime" → valid_target = Controller (parser sets this)
+            let mut trigger =
+                make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Controller);
             trigger.trigger_zones = vec![Zone::Graveyard];
             trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -6887,6 +6957,7 @@ pub mod tests {
                                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
                                 ),
                                 count: None,
+                                random: false,
                                 choice_optional: false,
                             },
                         )
@@ -8300,10 +8371,10 @@ pub mod tests {
     #[test]
     fn commander_in_command_zone_etb_trigger_does_not_fire() {
         // CR 114.4 regression: a non-emblem object in the command zone has no
-        // functioning abilities, so its ETB observer trigger must not fire
-        // when some other creature enters. `process_triggers` must reach
-        // through `active_trigger_definitions`, which drops command-zone
-        // non-emblems.
+        // functioning abilities by default, so its ETB observer trigger must
+        // not fire when some other creature enters. `process_triggers` must
+        // reach through `active_trigger_definitions`, which drops command-zone
+        // non-emblem triggers unless they opt in via `trigger_zones`.
         let mut state = setup();
         state.active_player = PlayerId(0);
 
@@ -8346,6 +8417,57 @@ pub mod tests {
             state.stack.len(),
             0,
             "A non-emblem command-zone object must not fire its ETB observer trigger"
+        );
+    }
+
+    #[test]
+    fn command_zone_non_emblem_trigger_with_command_opt_in_fires() {
+        // CR 113.6b + CR 114.4: Eminence-style triggers explicitly state they
+        // function from the command zone. A non-emblem command-zone object with
+        // `trigger_zones = [Command]` must therefore be scanned by
+        // `process_triggers`; otherwise parser-level `trigger_zones` fixes do
+        // not reach runtime.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(0xC0FFEF),
+            PlayerId(0),
+            "Command Opt-In Observer".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_emblem = false;
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ))
+                    .destination(Zone::Battlefield)
+                    .trigger_zones(vec![Zone::Command]),
+            );
+        }
+
+        let events = vec![zone_changed_event(
+            ObjectId(0xBEEF),
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "A command-zone opt-in trigger on a non-emblem object must fire"
         );
     }
 

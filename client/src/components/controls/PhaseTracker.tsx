@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { Phase } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
@@ -17,13 +19,14 @@ const PHASES: { key: Phase; label: string }[] = [
 ];
 
 export function PhaseTracker() {
+  const { t } = useTranslation("game");
   const phase = useGameStore((s) => s.gameState?.phase ?? "Untap");
   const turnNumber = useGameStore((s) => s.gameState?.turn_number ?? 0);
 
   return (
     <div className="flex flex-col gap-1">
       <div className="text-center text-xs font-semibold text-gray-300">
-        Turn {turnNumber}
+        {t("phaseTracker.turn", { number: turnNumber })}
       </div>
       <div className="flex flex-wrap gap-0.5">
         {PHASES.map(({ key, label }) => {

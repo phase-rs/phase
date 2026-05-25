@@ -1,4 +1,8 @@
-import type { GameFormat } from "../adapter/types";
+import type {
+  GameFormat,
+  TokenCharacteristics,
+  TokenImageRef,
+} from "../adapter/types";
 
 type EngineModule = typeof import("@wasm/engine");
 
@@ -43,6 +47,41 @@ export async function getCardFaceData(cardName: string) {
   await ensureCardDatabase();
   const engine = await loadEngineModule();
   return engine.get_card_face_data(cardName);
+}
+
+/** A localized card face from a per-language content-i18n sidecar. Fields are
+ *  optional — absent fields fall back to the engine's English text. Mirrors the
+ *  `LocalizedFace` struct emitted by `oracle-gen --sidecar-dir`. */
+export interface LocalizedFace {
+  name?: string;
+  oracle_text?: string;
+  type_line?: string;
+}
+
+const cardLocalePromises = new Map<string, Promise<Map<string, LocalizedFace>>>();
+
+/**
+ * Lazily fetch the per-locale card-content sidecar (`card-data.<lng>.json`) once,
+ * into a Map keyed by lowercased canonical card name (the same key the engine's
+ * `face_index` uses). English needs no sidecar. A missing sidecar (e.g. 404 for a
+ * locale not yet published) resolves to an empty map so callers fall back to
+ * English per-field — content localization is best-effort display data, never a
+ * hard dependency.
+ */
+export async function ensureCardLocale(lang: string): Promise<Map<string, LocalizedFace>> {
+  if (lang === "en") return new Map();
+  let promise = cardLocalePromises.get(lang);
+  if (!promise) {
+    promise = (async () => {
+      const url = __CARD_DATA_LOCALE_URL_TEMPLATE__.replace("{lng}", lang);
+      const resp = await fetch(url);
+      if (!resp.ok) return new Map<string, LocalizedFace>();
+      const obj = (await resp.json()) as Record<string, LocalizedFace>;
+      return new Map(Object.entries(obj));
+    })().catch(() => new Map<string, LocalizedFace>());
+    cardLocalePromises.set(lang, promise);
+  }
+  return promise;
 }
 
 export async function getCardParseDetails(cardName: string) {
@@ -134,17 +173,15 @@ export async function sideboardPolicyForFormat(
  * first access; the result is cached for the session because the catalog is
  * static engine data (compiled into the WASM binary via `include_str!`).
  */
-import type { TokenCharacteristics } from "../adapter/types";
-
 export type PredefinedTokenKind =
   | "Treasure"
   | "Food"
+  | "Gold"
   | "Clue"
   | "Blood"
   | "Powerstone"
   | "Map"
-  | "Spawn"
-  | "Gold";
+  | "Lander";
 
 export type TokenCategory =
   | { PredefinedArtifact: { kind: PredefinedTokenKind } }
@@ -163,6 +200,20 @@ export interface TokenPreset {
   category: TokenCategory;
   fidelity: PresetFidelity;
   body: TokenCharacteristics;
+  source_card_names?: string[];
+  source_card_refs?: Array<{
+    card_name: string;
+    face_name?: string | null;
+    scryfall_oracle_id?: string | null;
+    scryfall_id?: string | null;
+  }>;
+  token_image_ref?: TokenImageRef | null;
+  set_code?: string;
+  set_name?: string;
+  collector_number?: string | null;
+  released_at?: string | null;
+  type_line?: string;
+  rules_text?: string | null;
 }
 
 let tokenPresetsCache: TokenPreset[] | null = null;

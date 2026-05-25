@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { useTranslation } from "react-i18next";
 
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
@@ -14,6 +15,7 @@ import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 
 export function PlayerHud() {
+  const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
   const speed = useGameStore((s) => s.gameState?.players[playerId]?.speed ?? 0);
@@ -83,7 +85,7 @@ export function PlayerHud() {
             {designations.activeDungeon ? (
               <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
             ) : null}
-            {isPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
+            {isPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
             {designations.ringLevel > 0 ? <CounterBadge kind="ring" value={designations.ringLevel} /> : null}
             {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
             {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}

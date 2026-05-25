@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
-use nom::combinator::{all_consuming, opt, value, verify};
+use nom::combinator::{all_consuming, map, opt, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
 
@@ -10,15 +10,18 @@ use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, GainLifePlayer, MultiTargetSpec, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    RoundingMode, StaticDefinition, TargetFilter, TypedFilter,
+    FilterProp, GainLifePlayer, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+    QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
+use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
 
+use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
+use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
@@ -41,6 +44,18 @@ pub(super) fn try_parse_subject_predicate_ast(
     // must intercept before continuous clause parsing which would incorrectly
     // extract "defender" as an AddKeyword from "didn't have defender".
     if let Some(clause) = try_parse_can_attack_with_defender(text, ctx) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, _sub_ability| PredicateAst::Restriction { effect, duration },
+            ctx,
+        ));
+    }
+
+    // CR 509.1a + CR 509.1b: "can block an additional creature [this turn]" —
+    // must intercept before continuous clause parsing which cannot produce the
+    // ExtraBlockers static mode from the predicate text.
+    if let Some(clause) = try_parse_can_block_additional(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
@@ -461,6 +476,117 @@ fn try_parse_can_attack_with_defender(
         optional: false,
         unless_pay: None,
     })
+}
+
+/// CR 509.1a + CR 509.1b: "[subject] can block an additional creature [this turn]"
+/// Produces a GenericEffect with ExtraBlockers { count: Some(1) } static mode.
+/// Mirrors the static-ability parser in `oracle_static.rs` but for activated/triggered
+/// effect text where the grant is transient (until end of turn).
+fn try_parse_can_block_additional(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (subject_lower, predicate_lower) =
+        nom_primitives::scan_split_at_phrase(&lower, |i| tag("can block ").parse(i))?;
+    let subject_text = &text[..subject_lower.len()];
+    let application = if subject_text.trim().is_empty() {
+        SubjectApplication {
+            affected: TargetFilter::ParentTarget,
+            target: Some(TargetFilter::ParentTarget),
+            multi_target: None,
+            inherits_parent: true,
+            is_optional: false,
+        }
+    } else {
+        parse_subject_application(subject_text.trim(), ctx)?
+    };
+
+    let (_rest, (_, _, _, _, count, duration, _)) = all_consuming((
+        tag("can"),
+        tag(" "),
+        tag("block"),
+        tag(" "),
+        parse_extra_blockers_count,
+        parse_block_grant_duration,
+        opt(tag(".")),
+    ))
+    .parse(predicate_lower)
+    .ok()?;
+    let duration = if subject_text.trim().is_empty() {
+        duration.or(Some(Duration::UntilEndOfTurn))
+    } else {
+        duration
+    };
+    let mode = StaticMode::ExtraBlockers { count };
+    let affected = static_affected_for_application(&application);
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(mode.clone())
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
+            duration: duration.clone(),
+            target: application.target,
+        },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+pub(super) fn is_can_block_extra_predicate(lower: &str) -> bool {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("can"),
+        tag(" "),
+        tag("block"),
+        tag(" "),
+        parse_extra_blockers_count,
+        parse_block_grant_duration,
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+}
+
+fn parse_extra_blockers_count(input: &str) -> OracleResult<'_, Option<u32>> {
+    alt((
+        map(
+            (
+                nom_primitives::parse_number,
+                tag(" additional creature"),
+                opt(tag("s")),
+            ),
+            |(count, _, _)| Some(count),
+        ),
+        value(
+            None,
+            (
+                tag("any"),
+                tag(" "),
+                tag("number"),
+                tag(" "),
+                tag("of"),
+                tag(" "),
+                tag("creatures"),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_block_grant_duration(input: &str) -> OracleResult<'_, Option<Duration>> {
+    opt(preceded(
+        tag(" this "),
+        alt((
+            value(Duration::UntilEndOfTurn, tag("turn")),
+            value(Duration::UntilEndOfCombat, tag("combat")),
+        )),
+    ))
+    .parse(input)
 }
 
 pub(super) fn parse_subject_application(
@@ -890,8 +1016,21 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 608.2k: Bare pronoun "it" — context-dependent
+    // CR 608.2k: Bare pronoun "it" — context-dependent. In trigger context,
+    // `ctx.subject` identifies the triggering subject. In effect-chain context,
+    // `parent_target_available` records that a previous chunk introduced a real
+    // typed object referent. Standalone clause parsing leaves it false, so
+    // "it connives" remains self-referential instead of inventing ParentTarget.
     if lower == "it" {
+        if ctx.subject.is_none() && ctx.parent_target_available {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: None,
+                multi_target: None,
+                inherits_parent: true,
+                is_optional: false,
+            });
+        }
         return Some(SubjectApplication {
             affected: resolve_it_pronoun(ctx),
             target: None,
@@ -1107,6 +1246,13 @@ fn build_pump_effect(
             target,
         };
     }
+    if application.inherits_parent {
+        return Effect::Pump {
+            power,
+            toughness,
+            target: TargetFilter::ParentTarget,
+        };
+    }
     if is_single_object_ref(&application.affected) {
         return Effect::Pump {
             power,
@@ -1187,6 +1333,75 @@ fn try_split_pump_compound(
     })
 }
 
+fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Option<Duration>)> {
+    let lower = predicate.to_lowercase();
+    let (choice_text, _) = tag::<_, _, OracleError<'_>>("gain your choice of ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
+    let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
+    let first = parse_keyword_from_oracle(left.trim())?;
+    let second = parse_keyword_from_oracle(right.trim())?;
+    Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))))
+}
+
+fn keyword_choice_branch(
+    keyword: Keyword,
+    affected: TargetFilter,
+    target: Option<TargetFilter>,
+    duration: Option<Duration>,
+) -> AbilityDefinition {
+    let description = format!("gain {keyword}");
+    let mut branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                .description(description.clone())],
+            duration: duration.clone(),
+            target,
+        },
+    );
+    branch.duration = duration;
+    branch.description = Some(description);
+    branch
+}
+
+fn build_keyword_choice_clause(
+    application: &SubjectApplication,
+    predicate: &str,
+) -> Option<ParsedEffectClause> {
+    let (first, second, duration) = parse_keyword_choice_grant(predicate)?;
+    let affected = static_affected_for_application(application);
+    let branches = vec![
+        keyword_choice_branch(first, affected.clone(), None, duration.clone()),
+        keyword_choice_branch(second, affected, None, duration),
+    ];
+
+    let choose_effect = Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller,
+        branches,
+    };
+    let (effect, sub_ability) = if let Some(target) = application.target.clone() {
+        let choose = AbilityDefinition::new(AbilityKind::Spell, choose_effect);
+        (Effect::TargetOnly { target }, Some(Box::new(choose)))
+    } else {
+        (choose_effect, None)
+    };
+
+    Some(ParsedEffectClause {
+        effect,
+        duration: None,
+        sub_ability,
+        distribute: None,
+        multi_target: application.multi_target.clone(),
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 fn build_continuous_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -1228,6 +1443,10 @@ fn build_continuous_clause(
     // Split on " and " that follows a duration marker, producing a pump
     // with a chained sub_ability for the remainder.
     if let Some(clause) = try_split_pump_compound(&normalized, &application) {
+        return Some(clause);
+    }
+
+    if let Some(clause) = build_keyword_choice_clause(&application, &normalized) {
         return Some(clause);
     }
 
@@ -1686,25 +1905,13 @@ fn try_parse_set_life_total(
 ) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();
 
-    // Parse the amount expression
-    let amount = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("half ").parse(lower.as_str())
-    {
-        // "half their starting life total" / "half that player's starting life total"
-        if nom_primitives::scan_contains(rest, "starting life total") {
-            QuantityExpr::DivideRounded {
-                inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::StartingLifeTotal,
-                }),
-                divisor: 2,
-                rounding: RoundingMode::Down,
-            }
-        } else {
+    let amount = if nom_primitives::scan_contains(&lower, "starting life total") {
+        let amount_text = lower.trim().trim_end_matches('.');
+        let (rest, amount) = nom_quantity::parse_quantity(amount_text).ok()?;
+        if !rest.trim().is_empty() {
             return None;
         }
-    } else if nom_primitives::scan_contains(&lower, "starting life total") {
-        QuantityExpr::Ref {
-            qty: QuantityRef::StartingLifeTotal,
-        }
+        amount
     } else if let Some((n, rest)) = parse_number(&lower) {
         // Guard: reject if substantial text remains after the number.
         // "a 3/3 red goblin creature" matches "a" as 1 but the rest
@@ -1902,9 +2109,13 @@ fn build_restriction_clause(
     };
 
     let affected = static_affected_for_application(&application);
-    // CR 119.7 + CR 119.8 + CR 104.2b + CR 104.3b: Player-scoped life and
-    // game-state restriction modes (Everybody Lives!: "Players can't lose life
-    // this turn and players can't lose the game or win the game this turn.")
+    // CR 119.7 + CR 119.8 + CR 104.2b + CR 104.3b + CR 305.1: Player-scoped
+    // life, game-state, and land-play restriction modes (Everybody Lives!:
+    // "Players can't lose life this turn and players can't lose the game or
+    // win the game this turn."; Pardic Miner's activated form is target-
+    // scoped and routes through the `target.is_some()` branch — but the
+    // bare-subject sentence form "Players can't play lands" still needs
+    // player-fan-out, so `CantPlayLand` participates here too.) These modes
     // must bind to actual players, not be broadcast over battlefield
     // permanents. Rewrite an unscoped `Typed(empty)` affected filter — the
     // canonical form produced by the bare "Players" subject — to
@@ -1920,7 +2131,7 @@ fn build_restriction_clause(
                     | StaticMode::CantLoseLife
                     | StaticMode::CantLoseTheGame
                     | StaticMode::CantWinTheGame
-            )
+            ) || matches!(m, StaticMode::Other(name) if name == "CantPlayLand")
         });
     let affected = if all_modes_are_player_scoped {
         match &affected {
@@ -1987,6 +2198,18 @@ fn build_restriction_clause(
 // TCE with empty modifications and `player_has_cant_lose` /
 // `player_has_cant_gain_life` never see it.
 pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
+    // CR 305.1 + CR 611.1: Player-scoped land-play prohibition (Pardic Miner,
+    // Turf Wound, Solfatara, Moonhold: "Target player can't play lands this
+    // turn"). Without `AddStaticMode`, the resolver registers a transient
+    // continuous effect with empty modifications and
+    // `player_has_static_other(..., "CantPlayLand")` never observes it.
+    // Mirrors the player-scoped life/game prohibitions below for the
+    // named-string ("Other") family. Other `Other(...)` modes (CantBeSacrificed,
+    // CantBeEnchanted, etc.) intentionally remain object-scoped and are
+    // checked via `object_has_static_other` rather than transient TCEs.
+    if matches!(mode, StaticMode::Other(name) if name == "CantPlayLand") {
+        return true;
+    }
     matches!(
         mode,
         StaticMode::CantBlock
@@ -2128,6 +2351,27 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     .is_ok()
     {
         return Some(vec![StaticMode::CantGainLife]);
+    }
+    // CR 305.1 + CR 611.1: "can't play lands" — a player can't take the land-play
+    // special action (CR 305.1). This is the player-scoped prohibition shared by
+    // the static form ("Players can't play lands", Worms of the Earth — CR 113.3d)
+    // and the one-shot continuous-effect form ("Target player can't play lands
+    // this turn", Pardic Miner — CR 611.1 + CR 611.2c, generated by an activated
+    // ability's resolution rather than a static). The runtime gate lives in
+    // `handle_play_land` via `player_has_static_other(state, pid, "CantPlayLand")`.
+    //
+    // Decomposed into independent negation × verb-phrase axes (CLAUDE.md
+    // "Compose nom combinators, don't enumerate permutations") so future
+    // related prohibitions can reuse the same negation prefix without
+    // re-enumerating the cross-product.
+    if all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("can't "), tag("cannot "))),
+        alt((tag("play lands"), tag("play land cards"))),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(vec![StaticMode::Other("CantPlayLand".to_string())]);
     }
     // CR 119.8: "can't lose life" — life-loss events are prevented.
     if all_consuming(alt((
@@ -2406,6 +2650,12 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "deal",
     "discard",
     "draw",
+    // CR 701.63: Endure — "it endures N" / "this creature endures N" /
+    // "~ endures N" / "<cardname> endures N". The self-referential subject is
+    // stripped here so the deconjugated predicate ("endure N") re-dispatches
+    // through the imperative path to `Effect::Endure`. The endure resolver acts
+    // on the ability source, so no subject target injection is required.
+    "endure",
     "exile",
     "explore",
     "fight",
@@ -2414,6 +2664,8 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "have",
     "look",
     "lose",
+    "investigate",
+    "learn",
     // CR 701.40a: Manifest — "its controller manifests the top card of their
     // library" (Reality Shift). Subject-shifted manifest clauses route through
     // the PredicateAst::ImperativeFallback arm in `lower_subject_predicate_ast`.
@@ -2421,7 +2673,9 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "mill",
     "pay",
     "phase",
+    "populate",
     "put",
+    "proliferate",
     "regenerate",
     "reveal",
     "return",
@@ -2561,6 +2815,26 @@ mod tests {
             "expected TakeTheInitiative, got {:?}",
             ability.effect
         );
+    }
+
+    #[test]
+    fn life_total_becomes_half_starting_life_total_rounded_up() {
+        let mut ctx = ParseContext::default();
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "your life total becomes half your starting life total, rounded up",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        let Effect::SetLifeTotal { amount, .. } = &*ability.effect else {
+            panic!("expected SetLifeTotal, got {:?}", ability.effect);
+        };
+        assert!(matches!(
+            amount,
+            QuantityExpr::DivideRounded {
+                rounding: crate::types::ability::RoundingMode::Up,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3070,6 +3344,17 @@ mod tests {
         );
     }
 
+    // CR 305.1: "can't play lands" and "can't play land cards" are the same
+    // land-play special-action prohibition after subject stripping.
+    #[test]
+    fn parse_restriction_modes_cant_play_land_variants() {
+        let expected = Some(vec![StaticMode::Other("CantPlayLand".to_string())]);
+        assert_eq!(parse_restriction_modes("can't play lands"), expected);
+        assert_eq!(parse_restriction_modes("cannot play lands"), expected);
+        assert_eq!(parse_restriction_modes("can't play land cards"), expected);
+        assert_eq!(parse_restriction_modes("cannot play land cards"), expected);
+    }
+
     // CR 104.3 + CR 704.5: "can't lose the game" predicate emits `CantLoseTheGame`.
     #[test]
     fn parse_restriction_modes_cant_lose_the_game() {
@@ -3113,5 +3398,124 @@ mod tests {
                 StaticMode::CantWinTheGame
             ])
         );
+    }
+
+    /// CR 509.1a + CR 509.1b: Activated ability "~ can block an additional creature
+    /// this turn" produces a transient GenericEffect granting ExtraBlockers { count: Some(1) }
+    /// via AddStaticMode. Validates the `try_parse_can_block_additional` handler.
+    #[test]
+    fn can_block_additional_creature_this_turn_effect() {
+        let mut ctx = ParseContext {
+            card_name: Some("Luminous Guardian".to_string()),
+            ..Default::default()
+        };
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "~ can block an additional creature this turn.",
+            AbilityKind::Activated,
+            &mut ctx,
+        );
+        match &*ability.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    duration,
+                    &Some(Duration::UntilEndOfTurn),
+                    "duration must be UntilEndOfTurn"
+                );
+                assert_eq!(static_abilities.len(), 1);
+                let sd = &static_abilities[0];
+                assert_eq!(
+                    sd.mode,
+                    StaticMode::ExtraBlockers { count: Some(1) },
+                    "mode must be ExtraBlockers(1)"
+                );
+                assert!(
+                    sd.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::ExtraBlockers { count: Some(1) }
+                        }
+                    )),
+                    "must have AddStaticMode(ExtraBlockers(1)) modification"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 509.1a: "~ can block any number of creatures this turn" produces
+    /// ExtraBlockers { count: None } via the same handler.
+    #[test]
+    fn can_block_any_number_this_turn_effect() {
+        let mut ctx = ParseContext {
+            card_name: Some("Test Card".to_string()),
+            ..Default::default()
+        };
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "~ can block any number of creatures this turn.",
+            AbilityKind::Activated,
+            &mut ctx,
+        );
+        match &*ability.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    duration,
+                    &Some(Duration::UntilEndOfTurn),
+                    "duration must be UntilEndOfTurn"
+                );
+                assert_eq!(static_abilities.len(), 1);
+                let sd = &static_abilities[0];
+                assert_eq!(
+                    sd.mode,
+                    StaticMode::ExtraBlockers { count: None },
+                    "mode must be ExtraBlockers(None)"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 509.1a + CR 509.1b: combat-scoped blocking permissions expire at
+    /// end of combat, and numeric counts are parsed through the shared number
+    /// combinator rather than a one-card string branch.
+    #[test]
+    fn can_block_two_additional_creatures_this_combat_effect() {
+        let mut ctx = ParseContext {
+            card_name: Some("Test Card".to_string()),
+            ..Default::default()
+        };
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "~ can block two additional creatures this combat.",
+            AbilityKind::Activated,
+            &mut ctx,
+        );
+        match &*ability.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    duration,
+                    &Some(Duration::UntilEndOfCombat),
+                    "duration must be UntilEndOfCombat"
+                );
+                assert_eq!(static_abilities.len(), 1);
+                let sd = &static_abilities[0];
+                assert_eq!(
+                    sd.mode,
+                    StaticMode::ExtraBlockers { count: Some(2) },
+                    "mode must be ExtraBlockers(2)"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
     }
 }

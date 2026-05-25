@@ -4,6 +4,7 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{ReplacementDefinition, RestrictionExpiry};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
+use crate::types::format::GameFormat;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -448,8 +449,14 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // permanent that turn"), not its controller. It resets at the start of every
     // turn for every planeswalker regardless of who controls it.
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.loyalty_activated_this_turn = false;
+        obj.loyalty_activations_this_turn = 0;
     }
+    // CR 606.1 + CR 603.4: Per-player loyalty-activation history is a CR 603.4
+    // "this turn" record. The cap-raising grant from
+    // `Effect::GrantExtraLoyaltyActivations` (The Chain Veil class) is bounded
+    // to the same turn, so both maps clear together at turn start.
+    state.loyalty_abilities_activated_this_turn.clear();
+    state.extra_loyalty_activations_this_turn.clear();
     // CR 514 + CR 603.4: Per-ability per-turn resolution counter resets at turn
     // boundary alongside other "this turn" trackers (mirrors the cleanup of
     // `trigger_fire_counts_this_turn`).
@@ -582,8 +589,7 @@ pub fn execute_untap_with_choices(
         use crate::types::ability::GameRestriction;
 
         match restriction {
-            GameRestriction::CastOnlyFromZones { expiry, .. }
-            | GameRestriction::CantCastSpells { expiry, .. } => {
+            GameRestriction::ProhibitActivity { expiry, .. } => {
                 !matches!(expiry, RestrictionExpiry::UntilPlayerNextTurn { player } if *player == active)
             }
             GameRestriction::DamagePreventionDisabled { .. } => true,
@@ -944,8 +950,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         use crate::types::ability::{GameRestriction, RestrictionExpiry};
         match r {
             GameRestriction::DamagePreventionDisabled { expiry, .. }
-            | GameRestriction::CastOnlyFromZones { expiry, .. }
-            | GameRestriction::CantCastSpells { expiry, .. } => {
+            | GameRestriction::ProhibitActivity { expiry, .. } => {
                 !matches!(expiry, RestrictionExpiry::EndOfTurn)
             }
         }
@@ -1153,10 +1158,30 @@ pub fn finish_cleanup_discard(
     false
 }
 
-/// CR 103.8a: The player who goes first skips their first draw step.
-/// CR 614.1b + CR 614.10: Also skip if a "skip your draw step" static is active.
+/// CR 103.8: Whether the player who goes first skips their first draw step.
+/// - CR 103.8a: In a two-player game, the player who plays first skips it.
+/// - CR 103.8b: In Two-Headed Giant, the team who plays first skips it.
+/// - CR 103.8c: In all other multiplayer games (Free-for-All, 3+ player
+///   Commander, etc.) no player skips the draw step of their first turn.
+///
+/// The two-player check uses `state.players.len() == 2` rather than the
+/// game format, because a two-player Commander game is still a two-player
+/// game per CR 903.2 (Commander supports both two-player and multiplayer
+/// setups) — the skip rule applies to it.
+///
+/// The team case intentionally checks the format enum rather than the broader
+/// `team_based` axis: CR 103.8b names Two-Headed Giant specifically, while
+/// CR 805 shared-team-turns can be used by other multiplayer variants.
+fn first_player_skips_first_draw(state: &GameState) -> bool {
+    matches!(state.format_config.format, GameFormat::TwoHeadedGiant) || state.players.len() == 2
+}
+
+/// CR 103.8 + CR 614.1b + CR 614.10: Whether the active player should skip
+/// the draw step right now. Combines the first-turn rule above with any
+/// "skip your draw step" static / one-shot replacements.
 pub fn should_skip_draw(state: &GameState) -> bool {
-    state.turn_number == 1 || should_skip_step_static(state, Phase::Draw)
+    (state.turn_number == 1 && first_player_skips_first_draw(state))
+        || should_skip_step_static(state, Phase::Draw)
 }
 
 /// CR 614.1b + CR 614.10: Check whether the active player should skip the given step
@@ -1296,11 +1321,16 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 };
             }
             Phase::Draw => {
-                // CR 103.7a: The first player skips their first-turn draw step
-                // entirely — no draw, no triggers, no priority.
+                // CR 103.8: The starting player skips their first-turn draw
+                // step only in a two-player game (CR 103.8a) or Two-Headed
+                // Giant (CR 103.8b) — not in 3+ player multiplayer
+                // (CR 103.8c). `first_player_skips_first_draw` encodes this
+                // gate so it stays in sync with `should_skip_draw`.
                 // CR 614.10a + CR 614.1b: Other "skip your draw step" effects
                 // (replacements or static abilities) also remove the whole step.
-                if state.turn_number == 1 || should_skip_step_now(state, Phase::Draw) {
+                if (state.turn_number == 1 && first_player_skips_first_draw(state))
+                    || should_skip_step_now(state, Phase::Draw)
+                {
                     advance_phase(state, events);
                     continue;
                 }
@@ -1400,10 +1430,13 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     let valid_block_targets =
                         super::combat::get_valid_block_targets_for_player(state, defending);
                     let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+                    let block_requirements =
+                        super::combat::block_requirements_for_player(state, defending);
                     return WaitingFor::DeclareBlockers {
                         player: defending,
                         valid_blocker_ids,
                         valid_block_targets,
+                        block_requirements,
                     };
                 } else {
                     // CR 508.8: Declare blockers and combat damage steps are skipped if no attackers.
@@ -3127,6 +3160,62 @@ mod tests {
         assert!(!should_skip_draw(&state));
     }
 
+    /// CR 103.8c: In multiplayer games other than Two-Headed Giant, the
+    /// starting player does NOT skip their first draw step. Issue #954 —
+    /// engine previously hardcoded the 2-player rule and silently dropped the
+    /// first-turn draw in 3+ player Commander.
+    #[test]
+    fn multiplayer_starting_player_does_not_skip_first_draw() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        state.turn_number = 1;
+        assert!(
+            !should_skip_draw(&state),
+            "CR 103.8c: 4-player Commander game must not skip the starting \
+             player's first draw step",
+        );
+
+        // Sanity: a 3-player free-for-all is also multiplayer.
+        let mut state3 = GameState::new(FormatConfig::standard(), 3, 42);
+        state3.turn_number = 1;
+        assert!(
+            !should_skip_draw(&state3),
+            "CR 103.8c: 3-player game must not skip the starting player's \
+             first draw step",
+        );
+    }
+
+    /// CR 103.8b: In Two-Headed Giant the team who plays first DOES skip
+    /// their first draw step, even though the game has 4 players.
+    #[test]
+    fn two_headed_giant_first_team_skips_first_draw() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 1;
+        assert!(
+            should_skip_draw(&state),
+            "CR 103.8b: Two-Headed Giant first team must skip the first \
+             draw step",
+        );
+    }
+
+    /// CR 103.8a: A two-player Commander game is still a two-player game per
+    /// CR 903.2; the first player skips their first draw step.
+    #[test]
+    fn two_player_commander_still_skips_first_draw() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 2, 42);
+        state.turn_number = 1;
+        assert!(
+            should_skip_draw(&state),
+            "CR 103.8a + CR 903.2: 2-player Commander still skips the first \
+             player's first draw step",
+        );
+    }
+
     /// End-to-end: drive the engine through End-step priority passes and verify
     /// that with > 7 cards in hand, the resulting WaitingFor is DiscardToHandSize.
     /// Mirrors the user-visible flow (no direct execute_cleanup call).
@@ -3413,6 +3502,46 @@ mod tests {
         // Card should still be in library
         assert!(state.players[0].library.contains(&id));
         assert!(!state.players[0].hand.contains(&id));
+    }
+
+    /// CR 103.8c + issue #954: In a 4-player Commander game, the starting
+    /// player must draw on their first turn — `auto_advance` should not skip
+    /// the draw step. Mirrors `auto_advance_skips_draw_on_first_turn` (the
+    /// 2-player case) and pins the call-site gate at the `Phase::Draw` arm
+    /// of the auto_advance loop, complementing the predicate-level tests.
+    ///
+    /// Starts directly at `Phase::Draw` (rather than `Phase::Untap`) so the
+    /// `Phase::Draw` arm executes before auto_advance returns at the next
+    /// priority window — the 2-player mirror test passes vacuously because
+    /// auto_advance pauses at the Upkeep priority window before the Draw
+    /// arm is reached, but here we need to confirm the Draw arm actually
+    /// performs the turn-based draw.
+    #[test]
+    fn auto_advance_does_not_skip_draw_on_first_turn_in_multiplayer() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        state.phase = Phase::Draw;
+        state.turn_number = 1;
+        state.active_player = PlayerId(0);
+
+        // Add a card to library (should be drawn — multiplayer does not skip).
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        auto_advance(&mut state, &mut events);
+
+        assert!(
+            state.players[0].hand.contains(&id),
+            "CR 103.8c: 4-player Commander must perform the first-turn draw",
+        );
+        assert!(!state.players[0].library.contains(&id));
     }
 
     #[test]
@@ -3789,7 +3918,9 @@ mod tests {
 
     #[test]
     fn execute_untap_prunes_until_player_next_turn_restrictions() {
-        use crate::types::ability::{GameRestriction, RestrictionExpiry, RestrictionPlayerScope};
+        use crate::types::ability::{
+            GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+        };
         use crate::types::identifiers::{CardId, ObjectId};
 
         let mut state = GameState::new_two_player(42);
@@ -3801,12 +3932,14 @@ mod tests {
             "Avatar's Wrath".to_string(),
             Zone::Exile,
         );
-        state.restrictions.push(GameRestriction::CastOnlyFromZones {
+        state.restrictions.push(GameRestriction::ProhibitActivity {
             source,
             affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
-            allowed_zones: vec![Zone::Hand],
             expiry: RestrictionExpiry::UntilPlayerNextTurn {
                 player: PlayerId(1),
+            },
+            activity: ProhibitedActivity::CastOnlyFromZones {
+                allowed_zones: vec![Zone::Hand],
             },
         });
         state

@@ -334,6 +334,7 @@ pub fn room_effects(
                 Effect::ExileTop {
                     player: TargetFilter::Controller,
                     count: fixed(2),
+                    face_down: false,
                 },
                 source_id,
                 controller,
@@ -836,6 +837,7 @@ pub fn room_effects(
                             },
                         ],
                         condition: None,
+                        per_player_condition: None,
                         affected_zone: None,
                         effect_zone: None,
                         active_zones: vec![],
@@ -964,6 +966,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             reveal: true,
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
+            split: None,
         },
         source_id,
         controller,

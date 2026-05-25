@@ -1,7 +1,7 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, Duration, Effect,
-    GameRestriction, ModalSelectionCondition, QuantityExpr, ResolvedAbility,
+    GameRestriction, ModalSelectionCondition, ProhibitedActivity, QuantityExpr, ResolvedAbility,
     RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card::LayoutKind;
@@ -184,6 +184,51 @@ fn append_to_ability_def_sub_chain(ability: &mut AbilityDefinition, next: Abilit
 
 /// CR 101.2 + CR 601.2a: Temporary restrictions can limit which zones affected
 /// players may cast spells from.
+fn restriction_scope_matches_player(
+    source_controller: Option<PlayerId>,
+    affected_players: &RestrictionPlayerScope,
+    caster: PlayerId,
+) -> bool {
+    // CR 101.2: Restriction scope defines who is affected by the prohibition.
+    match affected_players {
+        RestrictionPlayerScope::AllPlayers => true,
+        RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
+        RestrictionPlayerScope::TargetedPlayer => {
+            debug_assert!(
+                false,
+                "TargetedPlayer should be resolved by add_restriction"
+            );
+            false
+        }
+        RestrictionPlayerScope::ParentTargetedPlayer => {
+            debug_assert!(
+                false,
+                "ParentTargetedPlayer should be resolved by add_restriction"
+            );
+            false
+        }
+        RestrictionPlayerScope::OpponentsOfSourceController => {
+            source_controller.is_some_and(|controller| controller != caster)
+        }
+    }
+}
+
+/// CR 601.2a: Build the spell-record projection used by prohibition filters.
+fn spell_record_for_restrictions(spell_obj: &super::game_object::GameObject) -> SpellCastRecord {
+    SpellCastRecord {
+        name: spell_obj.name.clone(),
+        core_types: spell_obj.card_types.core_types.clone(),
+        supertypes: spell_obj.card_types.supertypes.clone(),
+        subtypes: spell_obj.card_types.subtypes.clone(),
+        keywords: spell_obj.keywords.clone(),
+        colors: spell_obj.color.clone(),
+        mana_value: spell_obj.mana_cost.mana_value(),
+        has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
+        from_zone: spell_obj.zone,
+        cast_variant: crate::types::game_state::CastingVariant::Normal,
+    }
+}
+
 fn is_blocked_by_cast_only_from_zones(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -193,37 +238,38 @@ fn is_blocked_by_cast_only_from_zones(
         .restrictions
         .iter()
         .any(|restriction| match restriction {
-            GameRestriction::CastOnlyFromZones {
+            GameRestriction::ProhibitActivity {
                 source,
                 affected_players,
-                allowed_zones,
+                activity: ProhibitedActivity::CastOnlyFromZones { allowed_zones },
                 ..
             } => {
                 let source_controller = state
                     .objects
                     .get(source)
                     .map(|source_obj| source_obj.controller);
-                let caster_affected = match affected_players {
-                    RestrictionPlayerScope::AllPlayers => true,
-                    RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
-                    RestrictionPlayerScope::OpponentsOfSourceController => {
-                        source_controller.is_some_and(|controller| controller != caster)
-                    }
-                };
+                let caster_affected =
+                    restriction_scope_matches_player(source_controller, affected_players, caster);
                 caster_affected && !allowed_zones.contains(&obj.zone)
             }
-            GameRestriction::DamagePreventionDisabled { .. } => false,
-            GameRestriction::CantCastSpells { .. } => false,
+            _ => false,
         })
 }
 
 /// CR 101.2: Check if a CantCastSpells restriction prevents the given player
 /// from casting any spells. E.g., Silence: "Your opponents can't cast spells this turn."
-fn is_blocked_by_cant_cast_spells(state: &GameState, caster: PlayerId) -> bool {
+fn is_blocked_by_cant_cast_spells(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: Option<&super::game_object::GameObject>,
+) -> bool {
+    let spell_record = spell_obj.map(spell_record_for_restrictions);
+
     state.restrictions.iter().any(|restriction| {
-        let GameRestriction::CantCastSpells {
+        let GameRestriction::ProhibitActivity {
             source,
             affected_players,
+            activity: ProhibitedActivity::CastSpells { spell_filter },
             ..
         } = restriction
         else {
@@ -233,11 +279,56 @@ fn is_blocked_by_cant_cast_spells(state: &GameState, caster: PlayerId) -> bool {
             .objects
             .get(source)
             .map(|source_obj| source_obj.controller);
-        match affected_players {
-            RestrictionPlayerScope::AllPlayers => true,
-            RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
-            RestrictionPlayerScope::OpponentsOfSourceController => {
-                source_controller.is_some_and(|controller| controller != caster)
+        let caster_affected =
+            restriction_scope_matches_player(source_controller, affected_players, caster);
+
+        // CR 101.2: Once scope matches, filter-matching spells are prohibited.
+        caster_affected
+            && match spell_filter {
+                Some(filter) => spell_record.as_ref().is_some_and(|record| {
+                    super::filter::spell_record_matches_filter(
+                        record,
+                        filter,
+                        source_controller.unwrap_or(caster),
+                        &state.all_creature_types,
+                    )
+                }),
+                None => true,
+            }
+    })
+}
+
+/// CR 602.5 + CR 605.1a: Temporary game restrictions can prohibit activating
+/// abilities, optionally exempting mana abilities via the single classifier.
+fn is_blocked_by_cant_activate_abilities(
+    state: &GameState,
+    caster: PlayerId,
+    activating_ability: &AbilityDefinition,
+) -> bool {
+    state.restrictions.iter().any(|restriction| {
+        let GameRestriction::ProhibitActivity {
+            source,
+            affected_players,
+            activity: ProhibitedActivity::ActivateAbilities { exemption },
+            ..
+        } = restriction
+        else {
+            return false;
+        };
+        let source_controller = state
+            .objects
+            .get(source)
+            .map(|source_obj| source_obj.controller);
+        let caster_affected =
+            restriction_scope_matches_player(source_controller, affected_players, caster);
+        if !caster_affected {
+            return false;
+        }
+        match exemption {
+            ActivationExemption::None => true,
+            ActivationExemption::ManaAbilities => {
+                // CR 605.1a: Mana abilities are exempt from this prohibition.
+                !super::mana_abilities::is_mana_ability(activating_ability)
             }
         }
     })
@@ -331,18 +422,13 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         }
     }
 
-    // CR 101.2: If a CantCastSpells restriction blocks this player, no spells are available.
-    if is_blocked_by_cant_cast_spells(state, player) {
-        return vec![];
-    }
-
     objects
         .into_iter()
         .filter(|obj_id| {
-            state
-                .objects
-                .get(obj_id)
-                .is_some_and(|obj| !is_blocked_by_cast_only_from_zones(state, obj, player))
+            state.objects.get(obj_id).is_some_and(|obj| {
+                !is_blocked_by_cast_only_from_zones(state, obj, player)
+                    && !is_blocked_by_cant_cast_spells(state, player, Some(obj))
+            })
         })
         .collect()
 }
@@ -929,6 +1015,22 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
                     )
                 })
             })
+}
+
+pub(super) fn player_can_spend_as_any_color_for_payment(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ctx: Option<&PaymentContext<'_>>,
+) -> bool {
+    if matches!(
+        ctx,
+        Some(PaymentContext::Effect | PaymentContext::Activation { .. })
+    ) {
+        super::static_abilities::player_can_spend_as_any_color(state, player)
+    } else {
+        player_can_spend_as_any_color_for_spell(state, player, source_id)
+    }
 }
 
 /// CR 601.2a + CR 611.2a: Check if an object has an alt-cost cast-from-exile
@@ -1659,7 +1761,7 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
     // E.g., Silence: "Your opponents can't cast spells this turn."
-    if mode == CastingMode::Actual && is_blocked_by_cant_cast_spells(state, player) {
+    if mode == CastingMode::Actual && is_blocked_by_cant_cast_spells(state, player, Some(obj)) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents you from casting spells this turn".to_string(),
         ));
@@ -2547,15 +2649,22 @@ fn apply_battlefield_cost_modifiers_inner(
 ) {
     use crate::types::ability::ControllerRef;
 
-    // CR 702.26b + CR 114.4: Functioning gate (phased-out / command-zone) owned
-    // by `battlefield_functioning_statics`. We deliberately use the non-
-    // condition-filtered helper here — CR 604.1 condition evaluation must run
-    // against `caster` (so `SpellsCastThisTurn`-style conditions resolve against
-    // the casting player's history), not against the static's controller. The
+    // CR 702.26b + CR 114.4 + CR 113.6b: Functioning gate (phased-out /
+    // command-zone with Eminence-style opt-in) owned by
+    // `game_functioning_statics`. We deliberately use the non-condition-
+    // filtered helper here — CR 604.1 condition evaluation must run against
+    // `caster` (so `SpellsCastThisTurn`-style conditions resolve against the
+    // casting player's history), not against the static's controller. The
     // inline `evaluate_condition(... caster, ...)` call below does that work.
-    for (bf_obj, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
-        let bf_id = bf_obj.id;
-        let source_controller = bf_obj.controller;
+    //
+    // CR 113.6b: cost-reduction statics that opt into the command zone via
+    // `active_zones.contains(Command)` (Eminence — The Ur-Dragon, Edgar Markov)
+    // function from the command zone for non-emblem objects; the per-static
+    // `active_zones` filter below still enforces the static's declared zones
+    // when the source is on the battlefield.
+    for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
+        let bf_id = src_obj.id;
+        let source_controller = src_obj.controller;
 
         {
             let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
@@ -2590,9 +2699,15 @@ fn apply_battlefield_cost_modifiers_inner(
                 continue;
             }
 
-            // CR 113.6: Statics that declare non-battlefield active_zones must not
-            // fire from the battlefield. Empty active_zones = battlefield default.
-            if !def.active_zones.is_empty() && !def.active_zones.contains(&Zone::Battlefield) {
+            // CR 113.6 + CR 113.6b: A static functions only in its declared
+            // zones. Empty `active_zones` means battlefield default; non-empty
+            // means restrict to the listed zones. Eminence statics list both
+            // Battlefield and Command and pass for either source zone.
+            if def.active_zones.is_empty() {
+                if src_obj.zone != Zone::Battlefield {
+                    continue;
+                }
+            } else if !def.active_zones.contains(&src_obj.zone) {
                 continue;
             }
 
@@ -3012,6 +3127,35 @@ fn alternative_spell_layout(obj: &crate::game::game_object::GameObject) -> Optio
         Some(_) => None,
         None => Some(LayoutKind::Adventure),
     }
+}
+
+/// CR 712.11b: Returns true if `obj` is a Modal double-faced card whose two
+/// faces present a real *cast*-time face choice — i.e. both faces are spells
+/// (neither is a land). This is the spell//spell MDFC class (Esika, God of the
+/// Tree // The Prismatic Bridge and the other Kaldheim gods, Valki // Tibalt,
+/// Halvar // Sword, etc.) where `CastSpell` must let the player choose which
+/// face to put on the stack.
+///
+/// Land faces are deliberately excluded: a land MDFC face is put onto the
+/// battlefield through the play-land special action (`handle_play_land`), which
+/// runs its own `ModalFaceChoice`. A spell//land MDFC casts its spell (front)
+/// face normally and plays its land (back) face via PlayLand, so neither needs
+/// a cast-time choice here.
+///
+/// The gate keys off `back_face.layout_kind == Modal`, which
+/// `snapshot_object_face` clears to `None` after a swap — so re-entry into the
+/// cast pipeline for the chosen face does not re-prompt.
+fn modal_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+    use crate::types::card_type::CoreType;
+    let Some(back) = obj.back_face.as_ref() else {
+        return false;
+    };
+    if back.layout_kind != Some(LayoutKind::Modal) {
+        return false;
+    }
+    let front_is_land = obj.card_types.core_types.contains(&CoreType::Land);
+    let back_is_land = back.card_types.core_types.contains(&CoreType::Land);
+    !front_is_land && !back_is_land
 }
 
 fn casting_variant_for_alternative_spell(layout: LayoutKind) -> CastingVariant {
@@ -4115,6 +4259,22 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
+    // CR 712.11b: Spell//spell Modal DFCs from hand require choosing which face
+    // to cast (Esika, God of the Tree // The Prismatic Bridge, etc.). The
+    // `ChooseModalFace` handler swaps to the chosen face (if back) and re-enters
+    // this function; the swap clears the back face's Modal `layout_kind`, so the
+    // re-entry casts the chosen face without re-prompting.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand && modal_spell_face_choice_available(obj) {
+            return Ok(WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
+                payment_mode,
+            });
+        }
+    }
+
     let variant_choices = casting_variant_choice_set(state, player, object_id);
     if variant_choices.options.len() > 1 {
         return Ok(WaitingFor::CastingVariantChoice {
@@ -4696,6 +4856,11 @@ fn continue_with_prepared(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
+        let target_constraints = prepared
+            .ability_def
+            .as_ref()
+            .map(|ability| ability.target_constraints.clone())
+            .unwrap_or_default();
         let has_kicker_cost = state
             .objects
             .get(&prepared.object_id)
@@ -4748,7 +4913,7 @@ fn continue_with_prepared(
         }
 
         if let Some(targets) =
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
@@ -4767,7 +4932,12 @@ fn continue_with_prepared(
             );
         }
 
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        )?;
         let mut pending_targets = PendingCast::new(
             prepared.object_id,
             prepared.card_id,
@@ -4780,6 +4950,7 @@ fn continue_with_prepared(
             .ability_def
             .as_ref()
             .and_then(|a| a.distribute.clone());
+        pending_targets.target_constraints = target_constraints;
         pending_targets.origin_zone = prepared.origin_zone;
         pending_targets.payment_mode = prepared.payment_mode;
         return Ok(WaitingFor::TargetSelection {
@@ -4955,7 +5126,12 @@ pub fn spell_has_legal_targets(
             if target_slots.is_empty() {
                 true
             } else {
-                has_legal_target_assignment_for_ability(&simulated, &resolved, &target_slots, &[])
+                has_legal_target_assignment_for_ability(
+                    &simulated,
+                    &resolved,
+                    &target_slots,
+                    &ability_def.target_constraints,
+                )
             }
         }
         Err(_) => false,
@@ -5176,6 +5352,23 @@ fn can_cast_prepared_now(
         return can_cast_object_now(&sim, player, prepared.object_id);
     }
 
+    // CR 712.11c: For a spell//spell Modal DFC, only the face that will be face
+    // up on the stack is evaluated to determine if it can be cast — so the back
+    // face must be tested independently. The front face may be unaffordable
+    // (Esika, God of the Tree needs {1}{G}{G}) while the back face is castable
+    // (The Prismatic Bridge needs {W}{U}{B}{R}{G}); the card is still legally
+    // castable and will prompt ModalFaceChoice (CR 712.11b). Mirror the Adventure
+    // recursion: swap to the back face and re-test. `swap_to_alternative_spell_face`
+    // clears the back face's `layout_kind`, so the recursive call does not
+    // re-enter this branch (no infinite recursion).
+    if modal_spell_face_choice_available(obj) {
+        let mut sim = state.clone();
+        if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
+            swap_to_alternative_spell_face(sim_obj);
+        }
+        return can_cast_object_now(&sim, player, prepared.object_id);
+    }
+
     false
 }
 
@@ -5213,7 +5406,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
     // castable while the real cast failed "Cannot pay mana cost").
     super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut tap_events, 0);
 
-    let any_color = player_can_spend_as_any_color_for_spell(&simulated, player, source_id);
+    let any_color = player_can_spend_as_any_color_for_payment(&simulated, player, source_id, ctx);
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle the payer's
     // payment-time permissions (`any_color`, `max_life`, `life_colors`) so
     // K'rrik-style life-for-{B} grants are visible to the affordability check.
@@ -5359,6 +5552,17 @@ fn requires_untapped(cost: &AbilityCost) -> bool {
         AbilityCost::Tap => true,
         AbilityCost::Composite { costs } => costs.iter().any(requires_untapped),
         _ => false,
+    }
+}
+
+pub(super) fn ability_mana_payment_excluded_sources(
+    cost: &AbilityCost,
+    source_id: ObjectId,
+) -> HashSet<ObjectId> {
+    if requires_untapped(cost) {
+        HashSet::from([source_id])
+    } else {
+        HashSet::new()
     }
 }
 
@@ -5550,6 +5754,26 @@ pub(super) fn pay_ability_mana_cost_excluding(
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> Result<(), EngineError> {
+    pay_ability_mana_cost_with_choices_excluding(
+        state,
+        player,
+        source_id,
+        cost,
+        None,
+        events,
+        excluded_sources,
+    )
+}
+
+pub(super) fn pay_ability_mana_cost_with_choices_excluding(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
+    events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
+) -> Result<(), EngineError> {
     if state.layers_dirty {
         super::layers::evaluate_layers(state);
     }
@@ -5566,7 +5790,7 @@ pub(super) fn pay_ability_mana_cost_excluding(
         source_id,
         cost,
         Some(&activation_ctx),
-        None,
+        phyrexian_choices,
         events,
         excluded_sources,
     )?;
@@ -5712,7 +5936,7 @@ fn auto_tap_and_pay_cost_excluding(
     // (`any_color`, `max_life`, `life_colors`) once for the cast — K'rrik-style
     // life-for-{B} grants flow through the same dry-run + execution helpers.
     let permissions = {
-        let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
+        let any_color = player_can_spend_as_any_color_for_payment(state, player, source_id, ctx);
         super::static_abilities::build_cost_permission_context(state, player, any_color)
     };
     {
@@ -5856,6 +6080,18 @@ pub fn pay_ability_cost(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
+    pay_ability_cost_inner(state, player, source_id, cost, events, &excluded_sources)
+}
+
+fn pay_ability_cost_inner(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
+) -> Result<(), EngineError> {
     match cost {
         AbilityCost::Tap => {
             let obj = state
@@ -5883,11 +6119,29 @@ pub fn pay_ability_cost(
             // CR 106.6: Ability activation — restriction enforcement routes
             // through `allows_activation` (not `allows_spell`) via the
             // activation context built from the source permanent's types.
-            pay_ability_mana_cost(state, player, source_id, cost, events)?;
+            if excluded_sources.is_empty() {
+                pay_ability_mana_cost(state, player, source_id, cost, events)?;
+            } else {
+                pay_ability_mana_cost_excluding(
+                    state,
+                    player,
+                    source_id,
+                    cost,
+                    events,
+                    excluded_sources,
+                )?;
+            }
         }
         AbilityCost::Composite { costs } => {
             for sub_cost in costs {
-                pay_ability_cost(state, player, source_id, sub_cost, events)?;
+                pay_ability_cost_inner(
+                    state,
+                    player,
+                    source_id,
+                    sub_cost,
+                    events,
+                    excluded_sources,
+                )?;
             }
         }
         AbilityCost::PayLife { amount } => {
@@ -6050,7 +6304,12 @@ pub fn pay_ability_cost(
                     "Cannot unattach: source is not attached".to_string(),
                 ));
             }
-            super::effects::attach::unattach(state, source_id);
+            if let Some(old_target) = super::effects::attach::unattach(state, source_id) {
+                events.push(GameEvent::Unattached {
+                    attachment_id: source_id,
+                    old_target,
+                });
+            }
         }
         // CR 606.4: Loyalty abilities use loyalty counter adjustment as their cost.
         // Called after target selection when the ability was initiated interactively.
@@ -6110,19 +6369,13 @@ pub fn pay_ability_cost(
                 );
             }
         }
-        // Targeted remove-counter costs ("remove a counter from target X") would
-        // need an interactive WaitingFor flow to let the player pick the permanent.
-        // The current parser only emits `target: None`, so this is unreachable in
-        // practice but kept exhaustive to catch any future parser extension.
+        // Targeted remove-counter costs are paid by the interactive
+        // WaitingFor::RemoveCounterForCost path before automatic cost
+        // components resume here. This arm intentionally no-ops so composite
+        // activation costs can still pay their remaining automatic pieces.
         AbilityCost::RemoveCounter {
             target: Some(_), ..
-        } => {
-            return Err(EngineError::ActionNotAllowed(
-                "Targeted remove-counter costs require interactive resolution and must be \
-                 intercepted before reaching pay_ability_cost"
-                    .to_string(),
-            ));
-        }
+        } => {}
         // CR 701.43a: "To exert a permanent, its controller chooses to have it
         // not untap during its controller's next untap step." Modeled as a
         // transient continuous effect with `StaticMode::CantUntap` scoped to
@@ -6287,6 +6540,22 @@ fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     }
 }
 
+fn find_targeted_remove_counter_cost(
+    cost: &AbilityCost,
+) -> Option<(u32, &crate::types::counter::CounterMatch, &TargetFilter)> {
+    match cost {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target: Some(target),
+        } => Some((*count, counter_type, target)),
+        AbilityCost::Composite { costs } => {
+            costs.iter().find_map(find_targeted_remove_counter_cost)
+        }
+        _ => None,
+    }
+}
+
 /// Shared eligibility helper for hand-card cost payments — returns every card
 /// in `player`'s hand matching `filter` (if any), excluding the cast source.
 /// Used by both discard-as-cost (CR 601.2b) and exile-from-hand-as-cost
@@ -6363,6 +6632,14 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     }
 }
 
+fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
+    match cost {
+        AbilityCost::OneOf { costs } => Some(costs),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_one_of_cost),
+        _ => None,
+    }
+}
+
 fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
     match cost {
         // CR 118.12: This helper currently only handles the default
@@ -6399,6 +6676,41 @@ pub(crate) fn find_eligible_return_to_hand_targets(
                 obj.controller == player
                     && filter
                         .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            })
+        })
+        .collect()
+}
+
+fn removable_counter_count(
+    obj: &crate::game::game_object::GameObject,
+    counter_type: &crate::types::counter::CounterMatch,
+) -> u32 {
+    match counter_type {
+        crate::types::counter::CounterMatch::OfType(ty) => {
+            obj.counters.get(ty).copied().unwrap_or(0)
+        }
+        crate::types::counter::CounterMatch::Any => obj.counters.values().copied().sum(),
+    }
+}
+
+pub(crate) fn find_eligible_remove_counter_for_cost_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    target: &TargetFilter,
+    counter_type: &crate::types::counter::CounterMatch,
+    count: u32,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_source(state, source);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            state.objects.get(&id).is_some_and(|obj| {
+                obj.controller == player
+                    && super::filter::matches_target_filter(state, id, target, &ctx)
+                    && removable_counter_count(obj, counter_type) >= count
             })
         })
         .collect()
@@ -6662,6 +6974,9 @@ pub fn can_activate_ability_now(
     if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return false;
     }
+    if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
+        return false;
+    }
     if restrictions::check_activation_restrictions(
         state,
         player,
@@ -6731,7 +7046,7 @@ pub fn can_activate_ability_now(
                     &simulated,
                     &resolved,
                     &target_slots,
-                    &[],
+                    &ability_def.target_constraints,
                 )
         }
         Err(_) => false,
@@ -6780,6 +7095,11 @@ pub fn handle_activate_ability(
     if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return Err(EngineError::ActionNotAllowed(
             "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+        ));
+    }
+    if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "A temporary effect prevents activating this ability".to_string(),
         ));
     }
 
@@ -6946,6 +7266,19 @@ pub fn handle_activate_ability(
             });
         }
 
+        // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
+        if let Some(costs) = find_one_of_cost(cost) {
+            let mut pending_one_of =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_one_of.activation_cost = Some(cost.clone());
+            pending_one_of.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::ActivationCostOneOfChoice {
+                player,
+                costs: costs.clone(),
+                pending_cast: Box::new(pending_one_of),
+            });
+        }
+
         // CR 118.3: Pre-check for ReturnToHand costs — same WaitingFor detour pattern as
         // Sacrifice above. Ordering matters for Composite costs: Sacrifice wins if both are
         // present, but no real cards combine them.
@@ -6965,6 +7298,37 @@ pub fn handle_activate_ability(
                 count: count as usize,
                 permanents: eligible,
                 pending_cast: Box::new(pending_return),
+            });
+        }
+
+        // CR 118.3 + CR 122.1 + CR 602.2b: Pre-check targeted
+        // remove-counter activation costs. The player chooses which matching
+        // permanent supplies the counter before automatic cost components are
+        // paid and the ability is put on the stack.
+        if let Some((count, counter_type, target)) = find_targeted_remove_counter_cost(cost) {
+            let eligible = find_eligible_remove_counter_for_cost_targets(
+                state,
+                player,
+                source_id,
+                target,
+                counter_type,
+                count,
+            );
+            if eligible.is_empty() {
+                return Err(EngineError::ActionNotAllowed(
+                    "No eligible permanents with counters".into(),
+                ));
+            }
+            let mut pending_counter =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_counter.activation_cost = Some(cost.clone());
+            pending_counter.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::RemoveCounterForCost {
+                player,
+                count,
+                counter_type: counter_type.clone(),
+                permanents: eligible,
+                pending_cast: Box::new(pending_counter),
             });
         }
 
@@ -7021,8 +7385,9 @@ pub fn handle_activate_ability(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
+        let target_constraints = ability_def.target_constraints.clone();
         if let Some(targets) =
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
@@ -7065,7 +7430,10 @@ pub fn handle_activate_ability(
             // CR 117.1b: Priority permits unbounded activation. `pending_activations`
             // is a per-priority-window AI-guard — see `GameState::pending_activations`.
             state.pending_activations.push((source_id, ability_index));
-            events.push(GameEvent::AbilityActivated { source_id });
+            events.push(GameEvent::AbilityActivated {
+                player_id: player,
+                source_id,
+            });
             // CR 702.142b: Emit additional event when a boast ability is activated.
             super::casting_targets::emit_keyword_ability_event_if_tagged(
                 state,
@@ -7079,7 +7447,12 @@ pub fn handle_activate_ability(
             return Ok(WaitingFor::Priority { player });
         }
 
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        )?;
         let mut pending_target = PendingCast::new(
             source_id,
             CardId(0),
@@ -7088,6 +7461,7 @@ pub fn handle_activate_ability(
         );
         pending_target.activation_cost = ability_def.cost.clone();
         pending_target.activation_ability_index = Some(ability_index);
+        pending_target.target_constraints = target_constraints;
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending_target),
@@ -7132,7 +7506,10 @@ pub fn handle_activate_ability(
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
     state.pending_activations.push((source_id, ability_index));
-    events.push(GameEvent::AbilityActivated { source_id });
+    events.push(GameEvent::AbilityActivated {
+        player_id: player,
+        source_id,
+    });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
@@ -7202,13 +7579,15 @@ pub fn handle_cancel_cast(
             .rposition(|entry| entry.id == pending.object_id)
         {
             state.stack.remove(pos);
+            state.stack_paid_facts.remove(&pending.object_id);
         }
     }
 }
 
 // Cost payment handlers are in casting_costs module.
 pub(crate) use super::casting_costs::{
-    handle_discard_for_cost, handle_return_to_hand_for_cost, handle_sacrifice_for_cost,
+    handle_activation_cost_one_of_choice, handle_discard_for_cost, handle_return_to_hand_for_cost,
+    handle_sacrifice_for_cost,
 };
 
 fn generic_mana_in_cost(cost: &AbilityCost) -> u32 {
@@ -7525,6 +7904,18 @@ fn is_blocked_by_cant_be_cast(
             }
         }
 
+        // CR 101.2 + CR 109.5 + CR 601.3a: per-affected-player applicability gate.
+        // Angelic Arbiter restricts only opponents who attacked with a creature
+        // this turn. Evaluated against the CASTER (CR 109.5), not the source's
+        // controller. The source-relative `def.condition` functioning gate is
+        // already applied upstream by `battlefield_active_statics`, so this is the
+        // only additional gate needed — do NOT re-evaluate `def.condition` here.
+        if let Some(ref cond) = def.per_player_condition {
+            if !restrictions::evaluate_condition(state, caster, bf_obj.id, cond) {
+                continue;
+            }
+        }
+
         return true;
     }
     false
@@ -7689,9 +8080,10 @@ mod tests {
         CastVariantPaid, CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator,
         ContinuousModification, ControllerRef, CostCategory, FilterProp, GainLifePlayer,
         GameRestriction, KickerVariant, ManaContribution, ManaProduction, ManaSpendPermission,
-        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr,
-        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
+        ProhibitedActivity, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -7728,6 +8120,24 @@ mod tests {
                 expiry: None,
             });
         }
+    }
+
+    fn add_restricted_mana(
+        state: &mut GameState,
+        player: PlayerId,
+        color: ManaType,
+        restrictions: Vec<ManaRestriction>,
+    ) {
+        let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        player_data.mana_pool.add(ManaUnit {
+            color,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions,
+            grants: vec![],
+            expiry: None,
+        });
     }
 
     fn add_activation_only_colorless_source(
@@ -8558,6 +8968,93 @@ mod tests {
         obj_id
     }
 
+    #[test]
+    fn prohibit_activity_cast_spells_filter_blocks_only_matching_spell_types() {
+        // CR 101.2 + CR 601.2a: Abeyance-style restrictions can prohibit only
+        // the matching spell class while leaving other spell types castable.
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(0xA8E1),
+            PlayerId(1),
+            "Abeyance Source".to_string(),
+            Zone::Exile,
+        );
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::CastSpells {
+                spell_filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+            },
+        });
+
+        let instant = create_instant_in_hand(&mut state, PlayerId(0));
+        let sorcery = create_sorcery_in_hand(&mut state, PlayerId(0));
+        let creature = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 8);
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 8);
+
+        assert!(!can_cast_object_now(&state, PlayerId(0), instant));
+        assert!(!can_cast_object_now(&state, PlayerId(0), sorcery));
+        assert!(can_cast_object_now(&state, PlayerId(0), creature));
+    }
+
+    #[test]
+    fn prohibit_activity_activate_abilities_blocks_non_mana_but_exempts_mana() {
+        // CR 602.5 + CR 605.1a: Abeyance prohibits non-mana activated abilities
+        // while leaving mana abilities available.
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(0xA8E2),
+            PlayerId(1),
+            "Abeyance Source".to_string(),
+            Zone::Exile,
+        );
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::ActivateAbilities {
+                exemption: ActivationExemption::ManaAbilities,
+            },
+        });
+
+        let non_mana_source = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        let mana_source = create_object(
+            &mut state,
+            CardId(0xA8E3),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mana_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.entered_battlefield_turn = Some(0);
+            Arc::make_mut(&mut obj.abilities).push(make_tap_for_green_mana_ability());
+        }
+
+        assert!(!can_activate_ability_now(
+            &state,
+            PlayerId(0),
+            non_mana_source,
+            0
+        ));
+        assert!(can_activate_ability_now(
+            &state,
+            PlayerId(0),
+            mana_source,
+            0
+        ));
+    }
+
     fn create_gloomlake_verge(state: &mut GameState, player: PlayerId) -> ObjectId {
         let obj_id = create_object(
             state,
@@ -8684,6 +9181,488 @@ mod tests {
             .cost(AbilityCost::Tap),
         );
         obj_id
+    }
+
+    fn colorless_tap_mana_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+    }
+
+    fn blue_tap_mana_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Blue],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+    }
+
+    fn colorless_activation_mana_cost() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 0,
+        }
+    }
+
+    fn create_colorless_tap_activated_source(
+        state: &mut GameState,
+        player: PlayerId,
+        cost: AbilityCost,
+        effect: Effect,
+    ) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(52),
+            player,
+            "Mirrorlake Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(colorless_tap_mana_ability());
+        Arc::make_mut(&mut obj.abilities)
+            .push(AbilityDefinition::new(AbilityKind::Activated, effect).cost(cost));
+        obj_id
+    }
+
+    #[test]
+    fn composite_mana_tap_activation_excludes_source_from_auto_tap() {
+        let mut state = setup_game_at_main_phase();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: colorless_activation_mana_cost(),
+                },
+                AbilityCost::Tap,
+            ],
+        };
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            cost,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        assert!(!can_activate_ability_now(&state, PlayerId(0), source, 1));
+
+        let mut events = Vec::new();
+        let result = handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut events);
+
+        assert!(result.is_err());
+        assert!(!state.objects[&source].tapped);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn composite_mana_tap_sacrifice_activation_uses_alternate_mana_source() {
+        let mut state = setup_game_at_main_phase();
+        let source_cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: colorless_activation_mana_cost(),
+                },
+                AbilityCost::Tap,
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: 1,
+                },
+            ],
+        };
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            source_cost,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let alternate = add_brushland_like_land(&mut state, CardId(53), "Colorless Helper", false);
+
+        assert!(can_activate_ability_now(&state, PlayerId(0), source, 1));
+
+        let mut events = Vec::new();
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut events).unwrap();
+
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert!(state.objects[&source].tapped);
+        assert_eq!(state.objects[&source].zone, Zone::Graveyard);
+        assert!(state.objects[&alternate].tapped);
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn targeted_composite_mana_tap_activation_excludes_source_after_target_selection() {
+        let mut state = setup_game_at_main_phase();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: colorless_activation_mana_cost(),
+                },
+                AbilityCost::Tap,
+            ],
+        };
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            cost,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                damage_source: None,
+            },
+        );
+        let target = create_object(
+            &mut state,
+            CardId(54),
+            PlayerId(1),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let other_target = create_object(
+            &mut state,
+            CardId(55),
+            PlayerId(1),
+            "Other Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other_target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut Vec::new()).unwrap();
+        assert!(matches!(waiting, WaitingFor::TargetSelection { .. }));
+        state.waiting_for = waiting;
+
+        let result = handle_select_targets(
+            &mut state,
+            PlayerId(0),
+            vec![TargetRef::Object(target)],
+            &mut Vec::new(),
+        );
+
+        assert!(result.is_err());
+        assert!(!state.objects[&source].tapped);
+    }
+
+    #[test]
+    fn x_composite_mana_tap_activation_rejects_source_only_pending_payment_without_tapping() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            },
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+        match state.waiting_for.clone() {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(
+                max, 0,
+                "the activation source cannot raise X while it must remain untapped for {{T}}"
+            ),
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        let result = apply_as_current(&mut state, GameAction::ChooseX { value: 1 });
+
+        assert!(result.is_err());
+        assert!(
+            !state.objects[&source].tapped,
+            "failed pending X payment must not spend the source before its Tap cost"
+        );
+    }
+
+    #[test]
+    fn x_composite_mana_tap_activation_excludes_source_during_pending_payment() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            },
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+        );
+        let alternate = add_brushland_like_land(&mut state, CardId(56), "X Helper", false);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "X activation should ask for X before payment"
+        );
+        assert!(
+            !state.objects[&source].tapped,
+            "source must stay untapped before pending mana payment"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 1 }).unwrap();
+
+        assert!(state.objects[&source].tapped);
+        assert!(
+            state.objects[&alternate].tapped,
+            "pending activation mana payment must use the alternate source"
+        );
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn x_phyrexian_composite_mana_tap_activation_excludes_source_during_phyrexian_prepass() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(57),
+            PlayerId(0),
+            "Phyrexian Mirrorlake Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(blue_tap_mana_ability());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![ManaCostShard::X, ManaCostShard::PhyrexianBlue],
+                                generic: 0,
+                            },
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+            );
+        }
+        let life_before = state.players[0].life;
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+
+        match state.waiting_for.clone() {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(
+                max, 0,
+                "the activation source's own blue mana ability cannot pay X while {{T}} remains due"
+            ),
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::PhyrexianPayment { .. }),
+            "source-only Phyrexian activation has no mana/life choice once the source is excluded"
+        );
+        if matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        assert!(state.objects[&source].tapped);
+        assert_eq!(state.players[0].life, life_before - 2);
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn x_phyrexian_composite_mana_tap_activation_keeps_source_untapped_until_choice_resume() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(58),
+            PlayerId(0),
+            "Choice Phyrexian Mirrorlake Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(blue_tap_mana_ability());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![ManaCostShard::X, ManaCostShard::PhyrexianBlue],
+                                generic: 0,
+                            },
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+            );
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        let life_before = state.players[0].life;
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ManaPayment {
+                player: PlayerId(0),
+                convoke_mode: None
+            }
+        ));
+        assert!(
+            !state.objects[&source].tapped,
+            "source must remain untapped before pending mana payment finalizes"
+        );
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        match state.waiting_for.clone() {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(matches!(shards[0].options, ShardOptions::ManaOrLife));
+            }
+            other => panic!("expected PhyrexianPayment, got {other:?}"),
+        }
+        assert!(
+            !state.objects[&source].tapped,
+            "source must remain untapped while the Phyrexian mana choice is pending"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayMana],
+            },
+        )
+        .unwrap();
+
+        assert!(state.objects[&source].tapped);
+        assert_eq!(state.players[0].life, life_before);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.stack.len(), 1);
     }
 
     #[test]
@@ -12095,6 +13074,7 @@ mod tests {
                 affected: Some(affected),
                 modifications: vec![],
                 condition: None,
+                per_player_condition: None,
                 affected_zone: None,
                 effect_zone: None,
                 active_zones: vec![],
@@ -12573,7 +13553,7 @@ mod tests {
         assert!(state.objects[&source].tapped);
         assert!(events.iter().any(|event| matches!(
             event,
-            GameEvent::AbilityActivated { source_id } if *source_id == source
+            GameEvent::AbilityActivated { source_id, .. } if *source_id == source
         )));
     }
 
@@ -12760,7 +13740,8 @@ mod tests {
         assert!(second.is_err());
         assert!(events.iter().any(|event| matches!(
             event,
-            GameEvent::ExhaustAbilityActivated {
+            GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Exhaust,
                 player_id: PlayerId(0),
                 source_id,
                 is_mana_ability: false,
@@ -12858,6 +13839,7 @@ mod tests {
                         reveal: false,
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
                     },
                 )
                 .cost(AbilityCost::ReturnToHand {
@@ -16093,11 +17075,13 @@ mod tests {
             "Restriction Source".to_string(),
             Zone::Exile,
         );
-        state.restrictions.push(GameRestriction::CastOnlyFromZones {
+        state.restrictions.push(GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            allowed_zones: vec![Zone::Hand],
             expiry: RestrictionExpiry::UntilPlayerNextTurn { player: controller },
+            activity: ProhibitedActivity::CastOnlyFromZones {
+                allowed_zones: vec![Zone::Hand],
+            },
         });
         source
     }
@@ -16164,6 +17148,64 @@ mod tests {
         // No CantCastDuring statics on battlefield — baseline
         assert!(!is_blocked_by_cant_cast_during(&state, PlayerId(0)));
         assert!(!is_blocked_by_cant_cast_during(&state, PlayerId(1)));
+    }
+
+    /// CR 101.2 + CR 601.3a: Angelic Arbiter — "Each opponent who attacked with a
+    /// creature this turn can't cast spells." The per-affected-player turn-activity
+    /// predicate must gate the cast-lock: an opponent who has NOT attacked this turn
+    /// can still cast. This discriminates the prior misparse (an unconditional
+    /// opponent cast-lock that wrongly blocked, e.g., Bolt Bend).
+    #[test]
+    fn angelic_arbiter_cast_lock_only_after_opponent_attacks() {
+        let mut state = setup_game_at_main_phase();
+        // Opponent-controlled (PlayerId(1)) Angelic Arbiter clause on the battlefield.
+        let arbiter = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Angelic Arbiter".to_string(),
+            Zone::Battlefield,
+        );
+        let def = parse_static_line(
+            "Each opponent who attacked with a creature this turn can't cast spells.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.per_player_condition,
+            Some(crate::types::ability::ParsedCondition::YouAttackedThisTurn)
+        );
+        state
+            .objects
+            .get_mut(&arbiter)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        // Player 0's spell on the stack (CantBeCast has no `affected` filter, so any
+        // spell object is restricted).
+        let spell = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Bolt Bend".to_string(),
+            Zone::Stack,
+        );
+        let spell_obj = state.objects.get(&spell).unwrap().clone();
+
+        // Player 0 has NOT attacked this turn -> the per-player gate fails -> NOT
+        // blocked. On main (unconditional lock) this assertion FAILS.
+        assert!(
+            !is_blocked_by_cant_be_cast(&state, PlayerId(0), &spell_obj),
+            "an opponent who has not attacked this turn must still be able to cast"
+        );
+
+        // Record that player 0 attacked this turn -> the per-player gate holds ->
+        // now blocked (CR 601.3a).
+        state.players_attacked_this_turn.insert(PlayerId(0));
+        assert!(
+            is_blocked_by_cant_be_cast(&state, PlayerId(0), &spell_obj),
+            "after attacking, the opponent can no longer cast spells"
+        );
     }
 
     // --- PerTurnCastLimit enforcement tests ---
@@ -16613,7 +17655,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Counter {
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::card()),
-                    source_static: None,
+                    source_rider: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -19327,6 +20369,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn phyrexian_spell_prepass_honors_spell_mana_restrictions() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_phyrexian_instant_in_hand(
+            &mut state,
+            PlayerId(0),
+            vec![ManaCostShard::PhyrexianBlue],
+            0,
+        );
+        add_restricted_mana(
+            &mut state,
+            PlayerId(0),
+            ManaType::Blue,
+            vec![ManaRestriction::OnlyForSpellType("Creature".to_string())],
+        );
+        let life_before = state.players[0].life;
+
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CardId(0x9117),
+            &mut Vec::new(),
+        )
+        .expect("restricted mana cannot pay this instant, but life can");
+
+        assert!(
+            !matches!(waiting, WaitingFor::PhyrexianPayment { .. }),
+            "spell-restricted mana must not create a false mana/life choice for an ineligible spell"
+        );
+        assert_eq!(state.players[0].life, life_before - 2);
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            1,
+            "ineligible restricted mana must remain in the pool"
+        );
+    }
+
     /// CR 107.4f + CR 118.3b: Multi-Phyrexian cost paid entirely with life —
     /// each shard deducts 2, total life loss = 2 × shard_count.
     #[test]
@@ -20679,6 +21759,109 @@ mod tests {
                 "one counter removed, two remain"
             );
         }
+
+        #[test]
+        fn targeted_counter_cost_prompts_and_removes_from_chosen_permanent() {
+            use crate::game::engine::apply_as_current;
+
+            let mut state = setup_game_at_main_phase();
+            let source = create_object(
+                &mut state,
+                CardId(901),
+                PlayerId(0),
+                "Counter Scholar".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&source).unwrap();
+                obj.card_types.core_types.push(CoreType::Artifact);
+                Arc::make_mut(&mut obj.abilities).push(
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )
+                    .cost(AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Tap,
+                            AbilityCost::RemoveCounter {
+                                count: 1,
+                                counter_type: CounterMatch::Any,
+                                target: Some(TargetFilter::Typed(
+                                    TypedFilter::new(TypeFilter::Permanent)
+                                        .controller(ControllerRef::You),
+                                )),
+                            },
+                        ],
+                    }),
+                );
+            }
+            let saga = create_object(
+                &mut state,
+                CardId(902),
+                PlayerId(0),
+                "Test Saga".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&saga).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                obj.counters.insert(CounterType::Lore, 1);
+            }
+            let empty_permanent = create_object(
+                &mut state,
+                CardId(903),
+                PlayerId(0),
+                "No Counter".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&empty_permanent)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+
+            assert!(can_activate_ability_now(&state, PlayerId(0), source, 0));
+            let waiting =
+                handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+                    .unwrap();
+            match &waiting {
+                WaitingFor::RemoveCounterForCost {
+                    player,
+                    count,
+                    counter_type,
+                    permanents,
+                    ..
+                } => {
+                    assert_eq!(*player, PlayerId(0));
+                    assert_eq!(*count, 1);
+                    assert_eq!(*counter_type, CounterMatch::Any);
+                    assert_eq!(permanents, &vec![saga]);
+                }
+                other => panic!("Expected RemoveCounterForCost, got {other:?}"),
+            }
+            state.waiting_for = waiting;
+
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![saga] }).unwrap();
+
+            assert!(state.objects[&source].tapped);
+            assert_eq!(
+                state.objects[&saga]
+                    .counters
+                    .get(&CounterType::Lore)
+                    .copied()
+                    .unwrap_or(0),
+                0
+            );
+            assert!(
+                state.stack.iter().any(|entry| entry.source_id == source),
+                "activated ability should reach the stack after targeted counter cost payment"
+            );
+        }
     }
 
     mod unattach_cost {
@@ -21684,7 +22867,7 @@ mod tests {
                 .objects
                 .get_mut(&pw)
                 .unwrap()
-                .loyalty_activated_this_turn = true;
+                .loyalty_activations_this_turn = 1;
 
             // CR 606.3: every remaining loyalty ability on the same PW is denied.
             assert!(
@@ -21721,7 +22904,7 @@ mod tests {
                 .objects
                 .get_mut(&pw)
                 .unwrap()
-                .loyalty_activated_this_turn = true;
+                .loyalty_activations_this_turn = 1;
             assert!(!can_activate_ability_now(&state, PlayerId(0), pw, 0));
             assert!(!can_activate_ability_now(&state, PlayerId(0), pw, 1));
 
@@ -21740,11 +22923,11 @@ mod tests {
 
             assert!(
                 can_activate_ability_now(&state, PlayerId(0), pw, 0),
-                "ability 0 must be activatable again after loyalty_activated_this_turn reset"
+                "ability 0 must be activatable again after loyalty_activations_this_turn reset"
             );
             assert!(
                 can_activate_ability_now(&state, PlayerId(0), pw, 1),
-                "ability 1 must be activatable again after loyalty_activated_this_turn reset"
+                "ability 1 must be activatable again after loyalty_activations_this_turn reset"
             );
         }
 
@@ -21773,7 +22956,7 @@ mod tests {
                 .objects
                 .get_mut(&pw1)
                 .unwrap()
-                .loyalty_activated_this_turn = true;
+                .loyalty_activations_this_turn = 1;
 
             // PW1 fully locked.
             assert!(!can_activate_ability_now(&state, PlayerId(0), pw1, 0));
@@ -22335,6 +23518,7 @@ mod tests {
                     reveal: true,
                     target_player: None,
                     selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
                 },
             )
             .cost(AbilityCost::Composite {

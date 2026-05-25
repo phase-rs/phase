@@ -40,7 +40,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
     TypedFilter,
 };
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -634,17 +634,27 @@ pub(crate) fn lower_static_ir(ir: &StaticIr) -> StaticDefinition {
 /// mirrors `self_recursion_trigger_zone` for `TriggerDefinition.trigger_zones`.
 ///
 /// Walks the `StaticCondition` tree and collects every `SourceInZone { zone }`
-/// where `zone != Zone::Battlefield`, populating `StaticDefinition.active_zones`.
-/// The battlefield is NOT included (battlefield is the CR 113.6 default and
-/// does not need opt-in). If the condition does not reference a
-/// non-battlefield zone, `active_zones` is left empty (battlefield-only).
+/// it can reach. For a single non-battlefield reference (Anger-class), the
+/// resulting `active_zones` is `[Zone]` — `Battlefield` is the CR 113.6 default
+/// and only needs to be listed when the condition is a disjunction that names
+/// multiple zones (Eminence: "in the command zone or on the battlefield").
+/// When ALL collected zones happen to be `Battlefield`, `active_zones` is left
+/// empty so the standard battlefield-default applies.
 fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
-    let mut zones: Vec<crate::types::zones::Zone> = Vec::new();
+    use crate::types::zones::Zone;
+    let mut zones: Vec<Zone> = Vec::new();
     if let Some(cond) = def.condition.as_ref() {
         collect_source_in_zones(cond, &mut zones);
     }
     // Deduplicate while preserving order.
     zones.dedup();
+    // If the only reference was Battlefield, fall back to the empty/default
+    // representation (CR 113.6) — adding `[Battlefield]` explicitly is
+    // semantically identical but would diverge from existing tests that
+    // assume `active_zones.is_empty()` for pure-battlefield statics.
+    if zones.len() == 1 && zones[0] == Zone::Battlefield {
+        zones.clear();
+    }
     // Don't clobber an explicitly-set active_zones: upstream callers may pin
     // non-battlefield zones directly on the StaticDefinition (e.g. hand-zone
     // statics) and the condition-derived inference should only fill in zones
@@ -655,11 +665,8 @@ fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
 }
 
 fn collect_source_in_zones(cond: &StaticCondition, out: &mut Vec<crate::types::zones::Zone>) {
-    use crate::types::zones::Zone;
     match cond {
-        StaticCondition::SourceInZone { zone }
-            if *zone != Zone::Battlefield && !out.contains(zone) =>
-        {
+        StaticCondition::SourceInZone { zone } if !out.contains(zone) => {
             out.push(*zone);
         }
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
@@ -680,11 +687,23 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
+    // CR 101.2 + CR 109.5: "Each opponent who [did X] this turn can't [Y]" —
+    // per-affected-player conditional prohibition (Angelic Arbiter). Must run
+    // BEFORE the generic "can't attack" arm and the `parse_cant_cast_type_spells`
+    // dispatch so the per-player predicate is preserved and the attack clause is
+    // not misparsed as a SelfRef restriction.
+    if let Some(def) = parse_per_player_conditional_prohibition(&tp, &text) {
+        return Some(def);
+    }
     if let Some(def) = parse_every_creature_type_static(&tp, &text) {
         return Some(def);
     }
     if let Some(def) = parse_collection_counter_play_permission_static(&tp, &text) {
         return Some(def);
+    }
+
+    if let Some(mode) = parse_max_combat_creatures_static(&lower) {
+        return Some(StaticDefinition::new(mode).description(text.to_string()));
     }
 
     if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &text) {
@@ -1403,6 +1422,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
+    // CR 604.3 + CR 604.3a + CR 105.2c + CR 613.1e: Self-scoped
+    // characteristic-defining color line ("~ is colorless.",
+    // "~ is white and blue."). CDAs function in all zones and define the
+    // source object's own color characteristic.
+    if let Some(def) = parse_self_subject_is_color_cda(&tp, &text) {
+        return Some(def);
+    }
+
     // --- CDA: "~'s power is equal to the number of card types among cards in all graveyards
     //     and its toughness is equal to that number plus 1" (Tarmogoyf) ---
     if let Some(def) = parse_cda_pt_equality(tp.lower, tp.original) {
@@ -2063,6 +2090,36 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         }
     }
 
+    // --- "[Enchanted/Equipped] [type]'s activated abilities cost {N} less to activate" ---
+    // CR 303.4 + CR 602.1 + CR 601.2f: Aura/Equipment-granted activated ability
+    // cost reduction for the attached object (Power Artifact).
+    if let Some(((prefix, filter_part, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, prefix) = alt((
+            value("enchanted ", tag::<_, _, OracleError<'_>>("enchanted ")),
+            value("equipped ", tag::<_, _, OracleError<'_>>("equipped ")),
+        ))
+        .parse(i)?;
+        let (i, filter_part) = take_until("'s activated abilities cost ").parse(i)?;
+        let (i, _) = tag("'s activated abilities cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" less to activate").parse(i)?;
+        Ok((i, (prefix, filter_part.to_string(), amount)))
+    }) {
+        let filter_text = format!("{prefix}{filter_part}");
+        let (affected, _rest) = parse_type_phrase(&filter_text);
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
     // --- "Activated abilities of [filter] cost {N} less to activate" ---
     // CR 602.1 + CR 601.2f: Generic activated ability cost reduction (e.g., Training Grounds).
     if let Some(rest) = nom_tag_lower(tp.lower, tp.lower, "activated abilities of ") {
@@ -2282,6 +2339,31 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     None
+}
+
+fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("no more than ")
+        .parse(lower)
+        .ok()?;
+    let (max, rest) = parse_number(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creature").parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(rest).ok()?;
+    let (rest, mode) = alt((
+        value(
+            StaticMode::MaxAttackersEachCombat { max },
+            tag::<_, _, OracleError<'_>>(" can attack each combat"),
+        ),
+        value(
+            StaticMode::MaxBlockersEachCombat { max },
+            tag(" can block each combat"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    Some(mode)
 }
 
 fn parse_arcane_adaptation_chosen_type_static(
@@ -2569,8 +2651,8 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
-    // CR 508.1d / CR 509.1c: Cross-mode conjunctions of the form
-    // "<predicate_1> and attack/block each combat if able" combine a
+    // CR 508.1d / CR 509.1c / CR 701.15b: Cross-mode conjunctions of the form
+    // "<predicate_1> and attack/block each combat if able/is goaded" combine a
     // continuous static (usually a keyword grant) with a combat requirement.
     // A single `StaticDefinition` cannot carry both modes, so decompose them.
     if let Some(defs) = try_split_and_must_attack_block(&stripped) {
@@ -2778,6 +2860,10 @@ fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> 
                     tag::<_, _, VE>("must be blocked each combat if able"),
                     tag("must be blocked if able"),
                 )),
+            ),
+            value(
+                vec![StaticMode::Goaded],
+                alt((tag::<_, _, VE>("is goaded"), tag("are goaded"))),
             ),
         ))
         .parse(i)
@@ -3545,12 +3631,16 @@ pub(crate) fn parse_additive_type_clause_modifications(
     let after_verb_original = &clause_original[clause_original.len() - after_verb_lower.len()..];
     let (after_suffix_lower, type_words_lower) = terminated(
         take_until::<_, _, VE>(" in addition to "),
-        alt((
-            tag::<_, _, VE>(" in addition to its other types"),
-            tag::<_, _, VE>(" in addition to its other land types"),
-            tag::<_, _, VE>(" in addition to their other types"),
-            tag::<_, _, VE>(" in addition to their other land types"),
-        )),
+        (
+            tag::<_, _, VE>(" in addition to "),
+            alt((tag::<_, _, VE>("its"), tag::<_, _, VE>("their"))),
+            tag::<_, _, VE>(" other "),
+            alt((
+                tag::<_, _, VE>("creature types"),
+                tag::<_, _, VE>("land types"),
+                tag::<_, _, VE>("types"),
+            )),
+        ),
     )
     .parse(after_verb_lower)
     .ok()?;
@@ -6239,10 +6329,104 @@ fn strip_casting_prohibition_subject(tp: &str) -> Option<(ProhibitionScope, &str
         })
 }
 
+/// CR 601.2 + CR 601.3a + CR 604.1: Parse the "<SUBJECT> who has/have cast a [type] spell
+/// this turn can't cast additional [type] spells." phrasing (Ethersworn Canonist) into
+/// the equivalent `PerTurnCastLimit { max: 1, spell_filter: <type> }`.
+///
+/// Casting prohibitions are authorized by CR 601.2 (legality-to-cast check) and CR
+/// 601.3a (the "qualities prohibit casting" rule); the per-turn enforcement window
+/// is the static itself (CR 604.1).
+///
+/// The conditional subject ("who has cast a [type] spell this turn") combined with
+/// "can't cast additional [type] spells" is logically equivalent to "can't cast more
+/// than one [type] spell each turn" — once a player has cast a matching spell, every
+/// further matching spell is "additional" and prohibited.
+///
+/// The subject prefix is parsed via the shared `strip_casting_prohibition_subject`
+/// building block so this combinator covers the full subject axis (each player, each
+/// opponent, you, your opponents, enchanted player — not just AllPlayers). Both the
+/// subject-clause type phrase and the object-clause type phrase must match. If they
+/// diverge (a hypothetical future card like "who has cast an artifact spell ... can't
+/// cast noncreature spells"), the `max=1` reduction is no longer sound and we return
+/// `None` so the line falls through to other parsers (or `Unimplemented`).
+fn parse_conditional_subject_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
+    // 1. Strip subject prefix → scope, via the shared building block. This is the
+    //    single authority for subject→`ProhibitionScope` mapping; inlining a
+    //    hard-coded "each player" branch here would silently exclude every other
+    //    scope (each opponent, you, your opponents, enchanted player).
+    let (who, predicate) = strip_casting_prohibition_subject(tp)?;
+
+    // 2. Nom dispatch on the predicate: assemble the conditional-cast grammar as
+    //    composed combinators.
+    //   ("who has cast " | "who have cast ") ("a " | "an ") <SUBJECT_TYPE>
+    //   " spell this turn can't cast additional " <OBJECT_TYPE> (" spell" | " spells") "."?
+    //
+    // `take_until` is the canonical nom combinator for "everything up to delimiter",
+    // the structural counterpart to manually slicing on a found substring.
+    let mut parser = (
+        alt((
+            tag::<_, _, OracleError<'_>>("who has cast "),
+            tag("who have cast "),
+        )),
+        alt((tag("a "), tag("an "))),
+        take_until(" spell"),
+        tag(" spell"),
+        tag(" this turn can't cast additional "),
+        take_until(" spell"),
+        alt((tag(" spells"), tag(" spell"))),
+        opt(tag(".")),
+    );
+    let (rest, (_, _, subject_type_text, _, _, object_type_text, _, _)) =
+        parser.parse(predicate).ok()?;
+    // Disallow trailing content — we matched the entire restriction sentence.
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    // Both type phrases must canonicalize identically to preserve the `max=1` equivalence.
+    let (subject_filter, subject_rest) = parse_type_phrase(subject_type_text.trim());
+    let (object_filter, object_rest) = parse_type_phrase(object_type_text.trim());
+    if !subject_rest.trim().is_empty() || !object_rest.trim().is_empty() {
+        return None;
+    }
+    if subject_filter != object_filter {
+        return None;
+    }
+
+    // Verify a real type filter was extracted; mirrors the gate `parse_per_turn_cast_limit`
+    // uses on the standard "more than N" phrasing.
+    let spell_filter = match &subject_filter {
+        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(subject_filter),
+        _ => None,
+    };
+    // Untyped "<SUBJECT> who has cast a spell" is not a real sentence in printed
+    // Magic; require a typed filter to avoid over-matching.
+    spell_filter.as_ref()?;
+
+    Some(
+        StaticDefinition::new(StaticMode::PerTurnCastLimit {
+            who,
+            max: 1,
+            spell_filter,
+        })
+        .description(text.to_string()),
+    )
+}
+
 /// CR 101.2 + CR 604.1: Parse per-turn casting limits from Oracle text.
 /// Handles "Each player/opponent can't cast more than N [type] spell(s) each turn"
 /// and the alternate phrasing "You can cast no more than N spells each turn."
 fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
+    // CR 601.2 + CR 601.3a + CR 604.1: Conditional-subject phrasing — "<SUBJECT> who
+    // has cast a [type] spell this turn can't cast additional [type] spells."
+    // Semantically equivalent to `max=1` per-turn cast limit on the same [type]
+    // (Ethersworn Canonist). The two type phrases must match — if they diverge, the
+    // equivalence breaks and we bail (defensive: future cards with mismatched types
+    // would need a different model).
+    if let Some(def) = parse_conditional_subject_per_turn_cast_limit(tp, text) {
+        return Some(def);
+    }
+
     // 1. Strip subject → scope, yielding the predicate
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
 
@@ -6297,6 +6481,93 @@ fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
     )
 }
 
+/// CR 101.2 + CR 109.5 + CR 508.1 + CR 601.3a: "Each [scope] who [did X] this turn
+/// can't [Y]" — a static prohibition gated on a PER-AFFECTED-PLAYER turn-activity
+/// predicate (Angelic Arbiter).
+///
+/// The two clauses are:
+/// - "Each opponent who attacked with a creature this turn can't cast spells."
+///   → `CantBeCast { who: Opponents }` + `per_player_condition: YouAttackedThisTurn`
+///   (CR 601.3a cast prohibition).
+/// - "Each opponent who cast a spell this turn can't attack with creatures."
+///   → `CantAttack` with `affected = opponents' creatures` +
+///   `per_player_condition: YouCastSpellThisTurn { filter: None }` (CR 508.1
+///   declare-attackers prohibition).
+///
+/// The turn-activity predicate is stored in `per_player_condition` (CR 109.5:
+/// evaluated against the AFFECTED player — the caster, or the attacking creature's
+/// controller), NEVER in `condition` (which is the source-relative functioning
+/// gate). `condition` stays `None` so the prohibition is not globally gated.
+///
+/// Composed from the shared `strip_casting_prohibition_subject` building block plus
+/// nom `tag`/`alt`/`value` — no string-matching dispatch.
+fn parse_per_player_conditional_prohibition(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // 1. Strip the subject → scope. For "each opponent who ..." this yields
+    //    (Opponents, "who ..."). Only opponent-scoped prohibitions are modeled
+    //    by this combinator today (the only printed text class).
+    let (who, predicate) = strip_casting_prohibition_subject(tp.lower)?;
+    if who != ProhibitionScope::Opponents {
+        return None;
+    }
+
+    // 2. Strip the relative-clause marker and parse the per-player predicate.
+    let rest = nom_tag_lower(predicate, predicate, "who ")?;
+    let (rest, cond) = alt((
+        value(
+            ParsedCondition::YouAttackedThisTurn,
+            tag::<_, _, OracleError<'_>>("attacked with a creature this turn"),
+        ),
+        value(
+            ParsedCondition::YouCastSpellThisTurn { filter: None },
+            tag::<_, _, OracleError<'_>>("cast a spell this turn"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // 3. Strip the prohibition connector " can't " and dispatch on the verb.
+    let rest = nom_tag_lower(rest, rest, " can't ")?;
+
+    // CR 601.3a: "... can't cast spells" — cast-side prohibition.
+    if let Some(tail) = nom_tag_lower(rest, rest, "cast spells") {
+        if tail.trim_end_matches('.').is_empty() {
+            return Some(
+                StaticDefinition::new(StaticMode::CantBeCast { who })
+                    .per_player_condition(cond)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
+    // CR 508.1: "... can't attack with creatures" — attack-side prohibition. The
+    // `affected` filter is opponents' creatures (CR 109.5: `ControllerRef::Opponent`
+    // resolves against the source's controller), so the remote CantAttack scan in
+    // combat restricts the Arbiter-controller's opponents' creatures.
+    //
+    // INVARIANT: `per_player_condition` on a CantAttack/CantAttackOrBlock static is
+    // only honored on the remote-scan path (`check_static_ability`). The intrinsic
+    // `active_static_definitions` path in combat does NOT apply it, so the `affected`
+    // filter here must stay a remote filter (opponents' creatures), never SelfRef —
+    // a SelfRef CantAttack would be applied unconditionally, bypassing the gate.
+    if let Some(tail) = nom_tag_lower(rest, rest, "attack with creatures") {
+        if tail.trim_end_matches('.').is_empty() {
+            let affected =
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+            return Some(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(affected)
+                    .per_player_condition(cond)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
+    None
+}
+
 /// CR 101.2: Parse casting prohibition from Oracle text.
 /// Handles multiple patterns:
 /// - "[Subject] can't cast [type] spells" (Steel Golem, Hymn of the Wilds)
@@ -6327,19 +6598,11 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
         return Some(def);
     }
 
-    // --- "Each opponent who attacked [with a creature] this turn can't cast spells" ---
-    // CR 101.2: Conditional subject with turn-scoped attack condition — approximate
-    // as opponent-scoped prohibition since the condition is game-state dependent.
-    if nom_tag_lower(tp, tp, "each opponent who attacked").is_some()
-        && nom_primitives::scan_contains(tp, "can't cast spells")
-    {
-        return Some(
-            StaticDefinition::new(StaticMode::CantBeCast {
-                who: ProhibitionScope::Opponents,
-            })
-            .description(text.to_string()),
-        );
-    }
+    // NOTE: "Each opponent who attacked with a creature this turn can't cast
+    // spells" is handled earlier in `parse_static_line_inner` by
+    // `parse_per_player_conditional_prohibition`, which preserves the per-affected-
+    // player turn-activity predicate (CR 101.2 + CR 601.3a) instead of approximating
+    // it as an unconditional opponent cast-lock.
 
     // 1. Strip subject → scope
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
@@ -7733,6 +7996,9 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // into one AddType/AddSubtype modification per token (not a single
     // whole-phrase AddSubtype string).
     modifications.extend(parse_becomes_type_addition_modifications(&unquoted_tp));
+    modifications.extend(parse_bare_becomes_type_replacement_modifications(
+        &unquoted_tp,
+    ));
 
     modifications
 }
@@ -7947,6 +8213,158 @@ fn parse_becomes_type_addition_modifications(tp: &TextPair<'_>) -> Vec<Continuou
     let descriptor_original = &tp.original[start..end];
 
     super::oracle_effect::animation::parse_becomes_type_modifications(descriptor_original)
+}
+
+/// CR 205.1a-b + CR 613.1d: bare "becomes a/an <descriptor>" type-changing
+/// effects are replacement-form changes. Setting core card types replaces the
+/// previous card-type set except for CR 205.1b's artifact-creature exception;
+/// setting creature subtypes replaces the object's previous creature types.
+fn parse_bare_becomes_type_replacement_modifications(
+    tp: &TextPair<'_>,
+) -> Vec<ContinuousModification> {
+    type VE<'a> = OracleError<'a>;
+
+    let Some((_, tail_lower)) = nom_primitives::scan_split_at_phrase(tp.lower, |i| {
+        alt((
+            tag::<_, _, VE>("becomes a "),
+            tag::<_, _, VE>("becomes an "),
+        ))
+        .parse(i)
+    }) else {
+        return Vec::new();
+    };
+    let Ok::<_, nom::Err<VE<'_>>>((after_article_lower, _)) =
+        alt((tag("becomes a "), tag("becomes an "))).parse(tail_lower)
+    else {
+        return Vec::new();
+    };
+    let (descriptor_lower, retained_core_type) =
+        if let Some((descriptor_lower, retained_core_type)) =
+            split_type_retention_clause(after_article_lower)
+        {
+            (descriptor_lower, Some(retained_core_type))
+        } else {
+            (after_article_lower, None)
+        };
+    if retained_core_type.is_none()
+        && take_until::<_, _, VE>(" in addition to")
+            .parse(descriptor_lower)
+            .is_ok()
+    {
+        return Vec::new();
+    }
+
+    let Ok::<_, nom::Err<VE<'_>>>((_, descriptor_lower)) =
+        parse_clause_before_optional_period(descriptor_lower)
+    else {
+        return Vec::new();
+    };
+    let (descriptor_lower, _) = strip_trailing_duration(descriptor_lower.trim());
+    let descriptor_lower = descriptor_lower.trim();
+    if descriptor_lower.is_empty() {
+        return Vec::new();
+    }
+
+    let start = tp.lower.len() - after_article_lower.len();
+    let end = start + descriptor_lower.len();
+    let descriptor_original = &tp.original[start..end];
+    let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+        descriptor_original,
+        &mut ParseContext::default(),
+    ) else {
+        return Vec::new();
+    };
+    let animation_modifications = super::oracle_effect::animation::animation_modifications(&spec);
+    if let Some(core_type) = retained_core_type {
+        let mut modifications = animation_modifications;
+        if !modifications.contains(&ContinuousModification::AddType { core_type }) {
+            modifications.push(ContinuousModification::AddType { core_type });
+        }
+        return modifications;
+    }
+
+    let core_types: Vec<CoreType> = animation_modifications
+        .iter()
+        .filter_map(|modification| match modification {
+            ContinuousModification::AddType { core_type } => Some(*core_type),
+            _ => None,
+        })
+        .collect();
+    let keep_additive_core_types = core_types.len() == 2
+        && core_types.contains(&CoreType::Artifact)
+        && core_types.contains(&CoreType::Creature);
+
+    let mut modifications = Vec::new();
+    let mut set_core_types = false;
+    let mut removed_subtype_sets = Vec::new();
+    for modification in animation_modifications {
+        if matches!(modification, ContinuousModification::AddType { .. }) {
+            if core_types.is_empty() || keep_additive_core_types {
+                modifications.push(modification);
+            } else if !set_core_types {
+                modifications.push(ContinuousModification::SetCardTypes {
+                    core_types: core_types.clone(),
+                });
+                set_core_types = true;
+            }
+            continue;
+        }
+
+        if let ContinuousModification::AddSubtype { subtype } = &modification {
+            let set = noncreature_subtype_set(subtype).unwrap_or(SubtypeSet::Creature);
+            if !removed_subtype_sets.contains(&set) {
+                modifications.push(ContinuousModification::RemoveAllSubtypes { set });
+                removed_subtype_sets.push(set);
+            }
+        }
+        modifications.push(modification);
+    }
+    modifications
+}
+
+fn parse_clause_before_optional_period(input: &str) -> OracleResult<'_, &str> {
+    terminated(alt((take_until("."), rest)), opt(tag("."))).parse(input)
+}
+
+fn split_type_retention_clause(input: &str) -> Option<(&str, CoreType)> {
+    let (descriptor, retention_clause) =
+        nom_primitives::scan_split_at_phrase(input, |i| parse_type_retention_clause(i))?;
+    let (_, retained_core_type) = parse_type_retention_clause(retention_clause).ok()?;
+    Some((descriptor, retained_core_type))
+}
+
+fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreType> {
+    let (input, is_plural) = alt((
+        value(false, alt((tag("it's still "), tag("that's still ")))),
+        value(true, tag("they're still ")),
+    ))
+    .parse(input)?;
+
+    let (input, _) = if is_plural {
+        (input, None)
+    } else {
+        let (input, article) = opt(nom_primitives::parse_article).parse(input)?;
+        (input, article)
+    };
+
+    alt((
+        value(CoreType::Artifact, alt((tag("artifact"), tag("artifacts")))),
+        value(CoreType::Battle, alt((tag("battle"), tag("battles")))),
+        value(CoreType::Creature, alt((tag("creature"), tag("creatures")))),
+        value(
+            CoreType::Enchantment,
+            alt((tag("enchantment"), tag("enchantments"))),
+        ),
+        value(CoreType::Instant, alt((tag("instant"), tag("instants")))),
+        value(CoreType::Kindred, alt((tag("kindred"), tag("kindreds")))),
+        value(CoreType::Land, alt((tag("land"), tag("lands")))),
+        value(
+            CoreType::Planeswalker,
+            alt((tag("planeswalker"), tag("planeswalkers"))),
+        ),
+        value(CoreType::Sorcery, alt((tag("sorcery"), tag("sorceries")))),
+    ))
+    .parse(input)
 }
 
 fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
@@ -9902,6 +10320,77 @@ fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
     parse_color_list(text)
 }
 
+/// CR 604.3 + CR 604.3a + CR 105.2c + CR 613.1e: Parse self-referential
+/// "[self subject] is [color expression]." lines into a color CDA.
+///
+/// This covers the class of card text that defines the source object's own
+/// color as a characteristic (Ghostfire-style), not global/class filters
+/// handled by `parse_all_subject_are_color`.
+fn parse_self_subject_is_color_cda(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (_, colors) = parse_self_subject_is_color_cda_line(tp.lower).ok()?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::SetColor { colors }])
+            .active_zones(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ])
+            .cda()
+            .description(description.to_string()),
+    )
+}
+
+fn parse_self_subject_is_color_cda_line(input: &str) -> OracleResult<'_, Vec<ManaColor>> {
+    let (after_subject, _) = parse_self_color_subject(input)?;
+    let (after_predicate, predicate_lower) = alt((
+        terminated(take_until::<_, _, OracleError<'_>>("."), tag(".")),
+        rest,
+    ))
+    .parse(after_subject)?;
+    eof::<_, OracleError<'_>>(after_predicate)?;
+    let Some(colors) = parse_color_predicate(predicate_lower) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            predicate_lower,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((after_predicate, colors))
+}
+
+fn parse_self_color_subject(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("~")),
+        value((), tag("this card")),
+        value((), tag("this spell")),
+        parse_self_ref_type_subject,
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" is ").parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn parse_self_ref_type_subject(input: &str) -> OracleResult<'_, ()> {
+    for phrase in SELF_REF_TYPE_PHRASES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
+            return Ok((rest, ()));
+        }
+    }
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
+}
+
 /// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
 /// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
@@ -10171,8 +10660,8 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope,
-        SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope, PtStat,
+        PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
     };
 
     /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
@@ -10271,6 +10760,105 @@ mod tests {
     }
 
     #[test]
+    fn continuous_mods_replace_creature_subtypes_for_bare_becomes_clause() {
+        let mods = parse_continuous_modifications("gets +3/+3 and becomes a Bear Berserker");
+        assert!(mods.contains(&ContinuousModification::AddPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::AddToughness { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Bear".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Berserker".to_string(),
+        }));
+    }
+
+    #[test]
+    fn continuous_mods_replace_creature_subtypes_with_color_and_core_type_tail() {
+        let mods = parse_continuous_modifications(
+            "becomes a white and green Bear Berserker creature with trample",
+        );
+        assert!(mods.contains(&ContinuousModification::SetColor {
+            colors: vec![ManaColor::White, ManaColor::Green],
+        }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Bear".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Berserker".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature],
+        }));
+        assert!(mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample,
+        }));
+    }
+
+    #[test]
+    fn continuous_mods_preserve_additive_artifact_creature_exception() {
+        let mods = parse_continuous_modifications("becomes an artifact creature");
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Artifact,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }));
+        assert!(
+            !mods.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetCardTypes { .. }
+            )),
+            "artifact creature exception must retain previous card types: {mods:?}"
+        );
+    }
+
+    #[test]
+    fn continuous_mods_preserve_still_type_retention_clause() {
+        let mods = parse_continuous_modifications(
+            "becomes a 0/0 Elemental creature with vigilance and haste that's still a land",
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Elemental".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Land,
+        }));
+        assert!(
+            !mods.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetCardTypes { .. }
+                    | ContinuousModification::RemoveAllSubtypes { .. }
+            )),
+            "still-retained types must stay additive under CR 205.1b: {mods:?}"
+        );
+    }
+
+    #[test]
+    fn continuous_mods_replace_noncreature_subtype_set_for_bare_becomes_clause() {
+        let mods = parse_continuous_modifications("becomes a Treasure artifact");
+        assert!(mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Artifact],
+        }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Artifact,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Treasure".to_string(),
+        }));
+    }
+
+    #[test]
     fn static_merfolk_lord() {
         let def = parse_static_line("Other Merfolk you control get +1/+1.").unwrap();
         assert!(def
@@ -10311,9 +10899,9 @@ mod tests {
             matches!(
                 &def.mode,
                 StaticMode::CantBeBlockedBy { filter }
-                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerLE { value: QuantityExpr::Fixed { value: 2 } }))
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PtComparison { stat: PtStat::Power, scope: PtValueScope::Current, comparator: Comparator::LE, value: QuantityExpr::Fixed { value: 2 } }))
             ),
-            "Expected CantBeBlockedBy with PowerLE(2), got {:?}",
+            "Expected CantBeBlockedBy with PtComparison(Power, LE, 2), got {:?}",
             def.mode
         );
     }
@@ -10329,9 +10917,9 @@ mod tests {
             matches!(
                 &def.mode,
                 StaticMode::CantBeBlockedBy { filter }
-                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerGE { value: QuantityExpr::Fixed { value: 3 } }))
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PtComparison { stat: PtStat::Power, scope: PtValueScope::Current, comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 3 } }))
             ),
-            "Expected CantBeBlockedBy with PowerGE(3), got {:?}",
+            "Expected CantBeBlockedBy with PtComparison(Power, GE, 3), got {:?}",
             def.mode
         );
     }
@@ -11301,6 +11889,94 @@ mod tests {
     // NOTE: static_enters_with_counters test moved to oracle_replacement tests —
     // "enters with counters" is now parsed as a Moved replacement effect.
 
+    /// CR 113.6b + CR 207.2c + CR 408 + CR 601.2f: The Ur-Dragon's Eminence
+    /// line (canonical form) — "Other Dragon spells you cast cost {1} less to
+    /// cast as long as ~ is in the command zone or on the battlefield."
+    /// The condition disjunction must seed `active_zones` with both
+    /// `Battlefield` and `Command`, and produce a typed `Or { SourceInZone,
+    /// SourceInZone }` (no `SwallowedClause`).
+    #[test]
+    fn static_eminence_cost_reduction_command_zone_or_battlefield() {
+        let def = parse_static_line(
+            "Other Dragon spells you cast cost {1} less to cast as long as ~ is in the command zone or on the battlefield.",
+        )
+        .expect("Eminence cost-reduction line must parse");
+
+        // Mode is unchanged: ReduceCost {1} with a Dragon spell filter.
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ReduceCost {
+                    amount: ManaCost::Cost { generic: 1, .. },
+                    ..
+                }
+            ),
+            "expected ReduceCost {{1}}, got {:?}",
+            def.mode
+        );
+
+        // CR 113.6b: active_zones must include BOTH Battlefield and Command —
+        // populate_active_zones_from_condition walks the typed Or-disjunction.
+        assert!(
+            def.active_zones.contains(&Zone::Battlefield),
+            "active_zones must contain Battlefield, got {:?}",
+            def.active_zones
+        );
+        assert!(
+            def.active_zones.contains(&Zone::Command),
+            "active_zones must contain Command, got {:?}",
+            def.active_zones
+        );
+
+        // Condition is a typed Or-disjunction over SourceInZone variants —
+        // NOT a SwallowedClause / Unrecognized fallback.
+        match def.condition.as_ref().expect("condition must be set") {
+            StaticCondition::Or { conditions } => {
+                let zones: Vec<Zone> = conditions
+                    .iter()
+                    .filter_map(|c| match c {
+                        StaticCondition::SourceInZone { zone } => Some(*zone),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(zones.contains(&Zone::Command));
+                assert!(zones.contains(&Zone::Battlefield));
+            }
+            other => panic!("expected Or-disjunction, got {other:?}"),
+        }
+    }
+
+    /// CR 113.6b: Inverted Eminence form — "As long as ~ is in the command zone
+    /// or on the battlefield, other Dragon spells you cast cost {1} less to
+    /// cast." (The shape parsed straight off the printed Oracle text after the
+    /// Eminence ability-word strip.) Must converge to the same typed shape as
+    /// the canonical-form test.
+    #[test]
+    fn static_eminence_cost_reduction_inverted_form() {
+        let def = parse_static_line(
+            "As long as ~ is in the command zone or on the battlefield, other Dragon spells you cast cost {1} less to cast.",
+        )
+        .expect("inverted Eminence cost-reduction must parse");
+
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ReduceCost {
+                    amount: ManaCost::Cost { generic: 1, .. },
+                    ..
+                }
+            ),
+            "expected ReduceCost {{1}}, got {:?}",
+            def.mode
+        );
+        assert!(def.active_zones.contains(&Zone::Battlefield));
+        assert!(def.active_zones.contains(&Zone::Command));
+        assert!(matches!(
+            def.condition.as_ref().expect("condition must be set"),
+            StaticCondition::Or { .. }
+        ));
+    }
+
     #[test]
     fn static_as_long_as_chosen_color() {
         let def = parse_static_line(
@@ -12116,6 +12792,40 @@ mod tests {
     }
 
     #[test]
+    fn static_crackling_drake_counts_owned_instant_sorcery_exile_and_graveyard() {
+        let def = parse_static_line(
+            "Crackling Drake's power is equal to the total number of instant and sorcery cards you own in exile and in your graveyard.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        let expected = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Exile,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        scope: CountScope::Owner,
+                    },
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        scope: CountScope::Owner,
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetDynamicPower { value: expected }]
+        );
+    }
+
+    #[test]
     fn static_multani_cda_total_cards_in_all_players_hands() {
         let qty = QuantityExpr::Ref {
             qty: QuantityRef::HandSize {
@@ -12302,6 +13012,21 @@ mod tests {
         assert_eq!(defs[2].mode, StaticMode::Goaded);
         assert_eq!(defs[1].affected, defs[0].affected);
         assert_eq!(defs[2].affected, defs[0].affected);
+    }
+
+    #[test]
+    fn static_pump_and_goaded_emits_both_defs() {
+        let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and is goaded.");
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].mode, StaticMode::Continuous);
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
+        assert_eq!(defs[1].mode, StaticMode::Goaded);
+        assert_eq!(defs[1].affected, defs[0].affected);
     }
 
     #[test]
@@ -13096,6 +13821,45 @@ mod tests {
             }
             other => panic!("Expected Typed creature filter, got {:?}", other),
         }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+    }
+
+    #[test]
+    fn static_other_creatures_with_any_counters_have_flying_and_haste() {
+        let def = parse_static_line(
+            "Other creatures you control with counters on them have flying and haste.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties,
+                type_filters,
+                ..
+            })) => {
+                assert!(type_filters.contains(&TypeFilter::Creature));
+                assert!(properties.contains(&FilterProp::Another));
+                assert!(properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Counters {
+                        counters: CounterMatch::Any,
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }
+                )));
+            }
+            other => panic!("Expected typed creature filter, got {other:?}"),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }));
         assert!(def
             .modifications
             .contains(&ContinuousModification::AddKeyword {
@@ -14947,6 +15711,24 @@ mod tests {
     }
 
     #[test]
+    fn static_no_more_than_one_creature_can_attack_each_combat() {
+        let def = parse_static_line("No more than one creature can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 1 });
+    }
+
+    #[test]
+    fn static_no_more_than_two_creatures_can_attack_each_combat() {
+        let def = parse_static_line("No more than two creatures can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 2 });
+    }
+
+    #[test]
+    fn static_no_more_than_one_creature_can_block_each_combat() {
+        let def = parse_static_line("No more than one creature can block each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxBlockersEachCombat { max: 1 });
+    }
+
+    #[test]
     fn static_attacks_or_blocks_each_combat_if_able_emits_both_defs() {
         let direct = try_parse_scoped_must_attack_block(
             "this creature attacks or blocks each combat if able.",
@@ -15645,6 +16427,160 @@ mod tests {
                 spell_filter: None,
             }
         );
+    }
+
+    #[test]
+    fn per_turn_cast_limit_ethersworn_canonist_nonartifact() {
+        // CR 101.2 + CR 604.1: Ethersworn Canonist — conditional-subject phrasing
+        // semantically equivalent to "Each player can't cast more than one nonartifact
+        // spell each turn." Reduces to PerTurnCastLimit{ AllPlayers, max=1, Non(Artifact) }.
+        let def = parse_static_line(
+            "Each player who has cast a nonartifact spell this turn can't cast additional nonartifact spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit {
+            who,
+            max,
+            spell_filter,
+        } = &def.mode
+        else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::AllPlayers);
+        assert_eq!(*max, 1);
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Non(Box::new(TypeFilter::Artifact))]
+        );
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_creature_filter() {
+        // Class test: same conditional-subject grammar with a different matched
+        // type — proves the building block works across the type-filter axis,
+        // not just Ethersworn's Non(Artifact). Hypothetical future printed text.
+        let def = parse_static_line(
+            "Each player who has cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit {
+            who,
+            max,
+            spell_filter,
+        } = &def.mode
+        else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::AllPlayers);
+        assert_eq!(*max, 1);
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_instant_filter() {
+        // Class test: third filter axis to lock in the building-block behavior.
+        let def = parse_static_line(
+            "Each player who has cast an instant spell this turn can't cast additional instant spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { spell_filter, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Instant]);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_each_opponent_scope() {
+        // Class test (subject axis): "Each opponent who has cast..." must produce
+        // `Opponents` scope, not the hard-coded `AllPlayers`. Proves the subject
+        // prefix is dispatched through `strip_casting_prohibition_subject` instead
+        // of being inlined. Hypothetical future printed text within the class.
+        let def = parse_static_line(
+            "Each opponent who has cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { who, max, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::Opponents);
+        assert_eq!(*max, 1);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_plural_agreement() {
+        // Sibling coverage: plural subjects use "who have cast", and the parser
+        // should still flow through the shared subject and type-filter axes.
+        let def = parse_static_line(
+            "Players who have cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { who, max, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::AllPlayers);
+        assert_eq!(*max, 1);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_singular_additional_spell() {
+        // Sibling coverage: some Oracle-style restrictions use singular
+        // "additional [type] spell" rather than plural "spells".
+        let def = parse_static_line(
+            "Each player who has cast an instant spell this turn can't cast additional instant spell.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { spell_filter, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Instant]);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_you_scope() {
+        // Class test (subject axis): the helper accepts the "you " subject prefix;
+        // we lock in
+        // the building-block behavior for completeness across the
+        // `strip_casting_prohibition_subject` outputs that have a trailing space
+        // suitable for the "who have cast" continuation. The "you " arm of the
+        // shared subject helper covers cards like Arcane Laboratory variants.
+        let def = parse_static_line(
+            "You who have cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { who, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::Controller);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_mismatched_types_rejected() {
+        // Defensive: if subject and object types diverge, the max=1 reduction is
+        // no longer sound. The parser must not silently mis-model such a card.
+        // (No known printed card uses this shape; the test guards future text.)
+        let def = parse_static_line(
+            "Each player who has cast a creature spell this turn can't cast additional noncreature spells.",
+        );
+        // Either falls through to a different parser (None preferred) or is not the
+        // conditional-subject mode. The key invariant: it must NOT produce a
+        // PerTurnCastLimit with one type's filter on the other.
+        if let Some(def) = def {
+            if let StaticMode::PerTurnCastLimit { .. } = def.mode {
+                panic!("mismatched-type conditional subject must not collapse to PerTurnCastLimit");
+            }
+        }
     }
 
     #[test]
@@ -16941,7 +17877,9 @@ mod tests {
 
     #[test]
     fn cant_cast_opponent_attacked_this_turn() {
-        // CR 101.2: "Each opponent who attacked this turn can't cast spells"
+        // CR 101.2 + CR 601.3a: "Each opponent who attacked with a creature this
+        // turn can't cast spells" — the per-affected-player turn-activity predicate
+        // must be preserved in `per_player_condition`, NOT dropped (Angelic Arbiter).
         let def = parse_static_line(
             "Each opponent who attacked with a creature this turn can't cast spells.",
         )
@@ -16952,6 +17890,40 @@ mod tests {
                 who: ProhibitionScope::Opponents,
             }
         );
+        assert_eq!(
+            def.per_player_condition,
+            Some(ParsedCondition::YouAttackedThisTurn),
+            "the turn-activity predicate must be carried, not approximated away"
+        );
+        // `condition` (the source-relative functioning gate) must stay None so the
+        // prohibition is not globally gated on/off.
+        assert_eq!(def.condition, None);
+    }
+
+    #[test]
+    fn cant_attack_opponent_cast_spell_this_turn() {
+        // CR 508.1 + CR 109.5: "Each opponent who cast a spell this turn can't
+        // attack with creatures" — restricts OPPONENTS' creatures, not the source
+        // (Angelic Arbiter). Regression guard against the prior SelfRef misparse.
+        let def = parse_static_line(
+            "Each opponent who cast a spell this turn can't attack with creatures.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent)
+            )),
+            "affected must be opponents' creatures (CR 109.5)"
+        );
+        // Regression guard: the prior misparse set affected = SelfRef.
+        assert_ne!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.per_player_condition,
+            Some(ParsedCondition::YouCastSpellThisTurn { filter: None }),
+        );
+        assert_eq!(def.condition, None);
     }
 
     // --- Group A: Enchanted land type changes ---
@@ -17128,6 +18100,27 @@ mod tests {
             .contains(&ContinuousModification::AddSubtype {
                 subtype: "Bear".to_string(),
             }));
+    }
+
+    #[test]
+    fn static_hivestone_adds_sliver_subtype_to_creatures_you_control() {
+        let def = parse_static_line(
+            "Creatures you control are Slivers in addition to their other creature types.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Sliver".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -17420,6 +18413,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn static_self_is_colorless_is_cda_all_zones() {
+        // CR 604.3 + CR 604.3a + CR 105.2c: Ghostfire-style self color CDA.
+        let def = parse_static_line("~ is colorless.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+        assert_eq!(
+            def.active_zones,
+            vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ]
+        );
+    }
+
+    #[test]
+    fn static_raw_cardname_is_colorless_is_not_contextless_self_cda() {
+        assert!(parse_static_line("Ghostfire is colorless.").is_none());
+    }
+
+    #[test]
+    fn static_self_is_multicolor_cda() {
+        let def = parse_static_line("~ is white and blue.").unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: vec![ManaColor::White, ManaColor::Blue]
+            }]
+        );
+        assert!(def.characteristic_defining);
+    }
+
     // --- Group A: Chosen color/type creature pump ---
 
     #[test]
@@ -17609,6 +18644,48 @@ mod tests {
                 dynamic_count: None,
             }
         );
+    }
+
+    #[test]
+    fn static_reduce_activated_ability_cost_enchanted_artifact_with_minimum() {
+        let def = parse_static_line(
+            "Enchanted artifact's activated abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
+                dynamic_count: None,
+            }
+        );
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter { .. }))
+        ));
+    }
+
+    #[test]
+    fn static_reduce_activated_ability_cost_equipped_artifact_with_minimum() {
+        let def = parse_static_line(
+            "Equipped artifact's activated abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
+                dynamic_count: None,
+            }
+        );
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter { .. }))
+        ));
     }
 
     // --- Group C: Spells you cast have keyword ---

@@ -1,3 +1,6 @@
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
+
 import type { FormatGroup, GameFormat, LobbyGame } from "../../adapter/types";
 import { formatMetadata } from "../../data/formatRegistry";
 
@@ -30,17 +33,18 @@ const GROUP_BADGE_CLASSES: Record<FormatGroup, string> = {
 // which the lobby can still receive as a legal GameFormat value on the wire.
 const UNKNOWN_FORMAT_BADGE = "bg-slate-500/20 text-slate-300";
 
-function formatWaitTime(createdAt: number): string {
+function formatWaitTime(createdAt: number, t: TFunction<"multiplayer">): string {
   const now = Math.floor(Date.now() / 1000);
   const diff = now - createdAt;
-  if (diff < 60) return "just now";
+  if (diff < 60) return t("gameListItem.waitTimeJustNow");
   const mins = Math.floor(diff / 60);
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60) return t("gameListItem.waitTimeMinutes", { count: mins });
   const hours = Math.floor(mins / 60);
-  return `${hours}h ago`;
+  return t("gameListItem.waitTimeHours", { count: hours });
 }
 
 export function GameListItem({ game, onJoin, compatible = true }: GameListItemProps) {
+  const { t } = useTranslation("multiplayer");
   const format = game.format ?? "Standard";
   const meta = formatMetadata(format);
   const badgeClass = meta ? GROUP_BADGE_CLASSES[meta.group] : UNKNOWN_FORMAT_BADGE;
@@ -58,9 +62,12 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
   const disabled = !compatible || isFull;
 
   const disabledTitle = !compatible
-    ? `Host is on ${game.host_version || "?"} (${game.host_build_commit || "?"}) — your build is different. Refresh to update.`
+    ? t("gameListItem.buildMismatchTitle", {
+        version: game.host_version || "?",
+        commit: game.host_build_commit || "?",
+      })
     : isFull
-      ? "This game is full."
+      ? t("gameListItem.gameFull")
       : undefined;
 
   return (
@@ -68,9 +75,7 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
       onClick={() => {
         if (disabled) return;
         if (game.is_sandbox === true) {
-          const ok = window.confirm(
-            "This is a Sandbox game. Players with debug permission can directly manipulate game state. Continue?",
-          );
+          const ok = window.confirm(t("gameListItem.sandboxConfirm"));
           if (!ok) return;
         }
         onJoin(game.game_code, game.format);
@@ -94,9 +99,12 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
       {game.draft_metadata && (
         <span
           className="flex-shrink-0 rounded bg-purple-500/20 px-1.5 py-0.5 text-xs font-semibold text-purple-300"
-          title={`${game.draft_metadata.draftKind} Draft — ${game.draft_metadata.setCode}`}
+          title={t("gameListItem.draftBadgeTitle", {
+            kind: game.draft_metadata.draftKind,
+            setCode: game.draft_metadata.setCode,
+          })}
         >
-          {game.draft_metadata.setCode} Draft
+          {t("gameListItem.draftBadge", { setCode: game.draft_metadata.setCode })}
         </span>
       )}
 
@@ -108,7 +116,7 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
       {game.is_p2p === true && (
         <span
           className="flex-shrink-0 rounded bg-teal-500/20 px-1.5 py-0.5 text-xs font-semibold text-teal-300"
-          title="Peer-to-peer game (host runs the engine)"
+          title={t("gameListItem.p2pBadgeTitle")}
         >
           P2P
         </span>
@@ -119,7 +127,7 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
       {game.is_sandbox === true && (
         <span
           className="flex-shrink-0 rounded bg-amber-500/20 px-1.5 py-0.5 text-xs font-semibold text-amber-300"
-          title="This game allows debug actions. Use for testing — not a competitive match."
+          title={t("gameListItem.sandboxBadgeTitle")}
         >
           SANDBOX
         </span>
@@ -131,13 +139,15 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
           name as the title (the pre-room_name behavior). */}
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-gray-200">
-          {game.room_name || game.host_name || "Anonymous"}
+          {game.room_name || game.host_name || t("gameListItem.anonymous")}
         </p>
         <p className="text-xs text-gray-500">
           {game.room_name && game.host_name && (
-            <span className="mr-2 text-gray-400">by {game.host_name}</span>
+            <span className="mr-2 text-gray-400">
+              {t("gameListItem.by", { name: game.host_name })}
+            </span>
           )}
-          {formatWaitTime(game.created_at)}
+          {formatWaitTime(game.created_at, t)}
           {game.host_version && (
             <span className="ml-2 font-mono text-[10px] text-gray-600">
               v{game.host_version}
@@ -161,7 +171,7 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
           viewBox="0 0 20 20"
           fill="currentColor"
           className="h-4 w-4 flex-shrink-0 text-amber-400"
-          aria-label="Password protected"
+          aria-label={t("gameListItem.passwordProtected")}
         >
           <path
             fillRule="evenodd"

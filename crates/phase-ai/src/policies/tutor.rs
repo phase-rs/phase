@@ -433,6 +433,7 @@ mod tests {
                     reveal: false,
                     target_player: None,
                     selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
+                    split: None,
                 },
             ),
         );

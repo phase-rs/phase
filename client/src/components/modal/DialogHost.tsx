@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
@@ -155,6 +156,7 @@ function PeekRestoreTab({
   direction: "right" | "bottom";
   onClick: () => void;
 }) {
+  const { t } = useTranslation("game");
   // Inset by `right-3` / `bottom-3` so all four borders render fully —
   // flush-to-edge positioning clips the outer border on some browsers
   // (especially with non-zero safe-area insets).
@@ -169,8 +171,8 @@ function PeekRestoreTab({
     <motion.button
       type="button"
       onClick={onClick}
-      aria-label="Restore dialog"
-      title="Restore dialog"
+      aria-label={t("dialogShell.restoreDialog")}
+      title={t("dialogShell.restoreDialog")}
       initial={{ opacity: 0, scale: 0.9 }}
       animate={{
         opacity: 1,

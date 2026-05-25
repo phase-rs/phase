@@ -439,7 +439,7 @@ fn resolve_event_scoped_ref(
     }
 }
 
-fn resolve_mana_spent_to_cast_metric(
+pub(crate) fn resolve_mana_spent_to_cast_metric(
     state: &GameState,
     cast_object: ObjectId,
     metric: &CastManaSpentMetric,
@@ -618,6 +618,58 @@ fn divide_rounded(value: i32, divisor: u32, rounding: RoundingMode) -> i32 {
     rounded as i32
 }
 
+/// CR 400.1: The object IDs an `ObjectCount { filter }` matches — resolved in
+/// the filter's zone (default battlefield) with the `OtherThanTriggerObject`
+/// exclusion applied. Single source of truth: the `ObjectCount` count is `.len()`
+/// of this, and a "for each [object]" loop (`effects::resolve_chain_body`)
+/// iterates these exact ids for per-iteration `ParentTarget` rebinding — so the
+/// count and the iteration members can never diverge.
+///
+/// The `OtherThanTriggerObject` marker excludes the triggering/source object.
+/// This derives from the Oracle word "other"/"other than" — a parser-level
+/// semantic, not a numbered CR.
+///
+/// The `OtherThanTriggerObject` exclusion drops the trigger id by SET MEMBERSHIP
+/// (`retain`): it only excludes the trigger when it actually appears in the
+/// matched set, so a trigger object that matches the filter predicate but lies
+/// outside the filter's zone is not wrongly decremented. The `Aggregate` resolver
+/// delegates here for its population, so count and aggregate share this exclusion.
+pub(crate) fn object_count_matching_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    let zone = filter
+        .extract_in_zone()
+        .unwrap_or(crate::types::zones::Zone::Battlefield);
+    let mut ids: Vec<ObjectId> = crate::game::targeting::zone_object_ids(state, zone)
+        .into_iter()
+        .filter(|&id| matches_target_filter(state, id, filter, filter_ctx))
+        .collect();
+    // Drop the triggering object for an "other than" filter (Valakut's "five
+    // other Mountains" — the newly-entered Mountain matches the per-object filter
+    // as a pass-through and is removed here). The exclusion is the Oracle-text
+    // semantic of "other"/"other than", not a numbered CR. Falls back to the
+    // ability source when the trigger event carries no object subject.
+    // Resolution-time prefers the live `current_trigger_event`; detection-time
+    // uses the TLS override set by `resolve_quantity_for_trigger_check`.
+    if filter_contains_other_than_trigger_object(filter) {
+        let triggering_id = state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .or_else(|| {
+                detection_trigger_event()
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_source_from_event)
+            })
+            .unwrap_or(source_id);
+        ids.retain(|&id| id != triggering_id);
+    }
+    ids
+}
+
 fn resolve_ref(
     state: &GameState,
     qty: &QuantityRef,
@@ -709,54 +761,13 @@ fn resolve_ref(
                 i32::from(effective_speed(state, p.id))
             })
         }
-        QuantityRef::ObjectCount { filter } => {
-            // CR 400.1: If the filter constrains to a specific zone via InZone,
-            // count objects in that zone. Otherwise default to battlefield.
-            let zone = filter
-                .extract_in_zone()
-                .unwrap_or(crate::types::zones::Zone::Battlefield);
-            let raw = crate::game::targeting::zone_object_ids(state, zone)
-                .iter()
-                .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
-                .count();
-            // CR 603.4 + CR 109.3: If the filter carries `OtherThanTriggerObject`,
-            // exclude the triggering object from the count (e.g., Valakut's "five
-            // other Mountains" — the newly-entered Mountain is counted by the
-            // per-object filter as a pass-through, then subtracted here). Uses
-            // the currently-resolving trigger event; at detection time the event
-            // is threaded in via `resolve_quantity_for_trigger_check`, which sets
-            // a scoped override read here.
-            //
-            // When the trigger event carries no object subject (e.g. a `PhaseChanged`
-            // event for "at the beginning of your upkeep" / "end step"), the
-            // "other" modifier degrades to "other than the ability source" — this
-            // matches CR 109.3's general sense of "other" as "not the speaking
-            // object" and preserves Platoon-Dispenser-style "two or more other
-            // creatures" semantics where source == the only entity to exclude.
-            let adjusted = if filter_contains_other_than_trigger_object(filter) {
-                // Prefer the live `current_trigger_event` (resolution-time);
-                // fall back to the detection-time TLS override populated by
-                // `resolve_quantity_for_trigger_check`.
-                let triggering_id = state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_source_from_event)
-                    .or_else(|| {
-                        detection_trigger_event()
-                            .as_ref()
-                            .and_then(crate::game::targeting::extract_source_from_event)
-                    })
-                    .unwrap_or(source_id);
-                if matches_target_filter(state, triggering_id, filter, &filter_ctx) {
-                    raw.saturating_sub(1)
-                } else {
-                    raw
-                }
-            } else {
-                raw
-            };
-            usize_to_i32_saturating(adjusted)
-        }
+        QuantityRef::ObjectCount { filter } => usize_to_i32_saturating(
+            // CR 400.1 + CR 603.4 + CR 109.3: count of the matching objects in
+            // the filter's zone, with `OtherThanTriggerObject` exclusion applied
+            // — shared with the "for each [object]" iteration so count and
+            // members stay in lockstep.
+            object_count_matching_ids(state, filter, &filter_ctx, source_id).len(),
+        ),
         // CR 201.2 + CR 603.4: Count of objects matching `filter`,
         // deduplicated by the listed `qualities`. Each object contributes a
         // tuple-key formed from its values per quality; objects whose tuples
@@ -909,60 +920,24 @@ fn resolve_ref(
                     .map(|lki| u32_to_i32_saturating(lki.mana_value))
             })
             .unwrap_or(0),
-        // CR 107.3e: Aggregate queries over game objects.
-        // Uses extract_in_zone() to support non-battlefield zones (exile, graveyard, etc.),
-        // same pattern as ObjectCount above.
+        // Aggregate over objects matching `filter` in its zone; id population
+        // delegated to `object_count_matching_ids` (single source of truth for
+        // zone selection + the `OtherThanTriggerObject` exclusion). Selvala-class
+        // "each other creature's power" excludes the triggering object via the
+        // shared helper, so count and aggregate population are identical.
         QuantityRef::Aggregate {
             function,
             property,
             filter,
         } => {
-            let zone = filter
-                .extract_in_zone()
-                .unwrap_or(crate::types::zones::Zone::Battlefield);
-            let zone_ids = crate::game::targeting::zone_object_ids(state, zone);
-            // CR 603.4 + CR 109.3: If the filter carries
-            // `OtherThanTriggerObject`, exclude the triggering object from the
-            // aggregate population (Selvala-class "each other creature's
-            // power"). Mirrors the `ObjectCount` resolver's exclusion path
-            // above: per-object filter evaluation is a transparent
-            // pass-through for the marker; explicit subtraction happens here.
-            //
-            // When no trigger event carries an object subject, the marker
-            // degrades to source-exclusion via the same fallback used by
-            // `ObjectCount` (CR 109.3's general sense of "other").
-            let excluded_id = if filter_contains_other_than_trigger_object(filter) {
-                Some(
-                    state
-                        .current_trigger_event
-                        .as_ref()
-                        .and_then(crate::game::targeting::extract_source_from_event)
-                        .or_else(|| {
-                            detection_trigger_event()
-                                .as_ref()
-                                .and_then(crate::game::targeting::extract_source_from_event)
-                        })
-                        .unwrap_or(source_id),
-                )
-            } else {
-                None
-            };
-            let values = zone_ids.iter().filter_map(|&id| {
-                if excluded_id == Some(id) {
-                    return None;
-                }
-                if matches_target_filter(state, id, filter, &filter_ctx) {
-                    state.objects.get(&id).map(|obj| match property {
-                        ObjectProperty::Power => obj.power.unwrap_or(0),
-                        ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
-                        // CR 202.3e: Use mana_value() which correctly excludes X.
-                        ObjectProperty::ManaValue => {
-                            u32_to_i32_saturating(obj.mana_cost.mana_value())
-                        }
-                    })
-                } else {
-                    None
-                }
+            let ids = object_count_matching_ids(state, filter, &filter_ctx, source_id);
+            let values = ids.iter().filter_map(|&id| {
+                state.objects.get(&id).map(|obj| match property {
+                    ObjectProperty::Power => obj.power.unwrap_or(0),
+                    ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
+                    // CR 202.3e: mana_value() excludes X.
+                    ObjectProperty::ManaValue => u32_to_i32_saturating(obj.mana_cost.mana_value()),
+                })
             });
             match function {
                 AggregateFunction::Max => values.max().unwrap_or(0),
@@ -1237,8 +1212,15 @@ fn resolve_ref(
             .as_ref()
             .and_then(crate::game::targeting::extract_amount_from_event)
             .or_else(|| {
-                ctx.scoped_player
-                    .and_then(|player| state.last_effect_counts_by_player.get(&player).copied())
+                ctx.scoped_player.and_then(|player| {
+                    (!state.last_effect_counts_by_player.is_empty()).then(|| {
+                        state
+                            .last_effect_counts_by_player
+                            .get(&player)
+                            .copied()
+                            .unwrap_or(0)
+                    })
+                })
             })
             .or(state.last_effect_count)
             .or(state.last_effect_amount)
@@ -1445,6 +1427,12 @@ fn resolve_ref(
                 u32_to_i32_saturating(p.cards_drawn_this_turn)
             })
         }
+        // CR 305.2a + CR 603.4: Lands played this turn by the scoped player.
+        QuantityRef::LandsPlayedThisTurn { player } => {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
+                i32::from(p.lands_played_this_turn)
+            })
+        }
         // CR 400.7 + CR 700.4: Count zone-change snapshots from this turn
         // using last-known characteristics for the moved object.
         QuantityRef::ZoneChangeCountThisTurn { from, to, filter } => usize_to_i32_saturating(
@@ -1510,6 +1498,20 @@ fn resolve_ref(
             } else {
                 0
             }
+        }
+        // CR 606.1 + CR 603.4: Per-player loyalty-ability activation count for
+        // the current turn. Reads from `GameState::loyalty_abilities_activated_this_turn`,
+        // a player-id-keyed counter populated in
+        // `planeswalker::record_loyalty_activation`.
+        QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                state
+                    .loyalty_abilities_activated_this_turn
+                    .get(&p.id)
+                    .copied()
+                    .map(u32_to_i32_saturating)
+                    .unwrap_or(0)
+            })
         }
         // CR 117.1: Total spells cast last turn (by any player).
         QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
@@ -1789,9 +1791,12 @@ fn scoped_players<'a>(
     ctx: QuantityContext,
     controller: PlayerId,
 ) -> impl Iterator<Item = &'a crate::types::player::Player> {
-    let scoped_player = ctx.scoped_player.unwrap_or(controller);
+    let scoped_player = ctx
+        .scoped_player
+        .or_else(|| triggering_event_player(state))
+        .unwrap_or(controller);
     state.players.iter().filter(move |p| match scope {
-        CountScope::Controller => p.id == controller,
+        CountScope::Controller | CountScope::Owner => p.id == controller,
         CountScope::ScopedPlayer => p.id == scoped_player,
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
@@ -1808,7 +1813,7 @@ fn count_scope_owner_matches(
     owner: PlayerId,
 ) -> bool {
     match scope {
-        CountScope::Controller => owner == controller,
+        CountScope::Controller | CountScope::Owner => owner == controller,
         CountScope::ScopedPlayer => owner == ctx.scoped_player.unwrap_or(controller),
         CountScope::All => true,
         CountScope::Opponents => owner != controller,
@@ -1822,7 +1827,7 @@ fn counter_added_actor_matches(
     actor: PlayerId,
 ) -> bool {
     match scope {
-        CountScope::Controller => actor == controller,
+        CountScope::Controller | CountScope::Owner => actor == controller,
         CountScope::ScopedPlayer => actor == ctx.scoped_player.unwrap_or(controller),
         CountScope::All => true,
         CountScope::Opponents => actor != controller,
@@ -2746,6 +2751,17 @@ pub(crate) fn resolve_player_count(
                         PlayerFilter::OpponentGainedLife => {
                             p.id != controller && p.life_gained_this_turn > 0
                         }
+                        // CR 120.1 + CR 510.1: Each opponent who was dealt combat
+                        // damage this turn. Probes the `damage_dealt_this_turn`
+                        // ledger for any record targeting this player with
+                        // `is_combat = true`.
+                        PlayerFilter::OpponentDealtCombatDamage => {
+                            p.id != controller
+                                && state.damage_dealt_this_turn.iter().any(|r| {
+                                    r.is_combat
+                                        && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
+                                })
+                        }
                         PlayerFilter::All => true,
                         PlayerFilter::HighestSpeed => {
                             let highest_speed = state
@@ -3388,6 +3404,34 @@ mod tests {
             resolve_quantity(&state, &all_expr, PlayerId(0), ObjectId(0)),
             8
         );
+    }
+
+    /// CR 122.1 + CR 603.7c: "that player has" on a damage trigger binds to
+    /// the damaged player carried by `current_trigger_event`.
+    #[test]
+    fn resolve_quantity_player_counter_scoped_player_from_damage_event() {
+        use crate::types::events::GameEvent;
+        use crate::types::player::PlayerCounterKind;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].poison_counters = 1;
+        state.players[1].poison_counters = 4;
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: ObjectId(7),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Poison,
+                scope: CountScope::ScopedPlayer,
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(7)), 4);
     }
 
     #[test]
@@ -4882,6 +4926,68 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
+    /// CR 120.1 + CR 510.1: Resolving `PlayerCount { OpponentDealtCombatDamage }`
+    /// against `damage_dealt_this_turn` records counts only opponents whose
+    /// player target appears in the ledger with `is_combat = true`. Mirrors
+    /// the partner-quality "for each opponent that was dealt combat damage
+    /// this turn" class (Tymna the Weaver) and the resolver's `Opponent`
+    /// guard ensures the controller's own combat-damage entries don't leak in.
+    #[test]
+    fn resolve_quantity_player_count_opponent_dealt_combat_damage() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Player 1 was dealt combat damage; player 2 was dealt non-combat
+        // damage; player 0 (controller) is excluded by the Opponent guard.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 4,
+            is_combat: true,
+        });
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(2)),
+            target_controller: PlayerId(2),
+            amount: 2,
+            is_combat: false,
+        });
+        // Self-damage record must not count as an "opponent dealt combat damage".
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(0)),
+            target_controller: PlayerId(0),
+            amount: 1,
+            is_combat: true,
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage,
+            },
+        };
+        // Controller = player 0: only player 1 satisfies (combat + opponent).
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    /// CR 120.1 + CR 510.1: With no combat damage dealt this turn, the
+    /// quantity resolves to zero — the empty-ledger case mirrors
+    /// `resolve_quantity_player_count_opponent_lost_life_none_lost`.
+    #[test]
+    fn resolve_quantity_player_count_opponent_dealt_combat_damage_none() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
     /// CR 119.3: `LifeLostThisTurn { Opponent { Sum } }` sums life lost across
     /// opponents, excluding the controller. Three players' losses [2, 5, 1]
     /// with controller = 0 → sum of opponents 1+2 = 5+1 = 6. Locks in the
@@ -6206,6 +6312,8 @@ mod tests {
                 name: String::new(),
                 power: Some(6),
                 toughness: Some(5),
+                base_power: Some(6),
+                base_toughness: Some(5),
                 mana_value: 3,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6263,6 +6371,8 @@ mod tests {
                 name: "Regal Force".to_string(),
                 power: Some(5),
                 toughness: Some(5),
+                base_power: Some(5),
+                base_toughness: Some(5),
                 mana_value: 6,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6405,6 +6515,8 @@ mod tests {
                 name: "Sacrificed Hulk".to_string(),
                 power: Some(99),
                 toughness: Some(99),
+                base_power: Some(99),
+                base_toughness: Some(99),
                 mana_value: 99,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6465,6 +6577,8 @@ mod tests {
                 name: "Sacrificed Creature".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
                 mana_value: 3,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6523,6 +6637,8 @@ mod tests {
                 name: name.to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
                 mana_value,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6578,6 +6694,8 @@ mod tests {
                 name: "Revealed Card".to_string(),
                 power: Some(0),
                 toughness: Some(0),
+                base_power: Some(0),
+                base_toughness: Some(0),
                 mana_value: 3,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6626,6 +6744,8 @@ mod tests {
                 name: name.to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
                 mana_value,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6685,6 +6805,8 @@ mod tests {
                 name: name.to_string(),
                 power: Some(power),
                 toughness: Some(power),
+                base_power: Some(power),
+                base_toughness: Some(power),
                 mana_value: 0,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6721,6 +6843,8 @@ mod tests {
                 name: String::new(),
                 power: Some(3),
                 toughness: Some(3),
+                base_power: Some(3),
+                base_toughness: Some(3),
                 mana_value: 2,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6955,16 +7079,32 @@ mod tests {
             )),
         });
 
-        let aggregate = QuantityRef::Aggregate {
-            function: AggregateFunction::Max,
-            property: ObjectProperty::Power,
-            filter: TargetFilter::Typed(
+        let other_creatures = || {
+            TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::OtherThanTriggerObject]),
-            ),
+            )
         };
-        let expr = QuantityExpr::Ref { qty: aggregate };
-        // Triggering creature (power 6) must be excluded; max of remaining is 4.
-        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 4);
+        // Max: triggering creature (power 6) must be excluded; max of remaining is 4.
+        let max_expr = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Max,
+                property: ObjectProperty::Power,
+                filter: other_creatures(),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &max_expr, PlayerId(0), source), 4);
+
+        // Sum: the folded `object_count_matching_ids` delegation must keep the
+        // `OtherThanTriggerObject` exclusion — sum is 2 + 4 = 6 (NOT 12 with the
+        // triggering 6/6 included).
+        let sum_expr = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                filter: other_creatures(),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &sum_expr, PlayerId(0), source), 6);
     }
 
     /// Issue #338 — Greater Good end-to-end. Drives the REAL engine pipeline:

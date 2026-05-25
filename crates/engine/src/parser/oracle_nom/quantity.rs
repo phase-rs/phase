@@ -415,10 +415,11 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_life_gained_ref,
         parse_starting_life_ref,
         parse_object_mana_value_ref,
-        // CR 117.1 + CR 202.3: cost-paid object's mana value — must precede
-        // `parse_event_context_refs` so the cost-paid resolver wins over the
-        // generic event-source resolver for sacrificed/exiled possessives
-        // (Food Chain, Burnt Offering, Metamorphosis).
+        // CR 608.2k + CR 400.7j + CR 202.3: previously-referenced object's
+        // mana value — must precede `parse_event_context_refs` so the
+        // cost/effect referent resolver wins over the generic event-source
+        // resolver for sacrificed/exiled/milled possessives (Food Chain, Burnt
+        // Offering, Metamorphosis, Heed the Mists).
         parse_cost_paid_object_ref,
         parse_event_context_refs,
     ))
@@ -971,7 +972,7 @@ fn parse_creature_in_party_for_each(input: &str) -> OracleResult<'_, QuantityRef
     .parse(input)
 }
 
-fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((tag(" cards"), tag(" card"), tag("cards"), tag("card"))),
@@ -993,7 +994,7 @@ fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
 /// artifacts"). The longest-prefix-first ordering (`and/or` before `and`) is
 /// load-bearing — without it, `tag(" and ")` would consume the `" and "` head
 /// of `" and/or "` and the `/or` tail would derail `parse_type_filter_word`.
-fn parse_type_filter_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+pub(crate) fn parse_type_filter_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     let (mut rest, first) = parse_type_filter_word(input)?;
     let mut filters = vec![first];
     loop {
@@ -1011,7 +1012,7 @@ fn parse_type_filter_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     Ok((rest, filters))
 }
 
-fn parse_zone_ref_singular(input: &str) -> OracleResult<'_, ZoneRef> {
+pub(crate) fn parse_zone_ref_singular(input: &str) -> OracleResult<'_, ZoneRef> {
     alt((
         value(ZoneRef::Graveyard, tag("graveyard")),
         value(ZoneRef::Exile, tag("exile")),
@@ -1366,21 +1367,33 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((rest, QuantityRef::ObjectManaValue { scope }))
 }
 
-/// CR 117.1 + CR 202.3: Cost-paid object's mana value.
+/// CR 608.2k + CR 400.7j + CR 202.3: Previously-referenced object's mana value.
 ///
 /// Composes the prefix grammar
-/// `[the] (sacrificed|exiled) (creature|card|permanent|artifact)'s (mana value|converted mana cost)`
+/// `[the] (sacrificed|exiled|discarded|milled) (creature|card|permanent|artifact|enchantment|planeswalker|land)'s (mana value|converted mana cost|power|toughness)`
 /// into a single typed combinator. Each axis is a single `alt()` over
-/// independent variants — adding a new participle (e.g. "discarded"), a new
-/// noun, or the British spelling of "mana value" extends one alt branch
-/// rather than adding a new top-level arm.
+/// independent variants — adding a new participle, a new noun, or the British
+/// spelling of "mana value" extends one alt branch rather than adding a new
+/// top-level arm.
 ///
 /// Used by Food Chain ("1 plus the exiled creature's mana value"),
 /// Burnt Offering / Metamorphosis ("the sacrificed creature's mana value"),
+/// Heed the Mists ("the milled card's mana value"),
 /// and the broader cost-paid-by-property class.
+///
+/// CR 701.17a + CR 701.17c + CR 400.7j: "milled" card refers to the
+/// object that moved from the library to the graveyard; its mana value is read
+/// from that public-zone object or LKI as needed.
 fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = opt(tag("the ")).parse(input)?;
-    let (rest, _) = alt((tag("sacrificed "), tag("exiled "), tag("discarded "))).parse(rest)?;
+    let (rest, _) = alt((
+        tag("sacrificed "),
+        tag("exiled "),
+        tag("discarded "),
+        // CR 701.17a: "milled" — card moved library → graveyard by the mill action.
+        tag("milled "),
+    ))
+    .parse(rest)?;
     let (rest, _) = alt((
         tag("creature"),
         tag("card"),
@@ -1391,13 +1404,7 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         tag("land"),
     ))
     .parse(rest)?;
-    let (rest, property) = alt((
-        value(ObjectProperty::ManaValue, tag("'s mana value")),
-        value(ObjectProperty::ManaValue, tag("'s converted mana cost")),
-        value(ObjectProperty::Power, tag("'s power")),
-        value(ObjectProperty::Toughness, tag("'s toughness")),
-    ))
-    .parse(rest)?;
+    let (rest, property) = parse_object_property_possessive_suffix(rest)?;
     let qty = match property {
         ObjectProperty::Power => QuantityRef::Power {
             scope: ObjectScope::CostPaidObject,
@@ -1408,6 +1415,48 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         },
+    };
+    Ok((rest, qty))
+}
+
+fn parse_object_property_possessive_suffix(input: &str) -> OracleResult<'_, ObjectProperty> {
+    alt((
+        value(ObjectProperty::ManaValue, tag("'s mana value")),
+        value(ObjectProperty::ManaValue, tag("'s converted mana cost")),
+        value(ObjectProperty::Power, tag("'s power")),
+        value(ObjectProperty::Toughness, tag("'s toughness")),
+    ))
+    .parse(input)
+}
+
+fn parse_anaphoric_target_card_property_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("that ").parse(input)?;
+    let (rest, has_power_toughness) = alt((
+        value(true, tag("creature card")),
+        value(false, tag("artifact card")),
+        value(false, tag("enchantment card")),
+        value(false, tag("planeswalker card")),
+        value(false, tag("land card")),
+        value(false, tag("card")),
+    ))
+    .parse(rest)?;
+    let (rest, property) = parse_object_property_possessive_suffix(rest)?;
+    let qty = match property {
+        ObjectProperty::Power if has_power_toughness => QuantityRef::Power {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::Toughness if has_power_toughness => QuantityRef::Toughness {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::Power | ObjectProperty::Toughness => {
+            return Err(nom::Err::Error(OracleError::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
     };
     Ok((rest, qty))
 }
@@ -1443,6 +1492,10 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("that spell's mana value"),
         ),
+        // CR 109.2a + CR 608.2c: "that [type] card's [property]" — anaphoric
+        // reference to a card selected by an earlier instruction in the same
+        // resolution sequence.
+        parse_anaphoric_target_card_property_ref,
     ))
     .parse(input)
 }
@@ -2449,13 +2502,12 @@ fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind>
 }
 
 /// CR 122.1 + CR 109.5: Typed possessor alt mapping to `CountScope`. Each arm
-/// emits the scope variant directly. Targeted-player phrasings ("target
-/// opponent has", "that player has") are intentionally not represented
-/// because no current card requires them; extending here is a typed
-/// addition, not a string-match retrofit.
+/// emits the scope variant directly. New possessor phrases extend this typed
+/// alt rather than adding full phrase permutations.
 fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
     alt((
         value(CountScope::Controller, tag("you have")),
+        value(CountScope::ScopedPlayer, tag("that player has")),
         value(CountScope::Opponents, tag("each opponent has")),
         value(CountScope::Opponents, tag("your opponents have")),
         value(CountScope::All, tag("each player has")),
@@ -3667,6 +3719,36 @@ mod tests {
         assert_eq!(rest2, "");
     }
 
+    #[test]
+    fn test_parse_anaphoric_target_card_property_refs() {
+        let cases = [
+            (
+                "that creature card's power",
+                QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            ),
+            (
+                "that creature card's toughness",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::Target,
+                },
+            ),
+            (
+                "that artifact card's mana value",
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let (rest, qty) = parse_quantity_ref(input).unwrap();
+            assert_eq!(qty, expected);
+            assert_eq!(rest, "");
+        }
+    }
+
     /// CR 603.7c: Dusty Parlor — the SpellCast event's source object is the
     /// spell, so "that spell's mana value" reads its CMC via the parameterized
     /// `ObjectManaValue { scope: EventSource }` path.
@@ -4515,6 +4597,16 @@ mod tests {
                 PlayerCounterKind::Poison,
                 CountScope::All,
             ),
+            (
+                "the number of poison counters that player has",
+                PlayerCounterKind::Poison,
+                CountScope::ScopedPlayer,
+            ),
+            (
+                "the number of rad counters that player has",
+                PlayerCounterKind::Rad,
+                CountScope::ScopedPlayer,
+            ),
         ];
         for (phrase, kind, scope) in cases {
             let (rest, q) = parse_quantity_ref(phrase).unwrap_or_else(|e| {
@@ -4610,6 +4702,30 @@ mod tests {
                         ],
                     },
                 }
+            );
+        }
+    }
+
+    /// CR 701.17a + CR 701.17c: "the milled card's mana value" routes through
+    /// `parse_cost_paid_object_ref` (participle = "milled") and yields
+    /// `ObjectManaValue { CostPaidObject }`. Covers Heed the Mists and the
+    /// broader class of "milled card's <property>" CDA patterns.
+    #[test]
+    fn test_parse_milled_card_mana_value_ref() {
+        for phrase in [
+            "the milled card's mana value",
+            "the milled card's converted mana cost",
+            "milled card's mana value",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase)
+                .unwrap_or_else(|_| panic!("parse_quantity_ref({phrase:?}) should succeed"));
+            assert_eq!(rest, "", "phrase {phrase:?} should be fully consumed");
+            assert_eq!(
+                q,
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                "phrase {phrase:?} must yield ObjectManaValue{{CostPaidObject}}"
             );
         }
     }

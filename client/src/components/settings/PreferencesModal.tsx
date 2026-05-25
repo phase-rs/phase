@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { audioManager } from "../../audio/AudioManager.ts";
 import { cacheThemeManifest, clearThemeCache } from "../../audio/audioCache.ts";
@@ -26,6 +28,8 @@ import type {
   CardSizePreference,
   LogDefaultState,
 } from "../../stores/preferencesStore.ts";
+import type { SupportedLng } from "../../i18n/resources.ts";
+import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
@@ -39,52 +43,71 @@ interface PreferencesModalProps {
   highlight?: SettingsHighlight;
 }
 
+/** Locale options for the language selector. Labels are autonyms (each language's
+ *  own name) and are intentionally NOT translated. */
+const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
+  { value: "en", label: "English" },
+  { value: "es", label: "Español" },
+  { value: "fr", label: "Français" },
+  { value: "de", label: "Deutsch" },
+  { value: "it", label: "Italiano" },
+  { value: "pt", label: "Português" },
+];
+
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
 
 /** Format a speed value as a user-facing label. The slider goes 0→max where
- *  max = instant (skip animations). `0` = slowest, `1` = normal. */
-function formatSpeed(value: number, max: number): string {
-  if (value >= max) return "Instant";
-  if (value <= 0) return "Slowest";
+ *  max = instant (skip animations). `0` = slowest, `1` = normal. The endpoint
+ *  labels are translated by the caller and passed in. */
+function formatSpeed(value: number, max: number, labels: { instant: string; slowest: string }): string {
+  if (value >= max) return labels.instant;
+  if (value <= 0) return labels.slowest;
   return `${value.toFixed(2)}×`;
 }
 const SETTINGS_TABS = [
-  { id: "gameplay", label: "Gameplay" },
-  { id: "visual", label: "Visual" },
-  { id: "combat", label: "Pacing" },
-  { id: "audio", label: "Audio" },
-  { id: "multiplayer", label: "Multiplayer" },
-  { id: "data", label: "Data" },
-  { id: "experimental", label: "Experimental" },
+  { id: "gameplay" },
+  { id: "visual" },
+  { id: "combat" },
+  { id: "audio" },
+  { id: "multiplayer" },
+  { id: "data" },
+  { id: "experimental" },
 ] as const;
 
 export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
 
-const BOARD_BACKGROUND_GROUPS: { label: string; options: { value: string; label: string }[] }[] = [
+/** Board-background select groups. `labelKey` is a settings-namespace i18n key
+ *  for the frontend-authored group/option labels; battlefield and plain
+ *  background labels come from engine/asset modules and stay raw. */
+type BoardBackgroundGroup = {
+  labelKey: string;
+  options: { value: string; labelKey?: string; label?: string }[];
+};
+const BOARD_BACKGROUND_GROUPS: BoardBackgroundGroup[] = [
   {
-    label: "Automatic",
+    labelKey: "gameplay.boardBackgroundGroups.automatic",
     options: [
-      { value: "auto-wubrg", label: "Auto (match deck)" },
-      { value: "random", label: "Random" },
+      { value: "auto-wubrg", labelKey: "gameplay.boardBackgroundOptions.autoMatchDeck" },
+      { value: "random", labelKey: "gameplay.boardBackgroundOptions.random" },
     ],
   },
   {
-    label: "Battlefields",
+    labelKey: "gameplay.boardBackgroundGroups.battlefields",
     options: BATTLEFIELDS.map((bf) => ({ value: bf.id, label: `${bf.label} (${bf.color})` })),
   },
   {
-    label: "Plain",
+    labelKey: "gameplay.boardBackgroundGroups.plain",
     options: PLAIN_BACKGROUNDS.map((bg) => ({ value: bg.id, label: bg.label })),
   },
   {
-    label: "Custom",
-    options: [{ value: "custom", label: "Custom URL" }],
+    labelKey: "gameplay.boardBackgroundGroups.custom",
+    options: [{ value: "custom", labelKey: "gameplay.boardBackgroundOptions.customUrl" }],
   },
   {
-    label: "Off",
-    options: [{ value: "none", label: "None" }],
+    labelKey: "gameplay.boardBackgroundGroups.off",
+    options: [{ value: "none", labelKey: "gameplay.boardBackgroundOptions.none" }],
   },
 ];
 
@@ -93,6 +116,7 @@ export function PreferencesModal({
   initialTab = "gameplay",
   highlight,
 }: PreferencesModalProps) {
+  const { t } = useTranslation("settings");
   const boardBackgroundRef = useRef<HTMLDivElement | null>(null);
   const [highlightFlash, setHighlightFlash] = useState(highlight === "board-background");
 
@@ -109,6 +133,8 @@ export function PreferencesModal({
     };
   }, [highlight]);
 
+  const language = usePreferencesStore((s) => s.language);
+  const setLanguage = usePreferencesStore((s) => s.setLanguage);
   const cardSize = usePreferencesStore((s) => s.cardSize);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
@@ -183,10 +209,10 @@ export function PreferencesModal({
       setThemeImportUrl("");
       setThemeImportStatus("idle");
     } catch (err) {
-      setThemeImportError(err instanceof Error ? err.message : "Failed to import theme");
+      setThemeImportError(err instanceof Error ? err.message : t("audioTheme.importFailed"));
       setThemeImportStatus("error");
     }
-  }, [themeImportUrl, addCustomThemeUrl]);
+  }, [themeImportUrl, addCustomThemeUrl, t]);
 
   const handleRemoveTheme = useCallback(async (id: string) => {
     removeCustomThemeUrl(id);
@@ -204,8 +230,8 @@ export function PreferencesModal({
 
   return (
     <ModalPanelShell
-      title="Settings"
-      subtitle="Tune gameplay, visuals, audio, and multiplayer defaults."
+      title={t("modal.title")}
+      subtitle={t("modal.subtitle")}
       onClose={onClose}
       maxWidthClassName="max-w-5xl"
       bodyClassName="overflow-y-auto p-4 sm:p-6"
@@ -222,15 +248,40 @@ export function PreferencesModal({
                       : "border-white/8 bg-black/20 text-slate-400 hover:border-white/14 hover:text-slate-100"
                   }`}
                 >
-                  {tab.label}
+                  {t(`tabs.${tab.id}`)}
                 </button>
               ))}
             </nav>
 
             <div className="min-w-0">
               {activeTab === "gameplay" && (
-                <SettingsSection title="Gameplay">
-                  <SettingGroup label="Card Size">
+                <SettingsSection title={t("gameplay.title")}>
+                  <SettingGroup label={t("gameplay.language")}>
+                    <div className="flex flex-wrap gap-2">
+                      {LANGUAGE_OPTIONS.map((opt) => {
+                        const selected = opt.value === language;
+                        return (
+                          <button
+                            key={opt.value}
+                            type="button"
+                            onClick={() => setLanguage(opt.value)}
+                            aria-pressed={selected}
+                            aria-label={opt.label}
+                            className={`flex min-h-11 items-center gap-2 rounded-[14px] border px-3 py-2 text-sm transition-colors ${
+                              selected
+                                ? "border-sky-400/60 bg-sky-400/15 text-white"
+                                : "border-white/10 bg-black/18 text-slate-200 hover:border-white/25 hover:text-white"
+                            }`}
+                          >
+                            <LanguageFlag lng={opt.value} className="h-4 w-6 shrink-0 rounded-sm" />
+                            <span>{opt.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.cardSize")}>
                     <SegmentedControl
                       options={CARD_SIZES}
                       value={cardSize}
@@ -238,7 +289,7 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
-                  <SettingGroup label="Log Default">
+                  <SettingGroup label={t("gameplay.logDefault")}>
                     <SegmentedControl
                       options={LOG_DEFAULTS}
                       value={logDefaultState}
@@ -246,7 +297,7 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
-                  <SettingGroup label="Spell Payment">
+                  <SettingGroup label={t("gameplay.spellPayment")}>
                     <label className="flex min-h-11 items-center gap-2">
                       <input
                         type="checkbox"
@@ -254,7 +305,7 @@ export function PreferencesModal({
                         onChange={(e) => setSpellPaymentMode(e.target.checked ? "manual" : "auto")}
                         className="accent-cyan-500"
                       />
-                      <span className="text-sm text-slate-200">Manual mana payment for spells</span>
+                      <span className="text-sm text-slate-200">{t("gameplay.manualManaPayment")}</span>
                     </label>
                   </SettingGroup>
 
@@ -266,17 +317,17 @@ export function PreferencesModal({
                         : ""
                     }`}
                   >
-                    <SettingGroup label="Board Background">
+                    <SettingGroup label={t("gameplay.boardBackground")}>
                       <select
                         value={boardBackground}
                         onChange={(e) => setBoardBackground(e.target.value)}
                         className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
                       >
                         {BOARD_BACKGROUND_GROUPS.map((group) => (
-                          <optgroup key={group.label} label={group.label}>
+                          <optgroup key={group.labelKey} label={t(group.labelKey)}>
                             {group.options.map((bg) => (
                               <option key={bg.value} value={bg.value}>
-                                {bg.label}
+                                {bg.labelKey ? t(bg.labelKey) : bg.label}
                               </option>
                             ))}
                           </optgroup>
@@ -297,8 +348,8 @@ export function PreferencesModal({
               )}
 
               {activeTab === "visual" && (
-                <SettingsSection title="Visual">
-                  <SettingGroup label="VFX Quality">
+                <SettingsSection title={t("visual.title")}>
+                  <SettingGroup label={t("visual.vfxQuality")}>
                     <SegmentedControl
                       options={VFX_QUALITIES}
                       value={vfxQuality}
@@ -306,7 +357,7 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
-                  <SettingGroup label="Keyword Strip">
+                  <SettingGroup label={t("visual.keywordStrip")}>
                     <label className="flex min-h-11 items-center gap-2">
                       <input
                         type="checkbox"
@@ -314,11 +365,11 @@ export function PreferencesModal({
                         onChange={(e) => setShowKeywordStrip(e.target.checked)}
                         className="accent-cyan-500"
                       />
-                      <span className="text-sm text-slate-200">Show keywords on battlefield cards</span>
+                      <span className="text-sm text-slate-200">{t("visual.showKeywords")}</span>
                     </label>
                   </SettingGroup>
 
-                  <SettingGroup label="Opponent Hover Preview">
+                  <SettingGroup label={t("visual.opponentHoverPreview")}>
                     <label className="flex min-h-11 items-center gap-2">
                       <input
                         type="checkbox"
@@ -326,11 +377,11 @@ export function PreferencesModal({
                         onChange={(e) => setBattlefieldPeekOnHover(e.target.checked)}
                         className="accent-cyan-500"
                       />
-                      <span className="text-sm text-slate-200">Show opponent's board on HUD hover</span>
+                      <span className="text-sm text-slate-200">{t("visual.showOpponentBoard")}</span>
                     </label>
                   </SettingGroup>
 
-                  <SettingGroup label="Card Art Preferences">
+                  <SettingGroup label={t("visual.cardArtPreferences")}>
                     <ArtChainEditor
                       chain={artChain}
                       onAdd={addArtChainEntry}
@@ -341,13 +392,13 @@ export function PreferencesModal({
                       <button
                         type="button"
                         onClick={() => {
-                          if (window.confirm(`Clear all ${artOverrideCount} art override(s)?`)) {
+                          if (window.confirm(t("visual.clearArtOverridesConfirm", { count: artOverrideCount }))) {
                             clearAllArtOverrides();
                           }
                         }}
                         className="mt-2 rounded-[14px] border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 transition hover:bg-white/10"
                       >
-                        Clear All Art Overrides ({artOverrideCount})
+                        {t("visual.clearArtOverrides", { count: artOverrideCount })}
                       </button>
                     )}
                   </SettingGroup>
@@ -365,8 +416,8 @@ export function PreferencesModal({
               )}
 
               {activeTab === "audio" && (<>
-                <SettingsSection title="Audio">
-                  <SettingGroup label="Mute All">
+                <SettingsSection title={t("audio.title")}>
+                  <SettingGroup label={t("audio.muteAll")}>
                     <label className="flex min-h-11 items-center gap-2">
                       <input
                         type="checkbox"
@@ -377,11 +428,11 @@ export function PreferencesModal({
                         }}
                         className="accent-cyan-500"
                       />
-                      <span className="text-sm text-slate-200">Mute all audio</span>
+                      <span className="text-sm text-slate-200">{t("audio.muteAllAudio")}</span>
                     </label>
                   </SettingGroup>
 
-                  <SettingGroup label="Global Volume">
+                  <SettingGroup label={t("audio.globalVolume")}>
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                       <input
                         type="range"
@@ -395,7 +446,7 @@ export function PreferencesModal({
                     </div>
                   </SettingGroup>
 
-                  <SettingGroup label="SFX Volume">
+                  <SettingGroup label={t("audio.sfxVolume")}>
                     <div className={`flex flex-col gap-2 sm:flex-row sm:items-center ${masterMuted ? "opacity-50" : ""}`}>
                       <input
                         type="range"
@@ -409,7 +460,7 @@ export function PreferencesModal({
                     </div>
                   </SettingGroup>
 
-                  <SettingGroup label="Music Volume">
+                  <SettingGroup label={t("audio.musicVolume")}>
                     <div className={`flex flex-col gap-2 sm:flex-row sm:items-center ${masterMuted ? "opacity-50" : ""}`}>
                       <input
                         type="range"
@@ -424,8 +475,8 @@ export function PreferencesModal({
                   </SettingGroup>
                 </SettingsSection>
 
-                <SettingsSection title="Audio Theme">
-                  <SettingGroup label="Theme">
+                <SettingsSection title={t("audioTheme.title")}>
+                  <SettingGroup label={t("audioTheme.theme")}>
                     <select
                       value={audioThemeId}
                       onChange={(e) => handleThemeChange(e.target.value)}
@@ -440,7 +491,7 @@ export function PreferencesModal({
                     </select>
                   </SettingGroup>
 
-                  <SettingGroup label="Import Theme">
+                  <SettingGroup label={t("audioTheme.importTheme")}>
                     <div className="flex flex-col gap-2">
                       <div className="flex gap-2">
                         <input
@@ -456,7 +507,7 @@ export function PreferencesModal({
                           disabled={themeImportStatus === "loading" || !themeImportUrl.trim()}
                           className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-slate-100 hover:bg-sky-600/50 disabled:opacity-50"
                         >
-                          {themeImportStatus === "loading" ? "Loading..." : "Import"}
+                          {themeImportStatus === "loading" ? t("audioTheme.loading") : t("audioTheme.import")}
                         </button>
                       </div>
                       {themeImportStatus === "error" && (
@@ -466,17 +517,17 @@ export function PreferencesModal({
                   </SettingGroup>
 
                   {customThemeUrls.length > 0 && (
-                    <SettingGroup label="Custom Themes">
+                    <SettingGroup label={t("audioTheme.customThemes")}>
                       <div className="flex flex-col gap-1">
-                        {customThemeUrls.map((t) => (
-                          <div key={t.id} className="flex items-center justify-between rounded-lg bg-black/20 px-3 py-2">
-                            <span className="text-sm text-slate-300">{t.id}</span>
+                        {customThemeUrls.map((theme) => (
+                          <div key={theme.id} className="flex items-center justify-between rounded-lg bg-black/20 px-3 py-2">
+                            <span className="text-sm text-slate-300">{theme.id}</span>
                             <button
                               type="button"
-                              onClick={() => handleRemoveTheme(t.id)}
+                              onClick={() => handleRemoveTheme(theme.id)}
                               className="text-xs text-red-400 hover:text-red-300"
                             >
-                              Remove
+                              {t("audioTheme.remove")}
                             </button>
                           </div>
                         ))}
@@ -487,22 +538,20 @@ export function PreferencesModal({
               </>)}
 
               {activeTab === "multiplayer" && (
-                <SettingsSection title="Multiplayer">
-                  <SettingGroup label="Display Name">
+                <SettingsSection title={t("multiplayer.title")}>
+                  <SettingGroup label={t("multiplayer.displayName")}>
                       <input
                         type="text"
                         value={displayName}
                         onChange={(e) => setDisplayName(e.target.value)}
-                        placeholder="Enter your name"
+                        placeholder={t("multiplayer.displayNamePlaceholder")}
                         maxLength={20}
                         className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-sky-400/40 focus:outline-none"
                       />
                   </SettingGroup>
 
                   <p className="text-xs text-slate-400">
-                    Server selection moved to the lobby — open Multiplayer and use
-                    the server chip (or "Pick server" in P2P mode) to switch
-                    regions, configure a self-hosted instance, or test connectivity.
+                    {t("multiplayer.serverSelectionNote")}
                   </p>
                 </SettingsSection>
               )}
@@ -526,11 +575,12 @@ function ResetAllFooter({
 }: {
   resetAllPreferences: () => void;
 }) {
+  const { t } = useTranslation("settings");
   const onClick = useCallback(() => {
-    if (window.confirm("Reset all preferences to defaults? This clears every setting in this dialog.")) {
+    if (window.confirm(t("resetAll.confirm"))) {
       resetAllPreferences();
     }
-  }, [resetAllPreferences]);
+  }, [resetAllPreferences, t]);
 
   return (
     <div className="mt-4 flex justify-end border-t border-white/5 pt-3">
@@ -539,23 +589,23 @@ function ResetAllFooter({
         onClick={onClick}
         className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500 transition-colors hover:text-rose-300"
       >
-        Reset all preferences
+        {t("resetAll.button")}
       </button>
     </div>
   );
 }
 
 function ExperimentalSection() {
+  const { t } = useTranslation("settings");
   const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   const setExperimentalFeatures = usePreferencesStore((s) => s.setExperimentalFeatures);
   return (
-    <SettingsSection title="Experimental">
+    <SettingsSection title={t("experimental.title")}>
       <p className="text-xs text-slate-400">
-        These features are still in development. They may be incomplete, buggy,
-        or change without notice. Enable them to try things out early.
+        {t("experimental.description")}
       </p>
 
-      <SettingGroup label="Draft Experiments">
+      <SettingGroup label={t("experimental.draftExperiments")}>
         <label className="flex min-h-11 items-center gap-3">
           <input
             type="checkbox"
@@ -564,9 +614,9 @@ function ExperimentalSection() {
             className="accent-cyan-500"
           />
           <div className="flex flex-col">
-            <span className="text-sm text-slate-200">Enable experimental draft features</span>
+            <span className="text-sm text-slate-200">{t("experimental.enableDraftFeatures")}</span>
             <span className="text-xs text-slate-500">
-              Unlocks Cube Draft and Pod Draft. Quick Draft vs AI is always available.
+              {t("experimental.draftFeaturesDescription")}
             </span>
           </div>
         </label>
@@ -576,6 +626,7 @@ function ExperimentalSection() {
 }
 
 function DataSection() {
+  const { t } = useTranslation("settings");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -584,11 +635,11 @@ function DataSection() {
     setError(null);
     try {
       downloadBackup();
-      setStatus("Backup downloaded.");
+      setStatus(t("data.backupDownloaded"));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [t]);
 
   const onImport = useCallback(
     async (file: File, mode: ImportMode) => {
@@ -596,12 +647,12 @@ function DataSection() {
       setStatus(null);
       try {
         const result = await importBackupFromFile(file, mode);
-        const base =
-          `Imported ${result.decksImported} deck(s)` +
-          (result.preferencesReplaced ? " and preferences." : ".");
+        const base = result.preferencesReplaced
+          ? t("data.importedWithPreferences", { count: result.decksImported })
+          : t("data.imported", { count: result.decksImported });
         const malformedSuffix =
           result.malformedKeys.length > 0
-            ? ` Skipped ${result.malformedKeys.length} malformed entr${result.malformedKeys.length === 1 ? "y" : "ies"}.`
+            ? " " + t("data.skippedMalformed", { count: result.malformedKeys.length })
             : "";
         setStatus(base + malformedSuffix);
         // Zustand stores read from localStorage at boot — reload so every
@@ -613,23 +664,20 @@ function DataSection() {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [],
+    [t],
   );
 
   return (
-    <SettingsSection title="Backup & Restore">
+    <SettingsSection title={t("data.title")}>
       <p className="text-xs text-slate-400">
-        Export bundles your preferences, imported decks, and feed subscriptions
-        into a single JSON file. Import restores them on another machine. IndexedDB
-        caches (feed cache, audio cache, saved games) are not included — those
-        rebuild automatically.
+        {t("data.description")}
       </p>
       <div className="flex flex-wrap gap-2">
         <button
           onClick={onExport}
           className="rounded-[14px] border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10"
         >
-          Export backup…
+          {t("data.exportBackup")}
         </button>
         <button
           onClick={() => {
@@ -637,7 +685,7 @@ function DataSection() {
           }}
           className="rounded-[14px] border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10"
         >
-          Import backup…
+          {t("data.importBackup")}
         </button>
       </div>
       <input
@@ -649,11 +697,7 @@ function DataSection() {
           const file = e.target.files?.[0];
           e.target.value = "";
           if (!file) return;
-          const mode: ImportMode = window.confirm(
-            "Overwrite existing preferences and decks?\n\n" +
-              "OK: replace everything with the backup (destructive).\n" +
-              "Cancel: merge — keep existing decks, add new ones from the backup.",
-          )
+          const mode: ImportMode = window.confirm(t("data.importConfirm"))
             ? "overwrite"
             : "merge";
           void onImport(file, mode);
@@ -714,6 +758,7 @@ function MultiplierSlider({
   step: number;
   onChange: (next: number) => void;
 }) {
+  const { t } = useTranslation("settings");
   const atDefault = Math.abs(value - defaultValue) < 1e-9;
   return (
     <div>
@@ -722,7 +767,7 @@ function MultiplierSlider({
           {label}
         </label>
         <span className="font-mono text-xs tabular-nums text-slate-300">
-          {formatSpeed(value, max)}
+          {formatSpeed(value, max, { instant: t("pacing.instant"), slowest: t("pacing.slowest") })}
         </span>
       </div>
       <div className="flex items-center gap-2">
@@ -741,8 +786,8 @@ function MultiplierSlider({
           type="button"
           onClick={() => onChange(defaultValue)}
           disabled={atDefault}
-          aria-label={`Reset ${label} to default`}
-          title={atDefault ? "At default" : "Reset to default"}
+          aria-label={t("pacing.resetSliderLabel", { label })}
+          title={atDefault ? t("pacing.atDefault") : t("pacing.resetToDefault")}
           className={`flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-black/18 text-slate-300 transition-all ${
             atDefault
               ? "cursor-not-allowed opacity-30"
@@ -787,6 +832,7 @@ function PacingSection({
   setPacingMultiplier: (category: PacingCategory, n: number) => void;
   resetPacing: () => void;
 }) {
+  const { t } = useTranslation("settings");
   const allAtDefault =
     Math.abs(animationSpeedMultiplier - ANIMATION_SPEED_DEFAULT) < 1e-9 &&
     PACING_CATEGORIES.every(
@@ -797,7 +843,7 @@ function PacingSection({
     <section className="rounded-[20px] border border-white/10 bg-black/18 p-4 shadow-[0_18px_54px_rgba(0,0,0,0.18)] backdrop-blur-md sm:p-5">
       <header className="mb-4 flex items-center justify-between">
         <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-slate-500">
-          Pacing
+          {t("pacing.title")}
         </h3>
         <button
           type="button"
@@ -809,14 +855,14 @@ function PacingSection({
               : "text-slate-500 hover:text-cyan-200"
           }`}
         >
-          Reset section
+          {t("pacing.resetSection")}
         </button>
       </header>
 
       <div className="flex flex-col gap-5">
         <MultiplierSlider
-          label="Animation Speed"
-          description="Master speed — higher is faster. Full-right skips animations entirely."
+          label={t("pacing.animationSpeed")}
+          description={t("pacing.animationSpeedDescription")}
           value={ANIMATION_SPEED_MAX - animationSpeedMultiplier}
           defaultValue={ANIMATION_SPEED_MAX - ANIMATION_SPEED_DEFAULT}
           min={ANIMATION_SPEED_MIN}
@@ -841,19 +887,22 @@ function PacingSection({
       </div>
 
       <p className="mt-4 text-[0.68rem] leading-relaxed text-slate-500">
-        Per-category sliders multiply on top of Animation Speed. Double-click any
-        slider — or tap the <span className="text-slate-300">↺</span> next to it — to reset.
+        <Trans
+          t={t}
+          i18nKey="pacing.hint"
+          components={{ glyph: <span className="text-slate-300" /> }}
+        />
       </p>
     </section>
   );
 }
 
-const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; label: string }[] = [
-  { type: "source_printing", label: "Source Printing" },
-  { type: "newest", label: "Newest Printing" },
-  { type: "oldest", label: "Oldest Printing" },
-  { type: "prefer_borderless", label: "Prefer Borderless" },
-  { type: "prefer_extended", label: "Prefer Extended Art" },
+const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: string }[] = [
+  { type: "source_printing", labelKey: "artChain.rules.sourcePrinting" },
+  { type: "newest", labelKey: "artChain.rules.newest" },
+  { type: "oldest", labelKey: "artChain.rules.oldest" },
+  { type: "prefer_borderless", labelKey: "artChain.rules.preferBorderless" },
+  { type: "prefer_extended", labelKey: "artChain.rules.preferExtended" },
 ];
 
 interface ScryfallSetInfo {
@@ -862,14 +911,15 @@ interface ScryfallSetInfo {
   released_at: string;
 }
 
-function artChainEntryLabel(entry: ArtChainEntry): string {
+function artChainEntryLabel(entry: ArtChainEntry, t: TFunction<"settings">): string {
   switch (entry.type) {
-    case "set": return `Set: ${entry.label} (${entry.setCode.toUpperCase()})`;
-    case "newest": return "Newest Printing";
-    case "oldest": return "Oldest Printing";
-    case "prefer_borderless": return "Prefer Borderless";
-    case "prefer_extended": return "Prefer Extended Art";
-    case "source_printing": return "Source Printing";
+    // `entry.label` is the Scryfall set name (engine/asset data) — left raw.
+    case "set": return t("artChain.setEntry", { name: entry.label, code: entry.setCode.toUpperCase() });
+    case "newest": return t("artChain.rules.newest");
+    case "oldest": return t("artChain.rules.oldest");
+    case "prefer_borderless": return t("artChain.rules.preferBorderless");
+    case "prefer_extended": return t("artChain.rules.preferExtended");
+    case "source_printing": return t("artChain.rules.sourcePrinting");
   }
 }
 
@@ -888,6 +938,7 @@ function ArtChainEditor({
   onRemove: (index: number) => void;
   onMove: (from: number, to: number) => void;
 }) {
+  const { t } = useTranslation("settings");
   const [setInput, setSetInput] = useState("");
   const [scryfallSets, setScryfallSets] = useState<Record<string, ScryfallSetInfo> | null>(null);
 
@@ -933,7 +984,7 @@ function ArtChainEditor({
   return (
     <div className="flex flex-col gap-3">
       {chain.length === 0 && (
-        <p className="text-xs text-slate-500">Using default Scryfall art. Add rules below to customize.</p>
+        <p className="text-xs text-slate-500">{t("artChain.emptyState")}</p>
       )}
 
       {chain.length > 0 && (
@@ -948,13 +999,13 @@ function ArtChainEditor({
               }`}
             >
               <span className="mr-1 font-mono text-[10px] text-slate-600">{i + 1}</span>
-              <span className="flex-1 text-sm text-slate-200">{artChainEntryLabel(entry)}</span>
+              <span className="flex-1 text-sm text-slate-200">{artChainEntryLabel(entry, t)}</span>
               <button
                 type="button"
                 onClick={() => onMove(i, i - 1)}
                 disabled={i === 0}
                 className="text-slate-500 transition hover:text-slate-200 disabled:opacity-30"
-                aria-label="Move up"
+                aria-label={t("artChain.moveUp")}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
                   <path fillRule="evenodd" d="M14.77 12.79a.75.75 0 01-1.06-.02L10 8.832 6.29 12.77a.75.75 0 11-1.08-1.04l4.25-4.5a.75.75 0 011.08 0l4.25 4.5a.75.75 0 01-.02 1.06z" clipRule="evenodd" />
@@ -965,7 +1016,7 @@ function ArtChainEditor({
                 onClick={() => onMove(i, i + 1)}
                 disabled={i === chain.length - 1}
                 className="text-slate-500 transition hover:text-slate-200 disabled:opacity-30"
-                aria-label="Move down"
+                aria-label={t("artChain.moveDown")}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
                   <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
@@ -975,7 +1026,7 @@ function ArtChainEditor({
                 type="button"
                 onClick={() => onRemove(i)}
                 className="text-slate-500 transition hover:text-red-400"
-                aria-label="Remove"
+                aria-label={t("artChain.remove")}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
                   <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
@@ -985,14 +1036,14 @@ function ArtChainEditor({
           ))}
           {terminalIndex >= 0 && terminalIndex < chain.length - 1 && (
             <p className="text-[10px] text-amber-400/70">
-              Rules below "{artChainEntryLabel(chain[terminalIndex])}" are unreachable — it always matches.
+              {t("artChain.unreachable", { rule: artChainEntryLabel(chain[terminalIndex], t) })}
             </p>
           )}
         </div>
       )}
 
       <div className="flex flex-col gap-2 rounded-lg border border-white/5 bg-black/10 p-3">
-        <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Add Rule</span>
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">{t("artChain.addRule")}</span>
         <div className="flex flex-wrap gap-2">
           {ART_CHAIN_RULE_OPTIONS.map((opt) => (
             <button
@@ -1002,7 +1053,7 @@ function ArtChainEditor({
               disabled={chain.some((e) => e.type === opt.type)}
               className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 transition hover:bg-white/10 disabled:opacity-30"
             >
-              {opt.label}
+              {t(opt.labelKey)}
             </button>
           ))}
         </div>
@@ -1013,7 +1064,7 @@ function ArtChainEditor({
               value={setInput}
               onChange={(e) => setSetInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleAddSet()}
-              placeholder="Set code or name…"
+              placeholder={t("artChain.setInputPlaceholder")}
               list="art-chain-set-list"
               className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-400/40 focus:outline-none"
             />
@@ -1031,13 +1082,13 @@ function ArtChainEditor({
             disabled={!resolveSetCode(setInput)}
             className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-slate-100 hover:bg-sky-600/50 disabled:opacity-50"
           >
-            Add Set
+            {t("artChain.addSet")}
           </button>
         </div>
       </div>
 
       <p className="text-xs text-slate-500">
-        Rules are tried top-to-bottom. The first match wins. &ldquo;Source Printing&rdquo; uses the set from a draft pack or deck import when available. Per-card overrides (right-click in deck builder) always take priority.
+        {t("artChain.rulesPriorityNote")}
       </p>
     </div>
   );

@@ -348,6 +348,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
+                split: None,
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -531,6 +532,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
+                split: None,
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -571,6 +573,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
+                split: None,
             },
         );
         fetch_ability.cost = Some(AbilityCost::Composite {

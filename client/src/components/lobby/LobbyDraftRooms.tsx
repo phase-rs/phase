@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { LobbyGame } from "../../adapter/types";
 import type { CreateDraftSettings } from "../../adapter/server-draft-adapter";
@@ -22,6 +23,7 @@ interface LobbyDraftRoomsProps {
  * `onJoinP2P` handler (which feeds into the existing P2P guest flow).
  */
 export function LobbyDraftRooms({ draftRooms, onJoinP2P }: LobbyDraftRoomsProps) {
+  const { t } = useTranslation("multiplayer");
   const joinServerDraft = useMultiplayerStore((s) => s.joinServerDraft);
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
   const displayName = useMultiplayerStore((s) => s.displayName);
@@ -43,7 +45,7 @@ export function LobbyDraftRooms({ draftRooms, onJoinP2P }: LobbyDraftRoomsProps)
 
   if (draftRooms.length === 0) {
     return (
-      <p className="text-sm text-zinc-500">No draft rooms available</p>
+      <p className="text-sm text-zinc-500">{t("lobbyDraftRooms.noRooms")}</p>
     );
   }
 
@@ -62,7 +64,9 @@ export function LobbyDraftRooms({ draftRooms, onJoinP2P }: LobbyDraftRoomsProps)
                   : "bg-emerald-500/20 text-emerald-300"
               }`}
             >
-              {room.is_p2p === true ? "Player-hosted" : "Server"}
+              {room.is_p2p === true
+                ? t("lobbyDraftRooms.playerHosted")
+                : t("lobbyDraftRooms.server")}
             </span>
             {room.draft_metadata && (
               <>
@@ -88,7 +92,7 @@ export function LobbyDraftRooms({ draftRooms, onJoinP2P }: LobbyDraftRoomsProps)
                 viewBox="0 0 20 20"
                 fill="currentColor"
                 className="h-4 w-4 text-amber-400"
-                aria-label="Password protected"
+                aria-label={t("lobbyDraftRooms.passwordProtected")}
               >
                 <path
                   fillRule="evenodd"
@@ -104,7 +108,7 @@ export function LobbyDraftRooms({ draftRooms, onJoinP2P }: LobbyDraftRoomsProps)
               onClick={() => handleJoin(room)}
               className={menuButtonClass({ tone: "cyan", size: "sm" })}
             >
-              Join
+              {t("lobbyDraftRooms.join")}
             </button>
           </div>
         </div>
@@ -127,6 +131,7 @@ interface CreateServerDraftFormProps {
  * `createServerDraft` from the store with the chosen settings.
  */
 export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
+  const { t } = useTranslation("multiplayer");
   const createServerDraft = useMultiplayerStore((s) => s.createServerDraft);
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
   const displayName = useMultiplayerStore((s) => s.displayName);
@@ -170,12 +175,12 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
       onSubmit={(e) => void handleSubmit(e)}
       className="space-y-4 rounded-[18px] border border-white/10 bg-black/30 p-4"
     >
-      <h3 className="text-sm font-semibold text-white">Create Server Draft</h3>
+      <h3 className="text-sm font-semibold text-white">{t("lobbyDraftRooms.createTitle")}</h3>
 
       <div className="flex flex-wrap gap-3">
         {/* Set code */}
         <label className="flex flex-col gap-1">
-          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">Set</span>
+          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">{t("lobbyDraftRooms.set")}</span>
           <input
             type="text"
             value={setCode}
@@ -187,20 +192,20 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
 
         {/* Kind */}
         <label className="flex flex-col gap-1">
-          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">Kind</span>
+          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">{t("lobbyDraftRooms.kind")}</span>
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as "Premier" | "Traditional")}
             className="rounded-lg border border-white/10 bg-black/18 px-2 py-1.5 text-sm text-white outline-none focus:border-cyan-400/40"
           >
-            <option value="Premier">Premier</option>
-            <option value="Traditional">Traditional</option>
+            <option value="Premier">{t("lobbyDraftRooms.premier")}</option>
+            <option value="Traditional">{t("lobbyDraftRooms.traditional")}</option>
           </select>
         </label>
 
         {/* Pod size */}
         <label className="flex flex-col gap-1">
-          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">Pod size</span>
+          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">{t("lobbyDraftRooms.podSize")}</span>
           <input
             type="number"
             min={2}
@@ -213,7 +218,7 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
 
         {/* Timer */}
         <label className="flex flex-col gap-1">
-          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">Timer (s)</span>
+          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">{t("lobbyDraftRooms.timerSeconds")}</span>
           <input
             type="number"
             min={15}
@@ -228,13 +233,13 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
       {/* Password */}
       <label className="flex flex-col gap-1">
         <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">
-          Password (optional)
+          {t("lobbyDraftRooms.passwordOptional")}
         </span>
         <input
           type="text"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="Leave blank for public"
+          placeholder={t("lobbyDraftRooms.passwordPlaceholder")}
           className="rounded-lg border border-white/10 bg-black/18 px-2 py-1.5 text-sm text-white placeholder-white/30 outline-none focus:border-cyan-400/40"
         />
       </label>
@@ -245,7 +250,7 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
           onClick={onClose}
           className={menuButtonClass({ tone: "neutral", size: "sm" })}
         >
-          Cancel
+          {t("common:actions.cancel")}
         </button>
         <button
           type="submit"
@@ -256,7 +261,7 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
             disabled: submitting || !setCode.trim(),
           })}
         >
-          {submitting ? "Creating..." : "Create Draft"}
+          {submitting ? t("lobbyDraftRooms.creating") : t("lobbyDraftRooms.createDraft")}
         </button>
       </div>
     </form>

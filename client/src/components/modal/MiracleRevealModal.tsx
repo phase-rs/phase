@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { GameAction, ManaCost, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -65,6 +67,7 @@ function MiracleRevealContent({
   dispatch: (action: GameAction) => Promise<unknown>;
   phase: "reveal" | "cast" | "madness";
 }) {
+  const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 
   if (!obj) return null;
@@ -74,7 +77,6 @@ function MiracleRevealContent({
 
   const isReveal = phase === "reveal";
   const isMadness = phase === "madness";
-  const keywordLabel = isMadness ? "Madness" : "Miracle";
   const castAction: GameAction = isMadness
     ? {
         type: "CastSpellAsMadness",
@@ -87,13 +89,19 @@ function MiracleRevealContent({
 
   return (
     <DialogShell
-      eyebrow={keywordLabel}
+      eyebrow={isMadness ? t("miracleReveal.eyebrowMadness") : t("miracleReveal.eyebrowMiracle")}
       eyebrowClassName="text-amber-300/80"
-      title={isReveal ? `Reveal ${cardName}?` : `Cast ${cardName}?`}
+      title={
+        isReveal
+          ? t("miracleReveal.titleReveal", { name: cardName })
+          : t("miracleReveal.titleCast", { name: cardName })
+      }
       subtitle={
         isReveal
-          ? "You may reveal this card to cast it for its miracle cost."
-          : `You may cast this card for its ${keywordLabel.toLowerCase()} cost.`
+          ? t("miracleReveal.subtitleReveal")
+          : isMadness
+            ? t("miracleReveal.subtitleCastMadness")
+            : t("miracleReveal.subtitleCastMiracle")
       }
     >
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
@@ -102,7 +110,7 @@ function MiracleRevealContent({
           className="rounded-[16px] border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-left transition hover:bg-amber-400/20 hover:ring-1 hover:ring-amber-400/40"
         >
           <span className="font-semibold text-white">
-            {isReveal ? "Reveal" : "Cast"}
+            {isReveal ? t("miracleReveal.reveal") : t("miracleReveal.cast")}
           </span>
           <span className="ml-2">
             <ManaCostSymbols cost={cost} />
@@ -117,7 +125,7 @@ function MiracleRevealContent({
           }
           className="rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-white/20"
         >
-          <span className="font-semibold text-white">Decline</span>
+          <span className="font-semibold text-white">{t("miracleReveal.decline")}</span>
         </button>
       </div>
     </DialogShell>

@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { PlayerId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -8,6 +10,7 @@ interface CompanionZoneProps {
 }
 
 export function CompanionZone({ playerId }: CompanionZoneProps) {
+  const { t } = useTranslation("game");
   const companion = useGameStore(
     (s) => s.gameState?.players[playerId]?.companion,
   );
@@ -24,7 +27,11 @@ export function CompanionZone({ playerId }: CompanionZoneProps) {
     <button
       onClick={canActivate ? () => dispatchAction({ type: "CompanionToHand" }) : undefined}
       className={`group relative ${canActivate ? "cursor-pointer" : "cursor-default"}`}
-      title={canActivate ? `Pay {3}: Put ${cardName} into your hand` : `Companion: ${cardName}${companion.used ? " (Used)" : ""}`}
+      title={canActivate
+        ? t("zone.companionActivate", { name: cardName })
+        : companion.used
+          ? t("zone.companionTitleUsed", { name: cardName })
+          : t("zone.companionTitle", { name: cardName })}
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
     >
       {/* Card image */}
@@ -52,7 +59,7 @@ export function CompanionZone({ playerId }: CompanionZoneProps) {
 
       {/* Companion badge */}
       <div className="absolute -top-1 left-1/2 -translate-x-1/2 z-10 rounded-sm bg-purple-700 px-1.5 py-px text-[8px] font-bold text-purple-100 shadow">
-        Companion
+        {t("zone.companion")}
       </div>
 
       {/* Activatable glow ring */}
@@ -62,7 +69,7 @@ export function CompanionZone({ playerId }: CompanionZoneProps) {
 
       {companion.used && (
         <div className="absolute bottom-1 left-1/2 -translate-x-1/2 z-10 rounded-sm bg-gray-900/80 px-1.5 py-px text-[8px] text-gray-400">
-          Used
+          {t("zone.used")}
         </div>
       )}
     </button>

@@ -1,5 +1,7 @@
 import { listSavedDeckNames } from "../../constants/storage";
 import { useNavigate, useLocation } from "react-router";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { loadDeck } from "../menu/deckHelpers";
 
 import {
@@ -16,9 +18,10 @@ const RANDOM_DECK: DeckChoice = { type: "Random" };
 function compatibleDeckChoices(
   minDeckSize: number,
   commandZone: boolean,
+  t: TFunction,
 ): Array<{ label: string; choice: DeckChoice }> {
   const choices: Array<{ label: string; choice: DeckChoice }> = [
-    { label: "Random", choice: RANDOM_DECK },
+    { label: t("hostControl.random"), choice: RANDOM_DECK },
   ];
 
   for (const deckName of listSavedDeckNames()) {
@@ -34,16 +37,16 @@ function compatibleDeckChoices(
   return choices;
 }
 
-function seatLabel(kind: SeatKind): string {
+function seatLabel(kind: SeatKind, t: TFunction): string {
   switch (kind.type) {
     case "HostHuman":
-      return "Host";
+      return t("hostControl.seatHost");
     case "JoinedHuman":
-      return "Player";
+      return t("hostControl.seatPlayer");
     case "WaitingHuman":
-      return "Open";
+      return t("hostControl.seatOpen");
     case "Ai":
-      return `AI (${kind.data.difficulty})`;
+      return t("hostControl.seatAi", { difficulty: kind.data.difficulty });
   }
 }
 
@@ -75,17 +78,18 @@ function SeatRow({
   deckChoices: Array<{ label: string; choice: DeckChoice }>;
   mutate: (mutation: SeatMutation) => void;
 }) {
+  const { t } = useTranslation();
   const isOpen = slot.kind.type === "WaitingHuman";
-  const kickLabel = slot.name || `Player ${slot.playerId + 1}`;
+  const kickLabel = slot.name || t("hostControl.fallbackPlayerName", { number: slot.playerId + 1 });
   const aiSeat = slot.kind.type === "Ai" ? slot.kind : null;
   return (
     <div className="py-1">
       <div className="flex items-center justify-between gap-2">
         <span className={`text-sm ${isOpen ? "italic text-slate-500" : "text-slate-300"}`}>
-          {isOpen ? "Waiting…" : slot.name || `Seat ${slot.playerId}`}
+          {isOpen ? t("hostControl.waiting") : slot.name || t("hostControl.seatLabel", { id: slot.playerId })}
         </span>
         <span className={`text-xs font-medium ${seatColor(slot.kind)}`}>
-          {seatLabel(slot.kind)}
+          {seatLabel(slot.kind, t)}
         </span>
       </div>
       {canEdit && slot.playerId !== 0 && (
@@ -108,7 +112,7 @@ function SeatRow({
                 }
                 className="rounded border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300"
               >
-                Add AI
+                {t("hostControl.addAi")}
               </button>
               {seatCount > minPlayers && (
                 <button
@@ -116,7 +120,7 @@ function SeatRow({
                   onClick={() => mutate({ type: "Remove", data: { seatIndex: slot.playerId } })}
                   className="rounded border border-white/10 px-2 py-0.5 text-xs text-slate-400"
                 >
-                  Remove
+                  {t("hostControl.remove")}
                 </button>
               )}
             </>
@@ -188,7 +192,7 @@ function SeatRow({
                 }
                 className="rounded border border-white/10 px-2 py-0.5 text-xs text-slate-300"
               >
-                Human
+                {t("hostControl.human")}
               </button>
               {seatCount > minPlayers && (
                 <button
@@ -196,7 +200,7 @@ function SeatRow({
                   onClick={() => mutate({ type: "Remove", data: { seatIndex: slot.playerId } })}
                   className="rounded border border-white/10 px-2 py-0.5 text-xs text-slate-400"
                 >
-                  Remove
+                  {t("hostControl.remove")}
                 </button>
               )}
             </>
@@ -206,7 +210,7 @@ function SeatRow({
               <button
                 type="button"
                 onClick={() => {
-                  if (!window.confirm(`Kick ${kickLabel} from the room?`)) return;
+                  if (!window.confirm(t("hostControl.kickConfirm", { name: kickLabel }))) return;
                   mutate({
                     type: "SetKind",
                     data: { seatIndex: slot.playerId, kind: { type: "WaitingHuman" } },
@@ -214,12 +218,12 @@ function SeatRow({
                 }}
                 className="rounded border border-amber-500/20 px-2 py-0.5 text-xs text-amber-300"
               >
-                Kick
+                {t("hostControl.kick")}
               </button>
               <button
                 type="button"
                 onClick={() => {
-                  if (!window.confirm(`Replace ${kickLabel} with AI? This removes them from the room.`)) {
+                  if (!window.confirm(t("hostControl.replaceConfirm", { name: kickLabel }))) {
                     return;
                   }
                   mutate({
@@ -235,7 +239,7 @@ function SeatRow({
                 }}
                 className="rounded border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300"
               >
-                Replace AI
+                {t("hostControl.replaceAi")}
               </button>
             </>
           )}
@@ -254,6 +258,7 @@ export function HostControlTile() {
   const seatMutate = useMultiplayerStore((s) => s.seatMutate);
   const navigate = useNavigate();
   const location = useLocation();
+  const { t } = useTranslation();
 
   if (hostingStatus === "idle") {
     return null;
@@ -264,6 +269,7 @@ export function HostControlTile() {
   const deckChoices = compatibleDeckChoices(
     hostSession?.formatConfig.deck_size ?? 60,
     hostSession?.formatConfig.command_zone ?? false,
+    t,
   );
   const waitingSeats = playerSlots.filter((slot) => slot.kind.type === "WaitingHuman");
   const occupiedSeats = playerSlots.length - waitingSeats.length;
@@ -313,7 +319,7 @@ export function HostControlTile() {
               <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
             </span>
             {isConnecting ? (
-              <span className="font-medium text-slate-400">Connecting…</span>
+              <span className="font-medium text-slate-400">{t("hostControl.connecting")}</span>
             ) : (
               <>
                 <span className="font-mono tracking-wider text-emerald-400">
@@ -337,7 +343,7 @@ export function HostControlTile() {
               }
             }}
             className="text-slate-500 transition-colors hover:text-rose-400"
-            aria-label="Cancel hosting"
+            aria-label={t("hostControl.cancelHosting")}
           >
             ✕
           </button>
@@ -362,7 +368,7 @@ export function HostControlTile() {
         {canEditSeats && hostSession && (
           <div className="border-t border-white/5 px-3 py-2">
             <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">
-              {occupiedSeats}/{playerSlots.length} seats occupied
+              {t("hostControl.seatsOccupied", { occupied: occupiedSeats, total: playerSlots.length })}
             </div>
             <div className="flex flex-wrap gap-2">
               {waitingSeats.length === 0 ? (
@@ -371,7 +377,7 @@ export function HostControlTile() {
                   onClick={() => seatMutate({ type: "Start" })}
                   className="rounded border border-emerald-500/20 px-2 py-1 text-xs font-medium text-emerald-300"
                 >
-                  Start Game
+                  {t("hostControl.startGame")}
                 </button>
               ) : (
                 <>
@@ -381,7 +387,7 @@ export function HostControlTile() {
                       onClick={startWithCurrentPlayers}
                       className="rounded border border-emerald-500/20 px-2 py-1 text-xs font-medium text-emerald-300"
                     >
-                      Start Now
+                      {t("hostControl.startNow")}
                     </button>
                   )}
                   <button
@@ -389,7 +395,7 @@ export function HostControlTile() {
                     onClick={fillWithAiAndStart}
                     className="rounded border border-cyan-500/20 px-2 py-1 text-xs font-medium text-cyan-300"
                   >
-                    Fill With AI
+                    {t("hostControl.fillWithAi")}
                   </button>
                 </>
               )}
