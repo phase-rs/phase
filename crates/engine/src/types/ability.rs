@@ -7982,6 +7982,8 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
 pub enum AbilityTag {
     /// CR 702.142a: This ability originated from a Boast keyword definition.
     Boast,
+    /// CR 702.100a: This ability originated from an Evolve keyword definition.
+    Evolve,
     /// CR 702.177a: This ability originated from an Exhaust keyword definition.
     Exhaust,
     /// CR 702.107a: This ability originated from an Outlast keyword definition.
@@ -8994,6 +8996,10 @@ pub struct SpellContext {
     /// the resolution-time battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controller_controlled_as_cast: Vec<TargetFilter>,
+    /// CR 702: Keyword origin carried from the parsed/synthesized definition
+    /// into runtime resolution for keyword-specific events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_tag: Option<AbilityTag>,
 }
 
 impl SpellContext {

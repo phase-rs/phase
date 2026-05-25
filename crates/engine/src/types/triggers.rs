@@ -216,7 +216,9 @@ pub enum TriggerMode {
     /// (e.g., "an ability of an artifact source") live on `valid_card` — both
     /// reuse existing infrastructure shared with `KeywordAbilityActivated`.
     AbilityActivated,
-    /// CR 702.100: Evolve trigger — when a creature enters with greater power/toughness.
+    /// CR 702.100a: Evolve keyword trigger — when a creature enters with greater power/toughness.
+    Evolve,
+    /// CR 702.100b: Triggers when a creature evolves.
     Evolved,
     /// CR 701.44: Triggers when a creature explores.
     Explored,
@@ -434,6 +436,7 @@ impl FromStr for TriggerMode {
             "Enlisted" => TriggerMode::Enlisted,
             "AttacksOrBlocks" => TriggerMode::AttacksOrBlocks,
             "EntersOrAttacks" => TriggerMode::EntersOrAttacks,
+            "Evolve" => TriggerMode::Evolve,
             "Evolved" => TriggerMode::Evolved,
             "ExcessDamage" => TriggerMode::ExcessDamage,
             "ExcessDamageAll" => TriggerMode::ExcessDamageAll,
@@ -697,6 +700,7 @@ mod tests {
             "ElementalBend",
             "Enlisted",
             "EntersOrAttacks",
+            "Evolve",
             "Evolved",
             "ExcessDamage",
             "ExcessDamageAll",
