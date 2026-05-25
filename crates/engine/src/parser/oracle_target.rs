@@ -768,13 +768,18 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         let has_type_card =
             if let Ok((after_type, _)) = nom_target::parse_type_filter_word(type_start) {
                 let after_type = after_type.trim_start();
-                after_type.starts_with("card") || after_type.is_empty()
+                peek(tag::<_, _, OracleError<'_>>("card"))
+                    .parse(after_type)
+                    .is_ok()
+                    || after_type.is_empty()
             } else {
                 false
             };
 
         // Also check bare "card"/"cards" (e.g., "the enchanted card")
-        let is_bare_card = type_start.starts_with("card");
+        let is_bare_card = peek(tag::<_, _, OracleError<'_>>("card"))
+            .parse(type_start)
+            .is_ok();
 
         if has_type_card || is_bare_card {
             // Find end of "card"/"cards"
