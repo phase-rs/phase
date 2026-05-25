@@ -14,6 +14,7 @@ import type { DraftPodHostEvent } from "../draftPodHostAdapter";
 import { DraftPodGuestAdapter } from "../draftPodGuestAdapter";
 import type { DraftPodGuestEvent } from "../draftPodGuestAdapter";
 import type { DraftPlayerView } from "../draft-adapter";
+import { loadDraftHostSession } from "../../services/draftPersistence";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ const mockHostRequestPause = vi.fn();
 const mockHostRequestResume = vi.fn();
 const mockHostDispose = vi.fn();
 const mockHostTerminateDraft = vi.fn(async () => {});
-const mockHostRestoreFromPersisted = vi.fn(async () => null);
+const mockHostRestoreFromPersisted = vi.fn(async (): Promise<DraftPlayerView | null> => null);
 
 vi.mock("../p2p-draft-host", () => ({
   P2PDraftHost: vi.fn().mockImplementation(() => ({
@@ -220,6 +221,40 @@ describe("DraftPodHostAdapter", () => {
     expect(mockHostStartDraft).toHaveBeenCalledOnce();
   });
 
+  it("restores MatchInProgress host sessions without falling back to drafting", async () => {
+    vi.mocked(loadDraftHostSession).mockResolvedValue({
+      persistenceId: "draft-1",
+      roomCode: "ABCDE",
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      seatTokens: { 0: "host" },
+      seatNames: { 0: "Host" },
+      kickedTokens: [],
+      draftStarted: true,
+      draftCode: "ABCDE",
+      draftSessionJson: "{}",
+      setPoolJson: "{}",
+    });
+    const restoredView = mockView("MatchInProgress");
+    mockHostRestoreFromPersisted.mockResolvedValue(restoredView);
+
+    await adapter.initialize({
+      setPoolJson: "{}",
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      persistenceId: "draft-1",
+    });
+
+    expect(adapter.status).toBe("matchInProgress");
+    expect(events).toContainEqual({ type: "viewUpdated", view: restoredView });
+  });
+
   it("delegates submitPick and returns view", async () => {
     await adapter.initialize({
       setPoolJson: "{}",
@@ -307,6 +342,21 @@ describe("DraftPodHostAdapter", () => {
 
     hostEventHandler({ type: "allDecksSubmitted" });
     expect(adapter.status).toBe("pairing");
+
+    hostEventHandler({
+      type: "bo3ChoosePlayDraw",
+      matchId: "match-1",
+      gameNumber: 2,
+      score: { p0_wins: 0, p1_wins: 1, draws: 0 },
+      timerMs: 10_000,
+    });
+    expect(events).toContainEqual({
+      type: "bo3ChoosePlayDraw",
+      matchId: "match-1",
+      gameNumber: 2,
+      score: { p0_wins: 0, p1_wins: 1, draws: 0 },
+      timerMs: 10_000,
+    });
   });
 
   it("cleans up on dispose", async () => {

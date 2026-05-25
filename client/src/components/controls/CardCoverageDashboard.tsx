@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { useCardImage } from "../../hooks/useCardImage";
 import { useSetList, type SetMeta } from "../../hooks/useSetList";
@@ -114,12 +115,15 @@ function formatShortLabel(format: string): string {
   return FORMAT_METADATA_BY_LEGALITY_KEY.get(format)?.short_label ?? format.slice(0, 3).toUpperCase();
 }
 
-function formatFilterOptions(coverage: CoverageSummary): Array<{ key: FormatFilter; label: string }> {
+function formatFilterOptions(
+  coverage: CoverageSummary,
+  allFormatsLabel: string,
+): Array<{ key: FormatFilter; label: string }> {
   const keys = Object.entries(coverage.coverage_by_format ?? {})
     .filter(([, summary]) => summary.total_cards > 0)
     .map(([format]) => format);
   return [
-    { key: "all", label: "All Formats" },
+    { key: "all", label: allFormatsLabel },
     ...keys
       .sort((a, b) => formatDisplayName(a).localeCompare(formatDisplayName(b)))
       .map((key) => ({ key, label: formatDisplayName(key) })),
@@ -127,6 +131,7 @@ function formatFilterOptions(coverage: CoverageSummary): Array<{ key: FormatFilt
 }
 
 export function CardCoverageDashboard() {
+  const { t } = useTranslation("game");
   const [mainView, setMainView] = useState<MainView>("card-coverage");
 
   return (
@@ -134,11 +139,11 @@ export function CardCoverageDashboard() {
       {/* Header */}
       <div className="border-b border-white/10 px-4 py-4 sm:px-6 sm:py-5">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
-          Engine Tools
+          {t("coverage.engineTools")}
         </div>
-        <h2 className="mt-1 text-lg font-semibold text-white sm:text-xl">Card Coverage</h2>
+        <h2 className="mt-1 text-lg font-semibold text-white sm:text-xl">{t("coverage.title")}</h2>
         <p className="mt-1 text-xs text-slate-400 sm:text-sm">
-          Inspect implementation coverage and supported engine handlers.
+          {t("coverage.subtitle")}
         </p>
       </div>
 
@@ -155,12 +160,12 @@ export function CardCoverageDashboard() {
             }`}
           >
             {view === "card-coverage"
-              ? "Card Coverage"
+              ? t("coverage.tabCardCoverage")
               : view === "by-set"
-                ? "By Set"
+                ? t("coverage.tabBySet")
                 : view === "gap-analysis"
-                  ? "Gap Analysis"
-                  : "Supported Handlers"}
+                  ? t("coverage.tabGapAnalysis")
+                  : t("coverage.tabSupportedHandlers")}
           </button>
         ))}
       </div>
@@ -182,6 +187,7 @@ export function CardCoverageDashboard() {
 // --- Card Coverage View ---
 
 function CardCoverageView() {
+  const { t } = useTranslation("game");
   const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -282,9 +288,9 @@ function CardCoverageView() {
   if (error || !coverage) {
     return (
       <div className="flex-1 p-8 text-center text-sm text-slate-400">
-        <p className="mb-2">No coverage data available.</p>
+        <p className="mb-2">{t("coverage.noDataAvailable")}</p>
         <p className="font-mono text-xs text-slate-500">
-          Generate it with: cargo run --bin coverage-report -- /path/to/cards --all &gt; client/public/coverage-data.json
+          {t("coverage.generateHint")}
         </p>
       </div>
     );
@@ -293,9 +299,9 @@ function CardCoverageView() {
   if (coverage.total_cards === 0) {
     return (
       <div className="flex-1 p-8 text-center text-sm text-slate-400">
-        <p className="mb-2">Coverage data is empty (0 cards analyzed).</p>
+        <p className="mb-2">{t("coverage.emptyData")}</p>
         <p className="font-mono text-xs text-slate-500">
-          Run: cargo run --bin coverage-report -- /path/to/cards --all &gt; client/public/coverage-data.json
+          {t("coverage.runHint")}
         </p>
       </div>
     );
@@ -340,7 +346,7 @@ function CardCoverageView() {
               <input
                 ref={searchRef}
                 type="text"
-                placeholder="Search cards..."
+                placeholder={t("coverage.searchCards")}
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setFocusIndex(-1); }}
                 className="min-w-0 flex-1 rounded-[12px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sky-400/40"
@@ -350,9 +356,9 @@ function CardCoverageView() {
                 onChange={(e) => { setStatusFilter(e.target.value as StatusFilter); setFocusIndex(-1); }}
                 className="rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
               >
-                <option value="all">All</option>
-                <option value="supported">Supported</option>
-                <option value="unsupported">Unsupported</option>
+                <option value="all">{t("coverage.filterAll")}</option>
+                <option value="supported">{t("coverage.filterSupported")}</option>
+                <option value="unsupported">{t("coverage.filterUnsupported")}</option>
               </select>
             </div>
             <div className="flex gap-2">
@@ -361,9 +367,9 @@ function CardCoverageView() {
                 onChange={(e) => setSortMode(e.target.value as SortMode)}
                 className="min-w-0 flex-1 rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
               >
-                <option value="name">Sort: A-Z</option>
-                <option value="gaps-desc">Sort: Most Gaps</option>
-                <option value="gaps-asc">Sort: Fewest Gaps</option>
+                <option value="name">{t("coverage.sortAz")}</option>
+                <option value="gaps-desc">{t("coverage.sortMostGaps")}</option>
+                <option value="gaps-asc">{t("coverage.sortFewestGaps")}</option>
               </select>
             </div>
           </div>
@@ -406,11 +412,11 @@ function CardCoverageView() {
                 })}
                 {filteredCards.length > MAX_VISIBLE_CARDS && (
                   <div className="px-3 py-2 text-center text-[11px] text-slate-600">
-                    {MAX_VISIBLE_CARDS} of {filteredCards.length} shown
+                    {t("coverage.shownOfTotal", { shown: MAX_VISIBLE_CARDS, total: filteredCards.length })}
                   </div>
                 )}
                 {filteredCards.length === 0 && (
-                  <div className="px-3 py-10 text-center text-xs text-slate-500">No matches</div>
+                  <div className="px-3 py-10 text-center text-xs text-slate-500">{t("coverage.noMatches")}</div>
                 )}
             </>
           </div>
@@ -418,8 +424,11 @@ function CardCoverageView() {
           {/* List footer */}
           <div className="border-t border-white/8 px-3 py-2 text-center text-[11px] text-slate-600">
             {hasActiveFilter
-              ? `${Math.min(filteredCards.length, MAX_VISIBLE_CARDS)} of ${filteredCards.length.toLocaleString()} matches`
-              : `${coverage.total_cards.toLocaleString()} cards`}
+              ? t("coverage.matchesCount", {
+                  shown: Math.min(filteredCards.length, MAX_VISIBLE_CARDS),
+                  total: filteredCards.length.toLocaleString(),
+                })
+              : t("coverage.cardsCount", { count: coverage.total_cards.toLocaleString() })}
           </div>
         </div>
 
@@ -438,6 +447,7 @@ function CardCoverageView() {
 
 /** Summary view shown in the detail panel when no card is selected. */
 function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
+  const { t } = useTranslation("game");
   const formatCoverage = Object.entries(coverage.coverage_by_format ?? {}).filter(
     ([, summary]) => summary.total_cards > 0,
   );
@@ -445,9 +455,9 @@ function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
   return (
     <div className="flex h-full flex-col items-center justify-center px-8 py-12">
       <div className="mb-6 text-center">
-        <div className="text-sm text-slate-400">Select a card to inspect its parse breakdown</div>
+        <div className="text-sm text-slate-400">{t("coverage.selectCardPrompt")}</div>
         <div className="mt-1 text-xs text-slate-600">
-          Use arrow keys to navigate, Escape to deselect
+          {t("coverage.navHint")}
         </div>
       </div>
 
@@ -455,7 +465,7 @@ function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
       {formatCoverage.length > 0 && (
         <div className="w-full max-w-md">
           <div className="mb-2 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            Coverage by Format
+            {t("coverage.coverageByFormat")}
           </div>
           <div className="space-y-1.5">
             {[...formatCoverage]
@@ -539,6 +549,7 @@ function buildSetRows(coverage: CoverageSummary): SetCoverage[] {
 }
 
 function BySetView() {
+  const { t } = useTranslation("game");
   const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [expandedSet, setExpandedSet] = useState<string | null>(null);
@@ -579,7 +590,7 @@ function BySetView() {
   if (!coverage) {
     return (
       <div className="flex-1 p-8 text-center text-sm text-slate-400">
-        No coverage data available.
+        {t("coverage.noDataAvailable")}
       </div>
     );
   }
@@ -588,9 +599,9 @@ function BySetView() {
   if (!hasPrintings) {
     return (
       <div className="flex-1 p-8 text-center text-sm text-slate-400">
-        <p className="mb-2">Set membership data is not in this coverage export.</p>
+        <p className="mb-2">{t("coverage.setMembershipMissing")}</p>
         <p className="font-mono text-xs text-slate-500">
-          Regenerate with: ./scripts/gen-card-data.sh
+          {t("coverage.regenerateHint")}
         </p>
       </div>
     );
@@ -599,8 +610,8 @@ function BySetView() {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <div className="border-b border-white/10 px-4 py-3 text-xs text-slate-400 sm:px-6">
-        Sets with &ge;{MIN_SET_CARDS} cards and &ge;{MIN_SET_COVERAGE}% fully supported. Expand a set to inspect remaining gaps.
-        <span className="ml-2 text-slate-500">({sets.length} sets)</span>
+        {t("coverage.setThresholdHint", { minCards: MIN_SET_CARDS, minCoverage: MIN_SET_COVERAGE })}
+        <span className="ml-2 text-slate-500">{t("coverage.setsCount", { count: sets.length })}</span>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
@@ -623,7 +634,7 @@ function BySetView() {
           ))}
           {sets.length === 0 && (
             <div className="px-3 py-10 text-center text-xs text-slate-500">
-              No sets meet the threshold yet.
+              {t("coverage.noSetsMeetThreshold")}
             </div>
           )}
         </div>
@@ -647,6 +658,7 @@ function SetRow({
   selectedGapCard: string | null;
   onSelectGapCard: (name: string) => void;
 }) {
+  const { t } = useTranslation("game");
   const barColor =
     set.pct >= 98
       ? "from-emerald-500 to-emerald-300"
@@ -699,7 +711,7 @@ function SetRow({
         </span>
         {set.gap_cards.length > 0 && (
           <span className="shrink-0 rounded-full bg-rose-500/12 px-2 py-0.5 font-mono text-[10px] text-rose-300/90">
-            {set.gap_cards.length} gap{set.gap_cards.length === 1 ? "" : "s"}
+            {t("coverage.gapCount", { count: set.gap_cards.length })}
           </span>
         )}
       </button>
@@ -707,11 +719,11 @@ function SetRow({
       {isExpanded && (
         <div className="ml-3 mt-1 border-l border-white/8 pl-3 pt-1 sm:ml-6 sm:pl-4">
           {set.gap_cards.length === 0 ? (
-            <div className="py-2 text-[11px] text-slate-500">No unsupported cards in this set.</div>
+            <div className="py-2 text-[11px] text-slate-500">{t("coverage.noUnsupportedInSet")}</div>
           ) : (
             <>
               <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                Unsupported cards ({set.gap_cards.length}) — click one to inspect parse tree
+                {t("coverage.unsupportedCardsHint", { count: set.gap_cards.length })}
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {set.gap_cards.map((card) => {
@@ -728,7 +740,7 @@ function SetRow({
                       title={
                         (card.gap_details ?? [])
                           .map((g) => g.handler)
-                          .join(", ") || "no gap details"
+                          .join(", ") || t("coverage.noGapDetails")
                       }
                     >
                       {card.card_name}
@@ -755,6 +767,7 @@ function SetRow({
 // --- Gap Analysis View ---
 
 function GapAnalysisView() {
+  const { t } = useTranslation("game");
   const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [expandedGap, setExpandedGap] = useState<string | null>(null);
@@ -782,7 +795,7 @@ function GapAnalysisView() {
   if (!coverage?.top_gaps?.length) {
     return (
       <div className="flex-1 p-8 text-center text-sm text-slate-400">
-        No gap analysis data available.
+        {t("coverage.noGapAnalysis")}
       </div>
     );
   }
@@ -796,13 +809,13 @@ function GapAnalysisView() {
   const bundles = coverage.gap_bundles ?? [];
   const twoBundles = bundles.filter((b) => b.handlers.length === 2);
   const threeBundles = bundles.filter((b) => b.handlers.length === 3);
-  const filterOptions = formatFilterOptions(coverage);
+  const filterOptions = formatFilterOptions(coverage, t("coverage.allFormats"));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       {/* Format filter bar */}
       <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3 sm:px-6">
-        <span className="text-xs text-slate-500">Filter by format:</span>
+        <span className="text-xs text-slate-500">{t("coverage.filterByFormat")}</span>
         <select
           value={formatFilter}
           onChange={(e) => setFormatFilter(e.target.value as FormatFilter)}
@@ -819,11 +832,11 @@ function GapAnalysisView() {
         <div className="mb-6">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-              Top Gaps by Impact (Top 50)
+              {t("coverage.topGaps")}
             </div>
             <CopyButton
               text={filteredGaps.map((g) => `${g.handler}\t${g.total_count}\t${g.single_gap_cards}`).join("\n")}
-              label="Copy as TSV"
+              label={t("coverage.copyAsTsv")}
             />
           </div>
           <div className="space-y-1">
@@ -843,7 +856,7 @@ function GapAnalysisView() {
         {twoBundles.length > 0 && (
           <div className="mb-6">
             <div className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-              2-Gap Bundles (implement both to unlock cards)
+              {t("coverage.twoGapBundles")}
             </div>
             <div className="space-y-1">
               {twoBundles.slice(0, 15).map((bundle, i) => (
@@ -857,7 +870,7 @@ function GapAnalysisView() {
         {threeBundles.length > 0 && (
           <div className="mb-6">
             <div className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-              3-Gap Bundles (implement all three to unlock cards)
+              {t("coverage.threeGapBundles")}
             </div>
             <div className="space-y-1">
               {threeBundles.slice(0, 10).map((bundle, i) => (
@@ -882,6 +895,7 @@ function GapRow({
   onToggle: () => void;
   formatFilter: FormatFilter;
 }) {
+  const { t } = useTranslation("game");
   const ratioStr = gap.independence_ratio != null
     ? `${(gap.independence_ratio * 100).toFixed(0)}%`
     : null;
@@ -898,15 +912,15 @@ function GapRow({
       >
         <span className={`text-[10px] transition ${isExpanded ? "rotate-90" : ""}`}>&#9654;</span>
         <span className="min-w-0 flex-1 font-medium text-slate-300">{gap.handler}</span>
-        <span className="hidden shrink-0 font-mono text-xs text-amber-300/80 sm:inline">{gap.total_count} total</span>
+        <span className="hidden shrink-0 font-mono text-xs text-amber-300/80 sm:inline">{t("coverage.totalLabel", { count: gap.total_count })}</span>
         {gap.single_gap_cards > 0 && (
           <span className="shrink-0 font-mono text-xs text-emerald-300/80">
-            {gap.single_gap_cards} unlock
+            {t("coverage.unlockLabel", { count: gap.single_gap_cards })}
           </span>
         )}
         {ratioStr && (
           <span className="hidden shrink-0 rounded-full bg-sky-500/12 px-2 py-0.5 text-[10px] text-sky-300 sm:inline">
-            {ratioStr} ind
+            {t("coverage.indLabel", { ratio: ratioStr })}
           </span>
         )}
       </button>
@@ -917,7 +931,7 @@ function GapRow({
           {gap.oracle_patterns && gap.oracle_patterns.length > 0 && (
             <div>
               <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                Oracle Patterns
+                {t("coverage.oraclePatterns")}
               </div>
               <div className="space-y-0.5">
                 {gap.oracle_patterns.slice(0, 10).map((pat, i) => (
@@ -928,7 +942,7 @@ function GapRow({
                     </span>
                     {pat.example_cards.length > 0 && (
                       <span className="shrink-0 truncate text-[11px] text-slate-600">
-                        e.g. {pat.example_cards[0]}
+                        {t("coverage.exampleCard", { name: pat.example_cards[0] })}
                       </span>
                     )}
                   </div>
@@ -941,7 +955,7 @@ function GapRow({
           {gap.co_occurrences && gap.co_occurrences.length > 0 && (
             <div>
               <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                Co-occurring Gaps
+                {t("coverage.coOccurringGaps")}
               </div>
               <div className="flex flex-wrap gap-1">
                 {gap.co_occurrences.slice(0, 8).map((co) => (
@@ -960,7 +974,7 @@ function GapRow({
           {formatFilter === "all" && Object.keys(gap.single_gap_by_format).length > 0 && (
             <div>
               <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                Single-Gap Unlock by Format
+                {t("coverage.singleGapUnlockByFormat")}
               </div>
               <div className="flex flex-wrap gap-1">
                 {Object.entries(gap.single_gap_by_format).map(([fmt, count]) => (
@@ -987,6 +1001,7 @@ function BundleRow({
   bundle: GapBundle;
   formatFilter: FormatFilter;
 }) {
+  const { t } = useTranslation("game");
   const count = formatFilter === "all"
     ? bundle.unlocked_cards
     : (bundle.unlocked_by_format[formatFilter] ?? 0);
@@ -1006,7 +1021,7 @@ function BundleRow({
         ))}
       </div>
       <span className="shrink-0 font-mono text-xs text-emerald-300/80">
-        {count} cards
+        {t("coverage.bundleCards", { count })}
       </span>
     </div>
   );
@@ -1014,13 +1029,13 @@ function BundleRow({
 
 // --- Parse detail components ---
 
-const CATEGORY_LABELS: Record<ParseCategory, string> = {
-  keyword: "Keyword",
-  ability: "Ability",
-  trigger: "Trigger",
-  static: "Static",
-  replacement: "Replacement",
-  cost: "Cost",
+const CATEGORY_LABEL_KEYS: Record<ParseCategory, string> = {
+  keyword: "coverage.categoryKeyword",
+  ability: "coverage.categoryAbility",
+  trigger: "coverage.categoryTrigger",
+  static: "coverage.categoryStatic",
+  replacement: "coverage.categoryReplacement",
+  cost: "coverage.categoryCost",
 };
 
 const CATEGORY_COLORS: Record<ParseCategory, string> = {
@@ -1233,6 +1248,7 @@ function annotateOracleLine(line: string, indexed: IndexedItem[]): TextSegment[]
 }
 
 function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: () => void }) {
+  const { t } = useTranslation("game");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const { src: cardImageSrc, isLoading: cardImageLoading } = useCardImage(card.card_name, { size: "normal" });
 
@@ -1279,7 +1295,7 @@ function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: 
           className="mb-3 flex items-center gap-1.5 text-xs text-slate-400 transition hover:text-slate-200 md:hidden"
         >
           <span className="text-sm">&larr;</span>
-          Back to list
+          {t("coverage.backToList")}
         </button>
       )}
 
@@ -1305,15 +1321,15 @@ function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: 
             <h3 className="text-base font-semibold text-white">{card.card_name}</h3>
             {card.supported ? (
               <span className="rounded-full border border-emerald-400/30 bg-emerald-500/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-300">
-                Supported
+                {t("coverage.supported")}
               </span>
             ) : (
               <span className="rounded-full border border-rose-400/30 bg-rose-500/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-rose-300">
-                Unsupported
+                {t("coverage.unsupported")}
               </span>
             )}
             {card.oracle_text && (
-              <CopyButton text={card.oracle_text} label="Copy Oracle" className="sm:ml-auto" />
+              <CopyButton text={card.oracle_text} label={t("coverage.copyOracle")} className="sm:ml-auto" />
             )}
           </div>
         </div>
@@ -1326,7 +1342,7 @@ function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: 
       {!card.supported && (card.gap_details?.length ?? 0) > 0 && (
         <div className="mb-5 rounded-md border border-rose-400/25 bg-rose-500/5 px-3 py-2.5">
           <div className="mb-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-rose-300/90">
-            Unresolved Gaps ({card.gap_details!.length})
+            {t("coverage.unresolvedGaps", { count: card.gap_details!.length })}
           </div>
           <ul className="space-y-1 text-xs text-slate-300">
             {card.gap_details!.map((gap, i) => (
@@ -1358,14 +1374,14 @@ function CardParseDetail({ card, onBack }: { card: CardCoverageResult; onBack?: 
           ))}
         </div>
       ) : totalItems === 0 ? (
-        <div className="text-xs text-slate-500">No parsed items (vanilla card).</div>
+        <div className="text-xs text-slate-500">{t("coverage.vanillaCard")}</div>
       ) : null}
 
       {/* Unmatched items fallback */}
       {unmatchedItems.length > 0 && (
         <div className="mt-4">
           <div className="mb-2 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            Additional Parse Items
+            {t("coverage.additionalParseItems")}
           </div>
           <div className="space-y-0.5">
             {unmatchedItems.map((item, i) => (
@@ -1499,6 +1515,7 @@ function ParseNode({
   onHover: (id: string | null) => void;
   indexed: IndexedItem[];
 }) {
+  const { t } = useTranslation("game");
   const hasChildren = (item.children?.length ?? 0) > 0;
   const labelColor = item.supported ? "text-slate-200" : "text-rose-300";
   const icon = ABILITY_KIND_ICONS[item.category] ?? "\u2726";
@@ -1535,12 +1552,12 @@ function ParseNode({
               <span className={`text-xs font-medium ${labelColor}`}>{item.label}</span>
               {depth > 0 && parentCategory != null && item.category !== parentCategory && (
                 <span className={`text-[10px] ${CATEGORY_COLORS[item.category]}`}>
-                  {CATEGORY_LABELS[item.category]}
+                  {t(CATEGORY_LABEL_KEYS[item.category])}
                 </span>
               )}
               {!item.supported && (
                 <span className="text-[9px] font-semibold uppercase tracking-[0.12em] text-rose-400">
-                  unsupported
+                  {t("coverage.itemUnsupported")}
                 </span>
               )}
             </div>
@@ -1583,6 +1600,7 @@ function ParseNode({
 // --- Copy button utility ---
 
 function CopyButton({ text, label, className = "" }: { text: string; label: string; className?: string }) {
+  const { t } = useTranslation("game");
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(() => {
@@ -1597,7 +1615,7 @@ function CopyButton({ text, label, className = "" }: { text: string; label: stri
       onClick={handleCopy}
       className={`rounded-[8px] border border-white/8 bg-black/20 px-2 py-0.5 text-[10px] text-slate-500 transition hover:border-white/14 hover:text-slate-300 ${className}`}
     >
-      {copied ? "Copied!" : label}
+      {copied ? t("coverage.copied") : label}
     </button>
   );
 }
@@ -1674,6 +1692,7 @@ function extractHandlerUsage(
 }
 
 function SupportedHandlersView() {
+  const { t } = useTranslation("game");
   const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -1706,13 +1725,13 @@ function SupportedHandlersView() {
   const tabs: { key: HandlerTab; label: string; count: number }[] = useMemo(
     () =>
       [
-        { key: "effects" as const, label: "Effects" },
-        { key: "triggers" as const, label: "Triggers" },
-        { key: "keywords" as const, label: "Keywords" },
-        { key: "statics" as const, label: "Statics" },
-        { key: "replacements" as const, label: "Replacements" },
-      ].map((t) => ({ ...t, count: usage?.[t.key].length ?? 0 })),
-    [usage],
+        { key: "effects" as const, label: t("coverage.tabEffects") },
+        { key: "triggers" as const, label: t("coverage.tabTriggers") },
+        { key: "keywords" as const, label: t("coverage.tabKeywords") },
+        { key: "statics" as const, label: t("coverage.tabStatics") },
+        { key: "replacements" as const, label: t("coverage.tabReplacements") },
+      ].map((tab) => ({ ...tab, count: usage?.[tab.key].length ?? 0 })),
+    [usage, t],
   );
 
   const totalHandlers = tabs.reduce((sum, t) => sum + t.count, 0);
@@ -1728,7 +1747,7 @@ function SupportedHandlersView() {
   if (!coverage || !usage) {
     return (
       <div className="flex-1 p-8 text-center text-sm text-slate-400">
-        No coverage data available.
+        {t("coverage.noDataAvailable")}
       </div>
     );
   }
@@ -1739,10 +1758,10 @@ function SupportedHandlersView() {
       <div className="border-b border-white/10 px-4 py-4 sm:px-6">
         <div className="mb-2 flex flex-col gap-1 text-sm sm:flex-row sm:items-center sm:justify-between">
           <span className="text-slate-300">
-            {totalHandlers} handlers observed on supported cards
+            {t("coverage.handlersObserved", { count: totalHandlers })}
           </span>
           <span className="font-mono text-xs text-slate-500 sm:text-sm">
-            derived from parser output &middot; stubs &amp; unused variants excluded
+            {t("coverage.derivedFrom")}
           </span>
         </div>
         <div className="h-2.5 w-full overflow-hidden rounded-full bg-black/30">
@@ -1774,7 +1793,7 @@ function SupportedHandlersView() {
       <div className="border-b border-white/10 px-4 py-4 sm:px-6">
         <input
           type="text"
-          placeholder="Search..."
+          placeholder={t("coverage.search")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="min-h-11 w-full rounded-[16px] border border-white/10 bg-black/18 px-4 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-sky-400/40"
@@ -1792,7 +1811,7 @@ function SupportedHandlersView() {
               <span className="text-emerald-300">&#10003;</span>
               <span className="min-w-0 flex-1 truncate">{item.label}</span>
               <span className="shrink-0 font-mono text-[11px] tabular-nums text-slate-500">
-                {item.count.toLocaleString()} card{item.count === 1 ? "" : "s"}
+                {t("coverage.cardCount", { count: item.count, formattedCount: item.count.toLocaleString() })}
               </span>
             </div>
           ))}
@@ -1800,15 +1819,19 @@ function SupportedHandlersView() {
         {filteredItems.length === 0 && (
           <p className="py-8 text-center text-sm text-gray-500">
             {search
-              ? `No matches found for \u201C${search}\u201D`
-              : "No handlers in this category are produced by the parser on fully supported cards."}
+              ? t("coverage.noMatchesFound", { query: search })
+              : t("coverage.noHandlersInCategory")}
           </p>
         )}
       </div>
 
       {/* Footer */}
       <div className="border-t border-white/10 px-4 py-3 text-center text-xs text-slate-500 sm:px-6">
-        {totalHandlers} handlers across {tabs.length} categories &middot; engine-derived from {coverage.supported_cards.toLocaleString()} supported cards
+        {t("coverage.footerSummary", {
+          handlers: totalHandlers,
+          categories: tabs.length,
+          cards: coverage.supported_cards.toLocaleString(),
+        })}
       </div>
     </>
   );

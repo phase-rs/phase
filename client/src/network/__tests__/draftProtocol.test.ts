@@ -10,8 +10,8 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 3", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(3);
+    it("is version 4", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(4);
     });
   });
 
@@ -72,6 +72,16 @@ describe("draftProtocol", () => {
       "draft_resumed",
       "draft_lobby_update",
       "draft_host_left",
+      "draft_timer_sync",
+      "draft_request_advance",
+      "draft_match_start",
+      "draft_bo3_sideboard_prompt",
+      "draft_bo3_sideboard_submit",
+      "draft_bo3_play_draw_prompt",
+      "draft_bo3_play_draw_choice",
+      "draft_bo3_game_start",
+      "draft_bo3_score_update",
+      "draft_bo3_match_complete",
     ])("accepts message type '%s'", (msgType) => {
       const msg = validateDraftMessage({ type: msgType });
       expect(msg.type).toBe(msgType);
@@ -124,6 +134,34 @@ describe("draftProtocol", () => {
       expect(encoded[0]).toBe(0x01);
 
       const decoded = await decodeDraftWireMessage(encoded);
+      expect(decoded).toEqual(msg);
+    });
+
+    it("round-trips a deck-carrying draft match start message", async () => {
+      const deck = {
+        main_deck: ["Island"],
+        sideboard: [],
+        commander: [],
+      };
+      const msg: DraftP2PMessage = {
+        type: "draft_match_start",
+        launch: {
+          type: "Bot",
+          matchId: "round-1-table-1",
+          round: 1,
+          localSeat: 0,
+          botSeat: 1,
+          botName: "Bot 2",
+          deckPayload: {
+            player: deck,
+            opponent: { main_deck: ["Mountain"], sideboard: [], commander: [] },
+            ai_decks: [],
+          },
+          matchConfig: { match_type: "Bo1" },
+        },
+      };
+
+      const decoded = await decodeDraftWireMessage(await encodeDraftWireMessage(msg));
       expect(decoded).toEqual(msg);
     });
 

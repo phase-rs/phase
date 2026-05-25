@@ -1,10 +1,12 @@
 import { useId } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 
 export function FullControlToggle() {
+  const { t } = useTranslation("game");
   const tooltipId = useId();
   const fullControl = useUiStore((s) => s.fullControl);
   const toggleFullControl = useUiStore((s) => s.toggleFullControl);
@@ -24,9 +26,9 @@ export function FullControlToggle() {
           : "border-white/10 bg-slate-950/64 text-slate-300 hover:border-white/20 hover:text-white"
       }`}
     >
-      Full Control {fullControl ? "On" : "Off"}
+      {fullControl ? t("fullControl.on") : t("fullControl.off")}
       <GameplayTooltip id={tooltipId}>
-        Hold priority windows instead of letting quiet spots auto-pass. Shortcut: F.
+        {t("fullControl.tooltip")}
       </GameplayTooltip>
     </button>
   );

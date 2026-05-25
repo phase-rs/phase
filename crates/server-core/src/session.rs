@@ -994,8 +994,15 @@ impl SessionManager {
         // Mana abilities skip the legal_actions pre-check — they are excluded from
         // legal_actions() for auto-pass purposes but validated by apply() directly.
         // SetAutoPass also skips (always legal when you have priority).
-        let skip_legality =
-            action.is_mana_ability() || matches!(action, GameAction::SetAutoPass { .. });
+        // Scry/surveil keep-on-top selections (CR 701.22a / CR 701.25a) also skip:
+        // their legal set is every duplicate-free subset in any order, which cannot
+        // be enumerated as candidate actions — apply() validates the submitted
+        // selection structurally instead (see handle_resolution_choice). The
+        // engine owns this classification via accepts_freeform_card_selection.
+        let skip_legality = action.is_mana_ability()
+            || matches!(action, GameAction::SetAutoPass { .. })
+            || (matches!(action, GameAction::SelectCards { .. })
+                && session.state.waiting_for.accepts_freeform_card_selection());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
             if !legal_actions.contains(&action) {
@@ -1672,5 +1679,153 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Sandbox"), "{err}");
+    }
+
+    /// CR 701.22a / CR 701.25a: a reordered (and partial-2+) scry keep-on-top
+    /// selection is a legal freeform selection that `select_cards_variants` does
+    /// not enumerate. Before the freeform-skip change it was rejected as
+    /// "Illegal action"; now the server must bypass the candidate gate for these
+    /// states and let `apply()` validate the selection structurally.
+    #[test]
+    fn reordered_scry_selection_is_accepted_not_rejected_as_illegal() {
+        use engine::game::zones::create_object;
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        // Make the scry the responsibility of the NON-active player so that
+        // `authorized_submitter_for_player` is the identity (no turn-decision
+        // re-routing) and authorization is unambiguous.
+        let scry_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if scry_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        // Give the scrying player a known library and put them in a ScryChoice
+        // over its top three cards.
+        let mut top_three = Vec::new();
+        for i in 0..3 {
+            let id = create_object(
+                &mut session.state,
+                CardId(1000 + i),
+                scry_player,
+                format!("Scry Card {i}"),
+                Zone::Library,
+            );
+            top_three.push(id);
+        }
+        let (a, b, c): (ObjectId, ObjectId, ObjectId) = (top_three[0], top_three[1], top_three[2]);
+        session.state.waiting_for = WaitingFor::ScryChoice {
+            player: scry_player,
+            cards: top_three.clone(),
+        };
+        // ScryChoice carries no PendingContinuation here; the resolution handler
+        // tolerates a None continuation (finishes back to priority), so the
+        // action's acceptance through the gate is what this test asserts.
+
+        // Reordered, partial-2 keep: [c, a] (drop b to the bottom). This is NOT
+        // an enumerated candidate, so it would be rejected by the legality gate.
+        let token = token.to_string();
+        let result =
+            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![c, a] });
+        assert!(
+            result.is_ok(),
+            "reordered scry selection should be accepted, got: {result:?}"
+        );
+
+        // The selection was applied: c then a rest on top.
+        let session = mgr.sessions.get(&code).unwrap();
+        let player_idx = scry_player.0 as usize;
+        let library: Vec<ObjectId> = session.state.players[player_idx]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(&library[..2], &[c, a]);
+        assert!(!library[2..].contains(&b) || library.last() == Some(&b));
+    }
+
+    /// A Dig reorder-mode selection (keep all, library-destined, reordered) is a
+    /// non-canonical permutation that the candidate enumerator does not list, so
+    /// pre-fix the server rejected it as "Illegal action". The server must now
+    /// bypass the gate for DigChoice and let `apply()` validate it structurally.
+    #[test]
+    fn reordered_dig_selection_is_accepted_not_rejected_as_illegal() {
+        use engine::game::zones::create_object;
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let dig_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if dig_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        let mut top_three = Vec::new();
+        for i in 0..3 {
+            let id = create_object(
+                &mut session.state,
+                CardId(2000 + i),
+                dig_player,
+                format!("Dig Card {i}"),
+                Zone::Library,
+            );
+            top_three.push(id);
+        }
+        let (a, b, c): (ObjectId, ObjectId, ObjectId) = (top_three[0], top_three[1], top_three[2]);
+        // Reorder mode: keep all three, library-destined — order matters.
+        session.state.waiting_for = WaitingFor::DigChoice {
+            player: dig_player,
+            library_owner: dig_player,
+            cards: top_three.clone(),
+            keep_count: 3,
+            up_to: false,
+            selectable_cards: top_three.clone(),
+            kept_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Library),
+            source_id: None,
+        };
+
+        // Non-canonical permutation [c, a, b] — not an enumerated candidate.
+        let token = token.to_string();
+        let result = mgr.handle_action(
+            &code,
+            &token,
+            GameAction::SelectCards {
+                cards: vec![c, a, b],
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "reordered dig selection should be accepted, got: {result:?}"
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        let library: Vec<ObjectId> = session.state.players[dig_player.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(&library[..3], &[c, a, b]);
     }
 }

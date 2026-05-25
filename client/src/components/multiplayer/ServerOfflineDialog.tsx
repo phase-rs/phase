@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -16,6 +17,7 @@ export function ServerOfflineDialog({
   onOpenSettings,
   onClose,
 }: ServerOfflineDialogProps) {
+  const { t } = useTranslation("multiplayer");
   return (
     <AnimatePresence>
       {isOpen && (
@@ -36,15 +38,15 @@ export function ServerOfflineDialog({
             transition={{ type: "spring", stiffness: 320, damping: 26 }}
           >
             <MenuPanel className="p-6">
-            <h2 className="mb-2 text-xl font-bold text-white">Server Offline</h2>
+            <h2 className="mb-2 text-xl font-bold text-white">{t("serverOfflineDialog.title")}</h2>
             <p className="mb-3 text-sm text-gray-300">
-              Couldn&apos;t connect to the dedicated multiplayer server.
+              {t("serverOfflineDialog.couldNotConnect")}
             </p>
             <p className="mb-3 text-sm text-cyan-200">
-              Switched to P2P-only mode for this session.
+              {t("serverOfflineDialog.switchedToP2P")}
             </p>
             <p className="mb-5 text-xs text-gray-400">
-              Server address:
+              {t("serverOfflineDialog.serverAddress")}
               {" "}
               <code className="rounded bg-gray-800 px-1.5 py-0.5 text-cyan-300">
                 {serverAddress}
@@ -56,13 +58,13 @@ export function ServerOfflineDialog({
                 onClick={onClose}
                 className={menuButtonClass({ tone: "neutral", size: "sm" })}
               >
-                Dismiss
+                {t("serverOfflineDialog.dismiss")}
               </button>
               <button
                 onClick={onOpenSettings}
                 className={menuButtonClass({ tone: "cyan", size: "sm" })}
               >
-                Open Settings
+                {t("serverOfflineDialog.openSettings")}
               </button>
             </div>
             </MenuPanel>

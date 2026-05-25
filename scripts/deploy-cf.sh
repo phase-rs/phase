@@ -11,6 +11,9 @@ export CARD_DATA_URL="${CARD_DATA_URL:-$R2_PUBLIC/card-data.json}"
 export COVERAGE_DATA_URL="${COVERAGE_DATA_URL:-$R2_PUBLIC/coverage-data.json}"
 export COVERAGE_SUMMARY_URL="${COVERAGE_SUMMARY_URL:-$R2_PUBLIC/coverage-summary.json}"
 export AUDIO_BASE_URL="${AUDIO_BASE_URL:-$R2_PUBLIC/audio}"
+# Per-locale content-i18n sidecars are offloaded to R2 like card-data.json;
+# the {lng} template resolves to where the upload loop below PUTs them.
+export CARD_DATA_LOCALE_URL_TEMPLATE="${CARD_DATA_LOCALE_URL_TEMPLATE:-$R2_PUBLIC/card-data.{lng}.json}"
 
 DEPLOY_CACHE=".deploy-cache"
 touch "$DEPLOY_CACHE"
@@ -24,7 +27,15 @@ jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' \
 upload_to_r2() {
   # Upload JSON data files in parallel, skipping unchanged
   local json_pids=()
-  for entry in "card-data.json:public/card-data.json" "coverage-data.json:public/coverage-data.json" "coverage-summary.json:public/coverage-summary.json"; do
+  for entry in \
+    "card-data.json:public/card-data.json" \
+    "card-data.de.json:public/card-data.de.json" \
+    "card-data.es.json:public/card-data.es.json" \
+    "card-data.fr.json:public/card-data.fr.json" \
+    "card-data.it.json:public/card-data.it.json" \
+    "card-data.pt.json:public/card-data.pt.json" \
+    "coverage-data.json:public/coverage-data.json" \
+    "coverage-summary.json:public/coverage-summary.json"; do
     key="${entry%%:*}"
     file="${entry#*:}"
     (
@@ -99,6 +110,8 @@ echo "  AUDIO_BASE_URL=$AUDIO_BASE_URL"
 
 # Remove large data/audio files and their compressed variants — served from R2
 rm -f client/dist/card-data.json client/dist/card-data.json.br
+# Locale sidecars (card-data.<lng>.json) — served from R2, strip from bundle.
+rm -f client/dist/card-data.??.json client/dist/card-data.??.json.br
 rm -f client/dist/coverage-data.json client/dist/coverage-data.json.br
 rm -f client/dist/coverage-summary.json client/dist/coverage-summary.json.br
 rm -f client/dist/audio/music/planeswalker-*.m4a

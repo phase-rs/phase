@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage";
@@ -93,6 +94,7 @@ interface LandRowProps {
 }
 
 function LandRow({ name, colorClass, count, onDecrement, onIncrement }: LandRowProps) {
+  const { t } = useTranslation("draft");
   return (
     <div className="flex items-center gap-2">
       <div className={`h-3 w-3 shrink-0 rounded-full ${colorClass}`} />
@@ -101,7 +103,7 @@ function LandRow({ name, colorClass, count, onDecrement, onIncrement }: LandRowP
         type="button"
         onClick={onDecrement}
         disabled={count <= 0}
-        aria-label={`Remove ${name}`}
+        aria-label={t("limitedDeck.removeCard", { name })}
         className={menuButtonClass({ tone: "neutral", size: "icon", disabled: count <= 0, className: "font-bold" })}
       >
         -
@@ -110,7 +112,7 @@ function LandRow({ name, colorClass, count, onDecrement, onIncrement }: LandRowP
       <button
         type="button"
         onClick={onIncrement}
-        aria-label={`Add ${name}`}
+        aria-label={t("limitedDeck.addCard", { name })}
         className={menuButtonClass({ tone: "neutral", size: "icon", className: "font-bold" })}
       >
         +
@@ -188,6 +190,7 @@ export function LimitedDeckBuilder({
   onSubmitDeck,
   showSuggestions = true,
 }: LimitedDeckBuilderProps = {}) {
+  const { t } = useTranslation("draft");
   const quickView = useDraftStore((s) => s.view);
   const quickMainDeck = useDraftStore((s) => s.mainDeck);
   const quickLandCounts = useDraftStore((s) => s.landCounts);
@@ -242,7 +245,7 @@ export function LimitedDeckBuilder({
           {/* Pool section */}
           <section>
             <h3 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-              Pool ({remainingPool.length})
+              {t("limitedDeck.poolHeading", { count: remainingPool.length })}
             </h3>
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
               <AnimatePresence mode="popLayout" initial={false}>
@@ -254,14 +257,14 @@ export function LimitedDeckBuilder({
               </AnimatePresence>
             </div>
             {remainingPool.length === 0 && (
-              <p className="py-4 text-sm text-white/30">All cards added to deck.</p>
+              <p className="py-4 text-sm text-white/30">{t("limitedDeck.allAdded")}</p>
             )}
           </section>
 
           {/* Main deck section */}
           <section>
             <h3 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-              Main Deck
+              {t("limitedDeck.mainDeck")}
             </h3>
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
               <AnimatePresence mode="popLayout" initial={false}>
@@ -274,7 +277,7 @@ export function LimitedDeckBuilder({
             </div>
             {mainDeck.length === 0 && (
               <p className="py-4 text-sm text-white/30">
-                Click cards from the pool to add them to your deck.
+                {t("limitedDeck.emptyDeckHint")}
               </p>
             )}
           </section>
@@ -286,7 +289,7 @@ export function LimitedDeckBuilder({
           <section>
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                Addable Cards
+                {t("limitedDeck.addableCards")}
               </h3>
               {showSuggestions && (
                 <button
@@ -294,7 +297,7 @@ export function LimitedDeckBuilder({
                   onClick={autoSuggestLands}
                   className={menuButtonClass({ tone: "neutral", size: "xs", ghost: true })}
                 >
-                  Auto Lands
+                  {t("limitedDeck.autoLands")}
                 </button>
               )}
             </div>
@@ -325,7 +328,7 @@ export function LimitedDeckBuilder({
                 onClick={autoSuggestDeck}
                 className={menuButtonClass({ tone: "neutral", size: "sm", className: "w-full" })}
               >
-                Suggest Deck
+                {t("limitedDeck.suggestDeck")}
               </button>
             )}
 
@@ -340,7 +343,7 @@ export function LimitedDeckBuilder({
                 className: "w-full",
               })}
             >
-              Submit Deck
+              {t("limitedDeck.submitDeck")}
             </button>
           </section>
         </div>
@@ -352,6 +355,7 @@ export function LimitedDeckBuilder({
 // ── Deck status bar ─────────────────────────────────────────────────────
 
 function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min: number }) {
+  const { t } = useTranslation("draft");
   const total = spells + lands;
   const valid = total >= min;
   const remaining = Math.max(0, min - total);
@@ -361,14 +365,14 @@ function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min
     <div className="rounded-[16px] border border-white/10 bg-black/18 px-4 py-3 backdrop-blur-md">
       <div className="flex items-baseline justify-between">
         <span className="text-sm font-medium text-white">
-          {total} <span className="text-white/40">/ {min} cards</span>
+          {total} <span className="text-white/40">{t("limitedDeck.cardCount", { min })}</span>
         </span>
         <span className="text-xs text-white/45">
-          {spells} spell{spells === 1 ? "" : "s"} · {lands} land{lands === 1 ? "" : "s"}
+          {t("limitedDeck.spellCount", { count: spells })} · {t("limitedDeck.landCount", { count: lands })}
           {valid ? (
-            <span className="ml-2 font-medium text-emerald-300">ready to submit</span>
+            <span className="ml-2 font-medium text-emerald-300">{t("limitedDeck.readyToSubmit")}</span>
           ) : (
-            <span className="ml-2 text-white/55">{remaining} more needed</span>
+            <span className="ml-2 text-white/55">{t("limitedDeck.moreNeeded", { count: remaining })}</span>
           )}
         </span>
       </div>

@@ -1,8 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 const EMOTES = ["Good game", "Nice play", "Thinking...", "Hello!", "Oops"] as const;
+const EMOTE_KEYS = ["goodGame", "nicePlay", "thinking", "hello", "oops"] as const;
 const EMOTE_DISPLAY_MS = 3000;
+
+/**
+ * Emotes travel the wire as their canonical English text (`onSendEmote(emote)`),
+ * so a received emote arrives in English regardless of the sender's locale.
+ * Reverse-look-up the fixed emote set to render it in the *viewer's* language;
+ * an unrecognized string (shouldn't occur) falls back to the raw text.
+ */
+function localizedEmote(text: string, t: TFunction<"multiplayer">): string {
+  const idx = (EMOTES as readonly string[]).indexOf(text);
+  return idx >= 0 ? t(`emoteOverlay.options.${EMOTE_KEYS[idx]}`) : text;
+}
 
 interface EmoteOverlayProps {
   onSendEmote: (emote: string) => void;
@@ -10,6 +24,7 @@ interface EmoteOverlayProps {
 }
 
 export function EmoteOverlay({ onSendEmote, receivedEmote }: EmoteOverlayProps) {
+  const { t } = useTranslation("multiplayer");
   const [showPanel, setShowPanel] = useState(false);
   const [displayedEmote, setDisplayedEmote] = useState<{ text: string; id: number } | null>(null);
   const nextId = useRef(0);
@@ -43,7 +58,7 @@ export function EmoteOverlay({ onSendEmote, receivedEmote }: EmoteOverlayProps) 
               exit={{ opacity: 0, y: -10, scale: 0.9 }}
               transition={{ duration: 0.25 }}
             >
-              {displayedEmote.text}
+              {localizedEmote(displayedEmote.text, t)}
             </motion.div>
           )}
         </AnimatePresence>
@@ -60,7 +75,7 @@ export function EmoteOverlay({ onSendEmote, receivedEmote }: EmoteOverlayProps) 
         <button
           onClick={() => setShowPanel((v) => !v)}
           className="flex h-8 w-8 items-center justify-center rounded-full bg-gray-800/80 text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"
-          aria-label="Emotes"
+          aria-label={t("emoteOverlay.ariaLabel")}
         >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
             <path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.536-4.464a.75.75 0 1 0-1.061-1.061 3.5 3.5 0 0 1-4.95 0 .75.75 0 0 0-1.06 1.06 5 5 0 0 0 7.07 0ZM9 8.5c0 .828-.448 1.5-1 1.5s-1-.672-1-1.5S7.448 7 8 7s1 .672 1 1.5Zm3 1.5c.552 0 1-.672 1-1.5S12.552 7 12 7s-1 .672-1 1.5.448 1.5 1 1.5Z" clipRule="evenodd" />
@@ -76,7 +91,7 @@ export function EmoteOverlay({ onSendEmote, receivedEmote }: EmoteOverlayProps) 
               exit={{ opacity: 0, y: 10 }}
               transition={{ duration: 0.15 }}
             >
-              {EMOTES.map((emote) => (
+              {EMOTES.map((emote, i) => (
                 <button
                   key={emote}
                   onClick={() => {
@@ -85,7 +100,7 @@ export function EmoteOverlay({ onSendEmote, receivedEmote }: EmoteOverlayProps) 
                   }}
                   className="whitespace-nowrap rounded-lg bg-gray-800/90 px-3 py-1.5 text-left text-xs font-medium text-gray-200 transition-colors hover:bg-gray-700 hover:text-white"
                 >
-                  {emote}
+                  {t(`emoteOverlay.options.${EMOTE_KEYS[i]}`)}
                 </button>
               ))}
             </motion.div>

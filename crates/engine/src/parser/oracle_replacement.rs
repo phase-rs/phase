@@ -110,6 +110,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "If you control N or more [type], ~ enters tapped" (positive-count conditional) ---
+    // CR 614.1d: Creature lands (Lair of the Hydra, Hall of Storm Giants) and similar.
+    // Must be checked BEFORE the unconditional "enters tapped" guard below.
+    if let Some(def) = parse_enters_tapped_if_controls(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "You may have ~ enter as a copy of [filter]" (clone replacement) ---
     // CR 707.9: "Enter as a copy" is a replacement effect modifying the ETB event.
     if let Some(def) = parse_clone_replacement(&norm_lower, &text, card_name) {
@@ -132,10 +139,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "~ enters the battlefield tapped" (unconditional) ---
-    // Guard: reject text with " unless " — all conditional patterns must be handled above.
+    // Guard: reject text with " unless " or "if you control" — all conditional
+    // patterns must be handled above.
     if (nom_primitives::scan_contains(&norm_lower, "enters the battlefield tapped")
         || nom_primitives::scan_contains(&norm_lower, "enters tapped"))
         && !nom_primitives::scan_contains(&norm_lower, "unless")
+        && !nom_primitives::scan_contains(&norm_lower, "if you control")
     {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -1342,6 +1351,77 @@ fn parse_enters_tapped_unless(
             .description(original_text.to_string())
             .condition(condition),
     )
+}
+
+/// Parse conditional "enters tapped if you control N or more [type]" patterns (CR 614.1d).
+///
+/// Covers creature-land "enters tapped" ETBs that are gated on controlling a minimum
+/// number of matching permanents. The positive "if you control" form is semantically
+/// distinct from the "unless" form: the replacement APPLIES when the condition is met
+/// (controller has enough lands), rather than being SUPPRESSED.
+///
+/// Recognized patterns:
+/// - "If you control two or more other lands, this land enters tapped."
+///   (Lair of the Hydra, Hall of Storm Giants, Celestial Colonnade, etc.)
+/// - "If you control N or more [type phrase], ~ enters tapped."
+///   (General class: any "if you control N or more … enters tapped" form.)
+fn parse_enters_tapped_if_controls(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    if !nom_primitives::scan_contains(norm_lower, "enters tapped")
+        && !nom_primitives::scan_contains(norm_lower, "enters the battlefield tapped")
+    {
+        return None;
+    }
+
+    let condition = parse_if_controls_count_condition(norm_lower)?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .description(original_text.to_string())
+            .condition(condition),
+    )
+}
+
+/// Extract "if you control N or more [type phrase]" condition (CR 614.1d).
+///
+/// The "if you control" prefix is the positive form: the replacement APPLIES
+/// when the controller has at least `minimum` matching permanents. Source
+/// exclusion is filter-driven: "other" injects `FilterProp::Another`, while
+/// forms without "other" count the source if it matches.
+fn parse_if_controls_count_condition(norm_lower: &str) -> Option<ReplacementCondition> {
+    // CR 614.1d: "if you control N or more [type]" — extract the minimum count
+    // and the type phrase that follows.
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if you control ")
+        .parse(norm_lower)
+        .ok()?;
+    let (minimum, type_text) = try_parse_quantity_prefix(rest)?;
+
+    let (filter, leftover) = parse_type_phrase(type_text);
+    // Allow trailing clause like ", this land enters tapped." — strip up to the comma.
+    let leftover = leftover.trim().trim_start_matches(',').trim();
+    if !leftover.trim_end_matches('.').is_empty()
+        && !nom_primitives::scan_contains(leftover, "enters tapped")
+        && !nom_primitives::scan_contains(leftover, "enters the battlefield tapped")
+    {
+        return None;
+    }
+    if filter == TargetFilter::Any {
+        return None;
+    }
+
+    // Inject ControllerRef::You — "you control" is implicit in the Oracle text.
+    let filter = inject_controller(filter, ControllerRef::You);
+
+    Some(ReplacementCondition::IfControlsMatching { minimum, filter })
 }
 
 /// Extract check land condition: "unless you control a [LandType] or a [LandType]"
@@ -4858,7 +4938,7 @@ fn parse_generic_unless_condition(
 ///
 /// Returns a `ReplacementDefinition` with:
 /// - `event`: `DamageDone`
-/// - `condition`: `IfControlsMatching { filter }` (controller scope)
+/// - `condition`: `IfControlsMatching { minimum: 1, filter }` (controller scope)
 /// - `damage_modification`: `LifeFloor { minimum: N }`
 /// - `damage_target_filter`: `DamageTargetFilter::Player(Controller)`
 fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDefinition> {
@@ -4905,6 +4985,7 @@ fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDe
     Some(
         ReplacementDefinition::new(ReplacementEvent::DamageDone)
             .condition(ReplacementCondition::IfControlsMatching {
+                minimum: 1,
                 filter: condition_filter,
             })
             .damage_modification(DamageModification::LifeFloor {
@@ -7634,6 +7715,81 @@ mod tests {
         }
     }
 
+    /// CR 614.1d: "If you control N or more other lands, this land enters tapped."
+    /// Covers Lair of the Hydra, Hall of Storm Giants, Celestial Colonnade, etc.
+    /// The replacement must apply (enter tapped) when the controller has ≥ N other lands.
+    #[test]
+    fn if_controls_two_or_more_other_lands_enters_tapped() {
+        let def = parse_replacement_line(
+            "If you control two or more other lands, this land enters tapped.",
+            "Test Land",
+        )
+        .expect("creature-land conditional ETB must parse");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(def.mode, ReplacementMode::Mandatory));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        match &def.condition {
+            Some(ReplacementCondition::IfControlsMatching { minimum, filter }) => {
+                assert_eq!(*minimum, 2);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("Expected Typed filter, got {filter:?}");
+                };
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Land),
+                    "filter must match lands"
+                );
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "filter must be controller-scoped to You"
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "filter must require 'other' (Another property)"
+                );
+            }
+            other => panic!("Expected IfControlsMatching, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1d: The "if you control" pattern must NOT fall through to the
+    /// unconditional enters-tapped handler. Regression guard.
+    #[test]
+    fn if_controls_pattern_does_not_match_unconditional() {
+        let def = parse_replacement_line(
+            "If you control two or more other lands, this land enters tapped.",
+            "Test Land",
+        )
+        .unwrap();
+        // Must have a non-None condition — the unconditional handler would produce None.
+        assert!(
+            def.condition.is_some(),
+            "conditional ETB must not produce unconditional replacement"
+        );
+    }
+
+    /// CR 614.1d: Generality — three or more threshold.
+    #[test]
+    fn if_controls_three_or_more_other_lands() {
+        let def = parse_replacement_line(
+            "If you control three or more other lands, this land enters tapped.",
+            "Hypothetical Land",
+        )
+        .expect("three-or-more variant must parse");
+        match &def.condition {
+            Some(ReplacementCondition::IfControlsMatching { minimum, .. }) => {
+                assert_eq!(*minimum, 3);
+            }
+            other => panic!("Expected IfControlsMatching, got {other:?}"),
+        }
+    }
+
     #[test]
     fn unconditional_catchall_rejects_unless() {
         // "enters tapped unless..." must NOT match the unconditional catch-all.
@@ -9270,7 +9426,8 @@ mod tests {
         assert_eq!(def.event, ReplacementEvent::DamageDone);
 
         match &def.condition {
-            Some(ReplacementCondition::IfControlsMatching { filter }) => {
+            Some(ReplacementCondition::IfControlsMatching { minimum, filter }) => {
+                assert_eq!(*minimum, 1, "Worship condition must have minimum = 1");
                 let is_creature = match filter {
                     TargetFilter::Typed(tf) => tf.type_filters.contains(&TypeFilter::Creature),
                     TargetFilter::And { filters } => filters.iter().any(|f| {
