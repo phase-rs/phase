@@ -176,8 +176,62 @@ fn matching_batched_trigger_events(
                 check_trigger_condition(state, condition, controller, Some(obj_id), Some(candidate))
             })
         })
-        .cloned()
+        .map(|candidate| {
+            contextual_batched_trigger_event(state, candidate, trig_def, obj_id, controller)
+        })
         .collect()
+}
+
+fn contextual_batched_trigger_event(
+    state: &GameState,
+    event: &GameEvent,
+    trig_def: &TriggerDefinition,
+    obj_id: ObjectId,
+    controller: PlayerId,
+) -> GameEvent {
+    let GameEvent::AttackersDeclared {
+        attacker_ids,
+        defending_player,
+        attacks,
+    } = event
+    else {
+        return event.clone();
+    };
+    if !matches!(trig_def.mode, TriggerMode::YouAttack | TriggerMode::Attacks) {
+        return event.clone();
+    }
+
+    let filter_ctx = FilterContext::from_source_with_controller(obj_id, controller);
+    let matching_attackers: Vec<_> = attacker_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            trig_def
+                .valid_card
+                .as_ref()
+                .is_none_or(|filter| matches_target_filter(state, *id, filter, &filter_ctx))
+        })
+        .collect();
+
+    if matching_attackers.is_empty() {
+        return event.clone();
+    }
+
+    let matching_set: HashSet<_> = matching_attackers.iter().copied().collect();
+    let matching_attacks: Vec<_> = attacks
+        .iter()
+        .copied()
+        .filter(|(attacker_id, _)| matching_set.contains(attacker_id))
+        .collect();
+
+    // CR 603.2c + CR 608.2c: batched "one or more ... attack" triggers fire
+    // once, but later "that many" text refers to the members of that matching
+    // event subset, not every attacker in the declaration.
+    GameEvent::AttackersDeclared {
+        attacker_ids: matching_attackers,
+        defending_player: *defending_player,
+        attacks: matching_attacks,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3499,9 +3553,10 @@ pub mod tests {
         AggregateFunction, ChosenAttribute, ChosenSubtypeKind, CommanderOwnership, Comparator,
         ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
         FilterProp, GainLifePlayer, KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter,
-        PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
-        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
+        StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -11552,6 +11607,109 @@ pub mod tests {
             trigger_fires(true),
             "subject-led God-filter trigger MUST fire when a God attacks"
         );
+    }
+
+    /// Issue #1055: The Earth King stores "that many" as EventContextAmount.
+    /// For a batched attack trigger, that amount is the number of attackers
+    /// that matched the trigger subject, not the raw number of all attackers.
+    #[test]
+    fn issue_1055_batched_attack_search_uses_matching_attacker_count() {
+        use crate::game::combat::AttackTarget;
+
+        fn add_basic_land(state: &mut GameState, name: &str) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(state.next_object_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Basic);
+            id
+        }
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let source = make_creature(&mut state, PlayerId(0), "The Earth King", 4, 4);
+        let mut trigger =
+            TriggerDefinition::new(TriggerMode::YouAttack).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                        FilterProp::HasSupertype {
+                            value: crate::types::card_type::Supertype::Basic,
+                        },
+                    ])),
+                    count: QuantityExpr::up_to(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                },
+            ));
+        trigger.batched = true;
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 4 },
+                }]),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let big_one = make_creature(&mut state, PlayerId(0), "Big One", 4, 4);
+        let big_two = make_creature(&mut state, PlayerId(0), "Big Two", 5, 5);
+        let small = make_creature(&mut state, PlayerId(0), "Small", 3, 3);
+        add_basic_land(&mut state, "Plains");
+        add_basic_land(&mut state, "Island");
+        add_basic_land(&mut state, "Forest");
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![big_one, big_two, small],
+                defending_player: PlayerId(1),
+                attacks: vec![
+                    (big_one, AttackTarget::Player(PlayerId(1))),
+                    (big_two, AttackTarget::Player(PlayerId(1))),
+                    (small, AttackTarget::Player(PlayerId(1))),
+                ],
+            }],
+        );
+
+        assert_eq!(state.stack.len(), 1, "The Earth King trigger should fire");
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice {
+                count,
+                up_to,
+                cards,
+                ..
+            } => {
+                assert_eq!(*count, 2, "two power-4+ attackers set the search cap");
+                assert!(*up_to, "The Earth King's search is up to that many");
+                assert_eq!(cards.len(), 3, "all three basic lands remain legal choices");
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
     }
 
     /// Issue #501 (class coverage): The Tenth Doctor's `Allons-y!` attack
