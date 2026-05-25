@@ -2440,6 +2440,17 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 "if it's the first combat phase of the turn",
                 TriggerCondition::FirstCombatPhaseOfTurn,
             ),
+            // CR 605.1a + CR 603.4: Bracers-class triggered abilities use
+            // "if it isn't a mana ability" as a leading intervening-if after
+            // the trigger event.
+            (
+                "if it isn't a mana ability",
+                TriggerCondition::ActivatedAbilityIsNonMana,
+            ),
+            (
+                "if it is not a mana ability",
+                TriggerCondition::ActivatedAbilityIsNonMana,
+            ),
         ],
     ) {
         return result;
@@ -3016,9 +3027,7 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         ),
     );
 
-    if let Some((_, (subject, _, qualifier))) =
-        all_consuming(parse_line).parse(lower).ok()
-    {
+    if let Ok((_, (subject, _, qualifier))) = all_consuming(parse_line).parse(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::AbilityActivated;
         def.valid_target = subject;
@@ -3029,20 +3038,23 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     // Passive form: "whenever an ability of [source] is activated"
     // The source object filter goes into `valid_card` so `match_ability_activated`
     // can check `valid_card_matches` against the activated ability's source.
-    // CR 605.1a: `GameEvent::AbilityActivated` fires only for non-mana activations,
-    // so the implicit "if it isn't a mana ability" qualifier on Bracers-class cards
-    // is automatically satisfied — no `TriggerCondition` needed.
+    // CR 605.1a: the following "if it isn't a mana ability" intervening-if is
+    // stripped by `extract_if_condition` and represented as `ActivatedAbilityIsNonMana`.
     // Cards: Battlemage's Bracers, Illusionist's Bracers.
-    fn parse_passive_source(input: &str) -> OracleResult<'_, TargetFilter> {
-        preceded(
-            tag("an ability of "),
-            // allow-noncombinator: single-value dispatch on already-lowercase input
-            alt((
-                value(TargetFilter::AttachedTo, tag("equipped creature")),
-                value(TargetFilter::AttachedTo, tag("enchanted creature")),
-            )),
+    fn parse_attached_to_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+        value(
+            TargetFilter::AttachedTo,
+            (
+                alt((tag("equipped"), tag("enchanted"))),
+                space1,
+                alt((tag("creature"), tag("land"), tag("permanent"))),
+            ),
         )
         .parse(input)
+    }
+
+    fn parse_passive_source(input: &str) -> OracleResult<'_, TargetFilter> {
+        preceded(tag("an ability of "), parse_attached_to_subject).parse(input)
     }
 
     fn parse_passive_line(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -20900,6 +20912,16 @@ mod snapshot_tests {
         assert_eq!(def.mode, TriggerMode::AbilityActivated);
         assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
         assert_eq!(def.valid_target, None);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::PayCost { .. })
+        ));
     }
 
     /// CR 602.1 + CR 605.1a: Illusionist's Bracers uses the same passive trigger phrase.
@@ -20911,5 +20933,15 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::AbilityActivated);
         assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::CopySpell { .. })
+        ));
     }
 }
