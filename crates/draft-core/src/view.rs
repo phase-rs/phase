@@ -303,18 +303,17 @@ fn compute_standings(session: &DraftSession) -> Vec<StandingEntry> {
         .seats
         .iter()
         .enumerate()
-        .filter(|(_, s)| matches!(s, DraftSeat::Human { .. }))
         .map(|(i, seat)| {
             let pid = match seat {
                 DraftSeat::Human { player_id, .. } => *player_id,
-                DraftSeat::Bot { .. } => unreachable!(),
+                DraftSeat::Bot { .. } => PlayerId(i as u8),
             };
             let record = session.match_records.get(&pid);
             StandingEntry {
                 seat_index: i as u8,
                 display_name: match seat {
                     DraftSeat::Human { display_name, .. } => display_name.clone(),
-                    DraftSeat::Bot { .. } => unreachable!(),
+                    DraftSeat::Bot { name } => name.clone(),
                 },
                 match_wins: record.map_or(0, |r| r.match_wins),
                 match_losses: record.map_or(0, |r| r.match_losses),
@@ -765,6 +764,30 @@ mod tests {
         for window in view.standings.windows(2) {
             assert!(window[0].match_wins >= window[1].match_wins);
         }
+    }
+
+    #[test]
+    fn view_standings_include_bot_seats() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+        session.seats[7] = DraftSeat::Bot {
+            name: "Bot 7".to_string(),
+        };
+
+        session::apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let view = filter_for_player(&session, 0);
+        let bot_standing = view
+            .standings
+            .iter()
+            .find(|standing| standing.seat_index == 7)
+            .unwrap();
+        assert_eq!(bot_standing.display_name, "Bot 7");
     }
 
     #[test]

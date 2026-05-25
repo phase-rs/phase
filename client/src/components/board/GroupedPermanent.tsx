@@ -40,6 +40,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "CopyTargetChoice":
     case "ExploreChoice":
     case "TriggerTargetSelection":
+    case "RetargetChoice":
     case "TapCreaturesForManaAbility":
     case "TapCreaturesForSpellCost":
       return waitingFor.data.player;

@@ -1222,16 +1222,13 @@ pub(crate) fn deterministic_choice(
             .iter()
             .map(|&id| (id, evaluate_card_value(state, id)))
             .collect();
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let graveyard_count = scored.len().div_ceil(2);
-        let to_graveyard: Vec<_> = scored
-            .iter()
-            .take(graveyard_count)
-            .map(|(id, _)| *id)
-            .collect();
-        return Some(GameAction::SelectCards {
-            cards: to_graveyard,
-        });
+        // CR 701.25a: the action is the ordered keep-on-top set; cards left out
+        // are milled. Keep the higher-value half on top (best drawn first) and
+        // let the worse half fall into the graveyard.
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let keep_count = scored.len() / 2;
+        let top_cards: Vec<_> = scored.iter().take(keep_count).map(|(id, _)| *id).collect();
+        return Some(GameAction::SelectCards { cards: top_cards });
     }
 
     if let WaitingFor::RevealChoice { cards, .. } = &state.waiting_for {
@@ -1319,10 +1316,14 @@ pub(crate) fn deterministic_choice(
             .iter()
             .map(|&id| (id, evaluate_card_value(state, id)))
             .collect();
-        let is_opponent_chooser = state
-            .players
-            .iter()
-            .any(|p| p.id == *player && p.id != state.priority_player);
+        // The search optimizes for `ai_player`, so a choice made by any other
+        // player is an opponent's (they pick the highest-value cards for
+        // themselves; the AI picks the lowest when choosing for itself).
+        // Compare against `ai_player`, not `state.priority_player` — under a
+        // turn-control effect (CR 723, e.g. Mindslaver) the latter is the
+        // controller (the authorized submitter), not the chooser, which would
+        // misclassify the controlled player's choice.
+        let is_opponent_chooser = *player != ai_player;
         if is_opponent_chooser {
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         } else {

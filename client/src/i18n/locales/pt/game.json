@@ -752,6 +752,7 @@
       "title": "Escolher Portador do Anel",
       "subtitle": "Escolha uma criatura que você controla"
     },
+    "reorderHint": "Arraste para reordenar · a primeira carta é comprada primeiro",
     "scry": {
       "title": "Vidência",
       "subtitle_one": "Olhe a {{count}} carta do topo de seu grimório",

@@ -21,7 +21,11 @@ import type {
   SeatPublicView,
   StandingEntry,
 } from "../adapter/draft-adapter";
-import type { MatchScore } from "../adapter/types";
+import type { EngineAdapter, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
+import type { DraftMatchLaunch } from "../network/draftProtocol";
+import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
+import { processRemoteUpdate } from "../game/dispatch";
+import { legalResultState, useGameStore } from "./gameStore";
 import {
   DraftPodHostAdapter,
   type DraftPodHostConfig,
@@ -92,13 +96,7 @@ interface MultiplayerDraftState {
   pairings: PairingView[];
   /** Full deck submitted during deckbuilding (mainDeck + lands). */
   submittedDeck: string[];
-  matchPairing: {
-    matchId: string;
-    opponentSeat: number;
-    opponentName: string;
-    matchHostPeerId: string;
-    isMatchHost: boolean;
-  } | null;
+  matchPairing: DraftMatchLaunch | null;
   matchAdapter: unknown | null;
   /** Bo3: sideboard prompt state between games. */
   sideboardPrompt: {
@@ -153,7 +151,7 @@ interface MultiplayerDraftActions {
   /** Reset store to initial state (without network cleanup). */
   reset: () => void;
   /** Both: start the match for the current pairing. */
-  startMatch: () => Promise<void>;
+  startMatch: () => Promise<string | null>;
   /** Both: report a match result back to the pod host. */
   reportMatchResult: (matchId: string, winnerSeat: number | null) => void;
   /** Host: advance to the next round (Casual mode). */
@@ -174,6 +172,7 @@ interface MultiplayerDraftActions {
 
 let activeHostAdapter: DraftPodHostAdapter | null = null;
 let activeGuestAdapter: DraftPodGuestAdapter | null = null;
+let activeMatchController: GameLoopController | null = null;
 
 const RARITY_SCORE: Record<string, number> = {
   mythic: 4,
@@ -241,6 +240,64 @@ function chooseAutoPickCard(view: DraftPlayerView | null): string | null {
   return bestCard.instance_id;
 }
 
+function opponentSeatForLaunch(launch: DraftMatchLaunch): number {
+  return launch.type === "Bot" ? launch.botSeat : launch.opponentSeat;
+}
+
+function winnerSeatForLaunch(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
+  if (gameWinner === null) return null;
+  return gameWinner === 0 ? launch.localSeat : opponentSeatForLaunch(launch);
+}
+
+function guestWinnerSeatForLaunch(launch: DraftMatchLaunch, gameWinner: number | null): number | null {
+  if (gameWinner === null) return null;
+  return gameWinner === 0 ? opponentSeatForLaunch(launch) : launch.localSeat;
+}
+
+function disposeMatchController(): void {
+  activeMatchController?.dispose();
+  activeMatchController = null;
+}
+
+async function installMatchRuntime(
+  gameId: string,
+  adapter: EngineAdapter,
+  initResult: SubmitResult,
+  controllerMode: "ai" | "online",
+): Promise<void> {
+  const state = await adapter.getState();
+  const legalResult = await adapter.getLegalActions();
+  const initLogEntries: GameLogEntry[] = (initResult.log_entries ?? []).map((entry, i) => ({
+    ...entry,
+    seq: i,
+  }));
+
+  useGameStore.setState({
+    gameId,
+    gameMode: "draft-match",
+    adapter,
+    gameState: state,
+    waitingFor: state.waiting_for,
+    ...legalResultState(legalResult),
+    events: [] as GameEvent[],
+    eventHistory: [] as GameEvent[],
+    logHistory: initLogEntries,
+    nextLogSeq: initLogEntries.length,
+    stateHistory: [],
+    turnCheckpoints: [],
+    lobbyProgress: null,
+  });
+
+  disposeMatchController();
+  activeMatchController = createGameLoopController({
+    mode: controllerMode,
+    difficulty: "Medium",
+    aiSeats: controllerMode === "ai" ? [{ playerId: 1, difficulty: "Medium" }] : undefined,
+    playerCount: 2,
+  });
+  activeMatchController.start();
+}
+
 function saveDraftPodProgress(phase: ActiveDraftPodPhase, view?: DraftPlayerView | null): void {
   const meta = loadActiveDraftPod();
   if (!meta) return;
@@ -279,9 +336,28 @@ function activePhaseForHostStatus(status: DraftPodHostStatus): ActiveDraftPodPha
 /** Dispose the active match adapter (P2PHostAdapter or P2PGuestAdapter). */
 function disposeMatchAdapter(set: SetFn): void {
   const state = useMultiplayerDraftStore.getState();
+  disposeMatchController();
   if (state.matchAdapter) {
     const adapter = state.matchAdapter as { dispose?: () => void };
     adapter.dispose?.();
+    if (useGameStore.getState().adapter === state.matchAdapter) {
+      useGameStore.setState({
+        gameId: null,
+        gameState: null,
+        events: [],
+        eventHistory: [],
+        logHistory: [],
+        nextLogSeq: 0,
+        adapter: null,
+        waitingFor: null,
+        legalActions: [],
+        autoPassRecommended: false,
+        spellCosts: {},
+        legalActionsByObject: {},
+        stateHistory: [],
+        turnCheckpoints: [],
+      });
+    }
     set({ matchAdapter: null, matchPairing: null, sideboardPrompt: null, playDrawPrompt: null, sideboardSubmitted: false });
   }
 }
@@ -472,17 +548,12 @@ export const useMultiplayerDraftStore = create<
   },
 
   startMatch: async () => {
-    const { matchPairing, submittedDeck, seatIndex } = get();
-    if (!matchPairing || submittedDeck.length === 0) return;
-
-    const deckPayload = {
-      player: { main_deck: submittedDeck, sideboard: [] as string[], commander: [] as string[] },
-      opponent: { main_deck: [] as string[], sideboard: [] as string[], commander: [] as string[] },
-      ai_decks: [] as Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>,
-    };
+    const { matchPairing } = get();
+    if (!matchPairing) return null;
+    const gameId = `draft-match-${matchPairing.matchId}`;
 
     try {
-      if (matchPairing.isMatchHost) {
+      if (matchPairing.type === "HumanHost") {
         // Lower seat# hosts the match (D-09).
         const [{ hostRoom }, { P2PHostAdapter }] = await Promise.all([
           import("../network/connection"),
@@ -490,24 +561,36 @@ export const useMultiplayerDraftStore = create<
         ]);
 
         const host = await hostRoom(undefined, {
-          preferredRoomCode: matchPairing.matchId,
+          preferredRoomCode: matchPairing.matchRoomCode,
         });
 
         const matchAdapter = new P2PHostAdapter(
-          deckPayload,
+          matchPairing.deckPayload,
           host.peer,
           host.onGuestConnected,
           2, // 1v1 match
+          undefined,
+          matchPairing.matchConfig,
         );
 
+        let resolveRoomFull!: () => void;
+        const roomFull = new Promise<void>((resolve) => {
+          resolveRoomFull = resolve;
+        });
         matchAdapter.onEvent((event) => {
+          if (event.type === "roomFull") {
+            resolveRoomFull();
+          }
+          if (event.type === "stateChanged") {
+            void processRemoteUpdate(event.state, event.events, event.legalResult);
+          }
           if (event.type === "stateChanged") {
             const wf = event.state?.waiting_for;
             if (!wf) return;
 
             if (wf.type === "GameOver") {
               // Match is complete — report result to pod host
-              const winnerSeat = wf.data.winner === 0 ? seatIndex : matchPairing.opponentSeat;
+              const winnerSeat = winnerSeatForLaunch(matchPairing, wf.data.winner);
               get().reportMatchResult(matchPairing.matchId, winnerSeat);
             } else if (wf.type === "BetweenGamesSideboard") {
               // Between games in Bo3 — bridge to draft pod host for sideboard orchestration.
@@ -517,7 +600,7 @@ export const useMultiplayerDraftStore = create<
               const loserSeat = score.p0_wins > score.p1_wins
                 ? matchPairing.opponentSeat
                 : score.p1_wins > score.p0_wins
-                  ? seatIndex
+                  ? matchPairing.localSeat
                   : null; // draw
               if (activeHostAdapter) {
                 activeHostAdapter.handleMatchBetweenGames(
@@ -525,7 +608,7 @@ export const useMultiplayerDraftStore = create<
                   gameNumber,
                   score,
                   loserSeat,
-                  seatIndex!,
+                  matchPairing.localSeat,
                   matchPairing.opponentSeat,
                 );
               }
@@ -541,40 +624,46 @@ export const useMultiplayerDraftStore = create<
           }
           if (event.type === "gameOver") {
             // Connection-level failure — report as match loss
-            const winnerSeat = event.winner === 0 ? seatIndex : matchPairing.opponentSeat;
+            const winnerSeat = winnerSeatForLaunch(matchPairing, event.winner);
             get().reportMatchResult(matchPairing.matchId, winnerSeat);
           }
         });
 
         await matchAdapter.initialize();
+        await roomFull;
+        const initResult = await matchAdapter.startPregameGame();
+        await installMatchRuntime(gameId, matchAdapter, initResult, "online");
         set({ matchAdapter, phase: "matchInProgress" });
-      } else {
+        return gameId;
+      } else if (matchPairing.type === "HumanGuest") {
         // Higher seat# joins as guest.
         const [{ joinRoom }, { P2PGuestAdapter }] = await Promise.all([
           import("../network/connection"),
           import("../adapter/p2p-adapter"),
         ]);
 
-        const { conn, peer } = await joinRoom(matchPairing.matchId);
-        const hostPeerId = `phase-${matchPairing.matchId}`;
+        const { conn, peer } = await joinRoom(matchPairing.matchRoomCode);
 
         const matchAdapter = new P2PGuestAdapter(
-          deckPayload,
+          {
+            player: matchPairing.localDeck,
+          },
           peer,
-          hostPeerId,
+          conn.peer,
           conn,
         );
 
         matchAdapter.onEvent((event) => {
+          if (event.type === "stateChanged") {
+            void processRemoteUpdate(event.state, event.events, event.legalResult);
+          }
           if (event.type === "stateChanged") {
             const wf = event.state?.waiting_for;
             if (!wf) return;
 
             if (wf.type === "GameOver") {
               // Guest reports as backup (host's report is authoritative)
-              const winnerSeat = wf.data.winner === 0
-                ? matchPairing.opponentSeat  // Guest's player 0 is the match host (opponent)
-                : seatIndex;
+              const winnerSeat = guestWinnerSeatForLaunch(matchPairing, wf.data.winner);
               get().reportMatchResult(matchPairing.matchId, winnerSeat);
             }
             // BetweenGamesSideboard: guest receives sideboard prompt via draft pod channel
@@ -582,19 +671,34 @@ export const useMultiplayerDraftStore = create<
           }
           if (event.type === "gameOver") {
             // Connection failure — report as match loss
-            const winnerSeat = event.winner === 0
-              ? matchPairing.opponentSeat
-              : seatIndex;
+            const winnerSeat = guestWinnerSeatForLaunch(matchPairing, event.winner);
             get().reportMatchResult(matchPairing.matchId, winnerSeat);
           }
         });
 
         await matchAdapter.initialize();
+        const initResult = await matchAdapter.initializeGame();
+        await installMatchRuntime(gameId, matchAdapter, initResult, "online");
         set({ matchAdapter, phase: "matchInProgress" });
+        return gameId;
+      } else {
+        const { WasmAdapter } = await import("../adapter/wasm-adapter");
+        const matchAdapter = new WasmAdapter();
+        await matchAdapter.initialize();
+        const initResult = await matchAdapter.initializeGame(
+          matchPairing.deckPayload,
+          undefined,
+          2,
+          matchPairing.matchConfig,
+        );
+        await installMatchRuntime(gameId, matchAdapter, initResult, "ai");
+        set({ matchAdapter, phase: "matchInProgress" });
+        return gameId;
       }
     } catch (err) {
       console.error("[multiplayerDraftStore] startMatch failed:", err);
       set({ error: err instanceof Error ? err.message : String(err) });
+      return null;
     }
   },
 
@@ -661,11 +765,7 @@ export const useMultiplayerDraftStore = create<
 
   leave: async (preserveSession = false) => {
     // Dispose match adapter first (game P2P connection)
-    const { matchAdapter } = get();
-    if (matchAdapter) {
-      const adapter = matchAdapter as { dispose?: () => void };
-      adapter.dispose?.();
-    }
+    disposeMatchAdapter(set);
 
     if (activeHostAdapter) {
       await activeHostAdapter.dispose({ preserveSession });
@@ -682,6 +782,7 @@ export const useMultiplayerDraftStore = create<
   },
 
   reset: () => {
+    disposeMatchAdapter(set);
     set(initialState);
   },
 }));
@@ -791,6 +892,9 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       set({ phase: "matchInProgress", currentRound: event.round, pairings: event.pairings });
       saveDraftPodProgress("matchInProgress");
       break;
+    case "matchStart":
+      set({ matchPairing: event.launch, phase: "matchInProgress" });
+      break;
     case "roundAdvanced":
       disposeMatchAdapter(set);
       set({ phase: "pairing", currentRound: event.newRound });
@@ -882,13 +986,7 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       break;
     case "matchStart":
       set({
-        matchPairing: {
-          matchId: event.matchId,
-          opponentSeat: event.opponentSeat,
-          opponentName: event.opponentName,
-          matchHostPeerId: event.matchHostPeerId,
-          isMatchHost: event.isMatchHost,
-        },
+        matchPairing: event.launch,
         phase: "matchInProgress",
       });
       break;

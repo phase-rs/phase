@@ -193,16 +193,18 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" =
+  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
         ? "p2p-join"
-        : rawMode === "host" || rawMode === "join"
-          ? "online"
-          : rawMode === "ai"
-            ? "ai"
-            : "local";
+        : rawMode === "draft-match"
+          ? "draft-match"
+          : rawMode === "host" || rawMode === "join"
+            ? "online"
+            : rawMode === "ai"
+              ? "ai"
+              : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 

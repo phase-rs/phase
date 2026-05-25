@@ -7112,7 +7112,15 @@ impl Effect {
             | Effect::Double { target, .. }
             | Effect::SetLifeTotal { target, .. }
             | Effect::GiveControl { target, .. }
-            | Effect::RemoveFromCombat { target, .. } => Some(target),
+            | Effect::RemoveFromCombat { target, .. }
+            // CR 115.7 + CR 115.1: "Change the target of target spell or ability"
+            // (Bolt Bend, Redirect, Misdirection) targets the stack spell/ability
+            // it will retarget. That target is chosen as the spell is cast (CR
+            // 115.1), so it must be surfaced here — both to build the cast-time
+            // target slot and so resolution-time re-validation (CR 608.2b) checks
+            // it against the StackSpell/StackAbility filter instead of the
+            // battlefield-only default (which would always fizzle a stack target).
+            | Effect::ChangeTargets { target, .. } => Some(target),
 
             // CR 109.4 + CR 115.1 + CR 707.2: `CopyTokenOf` has two
             // potentially-targetable axes — the copy *source* (`target`) and
@@ -7236,7 +7244,6 @@ impl Effect {
             | Effect::MadnessCast { .. }
             | Effect::GiftDelivery { .. }
             | Effect::ExchangeControl { .. }
-            | Effect::ChangeTargets { .. }
             | Effect::Manifest { .. }
             | Effect::ManifestDread
             | Effect::LoseTheGame

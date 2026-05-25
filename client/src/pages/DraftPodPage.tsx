@@ -365,8 +365,16 @@ function PairingPhaseView() {
 
 function MatchInProgressView() {
   const { t } = useTranslation("draft");
+  const navigate = useNavigate();
   const matchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
+  const startMatch = useMultiplayerDraftStore((s) => s.startMatch);
   const [showPool, setShowPool] = useState(false);
+  const opponentName = matchPairing
+    ? matchPairing.type === "Bot"
+      ? matchPairing.botName
+      : matchPairing.opponentName
+    : null;
+  const isHost = matchPairing?.type === "HumanHost";
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
@@ -377,13 +385,23 @@ function MatchInProgressView() {
         <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/5 p-4 text-center">
           <div className="text-sm text-white/50">{t("podPhaseView.yourMatch")}</div>
           <div className="text-lg text-white">
-            {t("podPhaseView.versusOpponent", { name: matchPairing.opponentName })}
+            {t("podPhaseView.versusOpponent", { name: opponentName })}
           </div>
           <div className="mt-1 text-sm text-white/40">
-            {matchPairing.isMatchHost
+            {isHost
               ? t("podPhaseView.youAreHosting")
               : t("podPhaseView.connectingOpponent")}
           </div>
+          <button
+            onClick={() => {
+              void startMatch().then((gameId) => {
+                if (gameId) navigate(`/game/${gameId}?mode=draft-match`);
+              });
+            }}
+            className={menuButtonClass({ tone: "emerald", size: "sm" })}
+          >
+            {t("formatPicker.startMatch")}
+          </button>
         </div>
       ) : (
         <div className="text-center text-white/50">

@@ -109,6 +109,15 @@ fn apply_generate_pairings(
             action: "GeneratePairings".to_string(),
         });
     }
+    if session.config.tournament_format == TournamentFormat::SingleElimination
+        && session.seats.len() != 8
+    {
+        return Err(DraftError::UnsupportedTournamentSize {
+            format: TournamentFormat::SingleElimination,
+            required: 8,
+            actual: session.seats.len() as u8,
+        });
+    }
 
     let mut rng =
         ChaCha20Rng::seed_from_u64(session.config.rng_seed ^ (round as u64 * 0xDEAD_BEEF));
@@ -137,17 +146,15 @@ fn generate_swiss_pairings(
     round: u8,
     rng: &mut ChaCha20Rng,
 ) -> Vec<DraftPairing> {
-    // Collect all human seat indices
-    let human_seats: Vec<u8> = session
+    let seat_indices: Vec<u8> = session
         .seats
         .iter()
         .enumerate()
-        .filter(|(_, s)| matches!(s, DraftSeat::Human { .. }))
         .map(|(i, _)| i as u8)
         .collect();
 
     // Build player IDs and their match records
-    let mut players_with_wins: Vec<(PlayerId, u8, u8)> = human_seats
+    let mut players_with_wins: Vec<(PlayerId, u8, u8)> = seat_indices
         .iter()
         .map(|&seat| {
             let pid = seat_player_id(session, seat);
@@ -834,6 +841,92 @@ mod tests {
         paired_players.sort_by_key(|p| p.0);
         paired_players.dedup();
         assert_eq!(paired_players.len(), 8);
+    }
+
+    #[test]
+    fn swiss_pairings_include_bot_filled_seats() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+        for seat in 2..8 {
+            session.seats[seat] = DraftSeat::Bot {
+                name: format!("Bot {seat}"),
+            };
+        }
+
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let round_pairings: Vec<_> = session.pairings.iter().filter(|p| p.round == 1).collect();
+        assert_eq!(round_pairings.len(), 4);
+        let mut paired_players: Vec<PlayerId> = round_pairings
+            .iter()
+            .flat_map(|p| p.players.iter().copied())
+            .collect();
+        paired_players.sort_by_key(|p| p.0);
+        paired_players.dedup();
+        assert_eq!(paired_players, (0u8..8).map(PlayerId).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn report_match_result_updates_bot_records() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+        session.seats[7] = DraftSeat::Bot {
+            name: "Bot 7".to_string(),
+        };
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+        let pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.players.contains(&PlayerId(7)))
+            .unwrap()
+            .clone();
+
+        apply(
+            &mut session,
+            DraftAction::ReportMatchResult {
+                match_id: pairing.match_id,
+                winner_seat: Some(7),
+            },
+            None,
+        )
+        .unwrap();
+
+        let record = session.match_records.get(&PlayerId(7)).unwrap();
+        assert_eq!(record.match_wins, 1);
+    }
+
+    #[test]
+    fn single_elimination_rejects_non_eight_player_pods() {
+        let (mut session, _) = test_session(4);
+        session.status = DraftStatus::Deckbuilding;
+        session.config.tournament_format = TournamentFormat::SingleElimination;
+
+        let result = apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(DraftError::UnsupportedTournamentSize {
+                format: TournamentFormat::SingleElimination,
+                required: 8,
+                actual: 4,
+            })
+        ));
+        assert_eq!(session.status, DraftStatus::Deckbuilding);
+        assert!(session.pairings.is_empty());
     }
 
     #[test]
