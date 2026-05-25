@@ -10312,6 +10312,18 @@ fn parse_all_subject_are_color(tp: &TextPair<'_>, description: &str) -> Option<S
 /// Input must be fully consumed by the combinator path; trailing content
 /// returns `None` so the outer dispatcher falls through.
 fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
+    // CR 105.2: "all colors" / "every color" means the full WUBRG set.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("all colors"),
+        tag("every color"),
+    ))
+    .parse(text)
+    {
+        if rest.is_empty() {
+            return Some(ManaColor::ALL.to_vec());
+        }
+    }
+
     if let Some(rest) = nom_tag_lower(text, text, "colorless") {
         if rest.is_empty() {
             return Some(Vec::new());
@@ -18450,6 +18462,18 @@ mod tests {
             def.modifications,
             vec![ContinuousModification::SetColor {
                 colors: vec![ManaColor::White, ManaColor::Blue]
+            }]
+        );
+        assert!(def.characteristic_defining);
+    }
+
+    #[test]
+    fn static_self_is_all_colors_cda() {
+        let def = parse_static_line("~ is all colors.").unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: ManaColor::ALL.to_vec()
             }]
         );
         assert!(def.characteristic_defining);
