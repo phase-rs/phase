@@ -546,6 +546,38 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
     false
 }
 
+fn condition_introduces_damage_source_controller_player(cond_lower: &str) -> bool {
+    let input = cond_lower.trim_start();
+    let input = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(input)
+    .map(|(rest, _)| rest)
+    .unwrap_or(input);
+    let Ok((rest, source_filter)) = parse_damage_source_subject(input) else {
+        return false;
+    };
+    let TargetFilter::Typed(TypedFilter {
+        controller: Some(ControllerRef::Opponent),
+        ..
+    }) = source_filter
+    else {
+        return false;
+    };
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("deals ").parse(rest) else {
+        return false;
+    };
+    let Ok((after_damage, _)) = parse_damage_predicate_tail(rest) else {
+        return false;
+    };
+
+    matches!(
+        parse_damage_to_qualifier(after_damage),
+        Some(TargetFilter::Controller)
+    )
+}
+
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
 /// The card_name is used for self-reference substitution.
@@ -640,7 +672,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
     // TargetPlayer resolution inside the trigger effect body.
-    if condition_introduces_target_player(&cond_lower) {
+    if condition_introduces_damage_source_controller_player(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+    } else if condition_introduces_target_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
     } else if condition_introduces_scoped_phase_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
@@ -3907,6 +3941,9 @@ pub(crate) fn parse_trigger_condition(
 fn execute_references_target_player(effect: &crate::types::ability::Effect) -> bool {
     fn filter_references(filter: &TargetFilter) -> bool {
         match filter {
+            // CR 115.1: Bare `Player` target means the effect explicitly
+            // targets a player (e.g. "target player mills ...").
+            TargetFilter::Player => true,
             TargetFilter::Typed(TypedFilter { controller, .. }) => {
                 matches!(controller, Some(ControllerRef::TargetPlayer))
             }
@@ -5489,8 +5526,21 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // misclassify the subject.
     let (rest, color) = opt(terminated(nom_primitives::parse_color, tag(" "))).parse(rest)?;
 
+    // CR 109.4: Head noun — "source" (any), a card type, or a negated type
+    // prefix ("noncreature source"). The negated variant uses
+    // `TypeFilter::Non(Box::new(…))` so the runtime filter excludes that type.
     let (rest, head_type) = alt((
-        value(None, tag::<_, _, OracleError<'_>>("source")),
+        value(
+            Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+            (
+                tag::<_, _, OracleError<'_>>("noncreature source"),
+                opt(tag("s")),
+            ),
+        ),
+        value(
+            None,
+            (tag::<_, _, OracleError<'_>>("source"), opt(tag("s"))),
+        ),
         value(Some(TypeFilter::Creature), tag("creature")),
         value(Some(TypeFilter::Artifact), tag("artifact")),
         value(Some(TypeFilter::Enchantment), tag("enchantment")),
@@ -5500,12 +5550,19 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     ))
     .parse(rest)?;
 
-    // Optional " you control" controller scope. Absence → no controller
-    // restriction (matches any source — Phyrexian Obliterator class, deferred).
-    let (rest, controller) = opt(value(
-        ControllerRef::You,
-        tag::<_, _, OracleError<'_>>(" you control"),
-    ))
+    // Optional controller scope. Absence → no controller restriction
+    // (matches any source — Phyrexian Obliterator class, deferred).
+    // CR 109.4: "a source you control" / "a source an opponent controls".
+    let (rest, controller) = opt(alt((
+        value(
+            ControllerRef::You,
+            tag::<_, _, OracleError<'_>>(" you control"),
+        ),
+        value(
+            ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>(" an opponent controls"),
+        ),
+    )))
     .parse(rest)?;
 
     // Require trailing space before the "deals" verb so we don't match
@@ -9894,6 +9951,84 @@ mod tests {
             "Goblin Guide",
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
+    }
+
+    /// CR 107.1 + CR 701.17a: Attack triggers can use the shared fractional
+    /// quantity parser to mill the targeted player's library.
+    #[test]
+    fn trigger_attacks_target_player_mills_half_their_library_rounded_up() {
+        use crate::types::ability::{RoundingMode, ZoneRef};
+
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, target player mills half their library, rounded up.",
+            "Fleet Swallower",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        match execute.effect.as_ref() {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(*target, TargetFilter::Player);
+                assert_eq!(*destination, Zone::Graveyard);
+                assert_eq!(
+                    *count,
+                    QuantityExpr::DivideRounded {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::TargetZoneCardCount {
+                                zone: ZoneRef::Library,
+                            },
+                        }),
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                    },
+                );
+            }
+            other => panic!("Expected Mill, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1 + CR 701.17a: Sibling coverage — "rounded down" variant
+    /// exercises the same fractional quantity parser with the opposite rounding
+    /// mode, ensuring both arms of the `RoundingMode` axis are verified.
+    #[test]
+    fn trigger_attacks_target_player_mills_half_their_library_rounded_down() {
+        use crate::types::ability::{RoundingMode, ZoneRef};
+
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, target player mills half their library, rounded down.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        match execute.effect.as_ref() {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(*target, TargetFilter::Player);
+                assert_eq!(*destination, Zone::Graveyard);
+                assert_eq!(
+                    *count,
+                    QuantityExpr::DivideRounded {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::TargetZoneCardCount {
+                                zone: ZoneRef::Library,
+                            },
+                        }),
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                    },
+                );
+            }
+            other => panic!("Expected Mill, got {other:?}"),
+        }
     }
 
     #[test]
@@ -15614,6 +15749,86 @@ mod tests {
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
     }
 
+    #[test]
+    fn trigger_source_opponent_controls_deals_damage_to_you() {
+        let def = parse_trigger_line(
+            "Whenever a source an opponent controls deals damage to you, you may put that many +1/+1 counters on ~.",
+            "Retaliator Griffin",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.damage_amount, None);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_noncreature_source_you_control_deals_damage() {
+        let def = parse_trigger_line(
+            "Whenever a noncreature source you control deals damage, you gain that much life.",
+            "Tamanoa",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.damage_amount, None);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                    .controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(def.valid_target, None);
+    }
+
+    #[test]
+    fn trigger_source_opponent_controls_deals_damage_to_you_michiko() {
+        let def = parse_trigger_line(
+            "Whenever a source an opponent controls deals damage to you, that player sacrifices a permanent.",
+            "Michiko Konda, Truth Seeker",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let execute = def.execute.as_ref().expect("trigger execute");
+        match execute.effect.as_ref() {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::ParentTargetController),
+                    ..
+                }) => assert_eq!(type_filters.as_slice(), [TypeFilter::Permanent]),
+                other => panic!("expected source-controller sacrifice filter, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_noncreature_source_deals_damage_to_player() {
+        let def = parse_trigger_line(
+            "Whenever a noncreature source deals damage to a player, draw a card.",
+            "Test",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(
+                Box::new(TypeFilter::Creature)
+            ))))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
     // ── Work Item 4: Transforms Into Self ─────────────────────────
 
     #[test]

@@ -10307,11 +10307,24 @@ fn parse_all_subject_are_color(tp: &TextPair<'_>, description: &str) -> Option<S
 
 /// CR 105.1 / CR 105.2c: Parse a color expression terminating an
 /// "All [subject] are ___" static. Accepts either the literal word "colorless"
-/// (→ empty color set, CR 105.2c) or any color list recognized by
-/// `parse_color_list` — single color, "X and Y", or "X, Y, and Z" (CR 105.1).
+/// (→ empty color set, CR 105.2c), "all/every color" (→ WUBRG, CR 105.2), or
+/// any color list recognized by `parse_color_list` — single color, "X and Y",
+/// or "X, Y, and Z" (CR 105.1).
 /// Input must be fully consumed by the combinator path; trailing content
 /// returns `None` so the outer dispatcher falls through.
 fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
+    // CR 105.2: "all colors" / "every color" means the full WUBRG set.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("all colors"),
+        tag("every color"),
+    ))
+    .parse(text)
+    {
+        if rest.is_empty() {
+            return Some(ManaColor::ALL.to_vec());
+        }
+    }
+
     if let Some(rest) = nom_tag_lower(text, text, "colorless") {
         if rest.is_empty() {
             return Some(Vec::new());
@@ -18389,6 +18402,17 @@ mod tests {
     }
 
     #[test]
+    fn static_all_creatures_are_all_colors() {
+        let def = parse_static_line("All creatures are all colors.").unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: ManaColor::ALL.to_vec()
+            }]
+        );
+    }
+
+    #[test]
     fn static_all_subject_are_color_falls_through_to_land_type_change() {
         // Regression guard: "All lands are Plains." has a non-color predicate,
         // so parse_color_predicate must reject and allow the outer dispatcher
@@ -18450,6 +18474,18 @@ mod tests {
             def.modifications,
             vec![ContinuousModification::SetColor {
                 colors: vec![ManaColor::White, ManaColor::Blue]
+            }]
+        );
+        assert!(def.characteristic_defining);
+    }
+
+    #[test]
+    fn static_self_is_all_colors_cda() {
+        let def = parse_static_line("~ is all colors.").unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: ManaColor::ALL.to_vec()
             }]
         );
         assert!(def.characteristic_defining);

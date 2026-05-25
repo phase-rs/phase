@@ -5159,7 +5159,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TokensCreatedThisTurn { .. } => ("TokensCreatedThisTurn", Handled),
         QuantityRef::PlayerActionsThisTurn { .. } => ("PlayerActionsThisTurn", Handled),
         QuantityRef::DungeonsCompleted => ("DungeonsCompleted", Unhandled),
-        QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Unhandled),
+        QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Handled),
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
@@ -8773,6 +8773,20 @@ mod tests {
         assert_eq!(
             features.get("quantity_ref:Speed"),
             Some(&FeatureSupport::Handled)
+        );
+    }
+
+    #[test]
+    fn target_zone_card_count_quantity_feature_is_marked_handled() {
+        let (name, support) = quantity_ref_feature(&QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Library,
+        });
+
+        assert_eq!(name, "TargetZoneCardCount");
+        assert_eq!(
+            support,
+            FeatureSupport::Handled,
+            "TargetZoneCardCount is resolved by game::quantity and should not block coverage",
         );
     }
 

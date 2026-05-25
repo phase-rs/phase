@@ -980,24 +980,7 @@ fn attack_target_matches(
     source_id: ObjectId,
 ) -> bool {
     if let Some(filter) = trigger.attack_target_filter.as_ref() {
-        let type_matches = matches!(
-            (filter, target),
-            (
-                crate::types::triggers::AttackTargetFilter::Player,
-                crate::game::combat::AttackTarget::Player(_)
-            ) | (
-                crate::types::triggers::AttackTargetFilter::Planeswalker,
-                crate::game::combat::AttackTarget::Planeswalker(_)
-            ) | (
-                crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
-                crate::game::combat::AttackTarget::Player(_)
-                    | crate::game::combat::AttackTarget::Planeswalker(_)
-            ) | (
-                crate::types::triggers::AttackTargetFilter::Battle,
-                crate::game::combat::AttackTarget::Battle(_)
-            )
-        );
-        if !type_matches {
+        if !attack_target_type_matches(target, filter) {
             return false;
         }
     }
@@ -1011,7 +994,30 @@ fn attack_target_matches(
     }
 }
 
-fn attack_target_defending_player(
+pub(super) fn attack_target_type_matches(
+    target: crate::game::combat::AttackTarget,
+    filter: &crate::types::triggers::AttackTargetFilter,
+) -> bool {
+    matches!(
+        (filter, target),
+        (
+            crate::types::triggers::AttackTargetFilter::Player,
+            crate::game::combat::AttackTarget::Player(_)
+        ) | (
+            crate::types::triggers::AttackTargetFilter::Planeswalker,
+            crate::game::combat::AttackTarget::Planeswalker(_)
+        ) | (
+            crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
+            crate::game::combat::AttackTarget::Player(_)
+                | crate::game::combat::AttackTarget::Planeswalker(_)
+        ) | (
+            crate::types::triggers::AttackTargetFilter::Battle,
+            crate::game::combat::AttackTarget::Battle(_)
+        )
+    )
+}
+
+pub(super) fn attack_target_defending_player(
     state: &GameState,
     target: crate::game::combat::AttackTarget,
     fallback_defending_player: PlayerId,
@@ -2225,11 +2231,26 @@ pub(super) fn match_you_attack(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    let GameEvent::AttackersDeclared { attacker_ids, .. } = event else {
-        return false;
+    !matching_you_attack_pairs(event, trigger, source_id, state).is_empty()
+}
+
+pub(super) fn matching_you_attack_pairs(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Vec<(ObjectId, crate::game::combat::AttackTarget)> {
+    let GameEvent::AttackersDeclared {
+        attacker_ids,
+        defending_player,
+        attacks,
+        ..
+    } = event
+    else {
+        return Vec::new();
     };
     if attacker_ids.is_empty() {
-        return false;
+        return Vec::new();
     }
     // CR 506.2: the active player is the attacking player; all attackers in
     // a single AttackersDeclared batch share one controller.
@@ -2237,29 +2258,55 @@ pub(super) fn match_you_attack(
         .iter()
         .find_map(|id| state.objects.get(id).map(|o| o.controller))
     else {
-        return false;
+        return Vec::new();
     };
     // CR 603.2c: the player-scope gate (valid_target). No filter ⇒ legacy
     // "attackers controlled by the trigger's source controller" semantics.
-    let player_ok = if trigger.valid_target.is_some() {
-        valid_player_matches(trigger, state, attacking_player, source_id)
-    } else {
-        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-        Some(attacking_player) == source_controller
+    let player_ok = match trigger.valid_target.as_ref() {
+        // Parser legacy for "one or more creatures attack a player": the
+        // attacked-player type is represented as `TargetFilter::Player`, not
+        // as attacking-player scope. The per-attack target filter below handles
+        // it, so keep the attacking-player gate permissive here.
+        Some(TargetFilter::Player) => true,
+        Some(_) => valid_player_matches(trigger, state, attacking_player, source_id),
+        None => {
+            let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+            Some(attacking_player) == source_controller
+        }
     };
     if !player_ok {
-        return false;
+        return Vec::new();
     }
 
-    // CR 508.1 + CR 603.2c: the attacker-type gate (valid_card). "Attack with one
-    // or more <TYPE>" fires iff at least one attacker in the batch matches the
-    // type filter. No filter ⇒ any attacker (current behavior preserved).
-    match &trigger.valid_card {
-        None => true,
-        Some(filter) => attacker_ids
-            .iter()
-            .any(|id| target_filter_matches_object(state, *id, filter, source_id)),
-    }
+    attacker_ids
+        .iter()
+        .filter_map(|id| {
+            if trigger
+                .valid_card
+                .as_ref()
+                .is_some_and(|filter| !target_filter_matches_object(state, *id, filter, source_id))
+            {
+                return None;
+            }
+            let target = attacks
+                .iter()
+                .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
+                .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+            if trigger
+                .attack_target_filter
+                .as_ref()
+                .is_some_and(|filter| !attack_target_type_matches(target, filter))
+            {
+                return None;
+            }
+            if matches!(trigger.valid_target, Some(TargetFilter::Player))
+                && !matches!(target, crate::game::combat::AttackTarget::Player(_))
+            {
+                return None;
+            }
+            Some((*id, target))
+        })
+        .collect()
 }
 
 /// CR 725.1: Matches when a player becomes the monarch.
