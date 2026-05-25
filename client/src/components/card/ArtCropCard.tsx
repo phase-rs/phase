@@ -1,4 +1,5 @@
 import { memo, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
@@ -24,6 +25,7 @@ const PT_COLORS: Record<PTColor, string> = {
 };
 
 export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
+  const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
@@ -33,7 +35,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
 
-  const cardName = obj?.face_down ? "Face-down card" : (obj?.name ?? "");
+  const cardName = obj?.face_down ? t("card.faceDownName") : (obj?.name ?? "");
   const imageLookup = obj
     ? cardImageLookup(obj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
@@ -164,7 +166,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                   onMouseEnter={isMobile ? undefined : () => inspectObject(objectId, 1)}
                   onMouseLeave={isMobile ? undefined : () => inspectObject(objectId, 0)}
                 >
-                  DFC
+                  {t("card.dfc")}
                 </button>
               )}
             </div>

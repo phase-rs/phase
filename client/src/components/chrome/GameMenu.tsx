@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
+import { useTranslation } from "react-i18next";
 
 import { ConnectionDot } from "../multiplayer/ConnectionDot.tsx";
 import { FullscreenButton } from "./FullscreenButton.tsx";
@@ -36,6 +37,7 @@ export function GameMenu({
   showSandboxTools,
   onSandboxToolsClick,
 }: GameMenuProps) {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [open, setOpen] = useState(false);
@@ -67,7 +69,7 @@ export function GameMenu({
         <button
           onClick={() => setOpen(!open)}
           className="flex h-9 w-9 items-center justify-center rounded-lg bg-gray-800/80 text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"
-          aria-label="Game menu"
+          aria-label={t("gameMenu.menu")}
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -88,8 +90,8 @@ export function GameMenu({
           <button
             onClick={onSandboxToolsClick}
             className="flex h-9 w-9 items-center justify-center rounded-lg bg-gray-800/80 text-amber-300/90 transition-colors hover:bg-gray-700/80 hover:text-amber-200"
-            aria-label="Sandbox Tools"
-            title="Sandbox Tools — set up any board state (`)"
+            aria-label={t("gameMenu.sandboxTools")}
+            title={t("gameMenu.sandboxToolsTitle")}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -111,16 +113,16 @@ export function GameMenu({
       </div>
       {open && (
         <div className="absolute left-0 top-full mt-1 w-52 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm">
-          <MenuButton label="Resume" onClick={() => setOpen(false)} />
+          <MenuButton label={t("gameMenu.resume")} onClick={() => setOpen(false)} />
           <MenuButton
-            label="Settings"
+            label={t("gameMenu.settings")}
             onClick={() => {
               setOpen(false);
               onSettingsClick();
             }}
           />
           <MenuButton
-            label="Help & Shortcuts"
+            label={t("gameMenu.helpShortcuts")}
             shortcut="?"
             onClick={() => {
               setOpen(false);
@@ -129,7 +131,7 @@ export function GameMenu({
           />
           {isAiMode && (
           <MenuButton
-            label={showAiHand ? "Hide AI Hand" : "Show AI Hand"}
+            label={showAiHand ? t("gameMenu.hideAiHand") : t("gameMenu.showAiHand")}
               onClick={() => {
                 onToggleAiHand();
                 setOpen(false);
@@ -138,7 +140,7 @@ export function GameMenu({
           )}
           <div className="my-1 border-t border-gray-700" />
           <MenuButton
-            label="Concede"
+            label={t("gameMenu.concede")}
             variant="danger"
             onClick={() => {
               setOpen(false);
@@ -156,7 +158,7 @@ export function GameMenu({
             }}
           />
           <MenuButton
-            label={isDraft ? "Back to Draft" : "Main Menu"}
+            label={isDraft ? t("gameMenu.backToDraft") : t("gameMenu.mainMenu")}
             onClick={() => {
               setOpen(false);
               if (isDraft) {
@@ -187,9 +189,9 @@ export function GameMenu({
                   target="_blank"
                   rel="noopener noreferrer"
                   className="transition-colors hover:text-white"
-                  title={`Card data: ${cardDataMeta.generated_at}`}
+                  title={t("gameMenu.cardDataTitle", { date: cardDataMeta.generated_at })}
                 >
-                  cards {cardDataMeta.commit_short}
+                  {t("gameMenu.cards", { commit: cardDataMeta.commit_short })}
                 </a>
               </>
             )}

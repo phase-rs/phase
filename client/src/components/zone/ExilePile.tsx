@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
@@ -9,6 +11,7 @@ interface ExilePileProps {
 }
 
 export function ExilePile({ playerId, onClick, size }: ExilePileProps) {
+  const { t } = useTranslation("game");
   const count = useGameStore((s) => getPlayerZoneIds(s.gameState, "exile", playerId).length);
   const canActForWaitingState = useCanActForWaitingState();
   const hasSelectableCards = useGameStore((s) => {
@@ -26,7 +29,7 @@ export function ExilePile({ playerId, onClick, size }: ExilePileProps) {
     <button
       onClick={onClick}
       className={`group relative cursor-pointer ${hasSelectableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
-      title={`Exile (${count})`}
+      title={t("zone.exileTitle", { count })}
       style={{ width: w, height: h }}
     >
       <div className="relative h-full w-full overflow-hidden rounded-lg border border-indigo-500/40 shadow-md group-hover:border-indigo-400/60 transition-colors">
@@ -44,7 +47,7 @@ export function ExilePile({ playerId, onClick, size }: ExilePileProps) {
           }}
         />
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300/80">Exile</span>
+          <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300/80">{t("zone.exile")}</span>
         </div>
       </div>
       <div className="absolute -bottom-1 -right-1 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-indigo-950 text-[9px] font-bold text-indigo-200 ring-1 ring-indigo-500/60">

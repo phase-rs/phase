@@ -7904,6 +7904,18 @@ fn is_blocked_by_cant_be_cast(
             }
         }
 
+        // CR 101.2 + CR 109.5 + CR 601.3a: per-affected-player applicability gate.
+        // Angelic Arbiter restricts only opponents who attacked with a creature
+        // this turn. Evaluated against the CASTER (CR 109.5), not the source's
+        // controller. The source-relative `def.condition` functioning gate is
+        // already applied upstream by `battlefield_active_statics`, so this is the
+        // only additional gate needed — do NOT re-evaluate `def.condition` here.
+        if let Some(ref cond) = def.per_player_condition {
+            if !restrictions::evaluate_condition(state, caster, bf_obj.id, cond) {
+                continue;
+            }
+        }
+
         return true;
     }
     false
@@ -13062,6 +13074,7 @@ mod tests {
                 affected: Some(affected),
                 modifications: vec![],
                 condition: None,
+                per_player_condition: None,
                 affected_zone: None,
                 effect_zone: None,
                 active_zones: vec![],
@@ -17135,6 +17148,64 @@ mod tests {
         // No CantCastDuring statics on battlefield — baseline
         assert!(!is_blocked_by_cant_cast_during(&state, PlayerId(0)));
         assert!(!is_blocked_by_cant_cast_during(&state, PlayerId(1)));
+    }
+
+    /// CR 101.2 + CR 601.3a: Angelic Arbiter — "Each opponent who attacked with a
+    /// creature this turn can't cast spells." The per-affected-player turn-activity
+    /// predicate must gate the cast-lock: an opponent who has NOT attacked this turn
+    /// can still cast. This discriminates the prior misparse (an unconditional
+    /// opponent cast-lock that wrongly blocked, e.g., Bolt Bend).
+    #[test]
+    fn angelic_arbiter_cast_lock_only_after_opponent_attacks() {
+        let mut state = setup_game_at_main_phase();
+        // Opponent-controlled (PlayerId(1)) Angelic Arbiter clause on the battlefield.
+        let arbiter = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Angelic Arbiter".to_string(),
+            Zone::Battlefield,
+        );
+        let def = parse_static_line(
+            "Each opponent who attacked with a creature this turn can't cast spells.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.per_player_condition,
+            Some(crate::types::ability::ParsedCondition::YouAttackedThisTurn)
+        );
+        state
+            .objects
+            .get_mut(&arbiter)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        // Player 0's spell on the stack (CantBeCast has no `affected` filter, so any
+        // spell object is restricted).
+        let spell = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Bolt Bend".to_string(),
+            Zone::Stack,
+        );
+        let spell_obj = state.objects.get(&spell).unwrap().clone();
+
+        // Player 0 has NOT attacked this turn -> the per-player gate fails -> NOT
+        // blocked. On main (unconditional lock) this assertion FAILS.
+        assert!(
+            !is_blocked_by_cant_be_cast(&state, PlayerId(0), &spell_obj),
+            "an opponent who has not attacked this turn must still be able to cast"
+        );
+
+        // Record that player 0 attacked this turn -> the per-player gate holds ->
+        // now blocked (CR 601.3a).
+        state.players_attacked_this_turn.insert(PlayerId(0));
+        assert!(
+            is_blocked_by_cant_be_cast(&state, PlayerId(0), &spell_obj),
+            "after attacking, the opponent can no longer cast spells"
+        );
     }
 
     // --- PerTurnCastLimit enforcement tests ---

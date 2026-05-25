@@ -68,6 +68,7 @@ fn blocks_lethal_attack() {
             player: P0,
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
+            block_requirements: HashMap::new(),
         };
     }
 
@@ -102,6 +103,7 @@ fn does_not_block_when_safe() {
             player: P0,
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
+            block_requirements: HashMap::new(),
         };
     }
 
@@ -223,6 +225,7 @@ fn ai_vs_ai_completes_combat_sequence() {
             player: P0,
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
+            block_requirements: HashMap::new(),
         };
     }
 
@@ -274,6 +277,7 @@ fn declare_blockers_never_produces_pass_priority() {
                 (blocker_a, vec![attacker]),
                 (blocker_b, vec![attacker]),
             ]),
+            block_requirements: HashMap::new(),
         };
     }
 

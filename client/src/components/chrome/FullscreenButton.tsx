@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 function EnterFullscreenIcon({ className }: { className?: string }) {
   return (
@@ -21,6 +22,7 @@ interface FullscreenButtonProps {
 }
 
 export function FullscreenButton({ variant }: FullscreenButtonProps) {
+  const { t } = useTranslation();
   const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
 
   useEffect(() => {
@@ -40,7 +42,7 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
   }, []);
 
   const Icon = isFullscreen ? ExitFullscreenIcon : EnterFullscreenIcon;
-  const label = isFullscreen ? "Exit fullscreen" : "Enter fullscreen";
+  const label = isFullscreen ? t("fullscreen.exit") : t("fullscreen.enter");
 
   if (variant === "game") {
     return (

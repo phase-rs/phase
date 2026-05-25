@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
@@ -17,6 +18,7 @@ const DUNGEON_DISPLAY_NAMES: Record<DungeonId, string> = {
 };
 
 export function DungeonChoiceModal({ data }: { data: ChooseDungeon["data"] }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<DungeonId | null>(null);
 
@@ -28,8 +30,8 @@ export function DungeonChoiceModal({ data }: { data: ChooseDungeon["data"] }) {
 
   return (
     <ChoiceOverlay
-      title="Choose a Dungeon"
-      subtitle="Select a dungeon to venture into"
+      title={t("dungeonChoice.title")}
+      subtitle={t("dungeonChoice.subtitle")}
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-3xl"
       footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
@@ -61,6 +63,7 @@ export function DungeonChoiceModal({ data }: { data: ChooseDungeon["data"] }) {
 }
 
 export function RoomChoiceModal({ data }: { data: ChooseDungeonRoom["data"] }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
 
@@ -74,8 +77,8 @@ export function RoomChoiceModal({ data }: { data: ChooseDungeonRoom["data"] }) {
 
   return (
     <ChoiceOverlay
-      title="Choose a Room"
-      subtitle={`Advance in ${dungeonName}`}
+      title={t("dungeonChoice.roomTitle")}
+      subtitle={t("dungeonChoice.roomSubtitle", { name: dungeonName })}
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-3xl"
       footer={<ConfirmButton onClick={handleConfirm} disabled={selectedIndex === null} />}

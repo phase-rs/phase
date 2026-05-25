@@ -68,6 +68,7 @@ function outsideGameChoice(count: number): WaitingFor {
     type: "OutsideGameChoice",
     data: {
       player: 0,
+      source_id: 1,
       choices: [
         {
           source: {
@@ -94,6 +95,7 @@ function outsideGameChoiceWithExile(): WaitingFor {
     type: "OutsideGameChoice",
     data: {
       player: 0,
+      source_id: 1,
       choices: [
         {
           source: {

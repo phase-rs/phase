@@ -1,4 +1,4 @@
-import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+import { strToU8, zipSync } from "fflate";
 import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -11,6 +11,7 @@ import {
   copyGameStateDebugSnapshot,
   exportGameStateDebugZip,
 } from "../../services/gameStateExport";
+import { gameStateFromImportText, readImportFile } from "../../services/gameStateImport";
 import { useGameStore } from "../../stores/gameStore";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -25,45 +26,6 @@ interface ConsoleEntry {
   level: ConsoleLevel;
   message: string;
   timestamp: number;
-}
-
-function gameStateFromImportText(importText: string): GameState | string {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(importText);
-  } catch {
-    return "Invalid JSON";
-  }
-
-  // Accept either a bare GameState or the full debug export format {gameState, ...}
-  const state = (
-    parsed && typeof parsed === "object" && "gameState" in parsed
-      ? (parsed as { gameState: GameState }).gameState
-      : parsed
-  ) as GameState;
-
-  if (!state || typeof state !== "object" || !("waiting_for" in state)) {
-    return "JSON does not look like a GameState (missing waiting_for)";
-  }
-
-  return state;
-}
-
-async function readImportFile(file: File): Promise<string> {
-  if (!file.name.toLowerCase().endsWith(".zip")) {
-    return file.text();
-  }
-
-  const archive = unzipSync(new Uint8Array(await file.arrayBuffer()));
-  const importFilename = Object.keys(archive).find((name) => {
-    const lowerName = name.toLowerCase();
-    return lowerName.endsWith(".json") || lowerName.endsWith(".txt");
-  });
-  if (!importFilename) {
-    throw new Error("ZIP does not contain a JSON or text file");
-  }
-
-  return strFromU8(archive[importFilename]);
 }
 
 /** Ring buffer of captured console output, shared across mount/unmount cycles. */

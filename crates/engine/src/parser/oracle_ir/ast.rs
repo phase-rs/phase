@@ -4,8 +4,9 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission,
     CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, PaymentCost, PlayerFilter, PtValue, QuantityExpr,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost, PlayerFilter, PtValue,
+    QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition,
+    TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -556,6 +557,9 @@ pub(crate) enum TargetedImperativeAst {
     UntapAll {
         target: TargetFilter,
     },
+    Goad {
+        target: TargetFilter,
+    },
     GoadAll {
         target: TargetFilter,
     },
@@ -698,10 +702,8 @@ pub(crate) enum SearchCreationImperativeAst {
         reveal: bool,
         destination: Zone,
         up_to: bool,
-        /// CR 406.3 + CR 400.11: Also offer face-up exile cards the controller
-        /// owns and that match `filter` (Karn-class "or choose a face-up …
-        /// card you own in exile" disjunction).
-        include_face_up_exile: bool,
+        /// CR 400.11 + CR 406.3: Which source pool the outside-game search uses.
+        source_pool: OutsideGameSourcePool,
     },
     Dig {
         count: QuantityExpr,
@@ -767,6 +769,10 @@ pub(crate) enum UtilityImperativeAst {
         target: TargetFilter,
     },
     Attach {
+        attachment: TargetFilter,
+        target: TargetFilter,
+    },
+    UnattachAll {
         attachment: TargetFilter,
         target: TargetFilter,
     },

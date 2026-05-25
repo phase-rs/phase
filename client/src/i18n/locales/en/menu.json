@@ -1,0 +1,217 @@
+{
+  "backButton": {
+    "label": "Back"
+  },
+  "aiDifficulty": {
+    "label": "AI difficulty",
+    "ariaLabel": "AI difficulty: {{difficulty}}"
+  },
+  "bracketFilter": {
+    "label": "Bracket filter"
+  },
+  "gamePresets": {
+    "heading": "Quick Start"
+  },
+  "shell": {
+    "disclaimer": "phase.rs is a non-commercial fan project and is not affiliated with or endorsed by Wizards of the Coast. Magic: The Gathering is © Wizards of the Coast LLC. Card images are fetched from Scryfall at runtime; card data is sourced from MTGJSON. No copyrighted WotC assets are bundled with this project."
+  },
+  "home": {
+    "resume": {
+      "title": "Resume Game",
+      "description": "Continue the last saved match from its current turn and board state."
+    },
+    "setup": {
+      "title": "Play vs AI",
+      "titleSaved": "New AI Match",
+      "description": "Play a solo match against an AI opponent — choose format, deck, archetype, and difficulty."
+    },
+    "online": {
+      "title": "Play Online",
+      "description": "Host a room, join by code, or reconnect to multiplayer."
+    },
+    "draft": {
+      "title": "Draft",
+      "description": "Quick Draft against AI, plus experimental cube and pod draft options."
+    },
+    "decks": {
+      "title": "Decks",
+      "description": "Open saved decks, switch your active list, and edit builds."
+    },
+    "social": {
+      "sponsor": "Sponsor"
+    },
+    "preview": {
+      "cta": "Try Preview",
+      "tooltip": "Play the latest preview build — newest cards & fixes land here before each release."
+    },
+    "coverage": {
+      "title": "Open the coverage dashboard",
+      "ariaLabel": "Open card coverage dashboard",
+      "heading": "Card Coverage Dashboard",
+      "viewDetails": "View details"
+    },
+    "preparingCards": "Preparing cards…",
+    "alpha": {
+      "label": "Early Alpha",
+      "message": " — expect broken cards and missing features."
+    },
+    "savedMatchAvailable": "Saved match available",
+    "load": {
+      "title": "Load Game State"
+    },
+    "exit": "Exit"
+  },
+  "loadState": {
+    "title": "Load Game State",
+    "subtitle": "Restore an exported or pasted state and continue against the AI.",
+    "tabPaste": "Paste JSON",
+    "tabFile": "From File",
+    "pastePlaceholder": "Paste GameState JSON…",
+    "fileSupports": "Supports .json, .txt, and .zip exported from the Debug Panel",
+    "chooseFile": "Choose File",
+    "load": "Load"
+  },
+  "aiOpponent": {
+    "heading": "AI Opponent",
+    "headingMulti": "AI Opponents ({{count}})",
+    "analyzingDecks": "Analyzing decks…",
+    "noLegalDecks": "No legal AI decks are available for this format.",
+    "catalogUnavailable": "AI deck catalog unavailable: {{error}}",
+    "randomPoolFilters": "Random Pool Filters",
+    "archetype": "Archetype",
+    "cardCoverage": "Card Coverage",
+    "coverageThresholdHint": "Exclude decks below this engine-support threshold",
+    "bracket": "Bracket",
+    "bracketHint": "Random AI picks from these brackets. Untagged decks are excluded when filtering.",
+    "opponentLabel": "Opponent {{number}}",
+    "deck": "Deck",
+    "difficulty": "Difficulty",
+    "deckRandom": "Random",
+    "deckRandomCount": "Random ({{count}})",
+    "source": {
+      "feed": "Feed",
+      "user": "User",
+      "precon": "Precon"
+    }
+  },
+  "feedManager": {
+    "title": "Manage Feeds",
+    "refreshing": "Refreshing…",
+    "refreshAll": "Refresh all",
+    "refresh": "Refresh",
+    "subscribe": "Subscribe",
+    "unsubscribe": "Unsubscribe",
+    "lastRefreshed": "Last refreshed: {{date}}",
+    "addCustomFeed": "Add Custom Feed",
+    "add": "Add",
+    "done": "Done"
+  },
+  "importDeck": {
+    "title": "Import Deck",
+    "tabPaste": "Paste Text",
+    "tabFile": "From File",
+    "deckNamePlaceholder": "Deck name",
+    "import": "Import",
+    "fileSupports": "Supports .dck, .dec, .txt, and MTGA format",
+    "chooseFile": "Choose File"
+  },
+  "precon": {
+    "savePrompt": "Save preconstructed deck as:",
+    "overwriteConfirm": "\"{{name}}\" already exists. Overwrite?",
+    "overwriteAllConfirm": "All {{count}} selected decks already exist. Overwrite?",
+    "overwriteSomeConfirm": "{{conflicts}} of {{total}} selected decks already exist. Overwrite the duplicates? (Cancel keeps existing copies and imports the rest.)",
+    "importedSkipped_one": "Imported {{count}} deck; skipped {{skipped}} existing.",
+    "importedSkipped_other": "Imported {{count}} decks; skipped {{skipped}} existing.",
+    "title": "Preconstructed Decks",
+    "subtitle": "Sourced from MTGJSON AllDeckFiles — every WotC-printed precon.",
+    "totalCount": "· {{count}} total",
+    "searchPlaceholder": "Search by name, set code, or type…",
+    "allTypes": "All ({{count}})",
+    "loadingCatalog": "Loading deck catalog…",
+    "noMatch": "No decks match.",
+    "selectDeck": "Select {{name}}",
+    "cardCount_one": "{{count}} card",
+    "cardCount_other": "{{count}} cards",
+    "commanderSuffix": " · cmdr",
+    "showingFirst": "Showing first {{count}} — refine search to narrow.",
+    "selectAllVisible": "Select all visible",
+    "clearSelection": "Clear ({{count}})",
+    "importSelected": "Import {{count}} selected"
+  },
+  "deckTile": {
+    "feedBadge": "Feed",
+    "edit": "Edit {{name}}",
+    "delete": "Delete",
+    "deleteTitle": "Delete deck",
+    "copy": "Copy to My Decks",
+    "copyTitle": "Copy to My Decks (removes feed tracking)",
+    "cardCount_one": "{{count}} card",
+    "cardCount_other": "{{count}} cards",
+    "preconBadge": "precon",
+    "unknown": "Unknown {{count}}",
+    "unknownCardsTitle": "Unknown cards:\n{{cards}}",
+    "unsupportedTitle": "Unsupported ({{unique}} unique, {{copies}} copies):\n{{cards}}",
+    "setIconAlt": "{{code}} set icon"
+  },
+  "myDecks": {
+    "headingManage": "My Decks",
+    "headingSelect": "Select Deck",
+    "tabDecks": "My Decks",
+    "tabSubscriptions": "Subscriptions",
+    "createNew": "Create New",
+    "refreshing": "Refreshing…",
+    "refreshAll": "Refresh All",
+    "manageFeeds": "Manage Feeds",
+    "searchPlaceholder": "Search decks…",
+    "formatLabel": "Format",
+    "browseAetherhub": "Browse {{format}} decks on Aetherhub",
+    "showAllDecks": "Show all decks",
+    "showLegalOnly": "Show legal only",
+    "showAllDecksButton": "Show All Decks",
+    "sortName": "Name",
+    "sortDateAdded": "Date Added",
+    "sortFormat": "Format",
+    "ascending": "Ascending",
+    "descending": "Descending",
+    "saveAsPrompt": "Save as:",
+    "banner": {
+      "showingAllFor": "Showing all saved decks for",
+      "showingLegalIn": "Showing decks legal in",
+      "deckCount": "· {{visible}} of {{total}}"
+    },
+    "status": {
+      "fallbackUserDeck": "user deck",
+      "fallbackVisibleDeck": "visible deck",
+      "startingWorker": "Starting compatibility worker…",
+      "loadingDatabase": "Loading compatibility database…",
+      "checkingDeck": "Checking {{deck}}…",
+      "checkedDeck": "Checked {{deck}}",
+      "loadingCoverage": "Loading coverage for {{deck}}…",
+      "checkingSelected": "Checking selected deck compatibility…",
+      "evaluatingVisible": "Evaluating visible decks…",
+      "remaining": "{{count}} remaining"
+    },
+    "compatibilityError": "Compatibility check unavailable: {{error}}",
+    "empty": {
+      "title": "No decks match this filter.",
+      "selectHint": "Import a compatible deck or change your format to see available decks.",
+      "manageHint": "Pick a different filter or show all decks to choose from your full collection."
+    },
+    "sectionMyDecks": "My Decks",
+    "sectionStarterDecks": "Starter Decks",
+    "sectionLegalPrecons": "Legal Precons",
+    "importDeckTile": "Import Deck",
+    "preconstructedTile": "Preconstructed",
+    "browseAll": "Browse All",
+    "loadMore": "Load More",
+    "selectedDeck": "Selected deck",
+    "chooseDeckToContinue": "Choose a deck to continue"
+  },
+  "subscriptions": {
+    "emptyTitle": "No feed subscriptions",
+    "emptyDescription": "Subscribe to deck feeds to get curated deck collections that auto-update.",
+    "feedMeta_one": "· {{count}} deck · Updated {{date}}",
+    "feedMeta_other": "· {{count}} decks · Updated {{date}}",
+    "error": "Error: {{error}}"
+  }
+}

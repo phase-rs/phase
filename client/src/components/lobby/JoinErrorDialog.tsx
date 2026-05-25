@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "../menu/buttonStyles";
 
@@ -25,6 +26,7 @@ export function JoinErrorDialog({
   primaryAction,
   onDismiss,
 }: JoinErrorDialogProps) {
+  const { t } = useTranslation("multiplayer");
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70" onClick={onDismiss} />
@@ -42,7 +44,7 @@ export function JoinErrorDialog({
             onClick={onDismiss}
             className={menuButtonClass({ tone: "neutral", size: "sm" })}
           >
-            Dismiss
+            {t("joinErrorDialog.dismiss")}
           </button>
           {primaryAction && (
             <button

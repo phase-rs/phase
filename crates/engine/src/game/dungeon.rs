@@ -837,6 +837,7 @@ pub fn room_effects(
                             },
                         ],
                         condition: None,
+                        per_player_condition: None,
                         affected_zone: None,
                         effect_zone: None,
                         active_zones: vec![],

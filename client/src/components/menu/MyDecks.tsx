@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
@@ -178,6 +179,7 @@ interface DeckTileProps {
 }
 
 const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride, catalogCandidate }: DeckTileProps) {
+  const { t } = useTranslation("menu");
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
@@ -205,7 +207,7 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
     : getRepresentativeCard(deckName);
   const feedOrigin = getDeckFeedOrigin(deckName);
   const feedForBadge = useCachedFeed(feedOrigin ?? "");
-  const feedBadge = !hideFeedBadge && feedOrigin ? (feedForBadge?.name ?? "Feed") : null;
+  const feedBadge = !hideFeedBadge && feedOrigin ? (feedForBadge?.name ?? t("deckTile.feedBadge")) : null;
   const isPrecon = deckName.startsWith(PRECON_PREFIX);
   const displayName = isPrecon ? deckName.slice(PRECON_PREFIX.length) : deckName;
   const coverage = compatibility?.coverage ?? coverageFromPct(preconDeckOverride?.coveragePct);
@@ -234,8 +236,8 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
         <button
           onClick={(e) => { e.stopPropagation(); onEdit(); }}
           className={`absolute right-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-gray-300 opacity-0 transition-opacity hover:bg-indigo-600 hover:text-white group-hover:opacity-100 ${feedBadge ? "top-10" : "top-2"}`}
-          title={`Edit ${displayName}`}
-          aria-label={`Edit ${displayName}`}
+          title={t("deckTile.edit", { name: displayName })}
+          aria-label={t("deckTile.edit", { name: displayName })}
         >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
             <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 2.474L6.226 11.16a2.25 2.25 0 0 1-.892.547l-2.115.705a.5.5 0 0 1-.632-.632l.705-2.115a2.25 2.25 0 0 1 .547-.892l7.174-7.346Z" />
@@ -251,20 +253,20 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
               onClick={(e) => { e.stopPropagation(); onDelete(); setConfirmingDelete(false); }}
               className="rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors hover:bg-red-500"
             >
-              Delete
+              {t("deckTile.delete")}
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); setConfirmingDelete(false); }}
               className="rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium text-gray-300 transition-colors hover:bg-black/90"
             >
-              Cancel
+              {t("common:actions.cancel")}
             </button>
           </div>
         ) : (
           <button
             onClick={(e) => { e.stopPropagation(); setConfirmingDelete(true); }}
             className="absolute left-2 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-gray-400 opacity-0 transition-opacity hover:bg-red-600 hover:text-white group-hover:opacity-100"
-            title="Delete deck"
+            title={t("deckTile.deleteTitle")}
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
               <path fillRule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clipRule="evenodd" />
@@ -277,9 +279,9 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
         <button
           onClick={(e) => { e.stopPropagation(); onAdopt(); }}
           className="absolute left-2 top-2 z-20 rounded bg-black/70 px-2 py-1 text-[10px] font-medium text-white opacity-0 transition-opacity hover:bg-black/90 group-hover:opacity-100"
-          title="Copy to My Decks (removes feed tracking)"
+          title={t("deckTile.copyTitle")}
         >
-          Copy to My Decks
+          {t("deckTile.copy")}
         </button>
       )}
 
@@ -302,7 +304,7 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
               <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
             )}
           </div>
-          <span className="text-xs text-gray-300">{count} cards</span>
+          <span className="text-xs text-gray-300">{t("deckTile.cardCount", { count })}</span>
         </div>
         <div className="mt-2 flex flex-wrap gap-1">
           {/* Bracket estimate chip (Commander decks only) */}
@@ -312,7 +314,7 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
             <StatusBadge key={tag} label={tag} active={FORMAT_TAGS.has(tag)} />
           ))}
           {isPrecon && !preconDeckOverride && !feedDeckOverride?.tags?.length && (
-            <StatusBadge label="precon" active />
+            <StatusBadge label={t("deckTile.preconBadge")} active />
           )}
           {/* Engine compatibility badges */}
           {compatibility?.standard.compatible && <StatusBadge label="STD" active />}
@@ -321,9 +323,9 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
           {compatibility && compatibility.unknown_cards.length > 0 && (
             <span
               className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
-              title={`Unknown cards:\n${compatibility.unknown_cards.join("\n")}`}
+              title={t("deckTile.unknownCardsTitle", { cards: compatibility.unknown_cards.join("\n") })}
             >
-              Unknown {compatibility.unknown_cards.length}
+              {t("deckTile.unknown", { count: compatibility.unknown_cards.length })}
             </span>
           )}
           {coverage && coverage.supported_unique < coverage.total_unique && (() => {
@@ -337,7 +339,11 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
             return (
               <div
                 className="flex w-full items-center gap-1.5"
-                title={`Unsupported (${unsupported_cards.length} unique, ${totalCopiesAffected} copies):\n${unsupported_cards.map((c) => `${(c.copies ?? 1) > 1 ? `${c.copies}x ` : ""}${c.name}: ${c.gaps.join(", ")}`).join("\n")}`}
+                title={t("deckTile.unsupportedTitle", {
+                  unique: unsupported_cards.length,
+                  copies: totalCopiesAffected,
+                  cards: unsupported_cards.map((c) => `${(c.copies ?? 1) > 1 ? `${c.copies}x ` : ""}${c.name}: ${c.gaps.join(", ")}`).join("\n"),
+                })}
                 onMouseEnter={() => setCoverageHovered(true)}
                 onMouseLeave={() => setCoverageHovered(false)}
               >
@@ -438,6 +444,7 @@ const FeedDeckTile = memo(function FeedDeckTile({
 });
 
 function PreconSetBadge({ deck }: { deck: PreconDeckEntry | undefined }) {
+  const { t } = useTranslation("menu");
   const setIcon = useSetSymbol(deck?.code);
   if (!deck?.code) return null;
 
@@ -449,7 +456,7 @@ function PreconSetBadge({ deck }: { deck: PreconDeckEntry | undefined }) {
       {setIcon ? (
         <img
           src={setIcon}
-          alt={`${deck.code} set icon`}
+          alt={t("deckTile.setIconAlt", { code: deck.code })}
           className="h-[18px] w-[18px] invert"
         />
       ) : (
@@ -492,6 +499,7 @@ export function MyDecks({
   bare = false,
   onCompatibilityUpdate,
 }: MyDecksProps) {
+  const { t } = useTranslation("menu");
   const [activeTab, setActiveTab] = useState<MyDecksTab>("decks");
   const [deckNames, setDeckNames] = useState<string[]>([]);
   const [showImport, setShowImport] = useState(false);
@@ -632,11 +640,11 @@ export function MyDecks({
     }
 
     setIsEvaluating(true);
-    const deckName = batch[0]?.name ?? "user deck";
+    const deckName = batch[0]?.name ?? t("myDecks.status.fallbackUserDeck");
     for (const { name } of batch) {
       pendingCompatibility.current.add(name);
     }
-    setCompatibilityStatus(`Checking ${deckName}…`);
+    setCompatibilityStatus(t("myDecks.status.checkingDeck", { deck: deckName }));
 
     evaluateDeckCompatibilityBatch(batch, {
       selectedFormat: selectedFormatForCompatibility,
@@ -644,13 +652,13 @@ export function MyDecks({
       summaryOnly: true,
       onStatus: (status) => {
         if (cancelled || generation !== compatibilityGeneration.current) return;
-        if (status === "starting-worker") setCompatibilityStatus("Starting compatibility worker…");
-        if (status === "loading-card-database") setCompatibilityStatus("Loading compatibility database…");
-        if (status === "checking-deck") setCompatibilityStatus(`Checking ${deckName}…`);
+        if (status === "starting-worker") setCompatibilityStatus(t("myDecks.status.startingWorker"));
+        if (status === "loading-card-database") setCompatibilityStatus(t("myDecks.status.loadingDatabase"));
+        if (status === "checking-deck") setCompatibilityStatus(t("myDecks.status.checkingDeck", { deck: deckName }));
       },
       onResult: (name, result) => {
         if (cancelled || generation !== compatibilityGeneration.current) return;
-        setCompatibilityStatus(`Checked ${name}`);
+        setCompatibilityStatus(t("myDecks.status.checkedDeck", { deck: name }));
         setCompatibilities((current) => {
           const next = { ...current, [name]: result };
           return next;
@@ -687,6 +695,7 @@ export function MyDecks({
     requiresCompatibilityFilter,
     selectedFormatForCompatibility,
     selectedMatchType,
+    t,
     unknownFormatDeckNames,
   ]);
 
@@ -885,9 +894,9 @@ export function MyDecks({
     const generation = compatibilityGeneration.current;
     coverageInFlight.current = true;
     setIsEvaluating(true);
-    const firstName = batch[0]?.name ?? "visible deck";
+    const firstName = batch[0]?.name ?? t("myDecks.status.fallbackVisibleDeck");
     setCoverageStatus({ deckName: firstName, remaining: visibleCoverageDeckNames.length });
-    setCompatibilityStatus(`Loading coverage for ${firstName}…`);
+    setCompatibilityStatus(t("myDecks.status.loadingCoverage", { deck: firstName }));
 
     evaluateDeckCompatibilityBatch(batch, {
       selectedFormat: selectedFormatForCompatibility,
@@ -895,9 +904,9 @@ export function MyDecks({
       onStatus: (status, statusDeckName) => {
         if (generation !== compatibilityGeneration.current) return;
         const currentDeckName = statusDeckName ?? firstName;
-        if (status === "starting-worker") setCompatibilityStatus("Starting compatibility worker…");
-        if (status === "loading-card-database") setCompatibilityStatus("Loading compatibility database…");
-        if (status === "checking-deck") setCompatibilityStatus(`Loading coverage for ${currentDeckName}…`);
+        if (status === "starting-worker") setCompatibilityStatus(t("myDecks.status.startingWorker"));
+        if (status === "loading-card-database") setCompatibilityStatus(t("myDecks.status.loadingDatabase"));
+        if (status === "checking-deck") setCompatibilityStatus(t("myDecks.status.loadingCoverage", { deck: currentDeckName }));
       },
       onResult: (name, result) => {
         if (generation !== compatibilityGeneration.current) return;
@@ -929,6 +938,7 @@ export function MyDecks({
     legalPreconByName,
     selectedFormatForCompatibility,
     selectedMatchType,
+    t,
     visibleCoverageDeckNames,
   ]);
 
@@ -972,11 +982,11 @@ export function MyDecks({
   };
 
   const handleAdoptDeck = useCallback((deckName: string) => {
-    const newName = prompt("Save as:", deckName);
+    const newName = prompt(t("myDecks.saveAsPrompt"), deckName);
     if (!newName) return;
     adoptFeedDeck(deckName, newName);
     setDeckNames(listSavedDeckNames());
-  }, []);
+  }, [t]);
 
   const handleDeleteDeck = useCallback((deckName: string) => {
     deleteDeck(deckName);
@@ -999,7 +1009,7 @@ export function MyDecks({
       <div className="flex w-full flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
           <h2 className="menu-display text-[1.9rem] leading-tight text-white">
-            {mode === "manage" ? "My Decks" : "Select Deck"}
+            {mode === "manage" ? t("myDecks.headingManage") : t("myDecks.headingSelect")}
           </h2>
           {mode === "manage" && (
             <div className="flex rounded-lg border border-white/10">
@@ -1011,7 +1021,7 @@ export function MyDecks({
                     : "text-slate-400 hover:text-white"
                 }`}
               >
-                My Decks
+                {t("myDecks.tabDecks")}
               </button>
               <button
                 onClick={() => setActiveTab("subscriptions")}
@@ -1021,7 +1031,7 @@ export function MyDecks({
                     : "text-slate-400 hover:text-white"
                 }`}
               >
-                Subscriptions
+                {t("myDecks.tabSubscriptions")}
               </button>
             </div>
           )}
@@ -1031,7 +1041,7 @@ export function MyDecks({
             onClick={onCreateDeck}
             className={`${menuButtonClass({ tone: "neutral", size: "sm" })} self-start sm:self-auto`}
           >
-            Create New
+            {t("myDecks.createNew")}
           </button>
         )}
         {mode === "manage" && activeTab === "subscriptions" && (
@@ -1041,13 +1051,13 @@ export function MyDecks({
               disabled={isRefreshing}
               className={menuButtonClass({ tone: "neutral", size: "sm", disabled: isRefreshing })}
             >
-              {isRefreshing ? "Refreshing…" : "Refresh All"}
+              {isRefreshing ? t("myDecks.refreshing") : t("myDecks.refreshAll")}
             </button>
             <button
               onClick={() => setShowFeedManager(true)}
               className={menuButtonClass({ tone: "neutral", size: "sm" })}
             >
-              Manage Feeds
+              {t("myDecks.manageFeeds")}
             </button>
           </div>
         )}
@@ -1065,7 +1075,7 @@ export function MyDecks({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search decks…"
+            placeholder={t("myDecks.searchPlaceholder")}
             className="w-full rounded-lg bg-black/30 py-1.5 pl-8 pr-3 text-xs text-slate-200 outline-none ring-1 ring-white/10 transition-colors placeholder:text-slate-500 focus:ring-white/20"
           />
         </div>
@@ -1073,7 +1083,7 @@ export function MyDecks({
         {mode === "manage" && (<>
         <div className="flex min-w-0 items-center gap-1 sm:w-[228px]">
           <label htmlFor="my-decks-format-filter" className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-            Format
+            {t("myDecks.formatLabel")}
           </label>
           <select
             id="my-decks-format-filter"
@@ -1093,7 +1103,7 @@ export function MyDecks({
               target="_blank"
               rel="noopener noreferrer"
               className="rounded p-1 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-300"
-              title={`Browse ${activeFilterOption.label} decks on Aetherhub`}
+              title={t("myDecks.browseAetherhub", { format: activeFilterOption.label })}
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
                 <path fillRule="evenodd" d="M4.5 2A2.5 2.5 0 0 0 2 4.5v7A2.5 2.5 0 0 0 4.5 14h7a2.5 2.5 0 0 0 2.5-2.5V9a.75.75 0 0 0-1.5 0v2.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1H7a.75.75 0 0 0 0-1.5H4.5ZM9 2a.75.75 0 0 0 0 1.5h2.69L8.22 7.03a.75.75 0 1 0 1.06 1.06l3.47-3.47V7a.75.75 0 0 0 1.5 0V2H9Z" clipRule="evenodd" />
@@ -1106,7 +1116,7 @@ export function MyDecks({
             onClick={() => setActiveFilter("all")}
             className="rounded border border-indigo-500/50 bg-indigo-500/10 px-2 py-1 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20"
           >
-            Show all decks
+            {t("myDecks.showAllDecks")}
           </button>
         )}
         <div className="flex items-center justify-end gap-1 sm:ml-auto">
@@ -1119,14 +1129,14 @@ export function MyDecks({
             }}
             className="rounded bg-black/30 px-2 py-1 text-xs text-slate-300 outline-none ring-1 ring-white/10 focus:ring-white/20"
           >
-            <option value="alpha">Name</option>
-            <option value="recent">Date Added</option>
-            {selectedFormat && <option value="format">Format</option>}
+            <option value="alpha">{t("myDecks.sortName")}</option>
+            <option value="recent">{t("myDecks.sortDateAdded")}</option>
+            {selectedFormat && <option value="format">{t("myDecks.sortFormat")}</option>}
           </select>
           <button
             onClick={() => setSortAsc((prev) => !prev)}
             className="rounded p-1 text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white"
-            title={sortAsc ? "Ascending" : "Descending"}
+            title={sortAsc ? t("myDecks.ascending") : t("myDecks.descending")}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -1153,18 +1163,18 @@ export function MyDecks({
             </svg>
             <span className="text-indigo-100">
               {activeFilter === "all"
-                ? <>Showing all saved decks for <span className="font-semibold">{selectedFormat}</span></>
-                : <>Showing decks legal in <span className="font-semibold">{selectedFormat}</span></>}
+                ? <>{t("myDecks.banner.showingAllFor")} <span className="font-semibold">{selectedFormat}</span></>
+                : <>{t("myDecks.banner.showingLegalIn")} <span className="font-semibold">{selectedFormat}</span></>}
             </span>
             <span className="text-xs text-indigo-300/70">
-              · {visibleDeckCount} of {deckNames.length + preconDeckNames.length}
+              {t("myDecks.banner.deckCount", { visible: visibleDeckCount, total: deckNames.length + preconDeckNames.length })}
             </span>
           </div>
           <button
             onClick={() => setActiveFilter((current) => (current === "all" ? (contextualFilter ?? "all") : "all"))}
             className="rounded border border-indigo-300/25 bg-indigo-400/10 px-2.5 py-1 text-xs font-medium text-indigo-100 transition-colors hover:bg-indigo-400/18"
           >
-            {activeFilter === "all" ? "Show legal only" : "Show all decks"}
+            {activeFilter === "all" ? t("myDecks.showLegalOnly") : t("myDecks.showAllDecks")}
           </button>
         </div>
       )}
@@ -1176,10 +1186,10 @@ export function MyDecks({
             <span className="text-sm font-medium text-indigo-200">
               {compatibilityStatus
                 ?? (isScanningUserDecks
-                ? "Checking selected deck compatibility…"
+                ? t("myDecks.status.checkingSelected")
                 : coverageStatus
-                  ? `Loading coverage for ${coverageStatus.deckName}…`
-                  : "Evaluating visible decks…")}
+                  ? t("myDecks.status.loadingCoverage", { deck: coverageStatus.deckName })
+                  : t("myDecks.status.evaluatingVisible"))}
             </span>
           </div>
           {isScanningUserDecks && (
@@ -1189,7 +1199,7 @@ export function MyDecks({
           )}
           {!isScanningUserDecks && isScanningCoverage && (
             <span className="text-xs tabular-nums text-indigo-300/75">
-              {coverageScanTotal} remaining
+              {t("myDecks.status.remaining", { count: coverageScanTotal })}
             </span>
           )}
         </div>
@@ -1197,24 +1207,24 @@ export function MyDecks({
 
       {compatibilityError && (
         <div className="w-full rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-          Compatibility check unavailable: {compatibilityError}
+          {t("myDecks.compatibilityError", { error: compatibilityError })}
         </div>
       )}
 
       {visibleDeckCount === 0 ? (
         <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[20px] border border-dashed border-white/10 bg-black/12 px-6 py-12 text-center">
-          <div className="text-lg font-medium text-white">No decks match this filter.</div>
+          <div className="text-lg font-medium text-white">{t("myDecks.empty.title")}</div>
           <div className="max-w-md text-sm leading-6 text-slate-400">
             {mode === "select"
-              ? "Import a compatible deck or change your format to see available decks."
-              : "Pick a different filter or show all decks to choose from your full collection."}
+              ? t("myDecks.empty.selectHint")
+              : t("myDecks.empty.manageHint")}
           </div>
           {mode === "manage" && (
             <button
               onClick={() => setActiveFilter("all")}
               className={menuButtonClass({ tone: "neutral", size: "sm" })}
             >
-              Show All Decks
+              {t("myDecks.showAllDecksButton")}
             </button>
           )}
         </div>
@@ -1223,21 +1233,21 @@ export function MyDecks({
           {/* User decks section */}
           <div>
             <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
-              My Decks
+              {t("myDecks.sectionMyDecks")}
               {userDecks.length > 0 && (
                 <span className="ml-2 text-slate-600">{userDecks.length}</span>
               )}
             </h3>
             <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
               <AddDeckTile
-                label="Import Deck"
+                label={t("myDecks.importDeckTile")}
                 onClick={() => setShowImport(true)}
                 icon={
                   <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
                 }
               />
               <AddDeckTile
-                label="Preconstructed"
+                label={t("myDecks.preconstructedTile")}
                 onClick={() => setShowPrecon(true)}
                 icon={
                   <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5v13a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 16.5v-13Zm11.25.5a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-1.5 0V4.75a.75.75 0 0 1 .75-.75Zm2.5 1.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-1.5 0v-8.5a.75.75 0 0 1 .75-.75Z" />
@@ -1265,14 +1275,14 @@ export function MyDecks({
             <div>
               <div className="mb-3 flex items-center justify-between">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Starter Decks
+                  {t("myDecks.sectionStarterDecks")}
                   <span className="ml-2 text-slate-600">{bundledDecks.length}</span>
                 </h3>
                 <button
                   onClick={() => setShowFeedManager(true)}
                   className="text-[11px] text-slate-500 transition-colors hover:text-slate-300"
                 >
-                  Manage Feeds
+                  {t("myDecks.manageFeeds")}
                 </button>
               </div>
               <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
@@ -1297,14 +1307,14 @@ export function MyDecks({
             <div className="rounded-[18px] border border-white/8 bg-black/10 p-3">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Legal Precons
+                  {t("myDecks.sectionLegalPrecons")}
                   <span className="ml-2 text-slate-600">{preconDeckNames.length}</span>
                 </h3>
                 <button
                   onClick={() => setShowPrecon(true)}
                   className="text-[11px] text-slate-500 transition-colors hover:text-slate-300"
                 >
-                  Browse All
+                  {t("myDecks.browseAll")}
                 </button>
               </div>
               <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
@@ -1331,7 +1341,7 @@ export function MyDecks({
                     onClick={() => setPreconDisplayCount((count) => count + PRECON_PAGE_SIZE)}
                     className={menuButtonClass({ tone: "neutral", size: "sm" })}
                   >
-                    Load More
+                    {t("myDecks.loadMore")}
                   </button>
                 </div>
               )}
@@ -1354,9 +1364,9 @@ export function MyDecks({
         <div className="sticky bottom-3 z-10 w-full">
           <div className="flex items-center justify-between gap-4 rounded-[20px] border border-white/10 bg-[#0a0f1b]/90 px-4 py-3 shadow-[0_18px_40px_rgba(0,0,0,0.28)] backdrop-blur-md">
             <div className="min-w-0">
-              <div className="text-xs text-slate-500">Selected deck</div>
+              <div className="text-xs text-slate-500">{t("myDecks.selectedDeck")}</div>
               <div className="truncate text-sm font-medium text-white">
-                {selectedDeckLabel ?? "Choose a deck to continue"}
+                {selectedDeckLabel ?? t("myDecks.chooseDeckToContinue")}
               </div>
             </div>
           {confirmAction ?? (
@@ -1403,15 +1413,16 @@ function SubscriptionsView({
   onTileClick,
   onAdopt,
 }: SubscriptionsViewProps) {
+  const { t } = useTranslation("menu");
   const subs = listSubscriptions();
   const feedCache = useFeedCacheSnapshot();
 
   if (subs.length === 0) {
     return (
       <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[20px] border border-dashed border-white/10 bg-black/12 px-6 py-12 text-center">
-        <div className="text-lg font-medium text-white">No feed subscriptions</div>
+        <div className="text-lg font-medium text-white">{t("subscriptions.emptyTitle")}</div>
         <div className="max-w-md text-sm leading-6 text-slate-400">
-          Subscribe to deck feeds to get curated deck collections that auto-update.
+          {t("subscriptions.emptyDescription")}
         </div>
       </div>
     );
@@ -1438,8 +1449,8 @@ function SubscriptionsView({
                   {feed?.name ?? sub.sourceId}
                 </h3>
                 <p className="mt-0.5 text-xs text-slate-500">
-                  {feed?.description} · {deckCount} {deckCount === 1 ? "deck" : "decks"} · Updated {lastRefreshed}
-                  {sub.error && <span className="ml-2 text-red-400">Error: {sub.error}</span>}
+                  {feed?.description} {t("subscriptions.feedMeta", { count: deckCount, date: lastRefreshed })}
+                  {sub.error && <span className="ml-2 text-red-400">{t("subscriptions.error", { error: sub.error })}</span>}
                 </p>
               </div>
             </div>

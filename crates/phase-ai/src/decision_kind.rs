@@ -217,6 +217,7 @@ mod tests {
                     player: PlayerId(0),
                     valid_blocker_ids: vec![],
                     valid_block_targets: std::collections::HashMap::new(),
+                    block_requirements: std::collections::HashMap::new(),
                 },
                 &dummy_action
             ),

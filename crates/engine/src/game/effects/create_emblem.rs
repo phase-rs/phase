@@ -75,6 +75,7 @@ mod tests {
                 ContinuousModification::AddToughness { value: 1 },
             ],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],

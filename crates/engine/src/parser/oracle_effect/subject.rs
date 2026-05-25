@@ -11,7 +11,7 @@ use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
     FilterProp, GainLifePlayer, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, RoundingMode, StaticDefinition, TargetFilter, TypedFilter,
+    QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -21,6 +21,7 @@ use crate::types::statics::StaticMode;
 use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
+use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
@@ -489,7 +490,17 @@ fn try_parse_can_block_additional(
     let (subject_lower, predicate_lower) =
         nom_primitives::scan_split_at_phrase(&lower, |i| tag("can block ").parse(i))?;
     let subject_text = &text[..subject_lower.len()];
-    let application = parse_subject_application(subject_text.trim(), ctx)?;
+    let application = if subject_text.trim().is_empty() {
+        SubjectApplication {
+            affected: TargetFilter::ParentTarget,
+            target: Some(TargetFilter::ParentTarget),
+            multi_target: None,
+            inherits_parent: true,
+            is_optional: false,
+        }
+    } else {
+        parse_subject_application(subject_text.trim(), ctx)?
+    };
 
     let (_rest, (_, _, _, _, count, duration, _)) = all_consuming((
         tag("can"),
@@ -502,6 +513,11 @@ fn try_parse_can_block_additional(
     ))
     .parse(predicate_lower)
     .ok()?;
+    let duration = if subject_text.trim().is_empty() {
+        duration.or(Some(Duration::UntilEndOfTurn))
+    } else {
+        duration
+    };
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
@@ -1000,8 +1016,21 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 608.2k: Bare pronoun "it" — context-dependent
+    // CR 608.2k: Bare pronoun "it" — context-dependent. In trigger context,
+    // `ctx.subject` identifies the triggering subject. In effect-chain context,
+    // `parent_target_available` records that a previous chunk introduced a real
+    // typed object referent. Standalone clause parsing leaves it false, so
+    // "it connives" remains self-referential instead of inventing ParentTarget.
     if lower == "it" {
+        if ctx.subject.is_none() && ctx.parent_target_available {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: None,
+                multi_target: None,
+                inherits_parent: true,
+                is_optional: false,
+            });
+        }
         return Some(SubjectApplication {
             affected: resolve_it_pronoun(ctx),
             target: None,
@@ -1876,25 +1905,13 @@ fn try_parse_set_life_total(
 ) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();
 
-    // Parse the amount expression
-    let amount = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("half ").parse(lower.as_str())
-    {
-        // "half their starting life total" / "half that player's starting life total"
-        if nom_primitives::scan_contains(rest, "starting life total") {
-            QuantityExpr::DivideRounded {
-                inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::StartingLifeTotal,
-                }),
-                divisor: 2,
-                rounding: RoundingMode::Down,
-            }
-        } else {
+    let amount = if nom_primitives::scan_contains(&lower, "starting life total") {
+        let amount_text = lower.trim().trim_end_matches('.');
+        let (rest, amount) = nom_quantity::parse_quantity(amount_text).ok()?;
+        if !rest.trim().is_empty() {
             return None;
         }
-    } else if nom_primitives::scan_contains(&lower, "starting life total") {
-        QuantityExpr::Ref {
-            qty: QuantityRef::StartingLifeTotal,
-        }
+        amount
     } else if let Some((n, rest)) = parse_number(&lower) {
         // Guard: reject if substantial text remains after the number.
         // "a 3/3 red goblin creature" matches "a" as 1 but the rest
@@ -2647,6 +2664,8 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "have",
     "look",
     "lose",
+    "investigate",
+    "learn",
     // CR 701.40a: Manifest — "its controller manifests the top card of their
     // library" (Reality Shift). Subject-shifted manifest clauses route through
     // the PredicateAst::ImperativeFallback arm in `lower_subject_predicate_ast`.
@@ -2654,7 +2673,9 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "mill",
     "pay",
     "phase",
+    "populate",
     "put",
+    "proliferate",
     "regenerate",
     "reveal",
     "return",
@@ -2794,6 +2815,26 @@ mod tests {
             "expected TakeTheInitiative, got {:?}",
             ability.effect
         );
+    }
+
+    #[test]
+    fn life_total_becomes_half_starting_life_total_rounded_up() {
+        let mut ctx = ParseContext::default();
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "your life total becomes half your starting life total, rounded up",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        let Effect::SetLifeTotal { amount, .. } = &*ability.effect else {
+            panic!("expected SetLifeTotal, got {:?}", ability.effect);
+        };
+        assert!(matches!(
+            amount,
+            QuantityExpr::DivideRounded {
+                rounding: crate::types::ability::RoundingMode::Up,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   BRACKET_LABEL,
   COMMANDER_BRACKETS,
@@ -10,8 +12,9 @@ interface Props {
 }
 
 export function BracketPicker({ value, onChange }: Props) {
+  const { t } = useTranslation("deck-builder");
   return (
-    <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Deck bracket">
+    <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label={t("bracketPicker.ariaLabel")}>
       <button
         type="button"
         aria-pressed={value === null}
@@ -22,7 +25,7 @@ export function BracketPicker({ value, onChange }: Props) {
             : "rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-xs font-medium text-slate-400 hover:bg-white/6"
         }
       >
-        Unrated
+        {t("bracketPicker.unrated")}
       </button>
       {COMMANDER_BRACKETS.map((b) => {
         const active = value === b;

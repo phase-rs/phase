@@ -530,6 +530,11 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_entered_this_turn_ref,
         parse_tokens_created_this_turn_tail,
         parse_number_of_distinct_colors_among_permanents_tail,
+        // CR 107.1 + CR 700.1: "[type] controlled by the player who controls
+        // the fewest/most" — must precede `parse_number_of_controlled_type`,
+        // whose " you control" suffix would otherwise not match but whose
+        // type-word prefix overlaps.
+        parse_controlled_by_extremum_player,
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
@@ -620,6 +625,36 @@ fn parse_distinct_named_objects(input: &str) -> OracleResult<'_, QuantityRef> {
             filter,
             qualities: vec![SharedQuality::Name],
         },
+    ))
+}
+
+/// CR 107.1 + CR 700.1: Parse "[type-phrase] controlled by the player who
+/// controls the fewest" (and "… the most") after "the number of" →
+/// `QuantityRef::ControlledByEachPlayer { filter, aggregate }`.
+///
+/// Used by Balance / Restore Balance / Balancing Act for the equalization
+/// minimum ("a number of lands they control equal to the number of lands
+/// controlled by the player who controls the fewest"). Battlefield-scoped: the
+/// hand-zone analogue is `HandSize { AllPlayers { Min } }`, parsed elsewhere.
+fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, filter) = super::target::parse_type_phrase(input)?;
+    if !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, aggregate) = preceded(
+        tag(" controlled by the player who controls the "),
+        alt((
+            value(AggregateFunction::Min, tag("fewest")),
+            value(AggregateFunction::Max, tag("most")),
+        )),
+    )
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ControlledByEachPlayer { filter, aggregate },
     ))
 }
 
@@ -3252,6 +3287,57 @@ mod tests {
                     aggregate: AggregateFunction::Sum,
                     exclude: None,
                 },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_controlled_by_fewest_player() {
+        // CR 107.1: Balance's equalization minimum.
+        let (rest, q) = parse_quantity_ref(
+            "the number of lands controlled by the player who controls the fewest",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ControlledByEachPlayer {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                aggregate: AggregateFunction::Min,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_controlled_by_most_player() {
+        // The `Max` direction — "the player who controls the most".
+        let (rest, q) = parse_quantity_ref(
+            "the number of creatures controlled by the player who controls the most",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ControlledByEachPlayer {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                aggregate: AggregateFunction::Max,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_controlled_by_fewest_permanents() {
+        // Balancing Act's "permanents" filter routes through the same arm.
+        let (rest, q) = parse_quantity_ref(
+            "the number of permanents controlled by the player who controls the fewest",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ControlledByEachPlayer {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+                aggregate: AggregateFunction::Min,
             }
         );
         assert_eq!(rest, "");

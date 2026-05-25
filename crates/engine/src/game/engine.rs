@@ -673,6 +673,7 @@ mod auto_pass_decision_tests {
             player: PlayerId(0),
             valid_blocker_ids: vec![ObjectId(10)],
             valid_block_targets: [(ObjectId(10), vec![ObjectId(20)])].into_iter().collect(),
+            block_requirements: Default::default(),
         };
         let mut state = GameState {
             phase: Phase::DeclareBlockers,

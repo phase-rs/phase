@@ -1,3 +1,4 @@
+use crate::game::effects::change_zone::{self, ZoneMoveResult};
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
@@ -23,7 +24,7 @@ pub fn resolve(
         count,
         reveal,
         destination,
-        include_face_up_exile,
+        source_pool,
     } = &ability.effect
     else {
         return Ok(());
@@ -66,7 +67,7 @@ pub fn resolve(
     // CR 406.3 + CR 400.11: Karn/Coax-class — also append face-up exile cards
     // the controller owns and that match the filter. The exile zone is a normal
     // in-game zone, so we route through the standard filter pipeline.
-    if *include_face_up_exile {
+    if source_pool.includes_face_up_exile() {
         let exile_candidates = collect_face_up_exile_candidates(state, ability, filter);
         choices.extend(exile_candidates);
     }
@@ -82,6 +83,7 @@ pub fn resolve(
     let available_total = choices.iter().map(|choice| choice.count as usize).sum();
     state.waiting_for = WaitingFor::OutsideGameChoice {
         player: ability.controller,
+        source_id: ability.source_id,
         count: count.min(available_total),
         choices,
         reveal: *reveal,
@@ -130,15 +132,18 @@ fn collect_face_up_exile_candidates(
         .collect()
 }
 
-/// CR 406.3 + CR 400.11: Move a face-up exile object into `destination`. The
-/// object retains its identity (no new object created) — exile is a normal
-/// in-game zone, so this is a routine `zones::move_to_zone`.
+/// CR 406.3 + CR 400.11 + CR 614.1: Move a face-up exile object into
+/// `destination`. The object retains its identity (no new object created);
+/// because exile is an in-game zone, the move routes through the normal
+/// `ChangeZone` replacement pipeline.
 pub(crate) fn put_face_up_exile_into(
     state: &mut GameState,
     object_id: ObjectId,
     destination: Zone,
+    source_id: ObjectId,
+    controller: PlayerId,
     events: &mut Vec<GameEvent>,
-) -> Result<ObjectId, EffectError> {
+) -> Result<ZoneMoveResult, EffectError> {
     if !state.exile.contains(&object_id) {
         return Err(EffectError::InvalidParam(
             "face-up exile object not in exile zone".to_string(),
@@ -154,8 +159,22 @@ pub(crate) fn put_face_up_exile_into(
             "exile object is face-down".to_string(),
         ));
     }
-    crate::game::zones::move_to_zone(state, object_id, destination, events);
-    Ok(object_id)
+    let ctx = change_zone::ChangeZoneIterationCtx {
+        source_id,
+        controller,
+        origin: Some(Zone::Exile),
+        destination,
+        enter_transformed: false,
+        enter_tapped: false,
+        under_your_control: false,
+        enters_attacking: false,
+        enter_with_counters: Vec::new(),
+        duration: None,
+        track_exiled_by_source: false,
+    };
+    Ok(change_zone::process_one_zone_move(
+        state, &ctx, object_id, events,
+    ))
 }
 
 pub(crate) fn put_sideboard_entry_into_game(
@@ -279,7 +298,7 @@ mod tests {
     use crate::game::deck_loading::DeckEntry;
     use crate::game::effects;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, TypedFilter};
+    use crate::types::ability::{OutsideGameSourcePool, QuantityExpr, TypedFilter};
     use crate::types::actions::{GameAction, OutsideGameSelection};
     use crate::types::card_type::CardType;
     use crate::types::game_state::PlayerDeckPool;
@@ -332,7 +351,7 @@ mod tests {
                 count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }),
                 reveal: true,
                 destination: Zone::Hand,
-                include_face_up_exile: false,
+                source_pool: OutsideGameSourcePool::Sideboard,
             },
             vec![],
             source_id,
@@ -514,6 +533,7 @@ mod tests {
         let mut state = state_with_sideboard(vec![entry("Pyroclasm", CoreType::Sorcery, 1)]);
         state.waiting_for = WaitingFor::OutsideGameChoice {
             player: PlayerId(0),
+            source_id: ObjectId(0),
             choices: vec![sideboard_choice(
                 0,
                 &state.deck_pools[0].current_sideboard[0].clone(),
@@ -539,6 +559,7 @@ mod tests {
         let mut state = state_with_sideboard(vec![entry("Pyroclasm", CoreType::Sorcery, 2)]);
         state.waiting_for = WaitingFor::OutsideGameChoice {
             player: PlayerId(0),
+            source_id: ObjectId(0),
             choices: vec![sideboard_choice(
                 0,
                 &state.deck_pools[0].current_sideboard[0].clone(),
@@ -575,6 +596,7 @@ mod tests {
         let mut state = state_with_sideboard(vec![entry("Pyroclasm", CoreType::Sorcery, 2)]);
         state.waiting_for = WaitingFor::OutsideGameChoice {
             player: PlayerId(0),
+            source_id: ObjectId(0),
             choices: vec![sideboard_choice(
                 0,
                 &state.deck_pools[0].current_sideboard[0].clone(),
@@ -606,6 +628,7 @@ mod tests {
         let mut state = state_with_sideboard(vec![entry("Pyroclasm", CoreType::Sorcery, 1)]);
         state.waiting_for = WaitingFor::OutsideGameChoice {
             player: PlayerId(0),
+            source_id: ObjectId(0),
             choices: vec![sideboard_choice(
                 0,
                 &state.deck_pools[0].current_sideboard[0].clone(),
@@ -631,6 +654,7 @@ mod tests {
         let mut state = state_with_sideboard(vec![entry("Pyroclasm", CoreType::Sorcery, 2)]);
         state.waiting_for = WaitingFor::OutsideGameChoice {
             player: PlayerId(0),
+            source_id: ObjectId(0),
             choices: vec![sideboard_choice(
                 0,
                 &state.deck_pools[0].current_sideboard[0].clone(),
@@ -693,7 +717,7 @@ mod tests {
                 count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }),
                 reveal: true,
                 destination: Zone::Hand,
-                include_face_up_exile: true,
+                source_pool: OutsideGameSourcePool::SideboardAndFaceUpExile,
             },
             vec![],
             source,
@@ -747,7 +771,7 @@ mod tests {
 
     /// CR 406.3 + CR 400.11: When the Karn-class disjunction's other branch
     /// (sideboard) is exercised, the sideboard pipeline still resolves —
-    /// proving the include_face_up_exile flag is additive, not replacing.
+    /// proving the source pool is additive, not replacing.
     #[test]
     fn karn_minus_two_pulls_sideboard_artifact_to_hand() {
         let mut state = state_with_sideboard(vec![entry("Pithing Needle", CoreType::Artifact, 1)]);
@@ -764,7 +788,7 @@ mod tests {
                 count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }),
                 reveal: true,
                 destination: Zone::Hand,
-                include_face_up_exile: true,
+                source_pool: OutsideGameSourcePool::SideboardAndFaceUpExile,
             },
             vec![],
             source,
@@ -798,6 +822,7 @@ mod tests {
         ]);
         state.waiting_for = WaitingFor::OutsideGameChoice {
             player: PlayerId(0),
+            source_id: ObjectId(0),
             choices: vec![
                 sideboard_choice(0, &state.deck_pools[0].current_sideboard[0].clone()),
                 sideboard_choice(1, &state.deck_pools[0].current_sideboard[1].clone()),

@@ -26,9 +26,9 @@ use crate::types::ability::TypeFilter;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect, FilterProp,
-    GainLifePlayer, LibraryPosition, MultiTargetSpec, PaymentCost, PlayerScope, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
+    GainLifePlayer, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PaymentCost,
+    PlayerScope, PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -1035,6 +1035,14 @@ pub(super) fn parse_targeted_action_ast(
             _ => unreachable!(),
         };
     }
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("goad ")).parse(input))
+    {
+        let (target_text, _) = super::strip_optional_target_prefix(strip_article(rest));
+        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+        #[cfg(debug_assertions)]
+        assert_no_compound_remainder(_rem, text);
+        return Some(TargetedImperativeAst::Goad { target });
+    }
     if let Some((_, after_discard_orig)) =
         nom_on_lower(text, lower, |input| value((), tag("discard ")).parse(input))
     {
@@ -1393,6 +1401,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Untap { target } => Effect::Untap { target },
         TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
         TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
+        TargetedImperativeAst::Goad { target } => Effect::Goad { target },
         TargetedImperativeAst::GoadAll { target } => Effect::GoadAll { target },
         TargetedImperativeAst::Sacrifice {
             target,
@@ -1776,10 +1785,10 @@ fn parse_search_outside_game_ast(
     // game collection and (b) face-up exile cards they own matching the
     // filter. The destination clause may be inline (" and put it into your
     // hand") or a sibling sentence handled by the chain splitter.
-    // (filter_text, destination, include_face_up_exile) — extracted into a
+    // (filter_text, destination, source_pool) — extracted into a
     // type alias so the parser's return type stays under the
     // clippy::type_complexity threshold.
-    type OutsideGameParseFields<'a> = (&'a str, Zone, bool);
+    type OutsideGameParseFields<'a> = (&'a str, Zone, OutsideGameSourcePool);
     fn parse_clause<'a>(
         input: &'a str,
     ) -> Result<(&'a str, OutsideGameParseFields<'a>), nom::Err<OracleError<'a>>> {
@@ -1792,8 +1801,12 @@ fn parse_search_outside_game_ast(
         // (Karn and Coax both repeat the filter literally in both branches);
         // we discard the second filter_text since the outside-game one is
         // canonical for the unified pool's filter.
-        let (rest, include_face_up_exile) = opt(parse_face_up_exile_branch).parse(rest)?;
-        let include_face_up_exile = include_face_up_exile.is_some();
+        let (rest, face_up_exile_branch) = opt(parse_face_up_exile_branch).parse(rest)?;
+        let source_pool = if face_up_exile_branch.is_some() {
+            OutsideGameSourcePool::SideboardAndFaceUpExile
+        } else {
+            OutsideGameSourcePool::Sideboard
+        };
         // Optional inline destination clause. When absent, the destination
         // arrives as a follow-up "Put that card into your hand." chunk
         // routed through the chain splitter into a ChangeZone sub-ability.
@@ -1806,14 +1819,13 @@ fn parse_search_outside_game_ast(
         let (rest, _) = eof.parse(rest)?;
         Ok((
             rest,
-            (
-                filter_text,
-                destination.unwrap_or(Zone::Hand),
-                include_face_up_exile,
-            ),
+            (filter_text, destination.unwrap_or(Zone::Hand), source_pool),
         ))
     }
 
+    // CR 406.3: A "face-up ... card you own in exile" branch refers to an
+    // in-game exile-zone card that is visible by default unless an effect
+    // exiled it face down.
     // " or choose a face-up <filter> card you own in exile". English
     // grammar always pairs "a face-up" (the head noun begins with the
     // consonant /f/), so no "an face-up" variant exists in MTGJSON.
@@ -1824,7 +1836,7 @@ fn parse_search_outside_game_ast(
         Ok((rest, ()))
     }
 
-    let (_, (filter_text, destination, include_face_up_exile)) = parse_clause(lower).ok()?;
+    let (_, (filter_text, destination, source_pool)) = parse_clause(lower).ok()?;
     let filter = super::search::parse_search_filter(filter_text, ctx);
     Some(SearchCreationImperativeAst::SearchOutsideGame {
         filter,
@@ -1832,7 +1844,7 @@ fn parse_search_outside_game_ast(
         reveal: true,
         destination,
         up_to: true,
-        include_face_up_exile,
+        source_pool,
     })
 }
 
@@ -1876,7 +1888,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             destination,
             up_to,
-            include_face_up_exile,
+            source_pool,
         } => Effect::SearchOutsideGame {
             filter,
             count: if up_to {
@@ -1886,7 +1898,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             },
             reveal,
             destination,
-            include_face_up_exile,
+            source_pool,
         },
         SearchCreationImperativeAst::Dig {
             count,
@@ -2742,6 +2754,17 @@ pub(super) fn parse_utility_imperative_ast(
             _ => unreachable!(),
         };
     }
+    if let Some((attachment_text, target_text)) = nom_on_lower(text, lower, |input| {
+        let (input, _) = tag("unattach all ").parse(input)?;
+        let (input, attachment) = terminated(take_until(" from "), tag(" from ")).parse(input)?;
+        Ok((input, attachment.to_string()))
+    }) {
+        let (attachment, attachment_rem) = parse_type_phrase(attachment_text.trim());
+        let (target, target_rem) = parse_target_with_ctx(target_text, ctx);
+        if attachment_rem.trim().is_empty() && target_rem.trim().is_empty() {
+            return Some(UtilityImperativeAst::UnattachAll { attachment, target });
+        }
+    }
     // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
     // CR 608.2k: the bare-pronoun and self-deictic arms ("transform it" /
     // "transform itself" / "transform this creature") split into two anaphor
@@ -2982,6 +3005,9 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { attachment, target } => {
             Effect::Attach { attachment, target }
+        }
+        UtilityImperativeAst::UnattachAll { attachment, target } => {
+            Effect::UnattachAll { attachment, target }
         }
         // CR 613.4d: Switch power and toughness.
         UtilityImperativeAst::SwitchPT { target } => Effect::SwitchPT { target },
@@ -4847,7 +4873,7 @@ pub(super) fn parse_imperative_family_ast(
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast))),
 
         // Utility verbs (CR 615, CR 701.19, CR 701.6, CR 613.4d)
-        "prevent" | "regenerate" | "copy" | "attach" | "switch" => {
+        "prevent" | "regenerate" | "copy" | "attach" | "unattach" | "switch" => {
             parse_utility_imperative_ast(text, lower, ctx)
                 .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)))
         }
@@ -6666,13 +6692,13 @@ mod tests {
                 count,
                 reveal,
                 destination,
-                include_face_up_exile,
+                source_pool,
             } => {
                 assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }));
                 assert!(reveal);
                 assert_eq!(destination, Zone::Hand);
                 assert!(
-                    !include_face_up_exile,
+                    !source_pool.includes_face_up_exile(),
                     "legacy single-branch wording must default to sideboard-only"
                 );
                 match filter {
@@ -6701,7 +6727,7 @@ mod tests {
 
     /// CR 406.3 + CR 400.11: Karn, the Great Creator's -2 reveals OR pulls
     /// from face-up exile. Verifies the Karn-class disjunction sets
-    /// `include_face_up_exile: true`, identifies the artifact filter, and
+    /// `source_pool: OutsideGameSourcePool::SideboardAndFaceUpExile`, identifies the artifact filter, and
     /// captures Hand as the destination. The trailing "Put that card into
     /// your hand." sentence (CR 608.2c anaphoric "that card") is absorbed
     /// into the parent effect's destination by the chain splitter, so no
@@ -6716,13 +6742,13 @@ mod tests {
             Effect::SearchOutsideGame {
                 filter,
                 destination,
-                include_face_up_exile,
+                source_pool,
                 reveal,
                 ..
             } => {
                 assert!(
-                    *include_face_up_exile,
-                    "Karn-class disjunction must set include_face_up_exile"
+                    source_pool.includes_face_up_exile(),
+                    "Karn-class disjunction must set source_pool"
                 );
                 assert!(reveal);
                 assert_eq!(*destination, Zone::Hand);
@@ -6753,13 +6779,13 @@ mod tests {
         match &*ability.effect {
             Effect::SearchOutsideGame {
                 filter,
-                include_face_up_exile,
+                source_pool,
                 destination,
                 ..
             } => {
                 assert!(
-                    *include_face_up_exile,
-                    "Coax disjunction must set include_face_up_exile"
+                    source_pool.includes_face_up_exile(),
+                    "Coax disjunction must set source_pool"
                 );
                 assert_eq!(*destination, Zone::Hand);
                 // CR 205.3m: Eldrazi is a creature subtype; the search filter
@@ -6784,7 +6810,7 @@ mod tests {
 
     /// Regression: legacy single-branch "reveal a … from outside the game"
     /// wording (Wish, Cunning Wish, Burning Wish) must still parse with
-    /// `include_face_up_exile: false` so non-Karn wishboard cards keep their
+    /// `source_pool: OutsideGameSourcePool::Sideboard` so non-Karn wishboard cards keep their
     /// sideboard-only resolution path.
     #[test]
     fn parse_outside_game_legacy_single_branch_still_works() {
@@ -6793,12 +6819,12 @@ mod tests {
         );
         match effect {
             Effect::SearchOutsideGame {
-                include_face_up_exile,
+                source_pool,
                 destination,
                 ..
             } => {
                 assert!(
-                    !include_face_up_exile,
+                    !source_pool.includes_face_up_exile(),
                     "legacy wishboard text must NOT enable face-up exile"
                 );
                 assert_eq!(destination, Zone::Hand);
@@ -6884,6 +6910,36 @@ mod tests {
             target,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+    }
+
+    #[test]
+    fn parse_unattach_all_equipment_from_target_creature() {
+        let input = "unattach all Equipment from target creature";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::UnattachAll { attachment, target }) = result else {
+            panic!("{input}: expected UnattachAll, got {result:?}");
+        };
+        assert_eq!(
+            attachment,
+            TargetFilter::Typed(TypedFilter::default().subtype("Equipment".to_string()))
+        );
+        assert_eq!(target, TargetFilter::Typed(TypedFilter::creature()));
+    }
+
+    #[test]
+    fn parse_unattach_all_decomposes_attachment_type_and_pronoun_target() {
+        let input = "unattach all Equipment from it";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::UnattachAll { attachment, target }) = result else {
+            panic!("{input}: expected UnattachAll, got {result:?}");
+        };
+        assert_eq!(
+            attachment,
+            TargetFilter::Typed(TypedFilter::default().subtype("Equipment".to_string()))
+        );
+        assert!(matches!(target, TargetFilter::ParentTarget));
     }
 
     /// CR 608.2k regression — issue #319 sibling.
@@ -7236,6 +7292,118 @@ mod tests {
             }
             other => panic!("expected Effect::Sacrifice, got {other:?}"),
         }
+    }
+
+    /// Issue #967: "sacrifice any number of creatures, each with power 1 or
+    /// less" — the comma+"each" distributive linker between the collective
+    /// type word and the per-object property suffix dropped the power filter
+    /// entirely (the parser stopped at the comma, leaving `, each with...`
+    /// unconsumed; the type-phrase fallback then produced
+    /// `Effect::Sacrifice { target: TargetFilter::Typed(Creature), count: 1 }`
+    /// — no power constraint, fixed count). CR 208.1: the per-object power
+    /// comparison applies via the existing P/T suffix combinator.
+    #[test]
+    fn parse_sacrifice_any_number_creatures_comma_each_power_filter_attached() {
+        use crate::types::ability::{Comparator, FilterProp, PtStat, PtValueScope};
+
+        for text in [
+            "sacrifice any number of creatures, each with power 1 or less",
+            "sacrifice any number of creatures each with power 1 or less",
+        ] {
+            let lower = text.to_lowercase();
+            let mut ctx = ParseContext {
+                actor: Some(ControllerRef::You),
+                ..Default::default()
+            };
+            let result =
+                parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+            let Effect::Sacrifice { target, count, .. } = lower_targeted_action_ast(result) else {
+                panic!("expected Effect::Sacrifice for {text:?}");
+            };
+            let TargetFilter::Typed(ref tf) = target else {
+                panic!("expected Typed filter for {text:?}, got {target:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "missing Creature type for {text:?}",
+            );
+            let has_pt = tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    }
+                )
+            });
+            assert!(
+                has_pt,
+                "missing PtComparison(Power, Current, LE, 1) for {text:?}: {:?}",
+                tf.properties,
+            );
+            match count {
+                QuantityExpr::UpTo { max } => match *max {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    } => assert_eq!(filter, target, "ObjectCount filter mismatch for {text:?}"),
+                    other => panic!("expected ObjectCount max for {text:?}, got {other:?}"),
+                },
+                other => panic!("expected UpTo count for {text:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Issue #967 follow-up: Angelic Aberration's "each with base power or
+    /// toughness 1 or less" disjunctive variant. The same comma-each linker
+    /// must allow the `power or toughness` disjunction (CR 208 + CR 208.4b)
+    /// to attach correctly with the `Base` scope qualifier.
+    #[test]
+    fn parse_sacrifice_any_number_creatures_comma_each_base_pt_disjunction() {
+        use crate::types::ability::{Comparator, FilterProp, PtStat, PtValueScope};
+
+        let text = "sacrifice any number of creatures, each with base power or toughness 1 or less";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            actor: Some(ControllerRef::You),
+            ..Default::default()
+        };
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        let Effect::Sacrifice { target, .. } = lower_targeted_action_ast(result) else {
+            panic!("expected Effect::Sacrifice");
+        };
+        let TargetFilter::Typed(ref tf) = target else {
+            panic!("expected Typed filter, got {target:?}");
+        };
+        // Disjunctive `power or toughness ≤ 1` ⇒ `AnyOf {
+        //   PtComparison(Power, Base, LE, 1),
+        //   PtComparison(Toughness, Base, LE, 1),
+        // }`.
+        let has_disj = tf.properties.iter().any(|p| {
+            let FilterProp::AnyOf { props } = p else {
+                return false;
+            };
+            let want_power = FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Base,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 1 },
+            };
+            let want_tough = FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Base,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 1 },
+            };
+            props.contains(&want_power) && props.contains(&want_tough)
+        });
+        assert!(
+            has_disj,
+            "missing AnyOf[Power Base LE 1, Toughness Base LE 1], got {:?}",
+            tf.properties,
+        );
     }
 
     // Issue #458: "sacrifice any number of <filter>" — Scapeshift class.

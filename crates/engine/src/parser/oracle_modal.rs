@@ -747,6 +747,7 @@ fn lower_as_enters_anchor_word_modal(
                     },
                 ],
             }),
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: Vec::new(),

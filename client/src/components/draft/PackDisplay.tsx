@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useCardImage } from "../../hooks/useCardImage";
 import { useDraftStore } from "../../stores/draftStore";
@@ -22,6 +23,7 @@ function PackCard({
   onConfirm,
   onHover,
 }: PackCardProps) {
+  const { t } = useTranslation("draft");
   const { src, isLoading } = useCardImage(card.name, {
     size: "normal",
     sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
@@ -60,7 +62,7 @@ function PackCard({
             onClick={onConfirm}
             className="w-full rounded-lg bg-amber-500 py-0.5 text-xs font-semibold text-black transition-colors hover:bg-amber-400"
           >
-            Confirm Pick
+            {t("pack.confirmPick")}
           </button>
         ) : (
           <span className="line-clamp-1 text-[10px] leading-tight text-white/80">
@@ -129,6 +131,7 @@ export function PackDisplay({
   onConfirmPick,
   onAutoPick,
 }: PackDisplayProps) {
+  const { t } = useTranslation("draft");
   const quickView = useDraftStore((s) => s.view);
   const quickSelectedCard = useDraftStore((s) => s.selectedCard);
   const quickSelectCard = useDraftStore((s) => s.selectCard);
@@ -157,7 +160,7 @@ export function PackDisplay({
   if (!pack || pack.length === 0) {
     return (
       <div className="flex items-center justify-center py-12 text-white/40">
-        Waiting for next pack...
+        {t("pack.waitingNext")}
       </div>
     );
   }
@@ -176,7 +179,7 @@ export function PackDisplay({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <span className="text-xs text-white/40">{pack.length} cards in pack</span>
+        <span className="text-xs text-white/40">{t("pack.cardsInPack", { count: pack.length })}</span>
         {showAutoPick && (
           <button
             type="button"
@@ -184,7 +187,7 @@ export function PackDisplay({
             disabled={autoPicking}
             className="rounded-lg border border-white/15 bg-white/[0.04] px-3 py-1 text-xs font-medium text-white/80 transition-colors hover:border-white/25 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {autoPicking ? "Picking…" : "Auto-pick"}
+            {autoPicking ? t("pack.picking") : t("pack.autoPick")}
           </button>
         )}
       </div>

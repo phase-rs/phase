@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 
@@ -14,6 +15,7 @@ import { useMultiplayerStore } from "../../stores/multiplayerStore";
  * actions.
  */
 export function PlayerIdentityBanner() {
+  const { t } = useTranslation("multiplayer");
   const displayName = useMultiplayerStore((s) => s.displayName);
   const setDisplayName = useMultiplayerStore((s) => s.setDisplayName);
 
@@ -54,7 +56,7 @@ export function PlayerIdentityBanner() {
     <div className="mx-auto mb-4 flex w-full max-w-xl items-center justify-between gap-3 rounded-[16px] border border-white/8 bg-black/16 px-4 py-2.5">
       <div className="min-w-0 flex-1">
         <div className="text-[0.6rem] uppercase tracking-[0.22em] text-slate-500">
-          Player Name
+          {t("playerIdentityBanner.playerName")}
         </div>
         {editing ? (
           <input
@@ -72,7 +74,7 @@ export function PlayerIdentityBanner() {
                 cancel();
               }
             }}
-            placeholder="Enter your name"
+            placeholder={t("playerIdentityBanner.namePlaceholder")}
             maxLength={20}
             className="mt-0.5 w-full rounded-[12px] bg-black/24 px-2.5 py-1 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
           />
@@ -81,10 +83,10 @@ export function PlayerIdentityBanner() {
             type="button"
             onClick={() => setEditing(true)}
             className="mt-0.5 truncate text-left text-sm font-medium text-white transition-colors hover:text-sky-200"
-            title="Click to edit your name"
+            title={t("playerIdentityBanner.editTitle")}
           >
             {displayName || (
-              <span className="italic text-slate-500">Set a name…</span>
+              <span className="italic text-slate-500">{t("playerIdentityBanner.setName")}</span>
             )}
           </button>
         )}
@@ -100,7 +102,7 @@ export function PlayerIdentityBanner() {
             }}
             className="text-xs text-slate-500 transition-colors hover:text-slate-300"
           >
-            Cancel
+            {t("common:actions.cancel")}
           </button>
           <button
             type="button"
@@ -110,7 +112,7 @@ export function PlayerIdentityBanner() {
             }}
             className="text-xs font-medium text-sky-300 transition-colors hover:text-sky-200"
           >
-            Save
+            {t("common:actions.save")}
           </button>
         </div>
       ) : (
@@ -119,7 +121,7 @@ export function PlayerIdentityBanner() {
           onClick={() => setEditing(true)}
           className="shrink-0 text-xs text-slate-400 transition-colors hover:text-white"
         >
-          Change
+          {t("playerIdentityBanner.change")}
         </button>
       )}
     </div>

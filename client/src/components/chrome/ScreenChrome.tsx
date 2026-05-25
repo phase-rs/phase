@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 
+import { usePreferencesStore } from "../../stores/preferencesStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PreferencesModal } from "../settings/PreferencesModal";
+import { LanguageFlag } from "../ui/LanguageFlag";
 import { FullscreenButton } from "./FullscreenButton";
 import { VolumeControl } from "./VolumeControl";
 
@@ -52,6 +54,7 @@ export function ScreenChrome({
   settingsOpen,
   onSettingsOpenChange,
 }: ScreenChromeProps) {
+  const language = usePreferencesStore((s) => s.language);
   const [internalShowSettings, setInternalShowSettings] = useState(false);
   const isSettingsControlled = settingsOpen !== undefined;
   const showSettings = isSettingsControlled ? settingsOpen : internalShowSettings;
@@ -90,6 +93,21 @@ export function ScreenChrome({
       <div className="fixed right-4 top-[calc(env(safe-area-inset-top)+1rem)] z-30 flex gap-2">
         <FullscreenButton variant="chrome" />
         <VolumeControl variant="chrome" />
+        <motion.button
+          className={menuButtonClass({
+            tone: "neutral",
+            size: "sm",
+            className:
+              "h-11 min-w-11 rounded-[16px] px-3 py-0 text-white/46 hover:text-white/72",
+          })}
+          whileHover={{ y: -1 }}
+          whileTap={{ scale: 0.98 }}
+          onClick={() => setShowSettings(true)}
+          aria-label={`Language (${language.toUpperCase()}) — open settings`}
+          title={`Language: ${language.toUpperCase()}`}
+        >
+          <LanguageFlag lng={language} className="h-4 w-6 rounded-sm" />
+        </motion.button>
         <motion.button
           className={menuButtonClass({
             tone: "neutral",

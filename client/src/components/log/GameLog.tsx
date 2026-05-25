@@ -1,105 +1,121 @@
 import { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import type { GameEvent } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 
-function formatEvent(event: GameEvent): string {
+function formatEvent(event: GameEvent, t: TFunction<"game">): string {
   switch (event.type) {
     case "GameStarted":
-      return "Game started";
+      return t("log.gameStarted");
     case "TurnStarted":
-      return `Turn ${event.data.turn_number} -- ${getPlayerDisplayName(event.data.player_id)}`;
+      return t("log.turnStarted", { turn: event.data.turn_number, player: getPlayerDisplayName(event.data.player_id) });
     case "PhaseChanged":
-      return `Phase: ${event.data.phase}`;
+      return t("log.phaseChanged", { phase: event.data.phase });
     case "PriorityPassed":
-      return `${getPlayerDisplayName(event.data.player_id)} passed priority`;
+      return t("log.priorityPassed", { player: getPlayerDisplayName(event.data.player_id) });
     case "SpellCast":
-      return `Spell cast by ${getPlayerDisplayName(event.data.controller)}`;
+      return t("log.spellCast", { player: getPlayerDisplayName(event.data.controller) });
     case "AbilityActivated":
-      return `Ability activated (source ${event.data.source_id})`;
+      return t("log.abilityActivated", { sourceId: event.data.source_id });
     case "ZoneChanged":
       // `from` is null for token creation (CR 111.1 + CR 603.6a — tokens are
       // created in the battlefield zone with no prior zone).
       return event.data.from
-        ? `Object ${event.data.object_id} moved ${event.data.from} -> ${event.data.to}`
-        : `Object ${event.data.object_id} enters ${event.data.to}`;
-    case "LifeChanged": {
-      const prefix = event.data.amount >= 0 ? "+" : "";
-      return `${getPlayerDisplayName(event.data.player_id)} life: ${prefix}${event.data.amount}`;
-    }
+        ? t("log.zoneChangedMoved", { objectId: event.data.object_id, from: event.data.from, to: event.data.to })
+        : t("log.zoneChangedEnters", { objectId: event.data.object_id, to: event.data.to });
+    case "LifeChanged":
+      return t("log.lifeChanged", {
+        player: getPlayerDisplayName(event.data.player_id),
+        sign: event.data.amount >= 0 ? "+" : "",
+        amount: event.data.amount,
+      });
     case "ManaAdded":
-      return `${getPlayerDisplayName(event.data.player_id)} added ${event.data.mana_type} mana`;
+      return t("log.manaAdded", { player: getPlayerDisplayName(event.data.player_id), manaType: event.data.mana_type });
     case "PermanentTapped":
-      return `Permanent ${event.data.object_id} tapped`;
+      return t("log.permanentTapped", { objectId: event.data.object_id });
     case "PermanentUntapped":
-      return `Permanent ${event.data.object_id} untapped`;
+      return t("log.permanentUntapped", { objectId: event.data.object_id });
     case "PlayerLost":
-      return `${getPlayerDisplayName(event.data.player_id)} lost the game`;
+      return t("log.playerLost", { player: getPlayerDisplayName(event.data.player_id) });
     case "MulliganStarted":
-      return "Mulligan phase";
+      return t("log.mulliganStarted");
     case "CardsDrawn":
-      return `${getPlayerDisplayName(event.data.player_id)} drew ${event.data.count} card(s)`;
+      return t("log.cardsDrawn", { player: getPlayerDisplayName(event.data.player_id), count: event.data.count });
     case "CardDrawn":
-      return `${getPlayerDisplayName(event.data.player_id)} drew a card`;
+      return t("log.cardDrawn", { player: getPlayerDisplayName(event.data.player_id) });
     case "LandPlayed":
-      return `${getPlayerDisplayName(event.data.player_id)} played a land`;
+      return t("log.landPlayed", { player: getPlayerDisplayName(event.data.player_id) });
     case "StackPushed":
-      return `Object ${event.data.object_id} pushed to stack`;
+      return t("log.stackPushed", { objectId: event.data.object_id });
     case "StackResolved":
-      return `Stack entry ${event.data.object_id} resolved`;
+      return t("log.stackResolved", { objectId: event.data.object_id });
     case "Discarded":
-      return `${getPlayerDisplayName(event.data.player_id)} discarded`;
+      return t("log.discarded", { player: getPlayerDisplayName(event.data.player_id) });
     case "DamageCleared":
-      return `Damage cleared from ${event.data.object_id}`;
+      return t("log.damageCleared", { objectId: event.data.object_id });
     case "GameOver":
       return event.data.winner != null
-        ? `Game over -- ${getPlayerDisplayName(event.data.winner)} wins!`
-        : "Game over -- Draw";
-    case "DamageDealt": {
-      const target =
-        "Player" in event.data.target
-          ? getPlayerDisplayName(event.data.target.Player)
-          : `object ${event.data.target.Object}`;
-      return `Source ${event.data.source_id} deals ${event.data.amount} damage to ${target}`;
-    }
+        ? t("log.gameOverWinner", { player: getPlayerDisplayName(event.data.winner) })
+        : t("log.gameOverDraw");
+    case "DamageDealt":
+      return "Player" in event.data.target
+        ? t("log.damageDealtPlayer", {
+            sourceId: event.data.source_id,
+            amount: event.data.amount,
+            player: getPlayerDisplayName(event.data.target.Player),
+          })
+        : t("log.damageDealtObject", {
+            sourceId: event.data.source_id,
+            amount: event.data.amount,
+            objectId: event.data.target.Object,
+          });
     case "SpellCountered":
-      return `Object ${event.data.object_id} countered by ${event.data.countered_by}`;
+      return t("log.spellCountered", { objectId: event.data.object_id, counteredBy: event.data.countered_by });
     case "CounterAdded":
-      return `${event.data.counter_type} x${event.data.count} added to ${event.data.object_id}`;
+      return t("log.counterAdded", { counterType: event.data.counter_type, count: event.data.count, objectId: event.data.object_id });
     case "CounterRemoved":
-      return `${event.data.counter_type} x${event.data.count} removed from ${event.data.object_id}`;
+      return t("log.counterRemoved", { counterType: event.data.counter_type, count: event.data.count, objectId: event.data.object_id });
     case "TokenCreated":
-      return `Token "${event.data.name}" created`;
+      return t("log.tokenCreated", { name: event.data.name });
     case "CreatureDestroyed":
-      return `Creature ${event.data.object_id} destroyed`;
+      return t("log.creatureDestroyed", { objectId: event.data.object_id });
     case "PermanentSacrificed":
-      return `${getPlayerDisplayName(event.data.player_id)} sacrificed ${event.data.object_id}`;
+      return t("log.permanentSacrificed", { player: getPlayerDisplayName(event.data.player_id), objectId: event.data.object_id });
     case "EffectResolved":
-      return `Effect ${event.data.kind} resolved`;
+      return t("log.effectResolved", { kind: event.data.kind });
     case "AttackersDeclared":
-      return `${event.data.attacker_ids.length} attacker(s) declared`;
+      return t("log.attackersDeclared", { count: event.data.attacker_ids.length });
     case "BlockersDeclared":
-      return `${event.data.assignments.length} blocker(s) assigned`;
+      return t("log.blockersDeclared", { count: event.data.assignments.length });
     case "BecomesTarget":
-      return `Object ${event.data.object_id} targeted by ${event.data.source_id}`;
+      return t("log.becomesTarget", { objectId: event.data.object_id, sourceId: event.data.source_id });
     case "ReplacementApplied":
-      return `Replacement applied: ${event.data.event_type}`;
+      return t("log.replacementApplied", { eventType: event.data.event_type });
     case "CompanionRevealed":
-      return `${getPlayerDisplayName(event.data.player)} revealed companion: ${event.data.card_name}`;
+      return t("log.companionRevealed", { player: getPlayerDisplayName(event.data.player), cardName: event.data.card_name });
     case "CompanionMovedToHand":
-      return `${getPlayerDisplayName(event.data.player)} put companion ${event.data.card_name} into hand`;
+      return t("log.companionMovedToHand", { player: getPlayerDisplayName(event.data.player), cardName: event.data.card_name });
     case "PowerToughnessChanged": {
       const d = event.data;
       const sign = (n: number) => (n >= 0 ? `+${n}` : `${n}`);
-      return `Object ${d.object_id} is now ${d.power}/${d.toughness} (${sign(d.power_delta)}/${sign(d.toughness_delta)})`;
+      return t("log.powerToughnessChanged", {
+        objectId: d.object_id,
+        power: d.power,
+        toughness: d.toughness,
+        powerDelta: sign(d.power_delta),
+        toughnessDelta: sign(d.toughness_delta),
+      });
     }
     default:
-      return `Event: ${(event as GameEvent).type}`;
+      return t("log.genericEvent", { type: (event as GameEvent).type });
   }
 }
 
 export function GameLog() {
+  const { t } = useTranslation("game");
   const events = useGameStore((s) => s.events);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -113,18 +129,18 @@ export function GameLog() {
   return (
     <div className="flex flex-1 flex-col gap-1 overflow-hidden">
       <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-        Game Log
+        {t("log.title")}
       </h3>
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto rounded bg-gray-900 p-1.5 font-mono text-[10px] leading-relaxed text-gray-300"
       >
         {events.length === 0 ? (
-          <p className="italic text-gray-600">No events yet</p>
+          <p className="italic text-gray-600">{t("log.noEvents")}</p>
         ) : (
           events.map((event, i) => (
             <div key={i} className="border-b border-gray-800 py-0.5">
-              {formatEvent(event)}
+              {formatEvent(event, t)}
             </div>
           ))
         )}

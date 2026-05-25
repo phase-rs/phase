@@ -1,9 +1,11 @@
 // Lightweight progress map for the Quick Draft flow. Display-only: it reads the
 // store-owned draft phase and renders where the player is in the journey.
 
+import { useTranslation } from "react-i18next";
+
 import type { DraftPhase } from "../../stores/draftStore";
 
-const STEPS = ["Choose Set", "Draft", "Build Deck", "Play"] as const;
+const STEP_KEYS = ["chooseSet", "draft", "buildDeck", "play"] as const;
 
 const PHASE_STEP: Record<DraftPhase, number> = {
   setup: 0,
@@ -23,11 +25,13 @@ function CheckIcon() {
 }
 
 export function DraftSteps({ phase }: { phase: DraftPhase }) {
+  const { t } = useTranslation("draft");
   const current = PHASE_STEP[phase];
 
   return (
-    <nav aria-label="Draft progress" className="mx-auto flex w-full max-w-md items-center">
-      {STEPS.map((label, i) => {
+    <nav aria-label={t("steps.navLabel")} className="mx-auto flex w-full max-w-md items-center">
+      {STEP_KEYS.map((key, i) => {
+        const label = t(`steps.${key}`);
         const done = i < current;
         const active = i === current;
         return (
@@ -52,7 +56,7 @@ export function DraftSteps({ phase }: { phase: DraftPhase }) {
                 {label}
               </span>
             </div>
-            {i < STEPS.length - 1 && (
+            {i < STEP_KEYS.length - 1 && (
               <span
                 aria-hidden="true"
                 className={`mx-2 -mt-3 h-px flex-1 transition-colors ${done ? "bg-emerald-400/35" : "bg-white/10"}`}

@@ -100,6 +100,25 @@ pub enum SearchSelectionConstraint {
     MatchEachFilter { filters: Vec<TargetFilter> },
 }
 
+/// CR 400.11 + CR 406.3: Candidate pool for outside-game searches. The
+/// baseline pool is the player's sideboard; Karn/Coax-class text widens that
+/// pool to include owned face-up exile cards that match the same filter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum OutsideGameSourcePool {
+    /// CR 400.11a: Tournament sideboard / casual outside-the-game collection.
+    #[default]
+    Sideboard,
+    /// CR 400.11a + CR 406.3: Sideboard plus matching owned face-up exile.
+    SideboardAndFaceUpExile,
+}
+
+impl OutsideGameSourcePool {
+    pub fn includes_face_up_exile(self) -> bool {
+        matches!(self, OutsideGameSourcePool::SideboardAndFaceUpExile)
+    }
+}
+
 /// CR 701.23a + CR 608.2c: A search whose found set is partitioned between two
 /// destinations — e.g. Cultivate ("put one onto the battlefield tapped and the
 /// other into your hand"). `primary_count` cards go to `primary_destination`
@@ -2798,6 +2817,22 @@ pub enum QuantityRef {
         property: ObjectProperty,
         filter: TargetFilter,
     },
+    /// CR 107.1: The [min/max], across every player in the game, of the number
+    /// of **battlefield** objects matching `filter` that the player controls
+    /// (the game counts only in integers). Each player's per-player count is
+    /// computed as if `filter`'s
+    /// controller clause were that player (CR 109.5 "you"/"your" rebinding),
+    /// then `aggregate` reduces the per-player counts to one integer. Used by
+    /// Balance / Restore Balance / Balancing Act for "the number of [lands]
+    /// controlled by the player who controls the fewest". `aggregate = Min` is
+    /// the "fewest" reading; `aggregate = Max` covers "most"; `Sum` is accepted
+    /// for completeness. Battlefield-scoped only: the hand-zone analogue ("the
+    /// fewest cards in any player's hand") is `HandSize { player: AllPlayers {
+    /// aggregate } }` — do NOT route hand counts through this variant.
+    ControlledByEachPlayer {
+        filter: TargetFilter,
+        aggregate: AggregateFunction,
+    },
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.
@@ -5187,6 +5222,15 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 701.3d: Unattach every matching Equipment from a matched host while
+    /// leaving that Equipment on the battlefield. `attachment` scopes which
+    /// attached objects move; `target` scopes the host object.
+    UnattachAll {
+        #[serde(default = "default_target_filter_any")]
+        attachment: TargetFilter,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// CR 701.25a: Surveil N — look at the top N cards, then put any number
     /// into the graveyard and the rest on top in any order.
     /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
@@ -5612,13 +5656,8 @@ pub enum Effect {
     /// outside the game. For tournament-style play, the bounded accessible set
     /// is the player's current sideboard, which is not modeled as a zone.
     ///
-    /// CR 406.3: The `include_face_up_exile` flag widens the eligible pool to
-    /// also include face-up cards the controller owns in the exile zone — the
-    /// Karn, the Great Creator / Coax from the Blind Eternities pattern of
-    /// "reveal a card you own from outside the game OR choose a face-up card
-    /// you own in exile". Face-up exile cards are in-game cards (the exile
-    /// zone is a normal zone per CR 406.1); the disjunction simply unifies
-    /// two source pools under one selection.
+    /// CR 400.11 + CR 406.3: Candidate source pool. Defaults to sideboard;
+    /// Karn/Coax-class text widens the pool to include owned face-up exile.
     SearchOutsideGame {
         filter: TargetFilter,
         #[serde(default = "default_quantity_one")]
@@ -5627,10 +5666,8 @@ pub enum Effect {
         reveal: bool,
         #[serde(default = "default_zone_hand")]
         destination: Zone,
-        /// CR 406.3 + CR 400.11: Also offer face-up exile cards the controller
-        /// owns and that match `filter` as legal selections (Karn-class).
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        include_face_up_exile: bool,
+        #[serde(default, skip_serializing_if = "is_default_outside_game_source_pool")]
+        source_pool: OutsideGameSourcePool,
     },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
@@ -6557,6 +6594,10 @@ fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool
     matches!(c, SearchSelectionConstraint::None)
 }
 
+fn is_default_outside_game_source_pool(pool: &OutsideGameSourcePool) -> bool {
+    matches!(pool, OutsideGameSourcePool::Sideboard)
+}
+
 fn default_zone_hand() -> Zone {
     Zone::Hand
 }
@@ -7029,6 +7070,7 @@ impl Effect {
             | Effect::GainControl { target, .. }
             | Effect::ControlNextTurn { target, .. }
             | Effect::Attach { target, .. }
+            | Effect::UnattachAll { target, .. }
             | Effect::Fight { target, .. }
             | Effect::Bounce { target, .. }
             | Effect::SwitchPT { target, .. }
@@ -7291,6 +7333,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GainControl { .. } => "GainControl",
         Effect::ControlNextTurn { .. } => "ControlNextTurn",
         Effect::Attach { .. } => "Attach",
+        Effect::UnattachAll { .. } => "UnattachAll",
         Effect::Surveil { .. } => "Surveil",
         Effect::Fight { .. } => "Fight",
         Effect::Bounce { .. } => "Bounce",
@@ -7465,6 +7508,7 @@ pub enum EffectKind {
     ControlNextTurn,
     Attach,
     AttachAll,
+    UnattachAll,
     Surveil,
     Fight,
     Bounce,
@@ -7642,6 +7686,7 @@ impl From<&Effect> for EffectKind {
             Effect::GainControl { .. } => EffectKind::GainControl,
             Effect::ControlNextTurn { .. } => EffectKind::ControlNextTurn,
             Effect::Attach { .. } => EffectKind::Attach,
+            Effect::UnattachAll { .. } => EffectKind::UnattachAll,
             Effect::Surveil { .. } => EffectKind::Surveil,
             Effect::Fight { .. } => EffectKind::Fight,
             Effect::Bounce { .. } => EffectKind::Bounce,
@@ -9781,6 +9826,17 @@ pub struct StaticDefinition {
     /// `StaticDefinition` must reach `layers.rs` only with `condition: None`.
     #[serde(default)]
     pub condition: Option<StaticCondition>,
+    /// CR 101.2 + CR 109.5: Per-affected-player applicability gate.
+    ///
+    /// Distinct from `condition` (the source-relative CR 604.1 FUNCTIONING gate,
+    /// evaluated against the source's controller upstream by
+    /// `battlefield_active_statics`). `per_player_condition` is evaluated against
+    /// the AFFECTED player (the caster for `CantBeCast`; the attacking creature's
+    /// controller for `CantAttack`) via `restrictions::evaluate_condition`. Used by
+    /// "each opponent who [did X] this turn can't [Y]" prohibitions (Angelic
+    /// Arbiter). `None` = unconditional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_player_condition: Option<ParsedCondition>,
     #[serde(default)]
     pub affected_zone: Option<Zone>,
     #[serde(default)]
@@ -9808,6 +9864,7 @@ impl StaticDefinition {
             affected: None,
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9832,6 +9889,14 @@ impl StaticDefinition {
 
     pub fn condition(mut self, cond: StaticCondition) -> Self {
         self.condition = Some(cond);
+        self
+    }
+
+    /// CR 101.2 + CR 109.5: Set the per-affected-player applicability gate.
+    /// Evaluated against the affected player (caster / attacking creature's
+    /// controller), not the source controller. Mirrors `.condition()`.
+    pub fn per_player_condition(mut self, cond: ParsedCondition) -> Self {
+        self.per_player_condition = Some(cond);
         self
     }
 
@@ -11647,6 +11712,7 @@ mod tests {
                 ContinuousModification::AddToughness { value: 1 },
             ],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -11883,6 +11949,7 @@ mod tests {
                 affected: Some(TargetFilter::SelfRef),
                 modifications: vec![ContinuousModification::AddPower { value: 3 }],
                 condition: None,
+                per_player_condition: None,
                 affected_zone: None,
                 effect_zone: None,
                 active_zones: vec![],

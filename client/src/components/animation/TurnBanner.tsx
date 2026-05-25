@@ -1,4 +1,5 @@
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { useUiStore } from "../../stores/uiStore";
 
@@ -10,6 +11,7 @@ import { useUiStore } from "../../stores/uiStore";
  * Triggered via uiStore.flashTurnBanner().
  */
 export function TurnBanner() {
+  const { t } = useTranslation();
   const showTurnBanner = useUiStore((s) => s.showTurnBanner);
   const turnBannerText = useUiStore((s) => s.turnBannerText);
   const turnBannerNumber = useUiStore((s) => s.turnBannerNumber);
@@ -57,7 +59,7 @@ export function TurnBanner() {
                   className="text-3xl font-bold tracking-[0.5em] uppercase"
                   style={{ color: colors.primary }}
                 >
-                  Turn {turnBannerNumber}
+                  {t("turnBanner.turn", { number: turnBannerNumber })}
                 </span>
               )}
               <span
@@ -201,7 +203,7 @@ export function TurnBanner() {
               exit={{ opacity: 0, y: -16, scale: 0.95 }}
               transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: 0.18 }}
             >
-              Turn {turnBannerNumber}
+              {t("turnBanner.turn", { number: turnBannerNumber })}
             </motion.span>
           )}
 

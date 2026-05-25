@@ -1173,6 +1173,7 @@ pub(super) fn handle_resolution_choice(
         (
             WaitingFor::OutsideGameChoice {
                 player,
+                source_id,
                 choices,
                 count,
                 reveal,
@@ -1259,14 +1260,31 @@ pub(super) fn handle_resolution_choice(
                         chosen_ids.push(object_id);
                     }
                     OutsideGameSelection::FaceUpExile { object_id } => {
-                        let moved = effects::search_outside_game::put_face_up_exile_into(
+                        match effects::search_outside_game::put_face_up_exile_into(
                             state,
                             object_id,
                             destination,
+                            source_id,
+                            player,
                             events,
                         )
-                        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
-                        chosen_ids.push(moved);
+                        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?
+                        {
+                            effects::change_zone::ZoneMoveResult::Done => {
+                                chosen_ids.push(object_id);
+                            }
+                            effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                        }
                     }
                 }
             }

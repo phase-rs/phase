@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 interface MenuShellProps {
   eyebrow?: string;
@@ -66,11 +67,10 @@ export function MenuShell({
 }
 
 function MenuFooterDisclaimer() {
+  const { t } = useTranslation("menu");
   return (
     <p className="mt-16 text-center text-[0.68rem] leading-5 text-slate-500/70">
-      phase.rs is a non-commercial fan project and is not affiliated with or endorsed by Wizards of the Coast.
-      Magic: The Gathering is © Wizards of the Coast LLC. Card images are fetched from Scryfall at runtime;
-      card data is sourced from MTGJSON. No copyrighted WotC assets are bundled with this project.
+      {t("shell.disclaimer")}
     </p>
   );
 }

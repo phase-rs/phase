@@ -518,6 +518,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             valid_blocker_ids,
             valid_block_targets,
+            ..
         } => blocker_actions(*player, valid_blocker_ids, valid_block_targets),
         WaitingFor::UntapChoice {
             player, candidates, ..
@@ -807,10 +808,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             } else {
                 vec![*count]
             };
-            let mut seen: HashSet<Vec<OutsideGameSelection>> = HashSet::new();
             bounded_combinations_generic(&pool, sizes, SELECTION_POOL_CAP, SELECTION_CANDIDATE_CAP)
                 .into_iter()
-                .filter(|selections| seen.insert(selections.clone()))
                 .map(|selections| {
                     candidate(
                         GameAction::ChooseOutsideGameCards { selections },
@@ -3593,21 +3592,33 @@ where
 }
 
 fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
-    if k == 0 {
-        return vec![Vec::new()];
-    }
     if items.len() < k {
         return Vec::new();
     }
-    if items.len() == k {
-        return vec![items.to_vec()];
+
+    fn recurse<T: Clone>(
+        items: &[T],
+        k: usize,
+        start: usize,
+        current: &mut Vec<T>,
+        result: &mut Vec<Vec<T>>,
+    ) {
+        if current.len() == k {
+            result.push(current.clone());
+            return;
+        }
+        let remaining_needed = k - current.len();
+        let last_start = items.len() - remaining_needed;
+        for index in start..=last_start {
+            current.push(items[index].clone());
+            recurse(items, k, index + 1, current, result);
+            current.pop();
+        }
     }
+
     let mut result = Vec::new();
-    for mut combo in combinations_generic(&items[1..], k - 1) {
-        combo.insert(0, items[0].clone());
-        result.push(combo);
-    }
-    result.extend(combinations_generic(&items[1..], k));
+    let mut current = Vec::with_capacity(k);
+    recurse(items, k, 0, &mut current, &mut result);
     result
 }
 

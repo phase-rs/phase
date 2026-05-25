@@ -2264,6 +2264,7 @@ mod tests {
                 m.insert(blocker, vec![attacker]);
                 m
             },
+            block_requirements: HashMap::new(),
         };
 
         for difficulty in [

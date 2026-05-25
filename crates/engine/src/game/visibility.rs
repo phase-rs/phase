@@ -234,6 +234,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::OutsideGameChoice {
         player,
+        source_id,
         reveal,
         up_to,
         destination,
@@ -243,6 +244,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::OutsideGameChoice {
                 player,
+                source_id,
                 choices: Vec::new(),
                 count: 0,
                 reveal,

@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { isMultiplayerMode, useGameStore } from "../../stores/gameStore.ts";
@@ -21,6 +22,7 @@ interface GameBoardProps {
 }
 
 export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
+  const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
@@ -179,7 +181,7 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
   if (!gameState) {
     return (
       <div className="flex flex-1 items-center justify-center">
-        <span className="text-gray-500">Waiting for game...</span>
+        <span className="text-gray-500">{t("board.waitingForGame")}</span>
       </div>
     );
   }
@@ -195,7 +197,7 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
         <path fillRule="evenodd" d="M14 8a6 6 0 1 1-12 0 6 6 0 0 1 12 0ZM7.72 4.22a.75.75 0 0 0-1.06 0L4.97 5.91a.75.75 0 0 0 0 1.06l1.69 1.69a.75.75 0 1 0 1.06-1.06l-.47-.47h1.63a1.25 1.25 0 0 1 0 2.5H7.5a.75.75 0 0 0 0 1.5h1.38a2.75 2.75 0 0 0 0-5.5H7.25l.47-.47a.75.75 0 0 0 0-1.06Z" clipRule="evenodd" />
       </svg>
-      Undo
+      {t("board.undo")}
     </button>
   ) : null;
 
@@ -222,7 +224,7 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
               />
             ) : (
               <div className="flex flex-1 items-center justify-center">
-                <span className="text-xs text-gray-600">Click an opponent to view their board</span>
+                <span className="text-xs text-gray-600">{t("board.clickOpponent")}</span>
               </div>
             )}
           </div>
