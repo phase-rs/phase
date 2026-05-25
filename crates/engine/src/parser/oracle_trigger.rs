@@ -2911,12 +2911,51 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         ),
     );
 
-    let (_, (subject, _, qualifier)) = all_consuming(parse_line).parse(lower).ok()?;
-    let mut def = make_base();
-    def.mode = TriggerMode::AbilityActivated;
-    def.valid_target = subject;
-    def.condition = qualifier;
-    Some((TriggerMode::AbilityActivated, def))
+    if let Some((_, (subject, _, qualifier))) =
+        all_consuming(parse_line).parse(lower).ok()
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::AbilityActivated;
+        def.valid_target = subject;
+        def.condition = qualifier;
+        return Some((TriggerMode::AbilityActivated, def));
+    }
+
+    // Passive form: "whenever an ability of [source] is activated"
+    // The source object filter goes into `valid_card` so `match_ability_activated`
+    // can check `valid_card_matches` against the activated ability's source.
+    // CR 605.1a: `GameEvent::AbilityActivated` fires only for non-mana activations,
+    // so the implicit "if it isn't a mana ability" qualifier on Bracers-class cards
+    // is automatically satisfied — no `TriggerCondition` needed.
+    // Cards: Battlemage's Bracers, Illusionist's Bracers.
+    fn parse_passive_source(input: &str) -> OracleResult<'_, TargetFilter> {
+        preceded(
+            tag("an ability of "),
+            // allow-noncombinator: single-value dispatch on already-lowercase input
+            alt((
+                value(TargetFilter::AttachedTo, tag("equipped creature")),
+                value(TargetFilter::AttachedTo, tag("enchanted creature")),
+            )),
+        )
+        .parse(input)
+    }
+
+    fn parse_passive_line(input: &str) -> OracleResult<'_, TargetFilter> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            terminated(parse_passive_source, tag(" is activated")),
+        )
+        .parse(input)
+    }
+
+    if let Ok((_, source_filter)) = all_consuming(parse_passive_line).parse(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::AbilityActivated;
+        def.valid_card = Some(source_filter);
+        return Some((TriggerMode::AbilityActivated, def));
+    }
+
+    None
 }
 
 /// CR 702.49: Extract ninjutsu/sneak cost-paid conditions.
@@ -20141,5 +20180,30 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 602.1 + CR 605.1a: Passive form — "whenever an ability of equipped creature
+    /// is activated" routes to AbilityActivated with valid_card = AttachedTo.
+    /// Cards: Battlemage's Bracers, Illusionist's Bracers.
+    #[test]
+    fn trigger_ability_of_equipped_creature_is_activated_bracers() {
+        let def = parse_trigger_line(
+            "Whenever an ability of equipped creature is activated, if it isn't a mana ability, you may pay {1}. If you do, copy that ability. You may choose new targets for the copy.",
+            "Battlemage's Bracers",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        assert_eq!(def.valid_target, None);
+    }
+
+    /// CR 602.1 + CR 605.1a: Illusionist's Bracers uses the same passive trigger phrase.
+    #[test]
+    fn trigger_ability_of_equipped_creature_is_activated_illusionists() {
+        let def = parse_trigger_line(
+            "Whenever an ability of equipped creature is activated, if it isn't a mana ability, copy that ability. You may choose new targets for the copy.",
+            "Illusionist's Bracers",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
     }
 }
