@@ -198,5 +198,11 @@
   },
   "turnBanner": {
     "turn": "Zug {{number}}"
+  },
+  "chrome": {
+    "back": "Zurück",
+    "settings": "Einstellungen",
+    "languageSettings": "Sprache ({{lang}}) — Einstellungen öffnen",
+    "languageTitle": "Sprache: {{lang}}"
   }
 }

@@ -8,6 +8,8 @@
   "preview": {
     "holdCtrlBack": "Maintenez Ctrl pour la face arrière",
     "holdCtrlFront": "Maintenez Ctrl pour la face avant",
+    "holdCtrlFlip": "Maintenez Ctrl pour pivoter",
+    "flip": "Pivoter",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -307,7 +309,9 @@
     "statHand": "Main",
     "statCreatures": "Créatures",
     "statLands": "Terrains",
-    "statOther": "Autre"
+    "statOther": "Autre",
+    "compactHud": "HUD d'adversaire compact. Réduit chaque adversaire à une seule ligne fine (nom + points de vie) ; touchez un adversaire pour afficher tout son champ de bataille.",
+    "expandHud": "Développer le HUD d'adversaire. Affiche la main et le détail du champ de bataille de chaque adversaire."
   },
   "combat": {
     "attackAll": "Attaquer tous",
@@ -380,7 +384,9 @@
     "nounTarget": "cible",
     "confirmTap": "Confirmer l'engagement ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conserver les cibles actuelles",
-    "skip": "Ignorer"
+    "skip": "Ignorer",
+    "chooseNewTarget": "Choisissez la nouvelle cible du sort",
+    "chooseNewTargetForSpell": "Choisissez une nouvelle cible pour {{spell}}"
   },
   "log": {
     "title": "Journal de partie",
@@ -1247,6 +1253,9 @@
     "proliferateSubtitle": "Choisissez n'importe quel nombre de permanents et de joueurs ayant des marqueurs. Chaque cible choisie reçoit un marqueur de plus de chaque sorte déjà présente.",
     "chooseObjectsTitle": "Choisir des permanents",
     "chooseObjectsSubtitle": "Choisissez n'importe quel nombre de permanents. Vous payez un coût pour chacun choisi.",
+    "selectAll": "Tout",
+    "selectNone": "Aucun",
+    "selectMine": "Mon côté",
     "confirm": "Confirmer"
   },
   "replacement": {
@@ -1260,7 +1269,8 @@
     "scopeSingle": "Choisissez une nouvelle cible pour le sort",
     "scopeMulti": "Choisissez de nouvelles cibles pour le sort",
     "subtitle": "{{scope}}. Actuelle : {{current}}",
-    "confirm": "Confirmer"
+    "confirm": "Confirmer",
+    "badgeNewTarget": "Nouvelle cible"
   },
   "separatePiles": {
     "chooserName": "Joueur {{number}}",
@@ -1321,5 +1331,27 @@
     "subtitleLabel": "Choisissez une étiquette pour {{name}}",
     "subtitleVoteRemaining": "Votez ({{count}} restant(s))",
     "subtitleVote": "Exprimez votre vote"
+  },
+  "advance": {
+    "resolve": "Résoudre",
+    "passPriority": "Passer la priorité",
+    "toPhase": "Vers {{phase}}"
+  },
+  "outsideGame": {
+    "fromExile": "Depuis l'exil",
+    "fromSideboard": "Depuis la réserve"
+  },
+  "phaseName": {
+    "Upkeep": "Entretien",
+    "Draw": "Pioche",
+    "PreCombatMain": "Phase principale 1",
+    "BeginCombat": "Début de combat",
+    "DeclareAttackers": "Déclaration des attaquants",
+    "DeclareBlockers": "Déclaration des bloqueurs",
+    "CombatDamage": "Blessures de combat",
+    "EndCombat": "Fin de combat",
+    "PostCombatMain": "Phase principale 2",
+    "End": "Étape de fin",
+    "Cleanup": "Nettoyage"
   }
 }

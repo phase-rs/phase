@@ -163,6 +163,16 @@ export function isCardImageRotatedSync(oracleId: string, cardName: string): bool
   return isSidewaysLayout(entry?.layout);
 }
 
+/** Kamigawa-style flip cards (Scryfall `layout: "flip"`) print both halves in a
+ * single image, the alternate half rotated 180°. The preview lets the user spin
+ * the image to read that half; this reports whether a card is that layout. */
+export function isCardImageFlipLayoutSync(oracleId: string, cardName: string): boolean {
+  if (!scryfallDataResolved) return false;
+  const entry = scryfallDataResolved[oracleId.toLowerCase()]
+    ?? scryfallDataResolved[normalizeCardName(cardName).toLowerCase()];
+  return isFlipLayout(entry?.layout);
+}
+
 const SCRYFALL_DELAY_MS = 100;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
@@ -176,6 +186,10 @@ export interface CardImageAsset {
 
 function isSidewaysLayout(layout: string | undefined): boolean {
   return layout === "split";
+}
+
+function isFlipLayout(layout: string | undefined): boolean {
+  return layout === "flip";
 }
 
 export interface ScryfallCard {

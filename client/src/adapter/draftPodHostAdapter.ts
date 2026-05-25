@@ -44,6 +44,8 @@ export type DraftPodHostEvent =
   | { type: "draftComplete" }
   | { type: "deckSubmitted"; seatIndex: number }
   | { type: "allDecksSubmitted" }
+  | { type: "draftPaused"; reason: string }
+  | { type: "draftResumed" }
   | { type: "seatJoined"; seatIndex: number; displayName: string }
   | { type: "seatReconnected"; seatIndex: number }
   | { type: "seatDisconnected"; seatIndex: number }
@@ -53,12 +55,50 @@ export type DraftPodHostEvent =
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
   | { type: "roundAdvanced"; newRound: number }
   | { type: "timerExpired" }
+  | {
+      type: "bo3SideboardPrompt";
+      matchId: string;
+      gameNumber: number;
+      score: MatchScore;
+      loserSeat: number | null;
+      timerMs: number;
+    }
+  | {
+      type: "bo3ChoosePlayDraw";
+      matchId: string;
+      gameNumber: number;
+      score: MatchScore;
+      timerMs: number;
+    }
+  | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
   | { type: "bo3SideboardPromptSent"; matchId: string }
   | { type: "bo3BothSideboardsSubmitted"; matchId: string }
   | { type: "bo3GameStarted"; matchId: string; gameNumber: number }
   | { type: "error"; message: string };
 
 type DraftPodHostEventListener = (event: DraftPodHostEvent) => void;
+
+function hostStatusForView(view: DraftPlayerView): DraftPodHostStatus {
+  switch (view.status) {
+    case "Lobby":
+      return "lobby";
+    case "Drafting":
+    case "Paused":
+      return "drafting";
+    case "Deckbuilding":
+      return "deckbuilding";
+    case "Pairing":
+      return "pairing";
+    case "MatchInProgress":
+      return "matchInProgress";
+    case "RoundComplete":
+      return "roundComplete";
+    case "Complete":
+      return "complete";
+    case "Abandoned":
+      return "error";
+  }
+}
 
 export interface DraftPodHostConfig {
   setPoolJson: string;
@@ -174,9 +214,7 @@ export class DraftPodHostAdapter {
         if (persisted) {
           const view = await host.restoreFromPersisted(persisted);
           if (view) {
-            this.setStatus(
-              view.status === "Deckbuilding" ? "deckbuilding" : "drafting",
-            );
+            this.setStatus(hostStatusForView(view));
             this.emit({ type: "viewUpdated", view });
           }
         }
@@ -257,6 +295,12 @@ export class DraftPodHostAdapter {
         this.setStatus("pairing");
         this.emit({ type: "allDecksSubmitted" });
         break;
+      case "draftPaused":
+        this.emit({ type: "draftPaused", reason: event.reason });
+        break;
+      case "draftResumed":
+        this.emit({ type: "draftResumed" });
+        break;
       case "error":
         this.emit({ type: "error", message: event.message });
         break;
@@ -289,6 +333,33 @@ export class DraftPodHostAdapter {
         break;
       case "bo3GameStarted":
         this.emit({ type: "bo3GameStarted", matchId: event.matchId, gameNumber: event.gameNumber });
+        break;
+      case "bo3SideboardPrompt":
+        this.emit({
+          type: "bo3SideboardPrompt",
+          matchId: event.matchId,
+          gameNumber: event.gameNumber,
+          score: event.score,
+          loserSeat: event.loserSeat,
+          timerMs: event.timerMs,
+        });
+        break;
+      case "bo3ChoosePlayDraw":
+        this.emit({
+          type: "bo3ChoosePlayDraw",
+          matchId: event.matchId,
+          gameNumber: event.gameNumber,
+          score: event.score,
+          timerMs: event.timerMs,
+        });
+        break;
+      case "bo3GameStart":
+        this.emit({
+          type: "bo3GameStart",
+          matchId: event.matchId,
+          gameNumber: event.gameNumber,
+          firstPlayerSeat: event.firstPlayerSeat,
+        });
         break;
     }
   }

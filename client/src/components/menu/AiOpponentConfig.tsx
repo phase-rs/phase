@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
-import { AI_DIFFICULTIES, getAiDifficultyLabel, type AIDifficulty } from "../../constants/ai";
+import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
@@ -260,7 +260,7 @@ function AiSeatPanel({
   const summaryDeck = isRandom
     ? t("aiOpponent.deckRandomCount", { count: filteredDecks.length })
     : (selectedCandidate?.name ?? t("aiOpponent.deckRandom"));
-  const summaryDifficulty = getAiDifficultyLabel(seat.difficulty);
+  const summaryDifficulty = t(`aiDifficulty.levels.${seat.difficulty}`);
 
   const body = (
     <div className="flex flex-col gap-2.5 px-3 pb-3 pt-1">
@@ -295,7 +295,7 @@ function AiSeatPanel({
         >
           {AI_DIFFICULTIES.map((item) => (
             <option key={item.id} value={item.id}>
-              {item.label}
+              {t(`aiDifficulty.levels.${item.id}`)}
             </option>
           ))}
         </select>
