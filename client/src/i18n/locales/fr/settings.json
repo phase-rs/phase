@@ -1,1 +1,130 @@
-{}
+{
+  "modal": {
+    "title": "Paramètres",
+    "subtitle": "Réglez le gameplay, les visuels, l'audio et les valeurs par défaut du multijoueur."
+  },
+  "tabs": {
+    "gameplay": "Gameplay",
+    "visual": "Visuel",
+    "combat": "Rythme",
+    "audio": "Audio",
+    "multiplayer": "Multijoueur",
+    "data": "Données",
+    "experimental": "Expérimental"
+  },
+  "gameplay": {
+    "title": "Gameplay",
+    "language": "Langue",
+    "cardSize": "Taille des cartes",
+    "logDefault": "Journal par défaut",
+    "spellPayment": "Paiement des sorts",
+    "manualManaPayment": "Paiement manuel du mana pour les sorts",
+    "boardBackground": "Arrière-plan du plateau",
+    "boardBackgroundGroups": {
+      "automatic": "Automatique",
+      "battlefields": "Champs de bataille",
+      "plain": "Uni",
+      "custom": "Personnalisé",
+      "off": "Désactivé"
+    },
+    "boardBackgroundOptions": {
+      "autoMatchDeck": "Auto (assorti au deck)",
+      "random": "Aléatoire",
+      "customUrl": "URL personnalisée",
+      "none": "Aucun"
+    }
+  },
+  "visual": {
+    "title": "Visuel",
+    "vfxQuality": "Qualité des effets visuels",
+    "keywordStrip": "Bandeau de mots-clés",
+    "showKeywords": "Afficher les mots-clés sur les cartes du champ de bataille",
+    "opponentHoverPreview": "Aperçu au survol de l'adversaire",
+    "showOpponentBoard": "Afficher le plateau de l'adversaire au survol du HUD",
+    "cardArtPreferences": "Préférences d'illustration des cartes",
+    "clearArtOverrides_one": "Effacer tous les remplacements d'illustration ({{count}})",
+    "clearArtOverrides_other": "Effacer tous les remplacements d'illustration ({{count}})",
+    "clearArtOverridesConfirm_one": "Effacer les {{count}} remplacement d'illustration ?",
+    "clearArtOverridesConfirm_other": "Effacer les {{count}} remplacements d'illustration ?"
+  },
+  "audio": {
+    "title": "Audio",
+    "muteAll": "Tout couper",
+    "muteAllAudio": "Couper tout l'audio",
+    "globalVolume": "Volume global",
+    "sfxVolume": "Volume des effets",
+    "musicVolume": "Volume de la musique"
+  },
+  "audioTheme": {
+    "title": "Thème audio",
+    "theme": "Thème",
+    "importTheme": "Importer un thème",
+    "loading": "Chargement...",
+    "import": "Importer",
+    "importFailed": "Échec de l'importation du thème",
+    "customThemes": "Thèmes personnalisés",
+    "remove": "Retirer"
+  },
+  "multiplayer": {
+    "title": "Multijoueur",
+    "displayName": "Nom affiché",
+    "displayNamePlaceholder": "Saisissez votre nom",
+    "serverSelectionNote": "La sélection du serveur a été déplacée vers le salon — ouvrez Multijoueur et utilisez la puce du serveur (ou « Choisir un serveur » en mode P2P) pour changer de région, configurer une instance auto-hébergée ou tester la connectivité."
+  },
+  "experimental": {
+    "title": "Expérimental",
+    "description": "Ces fonctionnalités sont encore en développement. Elles peuvent être incomplètes, comporter des bugs ou changer sans préavis. Activez-les pour les essayer en avance.",
+    "draftExperiments": "Expériences de draft",
+    "enableDraftFeatures": "Activer les fonctionnalités de draft expérimentales",
+    "draftFeaturesDescription": "Débloque le Cube Draft et le Pod Draft. Le Quick Draft contre l'IA est toujours disponible."
+  },
+  "data": {
+    "title": "Sauvegarde et restauration",
+    "description": "L'export regroupe vos préférences, decks importés et abonnements à des flux dans un seul fichier JSON. L'import les restaure sur une autre machine. Les caches IndexedDB (cache de flux, cache audio, parties enregistrées) ne sont pas inclus — ils se reconstruisent automatiquement.",
+    "exportBackup": "Exporter une sauvegarde…",
+    "importBackup": "Importer une sauvegarde…",
+    "importConfirm": "Écraser les préférences et decks existants ?\n\nOK : tout remplacer par la sauvegarde (destructif).\nAnnuler : fusionner — conserver les decks existants, ajouter les nouveaux de la sauvegarde.",
+    "backupDownloaded": "Sauvegarde téléchargée.",
+    "imported_one": "{{count}} deck importé.",
+    "imported_other": "{{count}} decks importés.",
+    "importedWithPreferences_one": "{{count}} deck et les préférences importés.",
+    "importedWithPreferences_other": "{{count}} decks et les préférences importés.",
+    "skippedMalformed_one": "{{count}} entrée malformée ignorée.",
+    "skippedMalformed_other": "{{count}} entrées malformées ignorées."
+  },
+  "resetAll": {
+    "confirm": "Réinitialiser toutes les préférences aux valeurs par défaut ? Cela efface tous les paramètres de cette boîte de dialogue.",
+    "button": "Réinitialiser toutes les préférences"
+  },
+  "pacing": {
+    "title": "Rythme",
+    "resetSection": "Réinitialiser la section",
+    "animationSpeed": "Vitesse d'animation",
+    "animationSpeedDescription": "Vitesse maîtresse — plus c'est élevé, plus c'est rapide. Tout à droite ignore complètement les animations.",
+    "hint": "Les curseurs par catégorie se multiplient par-dessus la Vitesse d'animation. Double-cliquez sur un curseur — ou touchez le <glyph>↺</glyph> à côté — pour réinitialiser.",
+    "instant": "Instantané",
+    "slowest": "Le plus lent",
+    "resetSliderLabel": "Réinitialiser {{label}} par défaut",
+    "atDefault": "Valeur par défaut",
+    "resetToDefault": "Réinitialiser par défaut"
+  },
+  "artChain": {
+    "emptyState": "Utilisation de l'illustration Scryfall par défaut. Ajoutez des règles ci-dessous pour personnaliser.",
+    "moveUp": "Monter",
+    "moveDown": "Descendre",
+    "remove": "Retirer",
+    "unreachable": "Les règles sous « {{rule}} » sont inaccessibles — elle correspond toujours.",
+    "addRule": "Ajouter une règle",
+    "setInputPlaceholder": "Code ou nom d'extension…",
+    "addSet": "Ajouter une extension",
+    "rulesPriorityNote": "Les règles sont essayées de haut en bas. La première correspondance l'emporte. « Impression source » utilise l'extension d'un booster de draft ou d'un import de deck lorsqu'elle est disponible. Les remplacements par carte (clic droit dans le constructeur de deck) ont toujours la priorité.",
+    "setEntry": "Extension : {{name}} ({{code}})",
+    "rules": {
+      "sourcePrinting": "Impression source",
+      "newest": "Impression la plus récente",
+      "oldest": "Impression la plus ancienne",
+      "preferBorderless": "Préférer sans bordure",
+      "preferExtended": "Préférer l'illustration étendue"
+    }
+  }
+}

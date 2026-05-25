@@ -1,1 +1,1324 @@
-{}
+{
+  "card": {
+    "faceDownName": "Carta boca abajo",
+    "loading": "Cargando {{name}}",
+    "unimplemented": "Sin implementar: {{mechanics}}",
+    "dfc": "DFC"
+  },
+  "preview": {
+    "holdCtrlBack": "Mantén Ctrl para la cara trasera",
+    "holdCtrlFront": "Mantén Ctrl para la cara frontal",
+    "altParsedAbilities": "Alt: habilidades analizadas",
+    "debugId": "ID: {{id}}",
+    "engineParse": "Análisis del motor",
+    "altKey": "Alt",
+    "parse": "Analizar",
+    "rulings": "Aclaraciones",
+    "rulingCount_one": "{{count}} aclaración",
+    "rulingCount_other": "{{count}} aclaraciones",
+    "vanilla": "Vainilla — sin habilidades analizadas",
+    "unsupported": "no compatible",
+    "showMore": "Mostrar {{count}} más",
+    "showLess": "Mostrar menos",
+    "fromSource": "(de {{source}})",
+    "basePT": "(base {{power}}/{{toughness}})",
+    "damage": "Daño: {{amount}}",
+    "ptDeltaFrom": "{{delta}} de {{source}}",
+    "colors": "Colores: {{colors}}",
+    "colorless": "Incoloro"
+  },
+  "actionButton": {
+    "clearAttackers": "Limpiar atacantes",
+    "attackWithAll": "Atacar con todas",
+    "confirmAttackers": "Confirmar atacantes ({{count}})",
+    "attackWithNone": "Atacar con ninguna",
+    "attackWithNoneConfirm": "Toca de nuevo: atacar con ninguna",
+    "confirmBlockers": "Confirmar bloqueadores ({{count}})",
+    "resetBlocks": "Restablecer bloqueos",
+    "blockWithNone": "Bloquear con ninguna",
+    "blockWithNoneConfirm": "Toca de nuevo: bloquear con ninguna",
+    "selectAttackerForBlocker": "Selecciona el atacante contra el que debe defenderse este bloqueador",
+    "companionToHand": "Compañero a la mano",
+    "resolve": "Resolver",
+    "resolveTooltip": "Pasa la prioridad para que el objeto superior de la pila se resuelva si todos los jugadores también pasan. Atajo: Espacio.",
+    "resolveAll": "Resolver todo",
+    "resolveAllTooltip": "Sigue pasando la prioridad mientras se resuelve la pila. Una elección obligatoria o una parada pueden interrumpirlo.",
+    "waiting": "Esperando",
+    "priorityTooltip": "Pasa la prioridad. Si la pila está vacía, esto avanza por la ventana de prioridad actual. Atajo: Espacio.",
+    "pass": "Pasar",
+    "passToEndTooltip": "Pasar automáticamente hasta el paso final a menos que lo interrumpa una elección, una parada o el Control total. Atajo: Intro.",
+    "autoPassing": "Pasando automáticamente al paso final..."
+  },
+  "board": {
+    "regroupCreatures": "Reagrupar grupos de criaturas duplicadas",
+    "changeBackground": "Cambiar fondo…",
+    "gameLog": "Registro de la partida",
+    "debugLog": "Registro de depuración",
+    "waitingForGame": "Esperando la partida...",
+    "clickOpponent": "Haz clic en un oponente para ver su tablero",
+    "undo": "Deshacer"
+  },
+  "permanent": {
+    "expandGroup": "Expandir el grupo de {{name}}",
+    "chooseToken": "Elegir la ficha {{name}}",
+    "pick": "Elegir",
+    "close": "cerrar",
+    "eligibleCount": "{{count}} legales",
+    "attackingCount": "atq {{count}}",
+    "selectedCount": "sel {{count}}",
+    "pickAll": "Todas",
+    "pickNone": "Ninguna",
+    "underAttack_one": "Atacado por {{count}} criatura",
+    "underAttack_other": "Atacado por {{count}} criaturas",
+    "target": "Objetivo",
+    "copy": "Copia",
+    "copyTooltip": "Ficha copia de una carta real"
+  },
+  "player": {
+    "opponent": "Op {{seat}}",
+    "cardsInHand": "Cartas en la mano",
+    "hand": "Mano",
+    "creaturesAbbr": "Crt",
+    "landsAbbr": "Trr",
+    "otherAbbr": "Otr",
+    "out": "FUERA",
+    "eliminated": "Eliminado",
+    "phasedOut": "Desfasado",
+    "you": "Tú",
+    "commanderDamageFrom": "Daño de comandante de {{source}}: {{damage}}/{{threshold}}"
+  },
+  "attackTargetPicker": {
+    "heading": "Elegir objetivo de ataque",
+    "attackAll": "Atacar a todos",
+    "splitAttacks": "Dividir ataques",
+    "confirmSplitAttacks": "Confirmar ataques divididos",
+    "attackWith_one": "Atacar a <name>{{label}}</name> con {{count}} criatura",
+    "attackWith_other": "Atacar a <name>{{label}}</name> con {{count}} criaturas",
+    "allTo": "Todas → <name>{{label}}</name>",
+    "creatureFallback": "Criatura n.º {{id}}",
+    "planeswalkerFallback": "Planeswalker n.º {{id}}",
+    "you": "Tú",
+    "ally": "Aliado",
+    "restoreDialog": "Restaurar diálogo",
+    "restoreDialogTitle": "Restaurar el diálogo de objetivo de ataque"
+  },
+  "fullControl": {
+    "on": "Control total activado",
+    "off": "Control total desactivado",
+    "tooltip": "Mantén las ventanas de prioridad en lugar de dejar que los momentos tranquilos pasen automáticamente. Atajo: F."
+  },
+  "passButton": {
+    "resolve": "Resolver",
+    "done": "Listo"
+  },
+  "lifeTotal": {
+    "playerLabel": "J{{seat}}"
+  },
+  "phaseStop": {
+    "untapLabel": "Paso de enderezar",
+    "untapDescription": "Tus permanentes girados se enderezan aquí.",
+    "upkeepLabel": "Paso de mantenimiento",
+    "upkeepDescription": "Los disparos de mantenimiento y los costes recurrentes ocurren aquí.",
+    "drawLabel": "Paso de robar",
+    "drawDescription": "Robas para el turno aquí.",
+    "preCombatMainLabel": "Primera fase principal",
+    "preCombatMainDescription": "Juega tierras y lanza hechizos antes del combate.",
+    "beginCombatLabel": "Paso de inicio del combate",
+    "beginCombatDescription": "Última ventana de prioridad antes de elegir atacantes.",
+    "declareAttackersLabel": "Paso de declarar atacantes",
+    "declareAttackersDescription": "El jugador atacante elige atacantes.",
+    "declareBlockersLabel": "Paso de declarar bloqueadores",
+    "declareBlockersDescription": "Los jugadores defensores eligen bloqueadores.",
+    "combatDamageLabel": "Paso de daño de combate",
+    "combatDamageDescription": "Las criaturas asignan e infligen daño de combate.",
+    "endCombatLabel": "Paso de final del combate",
+    "endCombatDescription": "Última ventana de prioridad de combate tras el daño.",
+    "postCombatMainLabel": "Segunda fase principal",
+    "postCombatMainDescription": "Juega tierras o lanza hechizos después del combate.",
+    "endLabel": "Paso final",
+    "endDescription": "Los disparos del paso final y las acciones de fin de turno ocurren aquí.",
+    "cleanupLabel": "Paso de limpieza",
+    "cleanupDescription": "El daño desaparece y se comprueba el tamaño máximo de la mano.",
+    "tooltipStopSet": "Parada establecida: haz clic para quitar esta parada de pase automático.",
+    "tooltipNoStop": "Sin parada establecida: haz clic para pausar el pase automático aquí.",
+    "tooltipCurrentPhase": "Fase actual.",
+    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+  },
+  "phaseTracker": {
+    "turn": "Turno {{number}}"
+  },
+  "attachments": {
+    "enchantmentsOnPlayer": "Encantamientos sobre el jugador",
+    "attachedTo": "Anexado a",
+    "attachedCount_one": "{{count}} permanente anexado",
+    "attachedCount_other": "{{count}} permanentes anexados",
+    "unknownHost": "Desconocido",
+    "target": "Objetivo"
+  },
+  "battlefieldPeek": {
+    "boardOf": "Tablero de {{name}}",
+    "noNonlandPermanents": "Sin permanentes que no sean tierra",
+    "morePermanents_one": "+{{count}} permanente más",
+    "morePermanents_other": "+{{count}} permanentes más",
+    "notTargetable": " (no puede ser objetivo)"
+  },
+  "disconnectDialog": {
+    "title": "{{name}} se desconectó",
+    "reconnecting": "Reconectando… quedan <seconds>{{seconds}}s</seconds>",
+    "pauseAndWait": "Pausar y esperar",
+    "continueWithout": "Continuar sin él"
+  },
+  "kickDialog": {
+    "title": "¿Expulsar a {{name}}?",
+    "body": "Perderá la partida y no podrá volver a unirse.",
+    "kick": "Expulsar"
+  },
+  "enchantmentsBadge": {
+    "ariaLabel_one": "1 encantamiento sobre este jugador",
+    "ariaLabel_other": "{{count}} encantamientos sobre este jugador",
+    "tooltip_one": "Pasa el cursor para previsualizar, haz clic para ver",
+    "tooltip_other": "{{count}} encantamientos — pasa el cursor para previsualizar, haz clic para ver"
+  },
+  "badges": {
+    "monarch": "Monarca",
+    "monarchTooltip": "El Monarca — roba una carta extra al final del turno",
+    "initiative": "Iniciativa",
+    "initiativeTooltip": "Tiene la Iniciativa — se aventura en la Ciudad Baja al inicio del mantenimiento",
+    "cityBlessing": "Bendición de la ciudad",
+    "cityBlessingTooltip": "Bendición de la ciudad — controla diez o más permanentes (Ascender)",
+    "dungeonAriaLabel": "Aventurándose en {{name}}, sala {{room}}",
+    "dungeonTooltip": "Aventurándose en {{name}} — sala {{room}}",
+    "poisonAriaLabel_one": "{{count}} contador de veneno",
+    "poisonAriaLabel_other": "{{count}} contadores de veneno",
+    "poisonTooltip": "Contadores de veneno: {{count}}",
+    "energyAriaLabel_one": "{{count}} contador de energía",
+    "energyAriaLabel_other": "{{count}} contadores de energía",
+    "energyTooltip": "Energía: {{count}}",
+    "ringAriaLabel": "El Anillo te tienta (nivel {{level}})",
+    "ringTooltip": "El Anillo te tienta — nivel {{level}}",
+    "radAriaLabel_one": "{{count}} contador rad",
+    "radAriaLabel_other": "{{count}} contadores rad",
+    "radTooltip": "Contadores rad: {{count}}",
+    "speedAriaLabel": "Velocidad {{value}}",
+    "speedTooltip": "Velocidad: {{value}}",
+    "companion": "Compañero"
+  },
+  "avatar": {
+    "underAttack": "{{name}} está bajo ataque"
+  },
+  "incomingAttackers": {
+    "summary": "⚔×{{count}} entrantes de {{name}}",
+    "clickToFocus": "haz clic para enfocar"
+  },
+  "manaPool": {
+    "onlyForSpellType": "Gastar solo para lanzar hechizos de un tipo específico",
+    "onlyForCreatureType": "Gastar solo para lanzar un hechizo de criatura del tipo elegido",
+    "onlyForTypeSpellsOrAbilities": "Gastar solo en hechizos o habilidades de un tipo específico",
+    "onlyForSpellWithKeywordKind": "Gastar solo para lanzar hechizos con una palabra clave específica",
+    "onlyForSpellWithKeywordKindFromZone": "Gastar solo para lanzar hechizos con palabra clave desde un cementerio",
+    "onlyForActivation": "Gastar solo para activar habilidades",
+    "onlyForXCosts": "Gastar solo en costes que incluyan {X}",
+    "convokePayment": "Pago de convocar",
+    "grantsProperty": "Otorga una propiedad al hechizo"
+  },
+  "zone": {
+    "emblem": "Emblema",
+    "emblemFallback": "Emblema",
+    "commander": "Comandante",
+    "commanderTitle": "Comandante: {{name}}",
+    "commanderTitleTax": "Comandante: {{name}} (Impuesto: +{{tax}})",
+    "castCommander": "Lanza {{name}} — haz doble clic o arrastra para jugar",
+    "castCommanderTax": "Lanza {{name}} (Impuesto: +{{tax}}) — haz doble clic o arrastra para jugar",
+    "tax": "Impuesto: +{{tax}}",
+    "companion": "Compañero",
+    "companionTitle": "Compañero: {{name}}",
+    "companionTitleUsed": "Compañero: {{name}} (Usado)",
+    "companionActivate": "Paga {3}: Pon {{name}} en tu mano",
+    "used": "Usado",
+    "exile": "Exilio",
+    "exileTitle": "Exilio ({{count}})",
+    "graveyard": "Cementerio",
+    "graveyardShort": "CE",
+    "graveyardTitle": "Cementerio ({{count}})",
+    "libraryAlt": "Biblioteca",
+    "libraryCount_one": "Biblioteca ({{count}} carta)",
+    "libraryCount_other": "Biblioteca ({{count}} cartas)",
+    "playFromTop": "Juega {{name}} desde lo alto de la biblioteca",
+    "topOfLibrary": "lo alto de la biblioteca",
+    "indicatorOpponentPrefix": "Op ",
+    "graveyardLower": "cementerio",
+    "exileLower": "exilio",
+    "zoneTitle": "{{zone}} ({{count}})",
+    "noCardsIn": "No hay cartas en {{zone}}",
+    "castFromZone": "Lanzar desde {{zone}}: {{name}}",
+    "viewCount": "Ver {{count}}",
+    "castableCount": "{{zone}} — {{count}} lanzables"
+  },
+  "mana": {
+    "free": "Gratis",
+    "chooseXTitle": "Elige un valor para X",
+    "chooseXAria": "Elegir el valor de X",
+    "xEquals": "X = {{value}}",
+    "minMax": "mín. {{min}} / máx. {{max}}",
+    "maxOnly": "máx. {{max}}",
+    "confirmX": "Confirmar X = {{value}}",
+    "payMana": "Pagar el coste de maná",
+    "convokeHint": "Gira criaturas para ayudar a pagar.",
+    "improviseHint": "Gira artefactos para ayudar a pagar.",
+    "convokeOrImproviseHint": "Gira criaturas o artefactos para ayudar a pagar.",
+    "lifeAmount": "2 vidas",
+    "lifeCostSummary": "({{count}} vidas)",
+    "paymentPending": "El pago sigue pendiente. Gira permanentes o cancela esta acción.",
+    "poolLabel": "Reserva:",
+    "poolEmpty": "Vacía",
+    "pay": "Pagar",
+    "chooseAmountTitle": "Elige la cantidad a pagar",
+    "chooseAmountAria": "Elige la cantidad a pagar",
+    "payAmount": "Pagar {{value}} {{resource}}",
+    "resourceEnergy": "energía",
+    "resourceMana": "maná"
+  },
+  "hand": {
+    "viewFullHand_one": "Ver la mano completa ({{count}} carta)",
+    "viewFullHand_other": "Ver la mano completa ({{count}} cartas)",
+    "handLabel": "Mano {{count}}",
+    "handTitle": "Mano ({{count}})",
+    "cardBack": "Dorso de la carta"
+  },
+  "opponentHud": {
+    "ally": "Aliado",
+    "out": "Fuera",
+    "phased": "Desfasado",
+    "followingActiveOpponent": "Siguiendo al oponente activo. El enfoque cambia al oponente cuyo turno sea.",
+    "followActiveOpponent": "Seguir al oponente activo. El enfoque cambiará al oponente cuyo turno sea.",
+    "targetPlayer": "Apuntar a {{name}}",
+    "viewBoardThenTarget": "Ver el tablero de {{name}} (haz clic de nuevo para apuntar a {{name}})",
+    "viewBoard": "Ver el tablero de {{name}}",
+    "clickToTarget": "Haz clic para apuntar a {{name}}",
+    "clickToViewThenTarget": "Haz clic para ver el tablero de {{name}}, luego haz clic de nuevo para apuntar a {{name}}",
+    "clickToViewBoard": "Haz clic para ver el tablero de {{name}}",
+    "underAttack": "{{name}} está bajo ataque",
+    "kickPlayer": "Expulsar al jugador {{seat}}",
+    "kickPlayerTooltip": "Expulsar al jugador (rendición)",
+    "incomingAttackers_one": "{{count}} criatura te ataca",
+    "incomingAttackers_other": "{{count}} criaturas te atacan",
+    "disconnected": "Desconectado",
+    "connected": "Conectado",
+    "statHand": "Mano",
+    "statCreatures": "Criaturas",
+    "statLands": "Tierras",
+    "statOther": "Otros"
+  },
+  "combat": {
+    "attackAll": "Atacar a todos",
+    "skip": "Omitir",
+    "confirmAttackers": "Confirmar atacantes ({{count}})",
+    "confirmBlockers": "Confirmar bloqueadores ({{count}})",
+    "clickAttackerToAssignBlocker": "Haz clic en un atacante para asignar bloqueador",
+    "menaceRequirement": "Debe ser bloqueada por {{count}} o por ninguna",
+    "blockNeedsBadge": "Necesita {{required}}",
+    "blockProgressBadge": "{{assigned}} / {{required}}",
+    "blockSatisfiedBadge": "✓ {{required}}",
+    "blockIncompleteAttacker": "{{assigned}} de {{required}} bloqueadores asignados",
+    "blockIncomplete_one": "{{count}} atacante necesita otro bloqueador",
+    "blockIncomplete_other": "{{count}} atacantes necesitan otro bloqueador",
+    "assignDamageTitle": "Asignar {{amount}} de daño de combate",
+    "assignDamageSubtitle": "{{name}} — Restante: {{remaining}}",
+    "assignDamageButton": "Asignar daño",
+    "lethalLabel": "letal: {{amount}}",
+    "lethalBadge": "Letal",
+    "planeswalkerLoyalty": "Planeswalker (lealtad: {{loyalty}})",
+    "defendingPlayerTrample": "Jugador defensor (Arrollar)",
+    "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)"
+  },
+  "stack": {
+    "title": "Pila",
+    "collapsePanel": "Contraer el panel de la pila",
+    "expandPanel": "Expandir el panel de la pila",
+    "dockLeft": "Acoplar la pila a la izquierda",
+    "dockRight": "Acoplar la pila a la derecha",
+    "casting": "Lanzando…",
+    "next": "Siguiente",
+    "activated": "Activada",
+    "triggered": "Disparada",
+    "triggeredFrom": "Disparada — De {{source}}",
+    "controllerYou": "Tú",
+    "controllerOpp": "Op",
+    "controllerInitialYou": "T",
+    "controllerInitialOpp": "J{{seat}}",
+    "targetingLabel": "Apuntando a {{label}}",
+    "titleTargets": "Objetivos: {{targets}}",
+    "titlePaid": "Pagado: {{paid}}",
+    "titleContext": "Contexto: {{context}}",
+    "paidXValue": "X={{value}}",
+    "paidManaSpent": "{{amount}} de maná",
+    "paidColorsSpent": "{{count}} colores",
+    "paidKicked": "kicker",
+    "paidKickedTimes": "kicker ×{{count}}",
+    "paidAdditionalCost": "coste extra",
+    "paidConvoked": "convocado ×{{count}}"
+  },
+  "targeting": {
+    "choosePermanentToCopy": "Elige un permanente para copiar",
+    "retargetCopySlot": "Reasignar objetivo de la copia: ranura {{current}} de {{total}}",
+    "chooseTargetForCopySlot": "Elige objetivo para la copia: ranura {{current}} de {{total}}",
+    "chooseNewTargetForCopy": "Elige un nuevo objetivo para la copia",
+    "chooseTargetForCopy": "Elige objetivo para la copia",
+    "chooseCreatureToExplore": "Elige qué criatura explora a continuación",
+    "tapUntappedCreatures_one": "Gira {{count}} criatura sin girar",
+    "tapUntappedCreatures_other": "Gira {{count}} criaturas sin girar",
+    "chooseTargetOf": "Elige el objetivo {{current}} de {{total}}",
+    "chooseTarget": "Elige un objetivo",
+    "noLegalTargets": "No hay objetivos legales disponibles",
+    "upToOne": "hasta un(a) {{target}}",
+    "one": "un(a) {{target}}",
+    "nounPlayer": "jugador",
+    "nounNonlandPermanent": "permanente que no sea tierra",
+    "nounCreature": "criatura",
+    "nounPlaneswalker": "planeswalker",
+    "nounTargetPermanent": "permanente objetivo",
+    "nounTarget": "objetivo",
+    "confirmTap": "Confirmar giro ({{selected}}/{{count}})",
+    "keepCurrentTargets": "Conservar objetivos actuales",
+    "skip": "Omitir"
+  },
+  "log": {
+    "title": "Registro de la partida",
+    "noEvents": "Aún no hay eventos",
+    "closeLog": "Cerrar el registro de la partida",
+    "verbosityFull": "completo",
+    "verbosityCompact": "compacto",
+    "verbosityMinimal": "mínimo",
+    "gameStarted": "Partida iniciada",
+    "turnStarted": "Turno {{turn}} -- {{player}}",
+    "phaseChanged": "Fase: {{phase}}",
+    "priorityPassed": "{{player}} pasó la prioridad",
+    "spellCast": "Hechizo lanzado por {{player}}",
+    "abilityActivated": "Habilidad activada (fuente {{sourceId}})",
+    "zoneChangedMoved": "El objeto {{objectId}} se movió de {{from}} -> {{to}}",
+    "zoneChangedEnters": "El objeto {{objectId}} entra en {{to}}",
+    "lifeChanged": "Vida de {{player}}: {{sign}}{{amount}}",
+    "manaAdded": "{{player}} añadió {{manaType}} de maná",
+    "permanentTapped": "Permanente {{objectId}} girado",
+    "permanentUntapped": "Permanente {{objectId}} enderezado",
+    "playerLost": "{{player}} perdió la partida",
+    "mulliganStarted": "Fase de mulligan",
+    "cardsDrawn_one": "{{player}} robó {{count}} carta",
+    "cardsDrawn_other": "{{player}} robó {{count}} cartas",
+    "cardDrawn": "{{player}} robó una carta",
+    "landPlayed": "{{player}} jugó una tierra",
+    "stackPushed": "El objeto {{objectId}} se puso en la pila",
+    "stackResolved": "La entrada {{objectId}} de la pila se resolvió",
+    "discarded": "{{player}} descartó",
+    "damageCleared": "Daño eliminado de {{objectId}}",
+    "gameOverWinner": "Fin de la partida -- ¡{{player}} gana!",
+    "gameOverDraw": "Fin de la partida -- Empate",
+    "damageDealtPlayer": "La fuente {{sourceId}} inflige {{amount}} de daño a {{player}}",
+    "damageDealtObject": "La fuente {{sourceId}} inflige {{amount}} de daño al objeto {{objectId}}",
+    "spellCountered": "El objeto {{objectId}} fue contrarrestado por {{counteredBy}}",
+    "counterAdded": "{{counterType}} x{{count}} añadido a {{objectId}}",
+    "counterRemoved": "{{counterType}} x{{count}} eliminado de {{objectId}}",
+    "tokenCreated": "Ficha \"{{name}}\" creada",
+    "creatureDestroyed": "Criatura {{objectId}} destruida",
+    "permanentSacrificed": "{{player}} sacrificó {{objectId}}",
+    "effectResolved": "Efecto {{kind}} resuelto",
+    "attackersDeclared_one": "{{count}} atacante declarado",
+    "attackersDeclared_other": "{{count}} atacantes declarados",
+    "blockersDeclared_one": "{{count}} bloqueador asignado",
+    "blockersDeclared_other": "{{count}} bloqueadores asignados",
+    "becomesTarget": "El objeto {{objectId}} es objetivo de {{sourceId}}",
+    "replacementApplied": "Reemplazo aplicado: {{eventType}}",
+    "companionRevealed": "{{player}} reveló al compañero: {{cardName}}",
+    "companionMovedToHand": "{{player}} puso al compañero {{cardName}} en la mano",
+    "powerToughnessChanged": "El objeto {{objectId}} ahora es {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
+    "genericEvent": "Evento: {{type}}"
+  },
+  "coverage": {
+    "engineTools": "Herramientas del motor",
+    "title": "Cobertura de cartas",
+    "subtitle": "Inspecciona la cobertura de implementación y los gestores del motor compatibles.",
+    "tabCardCoverage": "Cobertura de cartas",
+    "tabBySet": "Por colección",
+    "tabGapAnalysis": "Análisis de carencias",
+    "tabSupportedHandlers": "Gestores compatibles",
+    "noDataAvailable": "No hay datos de cobertura disponibles.",
+    "generateHint": "Genéralos con: cargo run --bin coverage-report -- /path/to/cards --all > client/public/coverage-data.json",
+    "emptyData": "Los datos de cobertura están vacíos (0 cartas analizadas).",
+    "runHint": "Ejecuta: cargo run --bin coverage-report -- /path/to/cards --all > client/public/coverage-data.json",
+    "searchCards": "Buscar cartas...",
+    "filterAll": "Todas",
+    "filterSupported": "Compatibles",
+    "filterUnsupported": "No compatibles",
+    "sortAz": "Orden: A-Z",
+    "sortMostGaps": "Orden: más carencias",
+    "sortFewestGaps": "Orden: menos carencias",
+    "shownOfTotal": "{{shown}} de {{total}} mostradas",
+    "noMatches": "Sin coincidencias",
+    "matchesCount": "{{shown}} de {{total}} coincidencias",
+    "cardsCount": "{{count}} cartas",
+    "selectCardPrompt": "Selecciona una carta para inspeccionar su desglose de análisis",
+    "navHint": "Usa las teclas de flecha para navegar, Escape para deseleccionar",
+    "coverageByFormat": "Cobertura por formato",
+    "allFormats": "Todos los formatos",
+    "setThresholdHint": "Colecciones con ≥{{minCards}} cartas y ≥{{minCoverage}}% totalmente compatibles. Expande una colección para inspeccionar las carencias restantes.",
+    "setsCount": "({{count}} colecciones)",
+    "noSetsMeetThreshold": "Ninguna colección alcanza el umbral todavía.",
+    "setMembershipMissing": "Los datos de pertenencia a colecciones no están en esta exportación de cobertura.",
+    "regenerateHint": "Regenéralo con: ./scripts/gen-card-data.sh",
+    "gapCount_one": "{{count}} carencia",
+    "gapCount_other": "{{count}} carencias",
+    "noUnsupportedInSet": "No hay cartas no compatibles en esta colección.",
+    "unsupportedCardsHint": "Cartas no compatibles ({{count}}) — haz clic en una para inspeccionar el árbol de análisis",
+    "noGapDetails": "sin detalles de carencias",
+    "noGapAnalysis": "No hay datos de análisis de carencias disponibles.",
+    "filterByFormat": "Filtrar por formato:",
+    "topGaps": "Principales carencias por impacto (Top 50)",
+    "copyAsTsv": "Copiar como TSV",
+    "totalLabel": "{{count}} en total",
+    "unlockLabel": "{{count}} desbloqueo",
+    "indLabel": "{{ratio}} ind",
+    "exampleCard": "p. ej. {{name}}",
+    "oraclePatterns": "Patrones de Oracle",
+    "coOccurringGaps": "Carencias coincidentes",
+    "singleGapUnlockByFormat": "Desbloqueo de una sola carencia por formato",
+    "twoGapBundles": "Paquetes de 2 carencias (implementa ambas para desbloquear cartas)",
+    "threeGapBundles": "Paquetes de 3 carencias (implementa las tres para desbloquear cartas)",
+    "bundleCards": "{{count}} cartas",
+    "backToList": "Volver a la lista",
+    "supported": "Compatible",
+    "unsupported": "No compatible",
+    "copyOracle": "Copiar Oracle",
+    "unresolvedGaps": "Carencias sin resolver ({{count}})",
+    "vanillaCard": "Sin elementos analizados (carta vainilla).",
+    "additionalParseItems": "Elementos de análisis adicionales",
+    "itemUnsupported": "no compatible",
+    "categoryKeyword": "Palabra clave",
+    "categoryAbility": "Habilidad",
+    "categoryTrigger": "Disparo",
+    "categoryStatic": "Estática",
+    "categoryReplacement": "Reemplazo",
+    "categoryCost": "Coste",
+    "copied": "¡Copiado!",
+    "handlersObserved": "{{count}} gestores observados en cartas compatibles",
+    "derivedFrom": "derivado de la salida del analizador · stubs y variantes sin usar excluidos",
+    "tabEffects": "Efectos",
+    "tabTriggers": "Disparos",
+    "tabKeywords": "Palabras clave",
+    "tabStatics": "Estáticas",
+    "tabReplacements": "Reemplazos",
+    "search": "Buscar...",
+    "cardCount_one": "{{formattedCount}} carta",
+    "cardCount_other": "{{formattedCount}} cartas",
+    "noMatchesFound": "No se encontraron coincidencias para “{{query}}”",
+    "noHandlersInCategory": "El analizador no produce ningún gestor de esta categoría en las cartas totalmente compatibles.",
+    "footerSummary": "{{handlers}} gestores en {{categories}} categorías · derivados del motor a partir de {{cards}} cartas compatibles"
+  },
+  "gamePage": {
+    "actions": {
+      "returnToMenu": "Volver al menú",
+      "returnToMenuLower": "Volver al menú",
+      "concedeGame": "Conceder la partida",
+      "ok": "Aceptar"
+    },
+    "toasts": {
+      "playerDisconnected": "{{name}} se desconectó",
+      "gamePausedPlayerDisconnected": "Partida en pausa — {{name}} se desconectó",
+      "roomFull": "Sala llena — ¡lista para empezar!",
+      "hostReconnecting": "El anfitrión se desconectó — reconectando (intento {{attempt}})…",
+      "roomStillClaimed": "Tu sala anterior aún se está cerrando en el servidor de señalización. Espera aproximadamente un minuto y luego intenta Reanudar de nuevo."
+    },
+    "sandbox": {
+      "banner": "Modo Sandbox — acciones de depuración habilitadas",
+      "bannerAria": "Banner del modo sandbox"
+    },
+    "reconnect": {
+      "banner": "Reconectando… (intento {{attempt}})",
+      "bannerWithMax": "Reconectando… (intento {{attempt}}/{{maxAttempts}})",
+      "connectionLost": "Conexión perdida"
+    },
+    "opponentDisconnected": {
+      "title": "Oponente desconectado",
+      "body": "Esperando a que el oponente se reconecte..."
+    },
+    "resumeReset": {
+      "message": "{{reason}} Se inició una nueva partida."
+    },
+    "playDraw": {
+      "title": "Juego {{gameNumber}}: Elige jugar o robar",
+      "matchScore": "Marcador de la serie {{p0Wins}}-{{p1Wins}}",
+      "playFirst": "Jugar primero",
+      "playFirstDescription": "Toma el primer turno",
+      "drawFirst": "Robar primero",
+      "drawFirstDescription": "Toma el robo extra en tu primer turno"
+    },
+    "mulligan": {
+      "opponentDeciding": "El oponente está decidiendo su mano inicial…",
+      "londonTitle": "Mulligan de Londres ({{count}} tomados)",
+      "keepHand": "Conservar la mano",
+      "putOnBottom": "Poner {{count}} en el fondo",
+      "noCardsToBottom": "Sin cartas al fondo",
+      "mulligan": "Mulligan",
+      "freeMulligan": "Mulligan gratis",
+      "mulliganTo": "Mulligan a {{count}}",
+      "shuffleDrawSevenFree": "Baraja y roba 7 — sin cartas al fondo",
+      "shuffleDrawSevenAgain": "Baraja y roba 7 de nuevo",
+      "usePowder": "Usar {{name}}",
+      "powderDescription": "Exilia todas las cartas de la mano, roba el mismo número — no es un mulligan",
+      "powderTooltip": "Exilia todas las cartas de tu mano y roba el mismo número. No es un mulligan — el recuento y los fondos no se ven afectados.",
+      "eyebrowMulligan": "Mulligan {{count}} · Londres",
+      "eyebrowOpening": "Mano inicial · Mulligan de Londres",
+      "reviewTitle": "Revisa tu mano inicial",
+      "subtitleKeepWithBottom": "Conserva esta mano (pondrás {{count}} en el fondo) o haz mulligan de nuevo para 7 cartas nuevas.",
+      "subtitleKeepFree": "Conserva esta mano (mulligan gratis — sin cartas al fondo) o haz mulligan de nuevo para 7 cartas nuevas.",
+      "subtitleOpeningFree": "Conserva esta mano o haz un mulligan gratis (sin cartas al fondo).",
+      "subtitleOpeningOne": "Conserva esta mano o haz mulligan para 7 cartas nuevas (pondrás 1 en el fondo al conservar)."
+    },
+    "companion": {
+      "eyebrow": "Antes de la partida",
+      "title": "¿Revelar compañero?",
+      "subtitle": "Puedes revelar un compañero de tu sideboard. Se colocará en la zona de compañero y podrás ponerlo en tu mano una vez durante la partida pagando {3}.",
+      "decline": "Rechazar",
+      "reveal": "Revelar {{name}}"
+    },
+    "bottomCards": {
+      "eyebrowTinyLeaders": "Tiny Leaders",
+      "eyebrowLondon": "Mulligan de Londres",
+      "title_one": "Pon {{count}} carta en el fondo",
+      "title_other": "Pon {{count}} cartas en el fondo",
+      "subtitleOpening_one": "Selecciona {{count}} carta de tu mano inicial antes de que empiecen los mulligans.",
+      "subtitleOpening_other": "Selecciona {{count}} cartas de tu mano inicial antes de que empiecen los mulligans.",
+      "subtitleMulligan_one": "Selecciona {{count}} carta de tu mano. Se devolverá al fondo de tu biblioteca en el orden que elijas aquí.",
+      "subtitleMulligan_other": "Selecciona {{count}} cartas de tu mano. Se devolverán al fondo de tu biblioteca en el orden que elijas aquí.",
+      "selectedOf": "Seleccionadas {{selected}} de {{count}}",
+      "confirmSelection": "Confirmar selección"
+    },
+    "gameOver": {
+      "draw": "EMPATE",
+      "victory": "VICTORIA",
+      "defeat": "DERROTA",
+      "lifeSummary": "Tú: <player>{{playerLife}}</player> <sep>/</sep> Oponente: <opponent>{{opponentLife}}</opponent>",
+      "turns": "Turnos: {{count}}",
+      "duration": "Duración: {{time}}",
+      "backToDraft": "Volver al Draft",
+      "continueRun": "Continuar recorrido",
+      "backToLobby": "Volver a la sala de espera",
+      "rematch": "Revancha"
+    },
+    "abilityChoice": {
+      "subtitleSneak": "Elige qué atacante devolver (coste de Sneak)",
+      "subtitlePreparedCopy": "¿Lanzar el hechizo preparado?",
+      "subtitleActivate": "¿Activar esta habilidad?",
+      "subtitlePlay": "Elige cómo jugar esta carta",
+      "subtitleChoose": "Elige una habilidad para activar"
+    },
+    "defiler": {
+      "title": "Reducción de coste de Defiler",
+      "subtitle": "¿Pagar {{lifeCost}} vidas para reducir el coste de maná?",
+      "payLife": "Pagar {{lifeCost}} vidas",
+      "decline": "Rechazar"
+    },
+    "untap": {
+      "permanentFallback": "Permanente",
+      "title": "¿Enderezar {{name}}?",
+      "subtitle": "Elige si este permanente se endereza durante tu paso de enderezar.",
+      "untap": "Enderezar",
+      "untapDescription": "{{name}} se endereza ahora.",
+      "keepTapped": "Mantener girado",
+      "keepTappedDescription": "{{name}} permanece girado en este paso de enderezar."
+    },
+    "cost": {
+      "discardCard": "descarta una carta",
+      "life": "{{amount}} vidas",
+      "sacrifice_one": "sacrifica un permanente",
+      "sacrifice_other": "sacrifica {{count}} permanentes",
+      "returnToHand_one": "devuelve un permanente a la mano",
+      "returnToHand_other": "devuelve {{count}} permanentes a la mano",
+      "energy": "{{amount}} de energía",
+      "generic": "un coste",
+      "pay": "Pagar {{cost}}"
+    },
+    "unlessPayment": {
+      "defaultEffect": "Contrarrestar a menos que pagues",
+      "defaultChooseCost": "Elige un coste",
+      "title": "{{effect}} a menos que pagues",
+      "titleChooseOne": "{{effect}} a menos que pagues uno",
+      "dontPay": "No pagar",
+      "takeEffect": "Aceptar el efecto"
+    },
+    "activationCost": {
+      "title": "Elegir coste de activación"
+    },
+    "debug": {
+      "modeBanner": "MODO DEPURACIÓN - Haz clic en cualquier carta"
+    }
+  },
+  "gameProvider": {
+    "passwordPrompt": "Esta sala requiere una contraseña:",
+    "toasts": {
+      "connectionFailed": "La conexión falló. Reintenta o cambia el servidor en Ajustes.",
+      "eliminatedSpectating": "Has sido eliminado. Ahora eres espectador."
+    },
+    "resumeReset": {
+      "appUpdated": "La aplicación se actualizó y tu partida guardada es incompatible con la nueva versión.",
+      "restoreFailed": "No se pudo restaurar la partida guardada: {{error}}"
+    },
+    "notification": {
+      "title": "El oponente se unió",
+      "opponentJoined": "Tu oponente se ha unido a la partida. ¡Vuelve y juega!",
+      "opponentJoinedNamed": "{{name}} se unió a tu partida. ¡Vuelve y juega!"
+    },
+    "noLegalAiDecks": {
+      "withFormat": "No hay mazos de IA legales disponibles para {{format}}.",
+      "generic": "No hay mazos de IA legales disponibles para el formato seleccionado."
+    }
+  },
+  "gameSetup": {
+    "eyebrow": "Configuración de la partida",
+    "title": "Empieza una partida.",
+    "startMatch": "Empezar partida",
+    "startMatchWithOpponents": "Empezar partida ({{count}} op.)",
+    "deckNotLegal": "El mazo no es legal en {{format}}.",
+    "selectDeckPrompt": "Selecciona un mazo",
+    "commanderNote": "Commander: singleton de 100 cartas, daño de comandante a {{threshold}}",
+    "formatChip": {
+      "kicker": "Formato",
+      "choosePlaceholder": "Elige formato",
+      "ariaLabel": "Formato: {{label}} ({{group}}). Toca para cambiar.",
+      "ariaLabelEmpty": "Elige el formato de la partida"
+    },
+    "formatPicker": {
+      "title": "Elige un formato",
+      "subtitle": "Elige las reglas con las que jugarán todos en la mesa."
+    },
+    "deckPreview": {
+      "editDeck": "Editar {{name}}",
+      "cardCount_one": "{{count}} carta",
+      "cardCount_other": "{{count}} cartas",
+      "unknownBadge": "Desconocidas {{count}}",
+      "unknownCardsTitle": "Cartas desconocidas:\n{{cards}}"
+    },
+    "config": {
+      "startingLife": "Vida inicial",
+      "players": "Jugadores",
+      "whoGoesFirst": "Quién empieza",
+      "firstPlayer": {
+        "random": "Aleatorio",
+        "play": "Jugar",
+        "draw": "Robar"
+      }
+    },
+    "noLegalAiDecks": {
+      "withFormat": "Añade o importa un mazo legal en {{format}} para que lo use la IA.",
+      "generic": "Añade o importa un mazo legal en este formato para que lo use la IA."
+    }
+  },
+  "cardChoice": {
+    "badges": {
+      "choose": "Elegir",
+      "selected": "Seleccionada",
+      "keep": "Conservar",
+      "top": "Arriba",
+      "bottom": "Fondo",
+      "graveyard": "Cementerio",
+      "put": "Poner",
+      "sacrifice": "Sacrificar",
+      "exile": "Exiliar",
+      "battlefield": "Campo de batalla",
+      "target": "Objetivo",
+      "return": "Devolver",
+      "discard": "Descartar",
+      "evidence": "Evidencia",
+      "manifest": "Manifestar",
+      "crew": "Tripular ({{power}})",
+      "saddle": "Ensillar ({{power}})",
+      "station": "Estación (+{{power}})"
+    },
+    "buttons": {
+      "confirm": "Confirmar",
+      "decline": "Rechazar",
+      "pass": "Pasar",
+      "skip": "Omitir",
+      "repeat": "Repetir",
+      "stop": "Detener",
+      "confirmCount": "Confirmar ({{selected}}/{{count}})",
+      "confirmOrder": "Confirmar orden ({{selected}}/{{count}})",
+      "sacrificeCount": "Sacrificar ({{selected}}/{{count}})",
+      "exileCount": "Exiliar ({{selected}}/{{count}})",
+      "discardCount": "Descartar ({{selected}}/{{count}})",
+      "collectCount": "Recolectar ({{total}}/{{minimum}})",
+      "labelCount": "{{label}} ({{selected}}/{{count}})"
+    },
+    "ringBearer": {
+      "title": "Elegir Portador del Anillo",
+      "subtitle": "Elige una criatura que controles"
+    },
+    "scry": {
+      "title": "Adivinar",
+      "subtitle_one": "Mira la {{count}} carta superior de tu biblioteca",
+      "subtitle_other": "Mira las {{count}} cartas superiores de tu biblioteca"
+    },
+    "dig": {
+      "titleReorder": "Reordenar cartas",
+      "title": "Elegir cartas",
+      "subtitleReorder": "Selecciona las {{count}} cartas en orden de arriba a abajo",
+      "subtitleExact_one": "Selecciona {{count}} carta para poner {{destination}}",
+      "subtitleExact_other": "Selecciona {{count}} cartas para poner {{destination}}",
+      "subtitleUpTo_one": "Selecciona hasta {{count}} carta para poner {{destination}}",
+      "subtitleUpTo_other": "Selecciona hasta {{count}} cartas para poner {{destination}}",
+      "destinationTop": "en lo alto de tu biblioteca",
+      "destinationBattlefield": "en el campo de batalla",
+      "destinationHand": "en tu mano"
+    },
+    "surveil": {
+      "title": "Vigilar",
+      "subtitle_one": "Mira la {{count}} carta superior de tu biblioteca",
+      "subtitle_other": "Mira las {{count}} cartas superiores de tu biblioteca"
+    },
+    "reveal": {
+      "titleReveal": "Revelar de la mano",
+      "titleOpponentHand": "Mano del oponente",
+      "subtitleReveal": "Elige una carta para revelar, o rechaza",
+      "subtitleChoose": "Elige una carta"
+    },
+    "search": {
+      "title": "Buscar en la biblioteca",
+      "subtitleExact_one": "Elige {{count}} carta",
+      "subtitleExact_other": "Elige {{count}} cartas",
+      "subtitleUpTo_one": "Elige hasta {{count}} carta",
+      "subtitleUpTo_other": "Elige hasta {{count}} cartas",
+      "subtitleMatchExact_one": "Elige {{count}} carta que cumpla los requisitos de búsqueda indicados",
+      "subtitleMatchExact_other": "Elige {{count}} cartas que cumplan los requisitos de búsqueda indicados",
+      "subtitleMatchUpTo_one": "Elige hasta {{count}} carta que cumpla los requisitos de búsqueda indicados",
+      "subtitleMatchUpTo_other": "Elige hasta {{count}} cartas que cumplan los requisitos de búsqueda indicados",
+      "subtitleDistinctExact_one": "Elige {{count}} carta con cualidades distintas",
+      "subtitleDistinctExact_other": "Elige {{count}} cartas con cualidades distintas",
+      "subtitleDistinctUpTo_one": "Elige hasta {{count}} carta con cualidades distintas",
+      "subtitleDistinctUpTo_other": "Elige hasta {{count}} cartas con cualidades distintas",
+      "subtitleManaValueExact_one": "Elige {{count}} carta dentro del límite de valor de maná",
+      "subtitleManaValueExact_other": "Elige {{count}} cartas dentro del límite de valor de maná",
+      "subtitleManaValueUpTo_one": "Elige hasta {{count}} carta dentro del límite de valor de maná",
+      "subtitleManaValueUpTo_other": "Elige hasta {{count}} cartas dentro del límite de valor de maná"
+    },
+    "searchPartition": {
+      "title": "Elige cartas para el campo de batalla",
+      "subtitle_one": "Elige {{count}} carta para poner en el campo de batalla{{tapped}}; el resto va a tu mano",
+      "subtitle_other": "Elige {{count}} cartas para poner en el campo de batalla{{tapped}}; el resto va a tu mano",
+      "tapped": " giradas"
+    },
+    "outsideGame": {
+      "title": "Elegir del sideboard",
+      "subtitleExact": "Elige {{count}}",
+      "subtitleUpTo": "Elige hasta {{count}}"
+    },
+    "chooseFromZone": {
+      "title": "Elegir cartas",
+      "subtitleExact_one": "Elige {{count}} carta",
+      "subtitleExact_other": "Elige {{count}} cartas",
+      "subtitleUpTo_one": "Elige hasta {{count}} carta",
+      "subtitleUpTo_other": "Elige hasta {{count}} cartas",
+      "subtitleDistinctCardTypes": "Elige hasta {{count}} cartas con tipos de carta distintos"
+    },
+    "pair": {
+      "title": "Elegir compañero de Vínculo de almas",
+      "subtitle": "Empareja con una criatura sin emparejar que controles"
+    },
+    "effectZone": {
+      "titleSacrifice": "Sacrificar",
+      "titleTopdeck": "Poner en la biblioteca",
+      "titleBattlefield": "Poner en el campo de batalla",
+      "subtitleSacrificeExact_one": "Elige {{count}} permanente para sacrificar",
+      "subtitleSacrificeExact_other": "Elige {{count}} permanentes para sacrificar",
+      "subtitleSacrificeUpTo_one": "Elige hasta {{count}} permanente para sacrificar",
+      "subtitleSacrificeUpTo_other": "Elige hasta {{count}} permanentes para sacrificar",
+      "subtitleSacrificeRange_one": "Elige {{min}}-{{count}} permanente para sacrificar",
+      "subtitleSacrificeRange_other": "Elige {{min}}-{{count}} permanentes para sacrificar",
+      "subtitleTopdeckExact_one": "Elige {{count}} carta para poner en lo alto de tu biblioteca",
+      "subtitleTopdeckExact_other": "Elige {{count}} cartas para poner en lo alto de tu biblioteca",
+      "subtitleTopdeckUpTo_one": "Elige hasta {{count}} carta para poner en lo alto de tu biblioteca",
+      "subtitleTopdeckUpTo_other": "Elige hasta {{count}} cartas para poner en lo alto de tu biblioteca",
+      "subtitleTopdeckRange_one": "Elige {{min}}-{{count}} carta para poner en lo alto de tu biblioteca",
+      "subtitleTopdeckRange_other": "Elige {{min}}-{{count}} cartas para poner en lo alto de tu biblioteca",
+      "subtitleBattlefieldExact_one": "Elige {{count}} carta para poner en el campo de batalla",
+      "subtitleBattlefieldExact_other": "Elige {{count}} cartas para poner en el campo de batalla",
+      "subtitleBattlefieldUpTo_one": "Elige hasta {{count}} carta para poner en el campo de batalla",
+      "subtitleBattlefieldUpTo_other": "Elige hasta {{count}} cartas para poner en el campo de batalla",
+      "subtitleBattlefieldRange_one": "Elige {{min}}-{{count}} carta para poner en el campo de batalla",
+      "subtitleBattlefieldRange_other": "Elige {{min}}-{{count}} cartas para poner en el campo de batalla",
+      "labelSkip": "Omitir",
+      "labelDecline": "Rechazar",
+      "labelPutOnTop": "Poner arriba ({{order}})",
+      "labelConfirm": "Confirmar ({{selected}}/{{count}})",
+      "labelTop": "Arriba ({{selected}}/{{count}})",
+      "labelPut": "Poner ({{selected}}/{{count}})",
+      "orderTop": "Arriba"
+    },
+    "drawnThisTurn": {
+      "title": "Robadas este turno",
+      "subtitle": "Pon hasta {{count}} arriba; paga {{life}} vidas por cada una conservada",
+      "labelPayLife": "Pagar {{life}} vidas",
+      "labelConfirm": "Confirmar ({{selected}}/{{count}})"
+    },
+    "sacrifice": {
+      "title": "Sacrificar",
+      "subtitle_one": "Elige {{count}} permanente para sacrificar",
+      "subtitle_other": "Elige {{count}} permanentes para sacrificar"
+    },
+    "exileBattlefield": {
+      "title": "Exiliar",
+      "subtitle_one": "Elige {{count}} permanente para exiliar",
+      "subtitle_other": "Elige {{count}} permanentes para exiliar"
+    },
+    "multiTarget": {
+      "title": "Elegir objetivos",
+      "subtitleExact_one": "Elige {{count}} objetivo",
+      "subtitleExact_other": "Elige {{count}} objetivos",
+      "subtitleRange": "Elige {{min}}–{{max}} objetivos"
+    },
+    "paradigm": {
+      "title": "Paradigma",
+      "subtitle": "Lanza una copia de uno de estos hechizos sin pagar su coste de maná, o pasa."
+    },
+    "payManaAbility": {
+      "title": "Pagar el coste de la habilidad de maná",
+      "subtitle": "Selecciona qué maná gastar"
+    },
+    "returnToHand": {
+      "title": "Devolver",
+      "subtitle_one": "Elige {{count}} permanente para devolver",
+      "subtitle_other": "Elige {{count}} permanentes para devolver"
+    },
+    "removeCounter": {
+      "title": "Quitar contador",
+      "subtitle": "Elige un permanente del que quitar un contador",
+      "label": "Quitar"
+    },
+    "blight": {
+      "title": "Plaga",
+      "subtitle_one": "Pon un contador -1/-1 en {{count}} criatura que controles",
+      "subtitle_other": "Pon un contador -1/-1 en {{count}} criaturas que controles"
+    },
+    "crew": {
+      "title": "Tripular vehículo",
+      "subtitle": "Gira criaturas con fuerza total de {{power}} o mayor",
+      "label": "Tripular ({{total}}/{{power}})"
+    },
+    "station": {
+      "title": "Estación",
+      "subtitle": "Gira otra criatura sin girar que controles. Los contadores de carga añadidos equivalen a su fuerza.",
+      "labelWithCharge": "Estación (+{{charge}} de carga)",
+      "label": "Estación"
+    },
+    "saddle": {
+      "title": "Ensillar montura",
+      "subtitle": "Gira criaturas con fuerza total de {{power}} o mayor",
+      "label": "Ensillar ({{total}}/{{power}})"
+    },
+    "wardSacrifice": {
+      "title_one": "Guarda — Sacrifica un permanente",
+      "title_other": "Guarda — Sacrifica {{count}} permanentes",
+      "subtitle": "Elige un permanente para sacrificar"
+    },
+    "unlessBounce": {
+      "title_one": "Devuelve un permanente a la mano",
+      "title_other": "Devuelve {{count}} permanentes a la mano",
+      "subtitle": "Elige un permanente para devolver a la mano de su propietario"
+    },
+    "exileForCost": {
+      "titleAlternative": "Coste alternativo",
+      "titleEscape": "Evadir",
+      "sourceHand": "tu mano",
+      "sourceGraveyard": "tu cementerio",
+      "subtitle_one": "Exilia {{count}} carta de {{source}}",
+      "subtitle_other": "Exilia {{count}} cartas de {{source}}"
+    },
+    "behold": {
+      "title": "Contemplar",
+      "subtitleExile": "Exilia un permanente o carta que coincida",
+      "subtitleChoose": "Elige un permanente que coincida o revela una carta que coincida",
+      "labelExile": "Exiliar",
+      "labelBehold": "Contemplar"
+    },
+    "collectEvidence": {
+      "title": "Recolectar evidencia",
+      "subtitle": "Exilia cartas de tu cementerio con un valor de maná total de {{minimum}} o mayor"
+    },
+    "discard": {
+      "title": "Descartar",
+      "titleAdditionalCost": "Descartar como coste adicional",
+      "titleManaAbility": "Descartar para habilidad de maná",
+      "titleConnive_one": "Conspirar — Descarta una carta",
+      "titleConnive_other": "Conspirar — Descarta {{count}} cartas",
+      "titleUpTo": "Descarta hasta {{count}} cartas",
+      "titleExact_one": "Descarta una carta",
+      "titleExact_other": "Descarta {{count}} cartas",
+      "titleWard": "Guarda — Descarta una carta",
+      "subtitleUpTo_one": "Elige hasta {{count}} carta para descartar",
+      "subtitleUpTo_other": "Elige hasta {{count}} cartas para descartar",
+      "subtitleUnless": "Elige {{count}} cartas o 1 carta que coincida para descartar",
+      "subtitleExact_one": "Elige {{count}} carta para descartar",
+      "subtitleExact_other": "Elige {{count}} cartas para descartar"
+    },
+    "harmonize": {
+      "title": "Armonizar",
+      "subtitle": "Gira una criatura para reducir el coste de lanzamiento según su fuerza, u omite",
+      "labelSkip": "Omitir (paga el coste completo)"
+    },
+    "legend": {
+      "title": "Regla de leyenda",
+      "subtitle": "Elige qué \"{{name}}\" conservar",
+      "keepAria": "Conservar {{name}} ({{status}})",
+      "statusJustEntered": "Acaba de entrar",
+      "statusAlready": "Ya en el campo de batalla"
+    },
+    "commanderZone": {
+      "title": "Zona de comandante",
+      "subtitle": "{{name}} fue puesto en {{zone}}. ¿Devolver a la Zona de Mando?",
+      "commanderFallback": "Comandante",
+      "labelCommandZone": "Zona de Mando",
+      "labelLeave": "Dejar en {{zone}}"
+    },
+    "revealUntil": {
+      "title": "Revelar hasta",
+      "subtitle": "¿Poner {{name}} en el campo de batalla?",
+      "cardFallback": "la carta revelada",
+      "labelBattlefield": "En el campo de batalla",
+      "labelInto": "En {{zone}}"
+    },
+    "repeatProcess": {
+      "title": "Repetir este proceso",
+      "subtitle": "¿Repetir el proceso de nuevo?"
+    },
+    "damageSource": {
+      "title": "Fuente de daño",
+      "subtitle": "Elige una fuente"
+    },
+    "manifestDread": {
+      "title": "Manifestar pavor",
+      "subtitle": "Elige una carta para manifestar boca abajo. La otra va a tu cementerio.",
+      "label": "Confirmar manifestación"
+    },
+    "manaColor": {
+      "title": "Elegir color de maná",
+      "subtitleBatch": "Selecciona un color y luego cuántas fuentes girar",
+      "subtitle": "Selecciona qué color de maná producir",
+      "howMany": "¿Cuántas?",
+      "tapFewer": "Girar menos",
+      "tapMore": "Girar más",
+      "labelAdd": "Añadir {{count}}",
+      "labelConfirm": "Confirmar"
+    },
+    "manaCombination": {
+      "title": "Elegir combinación de maná",
+      "subtitleAny": "Selecciona cada color de maná a producir",
+      "subtitle": "Selecciona qué combinación de maná producir"
+    }
+  },
+  "dialogShell": {
+    "eyebrow": "Elección de la partida",
+    "restoreDialog": "Restaurar diálogo",
+    "peekAria": "Mover el diálogo a un lado",
+    "peekTitle": "Echar un vistazo al campo de batalla",
+    "close": "Cerrar",
+    "closeTitle": "Cerrar (Esc)"
+  },
+  "choiceOverlay": {
+    "eyebrow": "Elección de la partida",
+    "scrollLeft": "Desplazar a la izquierda",
+    "scrollRight": "Desplazar a la derecha",
+    "confirm": "Confirmar",
+    "cancel": "Cancelar"
+  },
+  "adventureCast": {
+    "eyebrow": "Aventura",
+    "title": "Elige una cara",
+    "subtitle": "Lanza como la criatura o como el hechizo de Aventura.",
+    "adventureFallback": "Aventura",
+    "castNamed": "Lanzar {{name}}",
+    "creatureTag": "(Criatura)",
+    "adventureTag": "(Aventura)"
+  },
+  "alternativeCost": {
+    "title": "Elegir coste de lanzamiento",
+    "warpEyebrow": "Distorsión",
+    "warpNormalLabel": "Lanzar normalmente",
+    "warpAltLabel": "Lanzar con Distorsión",
+    "warpAltSuffix": "(se exilia en el paso final)",
+    "warpSubtitle": "Lanza {{name}} normalmente o usa su coste de Distorsión.",
+    "evokeEyebrow": "Evocar",
+    "evokeNormalLabel": "Lanzar normalmente",
+    "evokeAltLabel": "Lanzar con Evocar",
+    "evokeSubtitle": "Lanza {{name}} normalmente o lánzala por su coste de Evocar.",
+    "overloadEyebrow": "Sobrecargar",
+    "overloadNormalLabel": "Lanzar normalmente",
+    "overloadAltLabel": "Lanzar con Sobrecargar",
+    "overloadSubtitle": "Lanza {{name}} normalmente apuntando a un único permanente, o paga su coste de Sobrecargar para afectar a todos los objetivos válidos.",
+    "bestowEyebrow": "Otorgar",
+    "bestowNormalLabel": "Lanzar como criatura",
+    "bestowAltLabel": "Lanzar con Otorgar",
+    "bestowSubtitle": "Lanza {{name}} normalmente como criatura, o paga su coste de Otorgar para lanzarla como un Aura.",
+    "additionalExile": "+ Exiliar una carta",
+    "additionalSacrifice": "+ Sacrificar un permanente",
+    "additionalPayLife": "+ Pagar vidas",
+    "additionalDiscard": "+ Descartar una carta",
+    "additionalTapCreatures": "+ Girar criaturas",
+    "additionalGeneric": "+ {{type}}"
+  },
+  "battleProtector": {
+    "title": "Elegir un protector",
+    "battleFallback": "Batalla",
+    "subtitle": "{{name}} necesita un nuevo protector. Elige qué oponente la defenderá."
+  },
+  "cardDataMissing": {
+    "title": "Faltan los datos de cartas",
+    "body": "No se encontró <code>card-data.json</code>. La partida necesita las definiciones de cartas para jugar con cartas reales.",
+    "generatePrompt": "Genéralo ejecutando:",
+    "placeFile": "Luego coloca el archivo de salida en <code>client/public/card-data.json</code> y recarga.",
+    "continueAnyway": "Continuar de todos modos"
+  },
+  "cascadeChoice": {
+    "cascadeEyebrow": "Cascada",
+    "discoverEyebrow": "Descubrir",
+    "title": "¿Lanzar {{name}}?",
+    "subtitleCascade": "Cascada exilió {{name}} (valor de maná inferior a {{sourceMv}}). Lánzala sin pagar su coste de maná, o rechaza y baraja las {{total}} cartas exiliadas hacia el fondo de tu biblioteca.",
+    "subtitleDiscover": "Descubrir exilió {{name}}. Lánzala sin pagar su coste de maná, o ponla en tu mano y baraja las otras {{missCount}} cartas exiliadas hacia el fondo de tu biblioteca.",
+    "castNamed": "Lanzar {{name}}",
+    "castSuffix": "(sin pagar su coste de maná)",
+    "putIntoHand": "Poner en la mano",
+    "decline": "Rechazar",
+    "discoverDeclineSuffix": "(pon el resto en el fondo)",
+    "cascadeDeclineSuffix": "(baraja todas las cartas exiliadas hacia el fondo)"
+  },
+  "castingVariant": {
+    "eyebrow": "Lanzar",
+    "title": "Elegir lanzamiento",
+    "variantNormal": "Lanzar normalmente",
+    "variantAdventure": "Lanzar como Aventura",
+    "variantOmen": "Lanzar como Presagio",
+    "variantWarp": "Lanzar con Distorsión",
+    "variantEscape": "Lanzar con Evadir",
+    "variantRetrace": "Lanzar con Retrazar",
+    "variantHarmonize": "Lanzar con Armonizar",
+    "variantFlashback": "Lanzar con Flashback",
+    "variantAftermath": "Lanzar con Secuela",
+    "variantGraveyardPermission": "Lanzar desde el cementerio",
+    "variantHandPermission": "Lanzar desde la mano",
+    "variantMiracle": "Lanzar con Milagro",
+    "variantMadness": "Lanzar con Locura",
+    "variantEvoke": "Lanzar con Evocar",
+    "variantSuspend": "Lanzar desde Suspender",
+    "variantPlot": "Lanzar desde Tramar",
+    "variantForetell": "Lanzar desde Predecir",
+    "variantOverload": "Lanzar con Sobrecargar",
+    "variantBestow": "Lanzar con Otorgar",
+    "variantFallback": "Lanzar con {{type}}"
+  },
+  "categoryChoice": {
+    "title": "Elegir permanentes a conservar",
+    "subtitleOpponent": "Elige un permanente de cada tipo de entre los permanentes que no sean tierra que controla {{name}}; el resto se sacrifica.",
+    "subtitleSelf": "Elige un permanente de cada tipo de entre los permanentes que no sean tierra que controles; el resto se sacrifica.",
+    "noneToKeep": "Sin {{category}} — ninguno a conservar",
+    "objectFallback": "Objeto {{id}}"
+  },
+  "chooseOneOfBranch": {
+    "eyebrow": "Elección",
+    "title": "Elige una",
+    "subtitle": "Selecciona la opción a resolver.",
+    "optionFallback": "Opción {{number}}"
+  },
+  "combatTax": {
+    "eyebrow": "Impuesto de combate",
+    "titleAttack": "Pagar para atacar",
+    "titleBlock": "Pagar para bloquear",
+    "subtitleAttack": "Uno o más atacantes tienen impuesto. Paga el total o retíralos del ataque.",
+    "subtitleBlock": "Uno o más bloqueadores tienen impuesto. Paga el total o retíralos del bloqueo.",
+    "declineAttack": "Rechazar (retirar atacantes con impuesto)",
+    "declineBlock": "Rechazar (retirar bloqueadores con impuesto)",
+    "perCreatureBreakdown": "Desglose por criatura",
+    "total": "Total",
+    "pay": "Pagar",
+    "creatureFallback": "Criatura {{id}}"
+  },
+  "distributeAmong": {
+    "unitCounter": "contador {{counter}}",
+    "unitDamage": "de daño",
+    "unitLife": "de vida",
+    "title": "Distribuir {{total}} {{unit}}",
+    "subtitle": "Asigna al menos 1 {{unit}} a cada objetivo. Restante: {{remaining}}"
+  },
+  "dungeonChoice": {
+    "title": "Elegir una mazmorra",
+    "subtitle": "Selecciona una mazmorra en la que aventurarte",
+    "roomTitle": "Elegir una sala",
+    "roomSubtitle": "Avanza en {{name}}"
+  },
+  "engineLost": {
+    "crashTitle": "El motor se bloqueó",
+    "crashBody": "phase.rs encontró un error interno y no puede continuar esta acción de forma segura. Tu último turno guardado se conserva — recarga para restaurar la partida. <strong>Por favor, informa de esto</strong> para que podamos corregirlo.",
+    "connectionTitle": "Se perdió la conexión con el motor",
+    "connectionBody": "phase.rs perdió su enlace con el motor de la partida — lo más habitual es que lo cause una actualización en segundo plano activándose a mitad de partida. Tu último turno guardado se conserva; recarga para restaurar la partida.",
+    "diagnostic": "diagnóstico: {{reason}}",
+    "showDetails": "Mostrar detalles",
+    "copyDiagnostic": "Copiar diagnóstico",
+    "copied": "¡Copiado!",
+    "reportOnGithub": "Informar en GitHub",
+    "reload": "Recargar",
+    "reportTitle": "Bloqueo del motor: {{summary}}",
+    "reportConnectionSummary": "Se perdió la conexión con el motor",
+    "reportWhatHappened": "**Qué pasó**\n_describe brevemente qué estabas haciendo_\n\n**Diagnóstico**\n```\n{{diagnostic}}\n```",
+    "copyPrompt": "Copia este diagnóstico:"
+  },
+  "miracleReveal": {
+    "eyebrowMiracle": "Milagro",
+    "eyebrowMadness": "Locura",
+    "titleReveal": "¿Revelar {{name}}?",
+    "titleCast": "¿Lanzar {{name}}?",
+    "subtitleReveal": "Puedes revelar esta carta para lanzarla por su coste de milagro.",
+    "subtitleCastMiracle": "Puedes lanzar esta carta por su coste de milagro.",
+    "subtitleCastMadness": "Puedes lanzar esta carta por su coste de locura.",
+    "reveal": "Revelar",
+    "cast": "Lanzar",
+    "decline": "Rechazar"
+  },
+  "modalFace": {
+    "eyebrow": "DFC modal",
+    "title": "Elige una cara",
+    "subtitle": "Elige qué cara jugar o lanzar.",
+    "backFaceFallback": "Cara trasera",
+    "labelFront": "Frontal",
+    "labelBack": "Trasera",
+    "play": "Jugar {{name}}",
+    "cast": "Lanzar {{name}}"
+  },
+  "modeChoice": {
+    "eyebrowAbility": "Modos de habilidad",
+    "eyebrowSpell": "Modos de hechizo",
+    "subtitle": "Selecciona el modo o los modos a aplicar.",
+    "chooseExact": "Elige {{count}}",
+    "chooseRange": "Elige de {{min}} a {{max}}",
+    "confirm": "Confirmar ({{selected}}/{{count}})",
+    "clear": "Limpiar",
+    "alreadyChosen": "(ya elegido)"
+  },
+  "namedChoice": {
+    "title": {
+      "creatureType": "Elige un tipo de criatura",
+      "color": "Elige un color",
+      "oddOrEven": "Elige par o impar",
+      "basicLandType": "Elige un tipo de tierra básica",
+      "cardType": "Elige un tipo de carta",
+      "cardName": "Nombra una carta",
+      "landType": "Elige un tipo de tierra",
+      "opponent": "Elige un oponente",
+      "player": "Elige un jugador",
+      "twoColors": "Elige dos colores",
+      "numberRange": "Elige un número",
+      "labeled": "Toma una decisión",
+      "keyword": "Elige una habilidad",
+      "fallback": "Toma una decisión"
+    },
+    "searchSubtitle": "Escribe para buscar en todas las cartas",
+    "searchPlaceholder": "Buscar por nombre...",
+    "noCardsFound": "No se encontraron cartas",
+    "buttonSubtitle": "Selecciona una opción"
+  },
+  "nonFatalPanic": {
+    "heading": "Advertencia del motor (no fatal)",
+    "dismiss": "Descartar",
+    "body": "phase.rs encontró una advertencia interna pero se recuperó. La partida sigue siendo segura para continuar. Por favor, <report>infórmalo</report> para que podamos investigarlo.",
+    "dontShowAgain": "No mostrar de nuevo en esta sesión",
+    "reportTitle": "Pánico del motor no fatal: {{summary}}",
+    "reportWhatHappened": "**Qué pasó**\n_describe brevemente qué estabas haciendo_\n\n**Diagnóstico**\n```\n{{diagnostic}}\n```"
+  },
+  "optionalEffect": {
+    "sourceFallback": "Efecto",
+    "title": "{{name}} - Efecto opcional",
+    "yes": "Sí",
+    "no": "No",
+    "dontAskAgain": "No volver a preguntar en esta partida"
+  },
+  "permanentTypeSlot": {
+    "eyebrow": "Tipo de permanente",
+    "title": "Elegir ranura de tipo",
+    "subtitle": "{{name}} tiene varios tipos de permanente. Elige qué ranura de tipo usar."
+  },
+  "proliferate": {
+    "proliferateTitle": "Proliferar",
+    "proliferateSubtitle": "Elige cualquier número de permanentes y jugadores con contadores. Cada objetivo elegido recibe un contador más de cada tipo que ya tenga.",
+    "chooseObjectsTitle": "Elegir permanentes",
+    "chooseObjectsSubtitle": "Elige cualquier número de permanentes. Pagas un coste por cada uno elegido.",
+    "confirm": "Confirmar"
+  },
+  "replacement": {
+    "eyebrow": "Orden de resolución",
+    "title": "Efectos de reemplazo",
+    "subtitle": "Elige qué efecto de reemplazo se aplica primero.",
+    "candidateFallback": "Efecto de reemplazo {{number}}"
+  },
+  "retargetChoice": {
+    "title": "Cambiar objetivo",
+    "scopeSingle": "Elige un nuevo objetivo para el hechizo",
+    "scopeMulti": "Elige nuevos objetivos para el hechizo",
+    "subtitle": "{{scope}}. Actual: {{current}}",
+    "confirm": "Confirmar"
+  },
+  "separatePiles": {
+    "chooserName": "Jugador {{number}}",
+    "partitionTitle": "Separar en dos montones",
+    "partitionSubtitle": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno.",
+    "partitionSubtitleRemaining_one": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugador más después de ti)",
+    "partitionSubtitleRemaining_other": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugadores más después de ti)",
+    "pileALabel": "Montón A:",
+    "pileBLabel": "Montón B:",
+    "pileAria": "{{name}} — montón {{pile}}",
+    "pileBadge": "Montón {{pile}}",
+    "chooseTitle": "Elegir un montón",
+    "chooseSubtitle": "Elige uno de los montones de {{subject}}.",
+    "chooseSubtitleRemaining_one": "Elige uno de los montones de {{subject}}. ({{count}} partición más después de esta)",
+    "chooseSubtitleRemaining_other": "Elige uno de los montones de {{subject}}. ({{count}} particiones más después de esta)",
+    "pileHeader": "Montón {{pile}} ({{count}})",
+    "empty": "(vacío)",
+    "choosePileA": "Elegir montón A",
+    "choosePileB": "Elegir montón B"
+  },
+  "tribute": {
+    "sourceFallback": "Criatura de tributo",
+    "title": "Tributo — {{name}}",
+    "subtitle_one": "¿Colocar {{count}} contador +1/+1 en {{name}}?",
+    "subtitle_other": "¿Colocar {{count}} contadores +1/+1 en {{name}}?",
+    "payLabel": "Pagar tributo",
+    "payDescription_one": "Pon {{count}} contador +1/+1 en {{name}}.",
+    "payDescription_other": "Pon {{count}} contadores +1/+1 en {{name}}.",
+    "declineLabel": "Rechazar",
+    "declineDescription": "Rechaza el tributo. Dispara \"si no se pagó el tributo\"."
+  },
+  "triggerOrder": {
+    "eyebrow": "Orden de resolución",
+    "title": "Ordena tus habilidades disparadas",
+    "subtitle": "Elige el orden en que estos disparos van a la pila. La parte superior de esta lista se resuelve la última (CR 405.3).",
+    "confirmOrder": "Confirmar orden",
+    "resolvesLast": "Se resuelve la última (fondo de la pila)",
+    "resolvesFirst": "Se resuelve la primera (cima de la pila)",
+    "moveUp": "Subir",
+    "moveDown": "Bajar",
+    "triggerFallback": "Disparo {{number}}"
+  },
+  "unhandledWaitingFor": {
+    "title": "Se requiere una acción, pero falta la interfaz",
+    "body": "La partida está esperando una acción tuya, pero esta versión de phase.rs aún no tiene una interfaz para ello. Esto es un error — por favor, infórmalo para que podamos corregirlo. Usa el botón de abajo para salir de la partida.",
+    "missingState": "Estado faltante",
+    "copyDiagnostic": "Copiar diagnóstico",
+    "copied": "¡Copiado!",
+    "reportOnGithub": "Informar en GitHub",
+    "copyPrompt": "Copia este diagnóstico:",
+    "reportTitle": "WaitingFor no gestionado: {{type}}",
+    "reportWhatHappened": "**Qué pasó**\n_describe brevemente qué estabas haciendo_\n\n**Diagnóstico**\n```\n{{diagnostic}}\n```"
+  },
+  "voteChoice": {
+    "subjectName": "Jugador {{number}}",
+    "titleLabel": "Etiquetar jugador",
+    "titleVote": "Votar",
+    "subtitleLabel": "Elige una etiqueta para {{name}}",
+    "subtitleVoteRemaining": "Emite un voto ({{count}} restantes)",
+    "subtitleVote": "Emite tu voto"
+  }
+}

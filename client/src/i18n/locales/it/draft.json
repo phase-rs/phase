@@ -1,1 +1,323 @@
-{}
+{
+  "intro": {
+    "quickTitle": "Quick Draft",
+    "podTitle": "Pod Draft",
+    "subtitle": "Ecco come funziona",
+    "startDrafting": "Inizia il draft",
+    "quick": {
+      "step1": "Aprirai 3 buste da 14 carte ciascuna",
+      "step2": "Scegli una carta per busta, poi passa il resto agli altri draftatori IA",
+      "step3": "Le buste alternano direzione a ogni round — sinistra, destra, sinistra",
+      "step4": "Dopo tutte le scelte, costruisci un mazzo da 40 carte e gioca una partita"
+    },
+    "pod": {
+      "step1": "Stai draftando con {{count}} giocatori in un pod",
+      "step2": "Apri 3 buste da 14 carte — scegline una, passa il resto",
+      "step3": "Le buste alternano direzione a ogni round — sinistra, destra, sinistra",
+      "step4": "Dopo il draft, costruisci un mazzo da 40 carte e gioca le partite del torneo"
+    }
+  },
+  "steps": {
+    "navLabel": "Avanzamento del draft",
+    "chooseSet": "Scegli set",
+    "draft": "Draft",
+    "buildDeck": "Costruisci mazzo",
+    "play": "Gioca"
+  },
+  "bracket": {
+    "title": "Tabellone",
+    "versus": "vs",
+    "quarterfinals": "Quarti di finale",
+    "semifinals": "Semifinali",
+    "final": "Finale"
+  },
+  "hostControls": {
+    "title": "Controlli host",
+    "resumeDraft": "Riprendi draft",
+    "pauseDraft": "Metti in pausa draft",
+    "startNextRound": "Inizia round successivo",
+    "overrideResult": "Sovrascrivi risultato",
+    "versusPair": "{{a}} v {{b}}",
+    "kickReplace": "Espelli + sostituisci",
+    "replaceWithBot": "Sostituisci {{name}} con un bot"
+  },
+  "manaCurve": {
+    "title": "Curva del mana"
+  },
+  "pickTimer": {
+    "label": "Timer di scelta",
+    "seconds": "{{count}}s"
+  },
+  "scoreBadge": {
+    "label": "Punteggio: {{count}} vittorie"
+  },
+  "seat": {
+    "label": "Posto {{number}}",
+    "passingLeft": "→ Passaggio a sinistra →",
+    "passingRight": "← Passaggio a destra ←"
+  },
+  "setSelector": {
+    "botDifficulty": "Difficoltà bot",
+    "chooseSet": "Scegli un set",
+    "noPools": "Nessun pool di draft disponibile. Esegui prima la pipeline dei dati di draft.",
+    "setIconAlt": "Icona set {{name}}"
+  },
+  "pack": {
+    "confirmPick": "Conferma scelta",
+    "waitingNext": "In attesa della prossima busta...",
+    "cardsInPack": "{{count}} carte nella busta",
+    "picking": "Scelta…",
+    "autoPick": "Scelta automatica"
+  },
+  "pool": {
+    "cardsDrafted": "{{count}} carte draftate",
+    "empty": "Nessuna carta ancora draftata",
+    "sortColor": "Colore",
+    "sortType": "Tipo",
+    "sortCmc": "CMC"
+  },
+  "standings": {
+    "title": "Classifica — Round {{round}}",
+    "rank": "#",
+    "player": "Giocatore",
+    "record": "Record",
+    "gwp": "GWP",
+    "currentPairings": "Accoppiamenti attuali",
+    "versus": "vs"
+  },
+  "limitedDeck": {
+    "poolHeading": "Pool ({{count}})",
+    "allAdded": "Tutte le carte aggiunte al mazzo.",
+    "mainDeck": "Mazzo principale",
+    "emptyDeckHint": "Clicca le carte dal pool per aggiungerle al tuo mazzo.",
+    "addableCards": "Carte aggiungibili",
+    "autoLands": "Terre automatiche",
+    "suggestDeck": "Suggerisci mazzo",
+    "submitDeck": "Invia mazzo",
+    "removeCard": "Rimuovi {{name}}",
+    "addCard": "Aggiungi {{name}}",
+    "cardCount": "/ {{min}} carte",
+    "spellCount_one": "{{count}} magia",
+    "spellCount_other": "{{count}} magie",
+    "landCount_one": "{{count}} terra",
+    "landCount_other": "{{count}} terre",
+    "readyToSubmit": "pronto per l'invio",
+    "moreNeeded": "{{count}} altre necessarie"
+  },
+  "landing": {
+    "title": "Draft",
+    "startNew": "Inizia nuovo",
+    "experimental": "Sperimentale",
+    "quickDraft": {
+      "title": "Quick Draft",
+      "description": "Drafta 3 buste con 7 draftatori IA, costruisci un mazzo da 40 carte, poi gioca una partita Bo1 contro uno di loro."
+    },
+    "cubeDraft": {
+      "title": "Cube Draft",
+      "description": "Incolla o carica una lista cube, regola le regole di busta e mazzo, poi fai un quick draft contro i bot IA."
+    },
+    "podDraft": {
+      "title": "Pod Draft",
+      "description": "Ospita o unisciti a un pod con fino a 8 giocatori, draftate insieme dal vivo, poi giocate un torneo svizzero o a eliminazione."
+    },
+    "podInProgress": "Pod Draft in corso",
+    "podLabel": "Pod {{kind}}",
+    "seatCount": "{{count}} posti",
+    "roomLabel": "Stanza {{code}}",
+    "cardsPicked": "{{count}} carte scelte",
+    "resume": "Riprendi",
+    "draftInProgress": "Draft in corso",
+    "draftComplete": "Draft completato",
+    "resumeMatch": "Riprendi partita",
+    "viewResults": "Vedi risultati",
+    "setIconAlt": "Icona {{code}}"
+  },
+  "podPhase": {
+    "lobby": "Lobby",
+    "drafting": "Draft",
+    "deckbuilding": "Costruzione mazzo",
+    "pairing": "Accoppiamento",
+    "matchInProgress": "Partita in corso",
+    "complete": "Completato"
+  },
+  "quickPhase": {
+    "drafting": "Draft",
+    "deckbuilding": "Costruzione mazzo",
+    "matchRecord": "Partita {{number}} — {{wins}}V-{{losses}}S",
+    "record": "{{wins}}V-{{losses}}S",
+    "runComplete": "Run completata — {{wins}}V-{{losses}}S"
+  },
+  "relativeTime": {
+    "justNow": "proprio ora",
+    "minutes": "{{count}}m fa",
+    "hours": "{{count}}h fa",
+    "days": "{{count}}g fa"
+  },
+  "cubeSetup": {
+    "defaultCubeName": "Cube personalizzato",
+    "fetchError": "Impossibile recuperare la lista cube",
+    "startError": "Impossibile avviare il cube draft",
+    "cubeName": "Nome del cube",
+    "seats": "Posti",
+    "packs": "Buste",
+    "packSize": "Dimensione busta",
+    "minDeck": "Mazzo minimo",
+    "exportUrl": "URL di esportazione CubeCobra",
+    "exportUrlPlaceholder": "Incolla un URL di esportazione raw, o incolla la lista qui sotto",
+    "loadUrl": "Carica URL",
+    "deckAddables": "Carte aggiungibili al mazzo",
+    "addablesStandardBasics": "Base standard",
+    "addablesBasicsPlusCustom": "Base più personalizzate",
+    "addablesCustomOnly": "Solo personalizzate",
+    "customAddableCards": "Carte aggiungibili personalizzate",
+    "customAddablePlaceholder": "Un nome di carta per riga",
+    "startCubeDraft": "Avvia Cube Draft"
+  },
+  "formatPicker": {
+    "title": "Il tuo mazzo è pronto",
+    "subtitle": "Scegli come vuoi giocare.",
+    "startMatch": "Avvia partita",
+    "single": {
+      "label": "Partita singola",
+      "description": "Gioca una partita Bo1 con il tuo mazzo draftato."
+    },
+    "bo3": {
+      "label": "Al meglio dei tre",
+      "description": "Gioca una partita Bo3 con sideboard tra le partite."
+    },
+    "run": {
+      "label": "Run completa",
+      "description": "Gioca partite Bo1 finché non raggiungi 7 vittorie o 3 sconfitte."
+    }
+  },
+  "run": {
+    "draftRun": "Run di draft",
+    "upNext": "Prossima — Partita {{number}}",
+    "nextMatch": "Partita successiva",
+    "endRun": "Termina run",
+    "done": "Fatto",
+    "perfectRun": "Run perfetta",
+    "runComplete": "Run completata",
+    "runOver": "Run terminata",
+    "finishedFlawless": "Hai concluso {{wins}}–{{losses}}. Impeccabile.",
+    "finishedCongrats": "Hai concluso {{wins}}–{{losses}}. Congratulazioni!",
+    "finishedRecord": "Hai concluso con un record di {{wins}}–{{losses}}.",
+    "wins": "Vittorie",
+    "losses": "Sconfitte",
+    "drawCount_one": "+ {{count}} pareggio",
+    "drawCount_other": "+ {{count}} pareggi",
+    "matchLog": "Registro partite",
+    "matchResultTitle": "Partita {{number}}: {{result}}",
+    "result": {
+      "win": "vittoria",
+      "loss": "sconfitta",
+      "draw": "pareggio"
+    },
+    "resultShort": {
+      "win": "V",
+      "loss": "S",
+      "draw": "P"
+    }
+  },
+  "page": {
+    "cubeDraftTitle": "Cube Draft",
+    "quickDraftTitle": "Quick Draft",
+    "setDraftTab": "Set Draft",
+    "cubeTab": "Cube"
+  },
+  "podSetup": {
+    "title": "Pod Draft",
+    "subtitle": "Drafta con gli amici — apri buste, scegli carte e gioca partite di torneo.",
+    "hostCardTitle": "Ospita un pod",
+    "hostCardDesc": "Crea una nuova stanza di draft. Scegli set, formato e dimensione del pod — poi condividi il codice della stanza con i tuoi amici. I posti vuoti possono essere riempiti con i bot.",
+    "joinCardTitle": "Unisciti a un pod",
+    "joinCardDesc": "Inserisci un codice stanza dall'host per unirti a un draft esistente. Verrai assegnato al prossimo posto libero e drafterai insieme a tutti in tempo reale.",
+    "howItWorksTitle": "Come funziona il Pod Draft",
+    "howItWorks1": "Ogni giocatore apre 3 buste da 14 carte — scegline una, passa il resto",
+    "howItWorks2": "Le buste alternano direzione a ogni round (sinistra → destra → sinistra)",
+    "howItWorks3": "Dopo il draft, tutti costruiscono un mazzo da 40 carte dal proprio pool",
+    "howItWorks4": "Poi giocate partite di torneo svizzero o a eliminazione diretta",
+    "back": "← Indietro",
+    "hostTitle": "Ospita un pod",
+    "joinTitle": "Unisciti a un pod",
+    "displayName": "Nome visualizzato",
+    "namePlaceholder": "Inserisci il tuo nome...",
+    "draftType": "Tipo di draft",
+    "kindPremier": "Premier",
+    "kindPremierDesc": "Partite di torneo al meglio di una dopo la costruzione del mazzo. Round più rapidi, niente sideboard tra le partite.",
+    "kindTraditional": "Tradizionale",
+    "kindTraditionalDesc": "Partite di torneo al meglio di tre dopo la costruzione del mazzo, con sideboard tra le partite.",
+    "tournamentFormat": "Formato torneo",
+    "tournamentSwiss": "Svizzero",
+    "tournamentSwissDesc": "Tutti continuano a giocare per tre round, anche dopo una sconfitta.",
+    "tournamentElimination": "Eliminazione diretta",
+    "tournamentEliminationDesc": "I giocatori vengono eliminati dopo una sconfitta finché non rimane un vincitore.",
+    "podPolicy": "Politica del pod",
+    "policyCompetitive": "Competitivo",
+    "policyCompetitiveDesc": "Scelte a tempo, scelte automatiche allo scadere e avanzamento automatico dei round.",
+    "policyCasual": "Casuale",
+    "policyCasualDesc": "Scelte senza tempo, avanzamento manuale dei round e controlli host per risolvere i problemi.",
+    "podSize": "Dimensione del pod",
+    "podSizeDesc": "{{count}} posti totali. I posti vuoti possono essere riempiti con i bot dalla lobby prima che inizi il draft.",
+    "playerCount": "{{count}} giocatori",
+    "setSelectorHint": "Scegli il set di draft per ultimo. Selezionando un set si carica il suo pool di carte e si crea la stanza del pod.",
+    "loadingPool": "Caricamento dati del pool del set...",
+    "roomCode": "Codice stanza",
+    "roomCodePlaceholder": "Inserisci codice stanza...",
+    "joinPod": "Unisciti al pod"
+  },
+  "podPhaseView": {
+    "tournamentPairings": "Accoppiamenti torneo",
+    "matchesInProgress": "Partite in corso",
+    "yourMatch": "La tua partita",
+    "versusOpponent": "vs {{name}}",
+    "youAreHosting": "Sei l'host",
+    "connectingOpponent": "Connessione all'avversario...",
+    "waitingResults": "In attesa dei risultati della partita...",
+    "hidePool": "Nascondi pool",
+    "reviewPool": "Rivedi pool",
+    "roundComplete": "Round completato",
+    "waitingNextRound": "In attesa che l'host inizi il prossimo round...",
+    "nextRoundShortly": "Il prossimo round inizierà a breve..."
+  },
+  "betweenGames": {
+    "game": "Partita {{number}}",
+    "lostPreviousGame": "Hai perso la partita precedente. Scegli:",
+    "seconds": "{{count}}s",
+    "secondsRemaining": "{{count}}s rimanenti",
+    "playFirst": "Gioca per primo",
+    "drawFirst": "Pesca per primo",
+    "sideboarding": "Sideboard",
+    "waitingSideboard": "In attesa che l'avversario invii la sideboard...",
+    "sideboardGame": "Sideboard — Partita {{number}}",
+    "sideboardHint": "Apporta modifiche alla sideboard, poi invia. Il tuo pool è disponibile qui sotto.",
+    "submitSideboard": "Invia sideboard",
+    "preparingNext": "Preparazione della prossima partita..."
+  },
+  "podComplete": {
+    "title": "Draft completato",
+    "returnToMenu": "Torna al menu"
+  },
+  "podError": {
+    "kicked": "Sei stato espulso dal pod",
+    "hostLeft": "L'host ha abbandonato il draft",
+    "connection": "Errore di connessione"
+  },
+  "lobby": {
+    "title": "Lobby del pod di draft",
+    "draftKind": "Draft {{kind}}",
+    "botSeat": "Bot",
+    "waitingSeat": "In attesa...",
+    "seatNumber": "Posto {{number}}",
+    "hostBadge": "HOST",
+    "kick": "Espelli",
+    "copyRoomCodeTitle": "Clicca per copiare il codice della stanza",
+    "roomCode": "Codice stanza",
+    "clickToCopy": "Clicca per copiare",
+    "seatsFilled": "{{current}} / {{total}} posti occupati",
+    "fillWithBots": "Riempi i posti vuoti con i bot",
+    "leave": "Abbandona",
+    "startDraft": "Avvia draft",
+    "waitingForHost": "In attesa che l'host avvii il draft..."
+  }
+}

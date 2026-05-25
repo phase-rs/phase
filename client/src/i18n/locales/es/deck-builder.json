@@ -1,1 +1,210 @@
-{}
+{
+  "search": {
+    "title": "Buscar",
+    "subtitle": "Añade cartas a la lista actual.",
+    "reset": "Restablecer",
+    "textPlaceholder": "Buscar cartas...",
+    "allTypes": "Todos los tipos",
+    "cmcMax": "CMC máx.:",
+    "sets": "Colecciones",
+    "addSetPlaceholder": "Añadir código de colección...",
+    "addSet": "Añadir",
+    "removeSet": "Quitar {{name}}",
+    "emptyHint": "Añade un filtro para empezar a explorar",
+    "searching": "Buscando...",
+    "searchFailed": "La búsqueda falló",
+    "results_one": "{{count}} resultado",
+    "results_other": "{{count}} resultados",
+    "browseFormat": {
+      "all": "Todas las cartas"
+    }
+  },
+  "filters": {
+    "title": "Filtros",
+    "close": "Cerrar filtros",
+    "done": "Listo",
+    "search": "Buscar"
+  },
+  "deck": {
+    "backToDeck": "Volver al mazo",
+    "listView": "Vista de lista",
+    "stackView": "Vista de pila"
+  },
+  "tabs": {
+    "ariaLabel": "Superficie del constructor de mazos",
+    "deck": "Mazo",
+    "info": "Info"
+  },
+  "toolbar": {
+    "menu": "Menú",
+    "deckBuilder": "Constructor de mazos",
+    "untitledDeck": "Mazo sin título",
+    "deckName": "Nombre del mazo",
+    "format": "Formato",
+    "bracket": "Nivel",
+    "saved": "Guardado ✓",
+    "clone": "Clonar",
+    "cloneTitle": "Guardar una copia con un nombre nuevo",
+    "loadDeck": "Cargar mazo...",
+    "nameToSave": "Pon un nombre al mazo para guardarlo"
+  },
+  "unsaved": {
+    "title": "Cambios sin guardar",
+    "dismiss": "Descartar diálogo",
+    "bodyLeaving": "Tienes cambios sin guardar en este mazo. ¿Guardarlos antes de salir?",
+    "bodyLoading": "Tienes cambios sin guardar en este mazo. ¿Guardarlos antes de cargar otro mazo?",
+    "discard": "Descartar",
+    "saveAndContinue": "Guardar y continuar"
+  },
+  "card": {
+    "moveToSideboard": "Mover una {{name}} al sideboard",
+    "moveToMain": "Mover una {{name}} al mazo principal",
+    "removeOne": "Quitar una {{name}}",
+    "makeCommander": "Hacer de {{name}} el comandante",
+    "makeCommanderTitle": "Hacer de esta mi comandante",
+    "chooseArtFor": "Elegir ilustración para {{name}}",
+    "alternateArtTap": "Ilustración alternativa disponible — toca para elegir",
+    "alternateArtRightClick": "Ilustración alternativa disponible — haz clic derecho para elegir",
+    "unsupportedExpand_one": "{{count}} mecánica no compatible; expandir detalles",
+    "unsupportedExpand_other": "{{count}} mecánicas no compatibles; expandir detalles",
+    "unsupportedTitle_one": "{{count}} mecánica no compatible — haz clic para expandir",
+    "unsupportedTitle_other": "{{count}} mecánicas no compatibles — haz clic para expandir"
+  },
+  "grid": {
+    "allFormats": "Todos",
+    "addCard": "Añadir {{name}}",
+    "notLegal": "{{name}} - No es legal en {{format}}",
+    "notFormat": "No es {{format}}"
+  },
+  "deckList": {
+    "currentList": "Lista actual",
+    "import": "Importar",
+    "importTitle": "Importar mazo desde texto (formato MTGA o .dck)",
+    "export": "Exportar",
+    "exportTitle": "Exportar mazo",
+    "mainTab": "Principal ({{count}})",
+    "sideboardTab": "Sideboard ({{count}})",
+    "mainDeckHeading_one": "Mazo principal ({{count}} carta)",
+    "mainDeckHeading_other": "Mazo principal ({{count}} cartas)",
+    "sideboardUnlimited": "Sideboard ({{count}})",
+    "sideboardLimited": "Sideboard ({{count}}/{{max}})",
+    "sideboardExceeds": "El sideboard supera el límite de {{max}} cartas",
+    "sideboardEmptyHint": "Pasa el cursor sobre una carta del mazo principal y haz clic en → para moverla aquí.",
+    "group": {
+      "Creatures": "Criaturas",
+      "Spells": "Hechizos",
+      "Lands": "Tierras"
+    },
+    "importModalTitle": "Importar mazo",
+    "pastePlaceholder": "Pega la lista del mazo (formato MTGA o .dck)...",
+    "fromFile": "Desde archivo",
+    "parse": "Analizar",
+    "exportModalTitle": "Exportar mazo",
+    "saveToFile": "Guardar en archivo",
+    "copied": "¡Copiado!",
+    "copy": "Copiar"
+  },
+  "moveList": {
+    "empty": "Vacío"
+  },
+  "stack": {
+    "deckView": "Vista del mazo",
+    "visualDeckStack": "Pila visual del mazo",
+    "mainBadge": "Principal {{count}}",
+    "sideboardBadge": "Sideboard {{count}}",
+    "emptyHint": "Las cartas añadidas aparecerán aquí como una pila escalonada.",
+    "commanderBadge": "Comandante",
+    "commanderLane": "Comandante",
+    "mainDeckLane": "Mazo principal",
+    "noCommander": "Ningún comandante seleccionado.",
+    "mainEmpty": "Las cartas del mazo principal aparecerán aquí.",
+    "cardCount_one": "{{count}} carta",
+    "cardCount_other": "{{count}} cartas",
+    "mainSideBadge": "{{main}} principal + {{side}} sideboard",
+    "groupCards_one": "{{count}} carta",
+    "groupCards_other": "{{count}} cartas",
+    "group": {
+      "Creatures": "Criaturas",
+      "Spells": "Hechizos",
+      "Lands": "Tierras"
+    },
+    "sideboardGroup": "Sideboard",
+    "addOne": "Añadir una {{name}}",
+    "copyLimit": "{{name}} está en el límite de copias",
+    "removeOne": "Quitar una {{name}}",
+    "removeCommander": "Quitar a {{name}} como comandante"
+  },
+  "printingPicker": {
+    "title": "Elegir ilustración",
+    "noPrintings": "No hay impresiones alternativas disponibles para esta carta.",
+    "filterPlaceholder": "Filtrar por colección o número de coleccionista…",
+    "filterAriaLabel": "Filtrar impresiones",
+    "count_one": "{{count}} impresión",
+    "count_other": "{{count}} impresiones",
+    "countMatching_one": "{{count}} impresión que coincide con “{{query}}”",
+    "countMatching_other": "{{count}} impresiones que coinciden con “{{query}}”",
+    "useDefault": "Usar predeterminada",
+    "noMatches": "Ninguna impresión coincide con tu filtro.",
+    "noImage": "Sin imagen",
+    "showMore_one": "Mostrar más ({{count}} restante)",
+    "showMore_other": "Mostrar más ({{count}} restantes)"
+  },
+  "stats": {
+    "formatLegality": "Legalidad del formato",
+    "engineCoverage": "Cobertura del motor",
+    "unsupportedTitle": "No compatibles:\n{{list}}"
+  },
+  "commanderPanel": {
+    "heading": "Comandante",
+    "noCommander": "Ningún comandante seleccionado",
+    "remove": "Quitar",
+    "identity": "Identidad:",
+    "setAsCommander": "Establecer como comandante:",
+    "cardCount": "{{count}}/{{expected}} cartas",
+    "singletonViolations": "Infracciones de singleton: {{cards}}",
+    "colorViolations": "Infracciones de identidad de color: {{cards}}"
+  },
+  "manaCurve": {
+    "title": "Curva de maná",
+    "colors": "Colores"
+  },
+  "legality": {
+    "legal": "Legal",
+    "banned": "Prohibida",
+    "restricted": "Restringida",
+    "notLegal": "No legal"
+  },
+  "contextMenu": {
+    "chooseArt": "Elegir ilustración…",
+    "noAlternates": "Sin impresiones alternativas",
+    "clearOverride": "Borrar anulación de ilustración"
+  },
+  "bracket": {
+    "unavailable": "La estimación de nivel no está disponible en esta versión.",
+    "addCommander": "Añade un comandante para ver tu estimación de nivel.",
+    "estimated": "Estimado: B{{tier}} {{label}}",
+    "manual": "Manual: B{{tier}} {{label}}",
+    "mismatch": " ⚠ discrepancia",
+    "hideBreakdown": "Ocultar desglose",
+    "showBreakdown": "Mostrar desglose",
+    "hideBreakdownButton": "▲ Ocultar desglose",
+    "showBreakdownButton": "▼ Mostrar desglose",
+    "forced": "(forzado B{{tier}})",
+    "dataVersion": "Datos: {{version}}",
+    "aboutBrackets": "Acerca de los niveles ↗",
+    "estimatedChip": "Estimado: B{{tier}}",
+    "estimatedChipFull": "Nivel estimado: B{{tier}} {{label}}"
+  },
+  "bracketPicker": {
+    "ariaLabel": "Nivel del mazo",
+    "unrated": "Sin clasificar"
+  },
+  "warnings": {
+    "commanderCount": "El mazo tiene {{count}} cartas (necesita exactamente {{expected}})",
+    "singleton": "{{name}}: copias múltiples (formato singleton)",
+    "colorIdentity": "{{name}}: fuera de la identidad de color del comandante",
+    "minimumCount": "El mazo tiene {{count}} cartas (mínimo 60)",
+    "maxCopies": "{{name}}: {{count}} copias (máx. 4)",
+    "companionInMain": "{{name}} es tu compañero pero también está en el mazo principal — esto infringe su condición de construcción de mazo. Quítalo del mazo principal para usarlo como compañero."
+  }
+}

@@ -1,1 +1,202 @@
-{}
+{
+  "actions": {
+    "cancel": "Annuler",
+    "save": "Enregistrer",
+    "close": "Fermer",
+    "closeNamed": "Fermer {{name}}"
+  },
+  "modal": {
+    "defaultEyebrow": "Outil d'espace de travail"
+  },
+  "pausedBanner": {
+    "message": "Partie en pause — {{reason}}"
+  },
+  "fullscreen": {
+    "enter": "Passer en plein écran",
+    "exit": "Quitter le plein écran"
+  },
+  "buildBadge": {
+    "downloading": "téléchargement… {{progress}} %",
+    "checking": "vérification…",
+    "updating": "mise à jour…",
+    "updatePending": "mise à jour en attente après la partie",
+    "cards": "cartes {{age}} ({{commit}})",
+    "cardDataTitle": "Données de cartes générées le {{date}} à partir de {{commit}}",
+    "checkForUpdates": "Rechercher des mises à jour",
+    "updaterDebugInfo": "Infos de débogage de la mise à jour",
+    "updaterIssue": "Problème de mise à jour : {{error}}",
+    "updateIssue": "problème de mise à jour",
+    "updated": "à jour"
+  },
+  "gameMenu": {
+    "menu": "Menu de la partie",
+    "sandboxTools": "Outils bac à sable",
+    "sandboxToolsTitle": "Outils bac à sable — configurez n'importe quel état du plateau (`)",
+    "resume": "Reprendre",
+    "settings": "Paramètres",
+    "helpShortcuts": "Aide et raccourcis",
+    "showAiHand": "Afficher la main de l'IA",
+    "hideAiHand": "Masquer la main de l'IA",
+    "concede": "Concéder",
+    "backToDraft": "Retour au Draft",
+    "mainMenu": "Menu principal",
+    "cards": "cartes {{commit}}",
+    "cardDataTitle": "Données de cartes : {{date}}"
+  },
+  "volume": {
+    "mute": "Couper le son",
+    "unmute": "Rétablir le son",
+    "volume": "Volume"
+  },
+  "hostControl": {
+    "seatHost": "Hôte",
+    "seatPlayer": "Joueur",
+    "seatOpen": "Libre",
+    "seatAi": "IA ({{difficulty}})",
+    "waiting": "En attente…",
+    "seatLabel": "Siège {{id}}",
+    "addAi": "Ajouter une IA",
+    "remove": "Retirer",
+    "human": "Humain",
+    "kick": "Exclure",
+    "replaceAi": "Remplacer par une IA",
+    "random": "Aléatoire",
+    "connecting": "Connexion…",
+    "cancelHosting": "Annuler l'hébergement",
+    "kickConfirm": "Exclure {{name}} de la salle ?",
+    "replaceConfirm": "Remplacer {{name}} par une IA ? Cela le retire de la salle.",
+    "fallbackPlayerName": "Joueur {{number}}",
+    "seatsOccupied": "{{occupied}}/{{total}} sièges occupés",
+    "startGame": "Démarrer la partie",
+    "startNow": "Démarrer maintenant",
+    "fillWithAi": "Compléter avec des IA"
+  },
+  "grantDebug": {
+    "heading": "Bac à sable : permissions de débogage",
+    "description": "Accordez à d'autres joueurs la capacité de soumettre des actions de débogage. Leurs actions sont consignées publiquement.",
+    "playerLabel": "Joueur {{number}}",
+    "revoke": "RÉVOQUER",
+    "grant": "ACCORDER"
+  },
+  "help": {
+    "eyebrow": "Aide",
+    "title": "Aide et raccourcis",
+    "subtitle": "Le déroulement de Magic en numérique pour les joueurs papier : arrêts, priorité, passage et outils de récupération.",
+    "closeHelp": "Fermer l'aide",
+    "searchPlaceholder": "Rechercher dans l'aide ou les raccourcis",
+    "whatCanIDo": "Que puis-je faire maintenant ?",
+    "recoveryTitle": "Outils de récupération",
+    "recoveryDescription": "Si une carte se comporte mal, exportez d'abord l'état. Le panneau de débogage avancé est disponible lorsque vous devez inspecter ou ajuster la partie.",
+    "copyState": "Copier l'état",
+    "exportState": "Exporter l'état",
+    "openAdvancedDebug": "Ouvrir le débogage avancé",
+    "sections": {
+      "Flow": "Déroulement",
+      "Shortcuts": "Raccourcis",
+      "Recovery": "Récupération"
+    },
+    "status": {
+      "copied": "État de la partie copié dans le presse-papiers.",
+      "copyFailed": "Impossible de copier l'état de la partie.",
+      "exported": "{{filename}} exporté.",
+      "exportFailed": "Impossible d'exporter l'état de la partie."
+    },
+    "prompt": {
+      "starting": "La partie démarre ou restaure son état.",
+      "gameOver": "La partie est terminée.",
+      "mulliganDecide": "Choisissez de garder cette main de départ ou de prendre un mulligan.",
+      "mulliganWaitDecide": "En attente qu'un autre joueur décide de sa main de départ.",
+      "mulliganBottom": "Choisissez les cartes à placer en dessous après avoir gardé une main de mulligan.",
+      "mulliganWaitBottom": "En attente qu'un autre joueur termine son mulligan.",
+      "openingHandBottom": "Choisissez une carte à placer en dessous avant que les mulligans normaux ne commencent.",
+      "openingHandWait": "En attente qu'un autre joueur résolve sa main de départ.",
+      "waitOther": "En attente qu'un autre joueur agisse.",
+      "priorityStack": "Vous avez la priorité avec quelque chose sur la pile. Résoudre passe la priorité afin que l'élément du dessus puisse se résoudre.",
+      "priorityAutoPass": "Vous avez la priorité. Le client peut passer automatiquement les fenêtres calmes sauf si un arrêt ou le Contrôle total est activé.",
+      "priorityActions": "Vous avez la priorité. Vous pouvez utiliser les cartes disponibles ou passer pour faire avancer le tour.",
+      "priorityPass": "Vous avez la priorité. Passer continue vers l'étape ou le joueur suivant.",
+      "manaPayment": "Payez le mana pour le sort ou la capacité en attente. Appuyez sur T pour engager les terrains disponibles.",
+      "targetSelection": "Choisissez la cible légale en surbrillance ou annulez si l'invite le permet.",
+      "declareAttackers": "Choisissez les attaquants, puis confirmez-les. Vous pouvez aussi n'attaquer avec aucun.",
+      "declareBlockers": "Choisissez les bloqueurs et assignez-les aux attaquants, puis confirmez-les.",
+      "chooseXValue": "Choisissez une valeur pour X avant de continuer avec le sort ou la capacité.",
+      "payAmountChoice": "Choisissez quelle quantité de la ressource demandée payer.",
+      "default": "La partie attend votre choix. Suivez l'invite active pour continuer."
+    },
+    "entries": {
+      "automaticPhaseSkips": {
+        "title": "Sauts de phase automatiques",
+        "body": "Les sauts de phase sont automatiques. Utilisez les arrêts ou le Contrôle total quand vous voulez des fenêtres de priorité à la manière du papier."
+      },
+      "phaseStops": {
+        "title": "Arrêts de phase",
+        "body": "Un arrêt met en pause avant cette étape, comme dire que vous pouvez agir avant le combat, avant la pioche ou avant l'étape de fin en papier."
+      },
+      "fullControl": {
+        "title": "Contrôle total",
+        "body": "Le Contrôle total empêche les fenêtres de priorité d'être ignorées, y compris aux endroits où le client numérique ferait normalement avancer la partie."
+      },
+      "resolve": {
+        "title": "Résoudre",
+        "body": "Résoudre signifie que vous passez la priorité afin que le sort ou la capacité du dessus de la pile puisse se résoudre si tout le monde passe aussi."
+      },
+      "passToEnd": {
+        "title": "Passer jusqu'à la fin",
+        "body": "Passer jusqu'à la fin continue de passer la priorité pour le tour sauf si un choix, un arrêt ou le Contrôle total interrompt."
+      },
+      "manaPayment": {
+        "title": "Paiement du mana",
+        "body": "Pendant le paiement du mana, vous pouvez engager des terrains manuellement ou appuyer sur T pour engager les terrains disponibles."
+      },
+      "combatDeclarations": {
+        "title": "Déclarations de combat",
+        "body": "La partie demande les attaquants et les bloqueurs uniquement pendant les étapes de déclaration. Choisissez les créatures, puis confirmez la déclaration."
+      },
+      "openHelp": {
+        "title": "Ouvrir l'aide",
+        "body": "Ouvrir cette fiche d'aide."
+      },
+      "passPriority": {
+        "title": "Passer la priorité",
+        "body": "Passer la priorité ou avancer dans l'invite de priorité actuelle."
+      },
+      "undo": {
+        "title": "Annuler",
+        "body": "Annuler la dernière action locale n'ayant pas révélé d'information cachée."
+      },
+      "cancel": {
+        "title": "Annuler",
+        "body": "Annuler la sélection actuelle, le paiement du mana, la sélection de cible ou le passage automatique lorsque c'est possible."
+      },
+      "advancedDebugPanel": {
+        "title": "Panneau de débogage avancé",
+        "body": "Ouvrir le panneau de débogage avancé. La plupart des joueurs devraient d'abord commencer par les outils de récupération."
+      },
+      "reportOrExportState": {
+        "title": "Signaler ou exporter l'état",
+        "body": "Si une carte se comporte mal, exportez l'état actuel de la partie afin que la position exacte du plateau puisse être reproduite."
+      },
+      "boardRightClickMenu": {
+        "title": "Menu clic droit du plateau",
+        "body": "Sur ordinateur, faites un clic droit sur un espace vide du plateau pour accéder au journal de partie, aux outils de récupération/débogage et aux paramètres d'arrière-plan."
+      }
+    },
+    "flowNudge": {
+      "message": "Les sauts de phase sont automatiques. Utilisez les arrêts ou le Contrôle total quand vous voulez des fenêtres de priorité à la manière du papier.",
+      "dismiss": "Ignorer",
+      "learnFlow": "Comprendre le déroulement"
+    },
+    "sandboxNudge": {
+      "message": "Configurez n'importe quel état du plateau avec les <tools>Outils bac à sable</tools> — ajoutez des cartes et des jetons, modifiez les points de vie et les marqueurs, copiez des permanents ou changez de phase. Ouvrez-les à tout moment avec la touche <key>`</key>.",
+      "dismiss": "Ignorer",
+      "open": "Ouvrir les outils bac à sable"
+    }
+  },
+  "splash": {
+    "ready": "Prêt",
+    "loading": "Chargement..."
+  },
+  "turnBanner": {
+    "turn": "Tour {{number}}"
+  }
+}

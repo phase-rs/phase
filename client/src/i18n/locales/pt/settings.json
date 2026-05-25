@@ -1,1 +1,130 @@
-{}
+{
+  "modal": {
+    "title": "Configurações",
+    "subtitle": "Ajuste a jogabilidade, os visuais, o áudio e os padrões de multijogador."
+  },
+  "tabs": {
+    "gameplay": "Jogabilidade",
+    "visual": "Visual",
+    "combat": "Ritmo",
+    "audio": "Áudio",
+    "multiplayer": "Multijogador",
+    "data": "Dados",
+    "experimental": "Experimental"
+  },
+  "gameplay": {
+    "title": "Jogabilidade",
+    "language": "Idioma",
+    "cardSize": "Tamanho da Carta",
+    "logDefault": "Registro Padrão",
+    "spellPayment": "Pagamento de Mágicas",
+    "manualManaPayment": "Pagamento manual de mana para mágicas",
+    "boardBackground": "Plano de Fundo do Tabuleiro",
+    "boardBackgroundGroups": {
+      "automatic": "Automático",
+      "battlefields": "Campos de batalha",
+      "plain": "Simples",
+      "custom": "Personalizado",
+      "off": "Desligado"
+    },
+    "boardBackgroundOptions": {
+      "autoMatchDeck": "Automático (combinar com o deck)",
+      "random": "Aleatório",
+      "customUrl": "URL personalizada",
+      "none": "Nenhum"
+    }
+  },
+  "visual": {
+    "title": "Visual",
+    "vfxQuality": "Qualidade dos VFX",
+    "keywordStrip": "Faixa de Palavras-chave",
+    "showKeywords": "Mostrar palavras-chave nas cartas do campo de batalha",
+    "opponentHoverPreview": "Pré-visualização ao Passar o Mouse sobre o Oponente",
+    "showOpponentBoard": "Mostrar o tabuleiro do oponente ao passar o mouse sobre o HUD",
+    "cardArtPreferences": "Preferências de Arte das Cartas",
+    "clearArtOverrides_one": "Limpar Todas as Substituições de Arte ({{count}})",
+    "clearArtOverrides_other": "Limpar Todas as Substituições de Arte ({{count}})",
+    "clearArtOverridesConfirm_one": "Limpar todas as {{count}} substituição de arte?",
+    "clearArtOverridesConfirm_other": "Limpar todas as {{count}} substituições de arte?"
+  },
+  "audio": {
+    "title": "Áudio",
+    "muteAll": "Silenciar Tudo",
+    "muteAllAudio": "Silenciar todo o áudio",
+    "globalVolume": "Volume Global",
+    "sfxVolume": "Volume dos SFX",
+    "musicVolume": "Volume da Música"
+  },
+  "audioTheme": {
+    "title": "Tema de Áudio",
+    "theme": "Tema",
+    "importTheme": "Importar Tema",
+    "loading": "Carregando...",
+    "import": "Importar",
+    "importFailed": "Falha ao importar o tema",
+    "customThemes": "Temas Personalizados",
+    "remove": "Remover"
+  },
+  "multiplayer": {
+    "title": "Multijogador",
+    "displayName": "Nome de Exibição",
+    "displayNamePlaceholder": "Digite seu nome",
+    "serverSelectionNote": "A seleção de servidor foi movida para o lobby — abra o Multijogador e use o chip de servidor (ou \"Escolher servidor\" no modo P2P) para trocar de região, configurar uma instância auto-hospedada ou testar a conectividade."
+  },
+  "experimental": {
+    "title": "Experimental",
+    "description": "Esses recursos ainda estão em desenvolvimento. Eles podem estar incompletos, ter bugs ou mudar sem aviso. Ative-os para experimentar as novidades antecipadamente.",
+    "draftExperiments": "Experimentos de Draft",
+    "enableDraftFeatures": "Ativar recursos experimentais de draft",
+    "draftFeaturesDescription": "Desbloqueia o Cube Draft e o Pod Draft. O Quick Draft contra IA está sempre disponível."
+  },
+  "data": {
+    "title": "Backup e Restauração",
+    "description": "A exportação agrupa suas preferências, decks importados e inscrições em feeds em um único arquivo JSON. A importação os restaura em outra máquina. Os caches do IndexedDB (cache de feeds, cache de áudio, jogos salvos) não são incluídos — eles se reconstroem automaticamente.",
+    "exportBackup": "Exportar backup…",
+    "importBackup": "Importar backup…",
+    "importConfirm": "Sobrescrever preferências e decks existentes?\n\nOK: substituir tudo pelo backup (destrutivo).\nCancelar: mesclar — manter os decks existentes e adicionar os novos do backup.",
+    "backupDownloaded": "Backup baixado.",
+    "imported_one": "Importado {{count}} deck.",
+    "imported_other": "Importados {{count}} decks.",
+    "importedWithPreferences_one": "Importado {{count}} deck e preferências.",
+    "importedWithPreferences_other": "Importados {{count}} decks e preferências.",
+    "skippedMalformed_one": "Ignorada {{count}} entrada malformada.",
+    "skippedMalformed_other": "Ignoradas {{count}} entradas malformadas."
+  },
+  "resetAll": {
+    "confirm": "Redefinir todas as preferências para os padrões? Isso limpa todas as configurações deste diálogo.",
+    "button": "Redefinir todas as preferências"
+  },
+  "pacing": {
+    "title": "Ritmo",
+    "resetSection": "Redefinir seção",
+    "animationSpeed": "Velocidade da Animação",
+    "animationSpeedDescription": "Velocidade mestre — quanto maior, mais rápido. Totalmente à direita pula as animações por completo.",
+    "hint": "Os controles deslizantes por categoria se multiplicam sobre a Velocidade da Animação. Clique duas vezes em qualquer controle deslizante — ou toque no <glyph>↺</glyph> ao lado dele — para redefinir.",
+    "instant": "Instantâneo",
+    "slowest": "Mais lento",
+    "resetSliderLabel": "Redefinir {{label}} para o padrão",
+    "atDefault": "No padrão",
+    "resetToDefault": "Redefinir para o padrão"
+  },
+  "artChain": {
+    "emptyState": "Usando a arte padrão do Scryfall. Adicione regras abaixo para personalizar.",
+    "moveUp": "Mover para cima",
+    "moveDown": "Mover para baixo",
+    "remove": "Remover",
+    "unreachable": "As regras abaixo de \"{{rule}}\" são inacessíveis — ela sempre corresponde.",
+    "addRule": "Adicionar Regra",
+    "setInputPlaceholder": "Código ou nome da coleção…",
+    "addSet": "Adicionar Coleção",
+    "rulesPriorityNote": "As regras são tentadas de cima para baixo. A primeira correspondência vence. “Impressão de Origem” usa a coleção de um booster de draft ou de uma importação de deck quando disponível. As substituições por carta (clique com o botão direito no construtor de decks) sempre têm prioridade.",
+    "setEntry": "Coleção: {{name}} ({{code}})",
+    "rules": {
+      "sourcePrinting": "Impressão de Origem",
+      "newest": "Impressão Mais Nova",
+      "oldest": "Impressão Mais Antiga",
+      "preferBorderless": "Preferir Sem Borda",
+      "preferExtended": "Preferir Arte Estendida"
+    }
+  }
+}

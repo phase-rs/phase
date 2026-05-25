@@ -1,1 +1,130 @@
-{}
+{
+  "modal": {
+    "title": "Ajustes",
+    "subtitle": "Ajusta la jugabilidad, los gráficos, el audio y los valores predeterminados del multijugador."
+  },
+  "tabs": {
+    "gameplay": "Jugabilidad",
+    "visual": "Visual",
+    "combat": "Ritmo",
+    "audio": "Audio",
+    "multiplayer": "Multijugador",
+    "data": "Datos",
+    "experimental": "Experimental"
+  },
+  "gameplay": {
+    "title": "Jugabilidad",
+    "language": "Idioma",
+    "cardSize": "Tamaño de las cartas",
+    "logDefault": "Registro predeterminado",
+    "spellPayment": "Pago de hechizos",
+    "manualManaPayment": "Pago manual de maná para hechizos",
+    "boardBackground": "Fondo del tablero",
+    "boardBackgroundGroups": {
+      "automatic": "Automático",
+      "battlefields": "Campos de batalla",
+      "plain": "Liso",
+      "custom": "Personalizado",
+      "off": "Desactivado"
+    },
+    "boardBackgroundOptions": {
+      "autoMatchDeck": "Automático (según el mazo)",
+      "random": "Aleatorio",
+      "customUrl": "URL personalizada",
+      "none": "Ninguno"
+    }
+  },
+  "visual": {
+    "title": "Visual",
+    "vfxQuality": "Calidad de los efectos visuales",
+    "keywordStrip": "Tira de palabras clave",
+    "showKeywords": "Mostrar palabras clave en las cartas del campo de batalla",
+    "opponentHoverPreview": "Vista previa al pasar el cursor sobre el oponente",
+    "showOpponentBoard": "Mostrar el tablero del oponente al pasar el cursor sobre el HUD",
+    "cardArtPreferences": "Preferencias de ilustración de cartas",
+    "clearArtOverrides_one": "Borrar todas las anulaciones de ilustración ({{count}})",
+    "clearArtOverrides_other": "Borrar todas las anulaciones de ilustración ({{count}})",
+    "clearArtOverridesConfirm_one": "¿Borrar la anulación de ilustración? ({{count}})",
+    "clearArtOverridesConfirm_other": "¿Borrar las {{count}} anulaciones de ilustración?"
+  },
+  "audio": {
+    "title": "Audio",
+    "muteAll": "Silenciar todo",
+    "muteAllAudio": "Silenciar todo el audio",
+    "globalVolume": "Volumen global",
+    "sfxVolume": "Volumen de efectos",
+    "musicVolume": "Volumen de la música"
+  },
+  "audioTheme": {
+    "title": "Tema de audio",
+    "theme": "Tema",
+    "importTheme": "Importar tema",
+    "loading": "Cargando...",
+    "import": "Importar",
+    "importFailed": "No se pudo importar el tema",
+    "customThemes": "Temas personalizados",
+    "remove": "Quitar"
+  },
+  "multiplayer": {
+    "title": "Multijugador",
+    "displayName": "Nombre visible",
+    "displayNamePlaceholder": "Introduce tu nombre",
+    "serverSelectionNote": "La selección de servidor se trasladó a la sala de espera — abre Multijugador y usa el chip de servidor (o \"Elegir servidor\" en modo P2P) para cambiar de región, configurar una instancia autoalojada o probar la conectividad."
+  },
+  "experimental": {
+    "title": "Experimental",
+    "description": "Estas funciones aún están en desarrollo. Pueden estar incompletas, tener errores o cambiar sin previo aviso. Actívalas para probar cosas pronto.",
+    "draftExperiments": "Experimentos de draft",
+    "enableDraftFeatures": "Activar funciones experimentales de draft",
+    "draftFeaturesDescription": "Desbloquea Cube Draft y Pod Draft. Quick Draft contra la IA siempre está disponible."
+  },
+  "data": {
+    "title": "Copia de seguridad y restauración",
+    "description": "Exportar agrupa tus preferencias, mazos importados y suscripciones a feeds en un único archivo JSON. Importar los restaura en otra máquina. Las cachés de IndexedDB (caché de feeds, caché de audio, partidas guardadas) no se incluyen — esas se reconstruyen automáticamente.",
+    "exportBackup": "Exportar copia de seguridad…",
+    "importBackup": "Importar copia de seguridad…",
+    "importConfirm": "¿Sobrescribir las preferencias y mazos existentes?\n\nAceptar: reemplazar todo con la copia de seguridad (destructivo).\nCancelar: fusionar — conservar los mazos existentes y añadir los nuevos de la copia de seguridad.",
+    "backupDownloaded": "Copia de seguridad descargada.",
+    "imported_one": "Se importó {{count}} mazo.",
+    "imported_other": "Se importaron {{count}} mazos.",
+    "importedWithPreferences_one": "Se importó {{count}} mazo y las preferencias.",
+    "importedWithPreferences_other": "Se importaron {{count}} mazos y las preferencias.",
+    "skippedMalformed_one": "Se omitió {{count}} entrada con formato incorrecto.",
+    "skippedMalformed_other": "Se omitieron {{count}} entradas con formato incorrecto."
+  },
+  "resetAll": {
+    "confirm": "¿Restablecer todas las preferencias a sus valores predeterminados? Esto borra todos los ajustes de este diálogo.",
+    "button": "Restablecer todas las preferencias"
+  },
+  "pacing": {
+    "title": "Ritmo",
+    "resetSection": "Restablecer sección",
+    "animationSpeed": "Velocidad de animación",
+    "animationSpeedDescription": "Velocidad principal — más alta es más rápida. Todo a la derecha omite las animaciones por completo.",
+    "hint": "Los controles deslizantes por categoría se multiplican sobre la Velocidad de animación. Haz doble clic en cualquier control deslizante — o toca el <glyph>↺</glyph> que tiene al lado — para restablecerlo.",
+    "instant": "Instantáneo",
+    "slowest": "Lo más lento",
+    "resetSliderLabel": "Restablecer {{label}} al valor predeterminado",
+    "atDefault": "En el valor predeterminado",
+    "resetToDefault": "Restablecer al valor predeterminado"
+  },
+  "artChain": {
+    "emptyState": "Usando la ilustración predeterminada de Scryfall. Añade reglas a continuación para personalizar.",
+    "moveUp": "Subir",
+    "moveDown": "Bajar",
+    "remove": "Quitar",
+    "unreachable": "Las reglas por debajo de \"{{rule}}\" son inalcanzables — siempre coincide.",
+    "addRule": "Añadir regla",
+    "setInputPlaceholder": "Código o nombre de colección…",
+    "addSet": "Añadir colección",
+    "rulesPriorityNote": "Las reglas se prueban de arriba a abajo. Gana la primera coincidencia. “Impresión de origen” usa la colección de un sobre de draft o una importación de mazo cuando está disponible. Las anulaciones por carta (clic derecho en el constructor de mazos) siempre tienen prioridad.",
+    "setEntry": "Colección: {{name}} ({{code}})",
+    "rules": {
+      "sourcePrinting": "Impresión de origen",
+      "newest": "Impresión más reciente",
+      "oldest": "Impresión más antigua",
+      "preferBorderless": "Preferir sin marco",
+      "preferExtended": "Preferir ilustración extendida"
+    }
+  }
+}

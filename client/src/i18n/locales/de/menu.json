@@ -1,1 +1,217 @@
-{}
+{
+  "backButton": {
+    "label": "Zurück"
+  },
+  "aiDifficulty": {
+    "label": "KI-Schwierigkeit",
+    "ariaLabel": "KI-Schwierigkeit: {{difficulty}}"
+  },
+  "bracketFilter": {
+    "label": "Bracket-Filter"
+  },
+  "gamePresets": {
+    "heading": "Schnellstart"
+  },
+  "shell": {
+    "disclaimer": "phase.rs ist ein nicht-kommerzielles Fanprojekt und steht in keiner Verbindung zu Wizards of the Coast und wird von diesen nicht unterstützt. Magic: The Gathering ist © Wizards of the Coast LLC. Kartenbilder werden zur Laufzeit von Scryfall abgerufen; Kartendaten stammen von MTGJSON. Es werden keine urheberrechtlich geschützten WotC-Inhalte mit diesem Projekt ausgeliefert."
+  },
+  "home": {
+    "resume": {
+      "title": "Spiel fortsetzen",
+      "description": "Setze die zuletzt gespeicherte Partie mit ihrem aktuellen Zug und Spielzustand fort."
+    },
+    "setup": {
+      "title": "Gegen KI spielen",
+      "titleSaved": "Neue KI-Partie",
+      "description": "Spiele eine Solo-Partie gegen einen KI-Gegner — wähle Format, Deck, Archetyp und Schwierigkeit."
+    },
+    "online": {
+      "title": "Online spielen",
+      "description": "Hoste einen Raum, tritt per Code bei oder verbinde dich erneut mit dem Mehrspielermodus."
+    },
+    "draft": {
+      "title": "Draft",
+      "description": "Quick Draft gegen KI sowie experimentelle Cube- und Pod-Draft-Optionen."
+    },
+    "decks": {
+      "title": "Decks",
+      "description": "Öffne gespeicherte Decks, wechsle deine aktive Liste und bearbeite Builds."
+    },
+    "social": {
+      "sponsor": "Sponsor"
+    },
+    "preview": {
+      "cta": "Vorschau testen",
+      "tooltip": "Spiele den neuesten Vorschau-Build — die neuesten Karten & Fixes landen hier vor jeder Veröffentlichung."
+    },
+    "coverage": {
+      "title": "Abdeckungs-Dashboard öffnen",
+      "ariaLabel": "Kartenabdeckungs-Dashboard öffnen",
+      "heading": "Kartenabdeckungs-Dashboard",
+      "viewDetails": "Details anzeigen"
+    },
+    "preparingCards": "Karten werden vorbereitet…",
+    "alpha": {
+      "label": "Frühe Alpha",
+      "message": " — rechne mit fehlerhaften Karten und fehlenden Funktionen."
+    },
+    "savedMatchAvailable": "Gespeicherte Partie verfügbar",
+    "load": {
+      "title": "Spielzustand laden"
+    },
+    "exit": "Beenden"
+  },
+  "loadState": {
+    "title": "Spielzustand laden",
+    "subtitle": "Stelle einen exportierten oder eingefügten Zustand wieder her und spiele gegen die KI weiter.",
+    "tabPaste": "JSON einfügen",
+    "tabFile": "Aus Datei",
+    "pastePlaceholder": "GameState-JSON einfügen…",
+    "fileSupports": "Unterstützt .json, .txt und .zip, exportiert aus dem Debug-Panel",
+    "chooseFile": "Datei wählen",
+    "load": "Laden"
+  },
+  "aiOpponent": {
+    "heading": "KI-Gegner",
+    "headingMulti": "KI-Gegner ({{count}})",
+    "analyzingDecks": "Decks werden analysiert…",
+    "noLegalDecks": "Für dieses Format sind keine legalen KI-Decks verfügbar.",
+    "catalogUnavailable": "KI-Deckkatalog nicht verfügbar: {{error}}",
+    "randomPoolFilters": "Filter für zufälligen Pool",
+    "archetype": "Archetyp",
+    "cardCoverage": "Kartenabdeckung",
+    "coverageThresholdHint": "Decks unterhalb dieser Engine-Unterstützungsschwelle ausschließen",
+    "bracket": "Bracket",
+    "bracketHint": "Die zufällige KI wählt aus diesen Brackets. Nicht markierte Decks werden beim Filtern ausgeschlossen.",
+    "opponentLabel": "Gegner {{number}}",
+    "deck": "Deck",
+    "difficulty": "Schwierigkeit",
+    "deckRandom": "Zufällig",
+    "deckRandomCount": "Zufällig ({{count}})",
+    "source": {
+      "feed": "Feed",
+      "user": "Benutzer",
+      "precon": "Precon"
+    }
+  },
+  "feedManager": {
+    "title": "Feeds verwalten",
+    "refreshing": "Wird aktualisiert…",
+    "refreshAll": "Alle aktualisieren",
+    "refresh": "Aktualisieren",
+    "subscribe": "Abonnieren",
+    "unsubscribe": "Abbestellen",
+    "lastRefreshed": "Zuletzt aktualisiert: {{date}}",
+    "addCustomFeed": "Eigenen Feed hinzufügen",
+    "add": "Hinzufügen",
+    "done": "Fertig"
+  },
+  "importDeck": {
+    "title": "Deck importieren",
+    "tabPaste": "Text einfügen",
+    "tabFile": "Aus Datei",
+    "deckNamePlaceholder": "Deckname",
+    "import": "Importieren",
+    "fileSupports": "Unterstützt .dck, .dec, .txt und MTGA-Format",
+    "chooseFile": "Datei wählen"
+  },
+  "precon": {
+    "savePrompt": "Vorkonstruiertes Deck speichern als:",
+    "overwriteConfirm": "„{{name}}“ existiert bereits. Überschreiben?",
+    "overwriteAllConfirm": "Alle {{count}} ausgewählten Decks existieren bereits. Überschreiben?",
+    "overwriteSomeConfirm": "{{conflicts}} von {{total}} ausgewählten Decks existieren bereits. Die Duplikate überschreiben? (Abbrechen behält die vorhandenen Kopien und importiert den Rest.)",
+    "importedSkipped_one": "{{count}} Deck importiert; {{skipped}} vorhandenes übersprungen.",
+    "importedSkipped_other": "{{count}} Decks importiert; {{skipped}} vorhandene übersprungen.",
+    "title": "Vorkonstruierte Decks",
+    "subtitle": "Aus MTGJSON AllDeckFiles — jedes von WotC gedruckte Precon.",
+    "totalCount": "· {{count}} insgesamt",
+    "searchPlaceholder": "Nach Name, Set-Code oder Typ suchen…",
+    "allTypes": "Alle ({{count}})",
+    "loadingCatalog": "Deckkatalog wird geladen…",
+    "noMatch": "Keine Decks passen.",
+    "selectDeck": "{{name}} auswählen",
+    "cardCount_one": "{{count}} Karte",
+    "cardCount_other": "{{count}} Karten",
+    "commanderSuffix": " · Cmdr",
+    "showingFirst": "Zeige die ersten {{count}} — verfeinere die Suche, um einzugrenzen.",
+    "selectAllVisible": "Alle sichtbaren auswählen",
+    "clearSelection": "Leeren ({{count}})",
+    "importSelected": "{{count}} ausgewählte importieren"
+  },
+  "deckTile": {
+    "feedBadge": "Feed",
+    "edit": "{{name}} bearbeiten",
+    "delete": "Löschen",
+    "deleteTitle": "Deck löschen",
+    "copy": "In Meine Decks kopieren",
+    "copyTitle": "In Meine Decks kopieren (entfernt Feed-Verfolgung)",
+    "cardCount_one": "{{count}} Karte",
+    "cardCount_other": "{{count}} Karten",
+    "preconBadge": "Precon",
+    "unknown": "Unbekannt {{count}}",
+    "unknownCardsTitle": "Unbekannte Karten:\n{{cards}}",
+    "unsupportedTitle": "Nicht unterstützt ({{unique}} eindeutige, {{copies}} Kopien):\n{{cards}}",
+    "setIconAlt": "{{code}} Set-Symbol"
+  },
+  "myDecks": {
+    "headingManage": "Meine Decks",
+    "headingSelect": "Deck auswählen",
+    "tabDecks": "Meine Decks",
+    "tabSubscriptions": "Abonnements",
+    "createNew": "Neu erstellen",
+    "refreshing": "Wird aktualisiert…",
+    "refreshAll": "Alle aktualisieren",
+    "manageFeeds": "Feeds verwalten",
+    "searchPlaceholder": "Decks durchsuchen…",
+    "formatLabel": "Format",
+    "browseAetherhub": "{{format}}-Decks auf Aetherhub durchsuchen",
+    "showAllDecks": "Alle Decks anzeigen",
+    "showLegalOnly": "Nur legale anzeigen",
+    "showAllDecksButton": "Alle Decks anzeigen",
+    "sortName": "Name",
+    "sortDateAdded": "Hinzugefügt am",
+    "sortFormat": "Format",
+    "ascending": "Aufsteigend",
+    "descending": "Absteigend",
+    "saveAsPrompt": "Speichern als:",
+    "banner": {
+      "showingAllFor": "Zeige alle gespeicherten Decks für",
+      "showingLegalIn": "Zeige Decks, die legal sind in",
+      "deckCount": "· {{visible}} von {{total}}"
+    },
+    "status": {
+      "fallbackUserDeck": "Benutzerdeck",
+      "fallbackVisibleDeck": "sichtbares Deck",
+      "startingWorker": "Kompatibilitäts-Worker wird gestartet…",
+      "loadingDatabase": "Kompatibilitätsdatenbank wird geladen…",
+      "checkingDeck": "{{deck}} wird geprüft…",
+      "checkedDeck": "{{deck}} geprüft",
+      "loadingCoverage": "Abdeckung für {{deck}} wird geladen…",
+      "checkingSelected": "Kompatibilität des ausgewählten Decks wird geprüft…",
+      "evaluatingVisible": "Sichtbare Decks werden ausgewertet…",
+      "remaining": "{{count}} verbleibend"
+    },
+    "compatibilityError": "Kompatibilitätsprüfung nicht verfügbar: {{error}}",
+    "empty": {
+      "title": "Keine Decks passen zu diesem Filter.",
+      "selectHint": "Importiere ein kompatibles Deck oder ändere dein Format, um verfügbare Decks zu sehen.",
+      "manageHint": "Wähle einen anderen Filter oder zeige alle Decks an, um aus deiner gesamten Sammlung zu wählen."
+    },
+    "sectionMyDecks": "Meine Decks",
+    "sectionStarterDecks": "Starterdecks",
+    "sectionLegalPrecons": "Legale Precons",
+    "importDeckTile": "Deck importieren",
+    "preconstructedTile": "Vorkonstruiert",
+    "browseAll": "Alle durchsuchen",
+    "loadMore": "Mehr laden",
+    "selectedDeck": "Ausgewähltes Deck",
+    "chooseDeckToContinue": "Wähle ein Deck, um fortzufahren"
+  },
+  "subscriptions": {
+    "emptyTitle": "Keine Feed-Abonnements",
+    "emptyDescription": "Abonniere Deck-Feeds, um kuratierte Decksammlungen zu erhalten, die sich automatisch aktualisieren.",
+    "feedMeta_one": "· {{count}} Deck · Aktualisiert {{date}}",
+    "feedMeta_other": "· {{count}} Decks · Aktualisiert {{date}}",
+    "error": "Fehler: {{error}}"
+  }
+}

@@ -1,1 +1,130 @@
-{}
+{
+  "modal": {
+    "title": "Einstellungen",
+    "subtitle": "Passe Spielablauf, Grafik, Audio und Mehrspieler-Standards an."
+  },
+  "tabs": {
+    "gameplay": "Spielablauf",
+    "visual": "Grafik",
+    "combat": "Tempo",
+    "audio": "Audio",
+    "multiplayer": "Mehrspieler",
+    "data": "Daten",
+    "experimental": "Experimentell"
+  },
+  "gameplay": {
+    "title": "Spielablauf",
+    "language": "Sprache",
+    "cardSize": "Kartengröße",
+    "logDefault": "Protokoll-Standard",
+    "spellPayment": "Zauberspruch-Bezahlung",
+    "manualManaPayment": "Manuelle Manabezahlung für Zaubersprüche",
+    "boardBackground": "Spielfeldhintergrund",
+    "boardBackgroundGroups": {
+      "automatic": "Automatisch",
+      "battlefields": "Schlachtfelder",
+      "plain": "Schlicht",
+      "custom": "Eigene",
+      "off": "Aus"
+    },
+    "boardBackgroundOptions": {
+      "autoMatchDeck": "Auto (zum Deck passend)",
+      "random": "Zufällig",
+      "customUrl": "Eigene URL",
+      "none": "Keiner"
+    }
+  },
+  "visual": {
+    "title": "Grafik",
+    "vfxQuality": "VFX-Qualität",
+    "keywordStrip": "Schlüsselwortleiste",
+    "showKeywords": "Schlüsselwörter auf Schlachtfeldkarten anzeigen",
+    "opponentHoverPreview": "Gegner-Hover-Vorschau",
+    "showOpponentBoard": "Spielfeld des Gegners beim Hovern über das HUD anzeigen",
+    "cardArtPreferences": "Karten-Artwork-Einstellungen",
+    "clearArtOverrides_one": "Alle Artwork-Überschreibungen aufheben ({{count}})",
+    "clearArtOverrides_other": "Alle Artwork-Überschreibungen aufheben ({{count}})",
+    "clearArtOverridesConfirm_one": "Alle {{count}} Artwork-Überschreibung aufheben?",
+    "clearArtOverridesConfirm_other": "Alle {{count}} Artwork-Überschreibungen aufheben?"
+  },
+  "audio": {
+    "title": "Audio",
+    "muteAll": "Alles stummschalten",
+    "muteAllAudio": "Gesamtes Audio stummschalten",
+    "globalVolume": "Gesamtlautstärke",
+    "sfxVolume": "SFX-Lautstärke",
+    "musicVolume": "Musiklautstärke"
+  },
+  "audioTheme": {
+    "title": "Audio-Theme",
+    "theme": "Theme",
+    "importTheme": "Theme importieren",
+    "loading": "Wird geladen...",
+    "import": "Importieren",
+    "importFailed": "Theme konnte nicht importiert werden",
+    "customThemes": "Eigene Themes",
+    "remove": "Entfernen"
+  },
+  "multiplayer": {
+    "title": "Mehrspieler",
+    "displayName": "Anzeigename",
+    "displayNamePlaceholder": "Gib deinen Namen ein",
+    "serverSelectionNote": "Die Serverauswahl ist in die Lobby verschoben — öffne den Mehrspielermodus und verwende den Server-Chip (oder „Server wählen“ im P2P-Modus), um Regionen zu wechseln, eine selbst gehostete Instanz zu konfigurieren oder die Verbindung zu testen."
+  },
+  "experimental": {
+    "title": "Experimentell",
+    "description": "Diese Funktionen befinden sich noch in Entwicklung. Sie können unvollständig oder fehlerhaft sein oder sich ohne Vorankündigung ändern. Aktiviere sie, um Dinge frühzeitig auszuprobieren.",
+    "draftExperiments": "Draft-Experimente",
+    "enableDraftFeatures": "Experimentelle Draft-Funktionen aktivieren",
+    "draftFeaturesDescription": "Schaltet Cube Draft und Pod Draft frei. Quick Draft gegen KI ist immer verfügbar."
+  },
+  "data": {
+    "title": "Sicherung & Wiederherstellung",
+    "description": "Der Export bündelt deine Einstellungen, importierten Decks und Feed-Abonnements in einer einzigen JSON-Datei. Der Import stellt sie auf einem anderen Gerät wieder her. IndexedDB-Caches (Feed-Cache, Audio-Cache, gespeicherte Spiele) sind nicht enthalten — diese werden automatisch neu aufgebaut.",
+    "exportBackup": "Sicherung exportieren…",
+    "importBackup": "Sicherung importieren…",
+    "importConfirm": "Vorhandene Einstellungen und Decks überschreiben?\n\nOK: alles durch die Sicherung ersetzen (destruktiv).\nAbbrechen: zusammenführen — vorhandene Decks behalten, neue aus der Sicherung hinzufügen.",
+    "backupDownloaded": "Sicherung heruntergeladen.",
+    "imported_one": "{{count}} Deck importiert.",
+    "imported_other": "{{count}} Decks importiert.",
+    "importedWithPreferences_one": "{{count}} Deck und Einstellungen importiert.",
+    "importedWithPreferences_other": "{{count}} Decks und Einstellungen importiert.",
+    "skippedMalformed_one": "{{count}} fehlerhaften Eintrag übersprungen.",
+    "skippedMalformed_other": "{{count}} fehlerhafte Einträge übersprungen."
+  },
+  "resetAll": {
+    "confirm": "Alle Einstellungen auf die Standardwerte zurücksetzen? Dies löscht jede Einstellung in diesem Dialog.",
+    "button": "Alle Einstellungen zurücksetzen"
+  },
+  "pacing": {
+    "title": "Tempo",
+    "resetSection": "Abschnitt zurücksetzen",
+    "animationSpeed": "Animationsgeschwindigkeit",
+    "animationSpeedDescription": "Hauptgeschwindigkeit — höher ist schneller. Ganz rechts überspringt Animationen vollständig.",
+    "hint": "Die Schieberegler pro Kategorie multiplizieren sich auf die Animationsgeschwindigkeit. Doppelklicke auf einen beliebigen Schieberegler — oder tippe auf das <glyph>↺</glyph> daneben — zum Zurücksetzen.",
+    "instant": "Sofort",
+    "slowest": "Am langsamsten",
+    "resetSliderLabel": "{{label}} auf Standard zurücksetzen",
+    "atDefault": "Auf Standard",
+    "resetToDefault": "Auf Standard zurücksetzen"
+  },
+  "artChain": {
+    "emptyState": "Standard-Scryfall-Artwork wird verwendet. Füge unten Regeln hinzu, um anzupassen.",
+    "moveUp": "Nach oben verschieben",
+    "moveDown": "Nach unten verschieben",
+    "remove": "Entfernen",
+    "unreachable": "Regeln unter „{{rule}}“ sind unerreichbar — sie trifft immer zu.",
+    "addRule": "Regel hinzufügen",
+    "setInputPlaceholder": "Set-Code oder Name…",
+    "addSet": "Set hinzufügen",
+    "rulesPriorityNote": "Regeln werden von oben nach unten geprüft. Der erste Treffer gewinnt. „Quelldruck“ verwendet das Set aus einem Draft-Booster oder Deck-Import, sofern verfügbar. Überschreibungen pro Karte (Rechtsklick im Deckbuilder) haben immer Vorrang.",
+    "setEntry": "Set: {{name}} ({{code}})",
+    "rules": {
+      "sourcePrinting": "Quelldruck",
+      "newest": "Neuester Druck",
+      "oldest": "Ältester Druck",
+      "preferBorderless": "Randlos bevorzugen",
+      "preferExtended": "Erweitertes Artwork bevorzugen"
+    }
+  }
+}

@@ -1,1 +1,202 @@
-{}
+{
+  "actions": {
+    "cancel": "Cancelar",
+    "save": "Guardar",
+    "close": "Cerrar",
+    "closeNamed": "Cerrar {{name}}"
+  },
+  "modal": {
+    "defaultEyebrow": "Herramienta del espacio de trabajo"
+  },
+  "pausedBanner": {
+    "message": "Partida en pausa — {{reason}}"
+  },
+  "fullscreen": {
+    "enter": "Activar pantalla completa",
+    "exit": "Salir de pantalla completa"
+  },
+  "buildBadge": {
+    "downloading": "descargando… {{progress}}%",
+    "checking": "comprobando…",
+    "updating": "actualizando…",
+    "updatePending": "actualización pendiente tras la partida",
+    "cards": "cartas {{age}} ({{commit}})",
+    "cardDataTitle": "Datos de cartas generados el {{date}} desde {{commit}}",
+    "checkForUpdates": "Buscar actualizaciones",
+    "updaterDebugInfo": "Información de depuración del actualizador",
+    "updaterIssue": "Problema del actualizador: {{error}}",
+    "updateIssue": "problema de actualización",
+    "updated": "actualizado"
+  },
+  "gameMenu": {
+    "menu": "Menú de la partida",
+    "sandboxTools": "Herramientas de sandbox",
+    "sandboxToolsTitle": "Herramientas de sandbox — configura cualquier estado del tablero (`)",
+    "resume": "Reanudar",
+    "settings": "Ajustes",
+    "helpShortcuts": "Ayuda y atajos",
+    "showAiHand": "Mostrar la mano de la IA",
+    "hideAiHand": "Ocultar la mano de la IA",
+    "concede": "Conceder",
+    "backToDraft": "Volver al Draft",
+    "mainMenu": "Menú principal",
+    "cards": "cartas {{commit}}",
+    "cardDataTitle": "Datos de cartas: {{date}}"
+  },
+  "volume": {
+    "mute": "Silenciar",
+    "unmute": "Activar sonido",
+    "volume": "Volumen"
+  },
+  "hostControl": {
+    "seatHost": "Anfitrión",
+    "seatPlayer": "Jugador",
+    "seatOpen": "Abierto",
+    "seatAi": "IA ({{difficulty}})",
+    "waiting": "Esperando…",
+    "seatLabel": "Asiento {{id}}",
+    "addAi": "Añadir IA",
+    "remove": "Quitar",
+    "human": "Humano",
+    "kick": "Expulsar",
+    "replaceAi": "Reemplazar con IA",
+    "random": "Aleatorio",
+    "connecting": "Conectando…",
+    "cancelHosting": "Cancelar hospedaje",
+    "kickConfirm": "¿Expulsar a {{name}} de la sala?",
+    "replaceConfirm": "¿Reemplazar a {{name}} con IA? Esto lo elimina de la sala.",
+    "fallbackPlayerName": "Jugador {{number}}",
+    "seatsOccupied": "{{occupied}}/{{total}} asientos ocupados",
+    "startGame": "Empezar partida",
+    "startNow": "Empezar ahora",
+    "fillWithAi": "Rellenar con IA"
+  },
+  "grantDebug": {
+    "heading": "Sandbox: Permisos de depuración",
+    "description": "Otorga a otros jugadores la capacidad de enviar acciones de depuración. Sus acciones se registran públicamente.",
+    "playerLabel": "Jugador {{number}}",
+    "revoke": "REVOCAR",
+    "grant": "OTORGAR"
+  },
+  "help": {
+    "eyebrow": "Ayuda",
+    "title": "Ayuda y atajos",
+    "subtitle": "Flujo de Magic digital para jugadores de papel: paradas, prioridad, pasar y herramientas de recuperación.",
+    "closeHelp": "Cerrar ayuda",
+    "searchPlaceholder": "Buscar en la ayuda o los atajos",
+    "whatCanIDo": "¿Qué puedo hacer ahora?",
+    "recoveryTitle": "Herramientas de recuperación",
+    "recoveryDescription": "Si una carta funciona mal, exporta el estado primero. El panel de depuración avanzada está disponible cuando necesites inspeccionar o ajustar la partida.",
+    "copyState": "Copiar estado",
+    "exportState": "Exportar estado",
+    "openAdvancedDebug": "Abrir depuración avanzada",
+    "sections": {
+      "Flow": "Flujo",
+      "Shortcuts": "Atajos",
+      "Recovery": "Recuperación"
+    },
+    "status": {
+      "copied": "Estado de la partida copiado al portapapeles.",
+      "copyFailed": "No se pudo copiar el estado de la partida.",
+      "exported": "Se exportó {{filename}}.",
+      "exportFailed": "No se pudo exportar el estado de la partida."
+    },
+    "prompt": {
+      "starting": "La partida se está iniciando o restaurando el estado.",
+      "gameOver": "La partida ha terminado.",
+      "mulliganDecide": "Elige si conservar esta mano inicial o hacer un mulligan.",
+      "mulliganWaitDecide": "Esperando a que otro jugador decida su mano inicial.",
+      "mulliganBottom": "Elige cartas para poner en el fondo tras conservar una mano de mulligan.",
+      "mulliganWaitBottom": "Esperando a que otro jugador termine su mulligan.",
+      "openingHandBottom": "Elige una carta para poner en el fondo antes de que empiecen los mulligans normales.",
+      "openingHandWait": "Esperando a que otro jugador resuelva su mano inicial.",
+      "waitOther": "Esperando a que otro jugador actúe.",
+      "priorityStack": "Tienes prioridad con algo en la pila. Resolver pasa la prioridad para que el objeto superior se resuelva.",
+      "priorityAutoPass": "Tienes prioridad. El cliente puede pasar automáticamente las ventanas tranquilas a menos que haya una parada o el Control total activado.",
+      "priorityActions": "Tienes prioridad. Puedes usar las cartas disponibles o pasar para mantener el turno en marcha.",
+      "priorityPass": "Tienes prioridad. Pasar continúa al siguiente paso o jugador.",
+      "manaPayment": "Paga el maná del hechizo o la habilidad pendiente. Pulsa T para girar las tierras disponibles.",
+      "targetSelection": "Elige el objetivo legal resaltado o cancela si el aviso lo permite.",
+      "declareAttackers": "Elige atacantes y luego confírmalos. También puedes atacar con ninguno.",
+      "declareBlockers": "Elige bloqueadores y asígnalos a los atacantes, luego confirma los bloqueadores.",
+      "chooseXValue": "Elige un valor para X antes de continuar con el hechizo o la habilidad.",
+      "payAmountChoice": "Elige cuánto del recurso solicitado pagar.",
+      "default": "La partida está esperando tu elección. Sigue el aviso activo para continuar."
+    },
+    "entries": {
+      "automaticPhaseSkips": {
+        "title": "Saltos de fase automáticos",
+        "body": "Los saltos de fase son automáticos. Usa paradas o el Control total cuando quieras ventanas de prioridad al estilo del papel."
+      },
+      "phaseStops": {
+        "title": "Paradas de fase",
+        "body": "Una parada se detiene antes de ese paso, similar a decir que puedes actuar antes del combate, antes de robar o antes del paso final en el papel."
+      },
+      "fullControl": {
+        "title": "Control total",
+        "body": "El Control total evita que se omitan las ventanas de prioridad, incluidos los momentos en que el cliente digital normalmente mantendría la partida en marcha."
+      },
+      "resolve": {
+        "title": "Resolver",
+        "body": "Resolver significa que pasas la prioridad para que el hechizo o la habilidad superior de la pila se resuelva si todos los demás también pasan."
+      },
+      "passToEnd": {
+        "title": "Pasar hasta el final",
+        "body": "Pasar hasta el final sigue pasando la prioridad durante el turno a menos que lo interrumpa una elección, una parada o el Control total."
+      },
+      "manaPayment": {
+        "title": "Pago de maná",
+        "body": "Durante el pago de maná, puedes girar tierras manualmente o pulsar T para girar las tierras disponibles."
+      },
+      "combatDeclarations": {
+        "title": "Declaraciones de combate",
+        "body": "La partida solicita atacantes y bloqueadores solo durante los pasos de declaración. Elige criaturas y luego confirma la declaración."
+      },
+      "openHelp": {
+        "title": "Abrir la ayuda",
+        "body": "Abre esta hoja de ayuda."
+      },
+      "passPriority": {
+        "title": "Pasar prioridad",
+        "body": "Pasa la prioridad o avanza por el aviso de prioridad actual."
+      },
+      "undo": {
+        "title": "Deshacer",
+        "body": "Deshaz la última acción local que no haya revelado información oculta."
+      },
+      "cancel": {
+        "title": "Cancelar",
+        "body": "Cancela la selección actual, el pago de maná, la selección de objetivos o el pase automático cuando esté disponible."
+      },
+      "advancedDebugPanel": {
+        "title": "Panel de depuración avanzada",
+        "body": "Abre el panel de depuración avanzada. La mayoría de los jugadores deberían empezar primero por las Herramientas de recuperación."
+      },
+      "reportOrExportState": {
+        "title": "Informar o exportar el estado",
+        "body": "Si una carta funciona mal, exporta el estado actual de la partida para poder reproducir la posición exacta del tablero."
+      },
+      "boardRightClickMenu": {
+        "title": "Menú del tablero con clic derecho",
+        "body": "En escritorio, haz clic derecho en un espacio vacío del tablero para acceder al registro de la partida, las herramientas de recuperación/depuración y los ajustes de fondo."
+      }
+    },
+    "flowNudge": {
+      "message": "Los saltos de fase son automáticos. Usa paradas o el Control total cuando quieras ventanas de prioridad al estilo del papel.",
+      "dismiss": "Descartar",
+      "learnFlow": "Conocer el flujo"
+    },
+    "sandboxNudge": {
+      "message": "Configura cualquier estado del tablero con <tools>Herramientas de sandbox</tools> — añade cartas y fichas, cambia vidas y contadores, copia permanentes o salta fases. Ábrelo en cualquier momento con la tecla <key>`</key>.",
+      "dismiss": "Descartar",
+      "open": "Abrir Herramientas de sandbox"
+    }
+  },
+  "splash": {
+    "ready": "Listo",
+    "loading": "Cargando..."
+  },
+  "turnBanner": {
+    "turn": "Turno {{number}}"
+  }
+}

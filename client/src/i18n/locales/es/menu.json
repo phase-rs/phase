@@ -1,1 +1,217 @@
-{}
+{
+  "backButton": {
+    "label": "Atrás"
+  },
+  "aiDifficulty": {
+    "label": "Dificultad de la IA",
+    "ariaLabel": "Dificultad de la IA: {{difficulty}}"
+  },
+  "bracketFilter": {
+    "label": "Filtro de nivel"
+  },
+  "gamePresets": {
+    "heading": "Inicio rápido"
+  },
+  "shell": {
+    "disclaimer": "phase.rs es un proyecto de fans sin ánimo de lucro y no está afiliado ni respaldado por Wizards of the Coast. Magic: The Gathering es © Wizards of the Coast LLC. Las imágenes de las cartas se obtienen de Scryfall en tiempo de ejecución; los datos de las cartas provienen de MTGJSON. Este proyecto no incluye ningún recurso con derechos de autor de WotC."
+  },
+  "home": {
+    "resume": {
+      "title": "Reanudar partida",
+      "description": "Continúa la última partida guardada desde su turno y estado del tablero actuales."
+    },
+    "setup": {
+      "title": "Jugar contra la IA",
+      "titleSaved": "Nueva partida contra la IA",
+      "description": "Juega una partida en solitario contra un oponente de IA — elige formato, mazo, arquetipo y dificultad."
+    },
+    "online": {
+      "title": "Jugar en línea",
+      "description": "Hospeda una sala, únete por código o reconéctate al multijugador."
+    },
+    "draft": {
+      "title": "Draft",
+      "description": "Quick Draft contra la IA, además de opciones experimentales de cube y pod draft."
+    },
+    "decks": {
+      "title": "Mazos",
+      "description": "Abre mazos guardados, cambia tu lista activa y edita tus creaciones."
+    },
+    "social": {
+      "sponsor": "Patrocinar"
+    },
+    "preview": {
+      "cta": "Probar la vista previa",
+      "tooltip": "Juega la última versión de vista previa — las cartas y correcciones más recientes llegan aquí antes de cada lanzamiento."
+    },
+    "coverage": {
+      "title": "Abrir el panel de cobertura",
+      "ariaLabel": "Abrir el panel de cobertura de cartas",
+      "heading": "Panel de cobertura de cartas",
+      "viewDetails": "Ver detalles"
+    },
+    "preparingCards": "Preparando cartas…",
+    "alpha": {
+      "label": "Alfa temprana",
+      "message": " — espera cartas que no funcionan y funciones que faltan."
+    },
+    "savedMatchAvailable": "Partida guardada disponible",
+    "load": {
+      "title": "Cargar estado de la partida"
+    },
+    "exit": "Salir"
+  },
+  "loadState": {
+    "title": "Cargar estado de la partida",
+    "subtitle": "Restaura un estado exportado o pegado y continúa contra la IA.",
+    "tabPaste": "Pegar JSON",
+    "tabFile": "Desde archivo",
+    "pastePlaceholder": "Pega el JSON del GameState…",
+    "fileSupports": "Admite .json, .txt y .zip exportados desde el Panel de depuración",
+    "chooseFile": "Elegir archivo",
+    "load": "Cargar"
+  },
+  "aiOpponent": {
+    "heading": "Oponente de IA",
+    "headingMulti": "Oponentes de IA ({{count}})",
+    "analyzingDecks": "Analizando mazos…",
+    "noLegalDecks": "No hay mazos de IA legales disponibles para este formato.",
+    "catalogUnavailable": "Catálogo de mazos de IA no disponible: {{error}}",
+    "randomPoolFilters": "Filtros del grupo aleatorio",
+    "archetype": "Arquetipo",
+    "cardCoverage": "Cobertura de cartas",
+    "coverageThresholdHint": "Excluir mazos por debajo de este umbral de compatibilidad del motor",
+    "bracket": "Nivel",
+    "bracketHint": "La IA aleatoria elige de estos niveles. Los mazos sin etiqueta se excluyen al filtrar.",
+    "opponentLabel": "Oponente {{number}}",
+    "deck": "Mazo",
+    "difficulty": "Dificultad",
+    "deckRandom": "Aleatorio",
+    "deckRandomCount": "Aleatorio ({{count}})",
+    "source": {
+      "feed": "Feed",
+      "user": "Usuario",
+      "precon": "Precon"
+    }
+  },
+  "feedManager": {
+    "title": "Gestionar feeds",
+    "refreshing": "Actualizando…",
+    "refreshAll": "Actualizar todo",
+    "refresh": "Actualizar",
+    "subscribe": "Suscribirse",
+    "unsubscribe": "Cancelar suscripción",
+    "lastRefreshed": "Última actualización: {{date}}",
+    "addCustomFeed": "Añadir feed personalizado",
+    "add": "Añadir",
+    "done": "Listo"
+  },
+  "importDeck": {
+    "title": "Importar mazo",
+    "tabPaste": "Pegar texto",
+    "tabFile": "Desde archivo",
+    "deckNamePlaceholder": "Nombre del mazo",
+    "import": "Importar",
+    "fileSupports": "Admite formatos .dck, .dec, .txt y MTGA",
+    "chooseFile": "Elegir archivo"
+  },
+  "precon": {
+    "savePrompt": "Guardar mazo preconstruido como:",
+    "overwriteConfirm": "\"{{name}}\" ya existe. ¿Sobrescribir?",
+    "overwriteAllConfirm": "Los {{count}} mazos seleccionados ya existen. ¿Sobrescribir?",
+    "overwriteSomeConfirm": "{{conflicts}} de {{total}} mazos seleccionados ya existen. ¿Sobrescribir los duplicados? (Cancelar conserva las copias existentes e importa el resto.)",
+    "importedSkipped_one": "Se importó {{count}} mazo; se omitió {{skipped}} existente.",
+    "importedSkipped_other": "Se importaron {{count}} mazos; se omitieron {{skipped}} existentes.",
+    "title": "Mazos preconstruidos",
+    "subtitle": "Provenientes de MTGJSON AllDeckFiles — todos los precon impresos por WotC.",
+    "totalCount": "· {{count}} en total",
+    "searchPlaceholder": "Buscar por nombre, código de colección o tipo…",
+    "allTypes": "Todos ({{count}})",
+    "loadingCatalog": "Cargando catálogo de mazos…",
+    "noMatch": "Ningún mazo coincide.",
+    "selectDeck": "Seleccionar {{name}}",
+    "cardCount_one": "{{count}} carta",
+    "cardCount_other": "{{count}} cartas",
+    "commanderSuffix": " · cmdr",
+    "showingFirst": "Mostrando los primeros {{count}} — refina la búsqueda para acotar.",
+    "selectAllVisible": "Seleccionar todos los visibles",
+    "clearSelection": "Limpiar ({{count}})",
+    "importSelected": "Importar {{count}} seleccionados"
+  },
+  "deckTile": {
+    "feedBadge": "Feed",
+    "edit": "Editar {{name}}",
+    "delete": "Eliminar",
+    "deleteTitle": "Eliminar mazo",
+    "copy": "Copiar a Mis mazos",
+    "copyTitle": "Copiar a Mis mazos (elimina el seguimiento del feed)",
+    "cardCount_one": "{{count}} carta",
+    "cardCount_other": "{{count}} cartas",
+    "preconBadge": "precon",
+    "unknown": "Desconocidas {{count}}",
+    "unknownCardsTitle": "Cartas desconocidas:\n{{cards}}",
+    "unsupportedTitle": "No compatibles ({{unique}} únicas, {{copies}} copias):\n{{cards}}",
+    "setIconAlt": "Icono de la colección {{code}}"
+  },
+  "myDecks": {
+    "headingManage": "Mis mazos",
+    "headingSelect": "Seleccionar mazo",
+    "tabDecks": "Mis mazos",
+    "tabSubscriptions": "Suscripciones",
+    "createNew": "Crear nuevo",
+    "refreshing": "Actualizando…",
+    "refreshAll": "Actualizar todo",
+    "manageFeeds": "Gestionar feeds",
+    "searchPlaceholder": "Buscar mazos…",
+    "formatLabel": "Formato",
+    "browseAetherhub": "Explorar mazos de {{format}} en Aetherhub",
+    "showAllDecks": "Mostrar todos los mazos",
+    "showLegalOnly": "Mostrar solo los legales",
+    "showAllDecksButton": "Mostrar todos los mazos",
+    "sortName": "Nombre",
+    "sortDateAdded": "Fecha de adición",
+    "sortFormat": "Formato",
+    "ascending": "Ascendente",
+    "descending": "Descendente",
+    "saveAsPrompt": "Guardar como:",
+    "banner": {
+      "showingAllFor": "Mostrando todos los mazos guardados para",
+      "showingLegalIn": "Mostrando mazos legales en",
+      "deckCount": "· {{visible}} de {{total}}"
+    },
+    "status": {
+      "fallbackUserDeck": "mazo de usuario",
+      "fallbackVisibleDeck": "mazo visible",
+      "startingWorker": "Iniciando el proceso de compatibilidad…",
+      "loadingDatabase": "Cargando la base de datos de compatibilidad…",
+      "checkingDeck": "Comprobando {{deck}}…",
+      "checkedDeck": "Comprobado {{deck}}",
+      "loadingCoverage": "Cargando cobertura de {{deck}}…",
+      "checkingSelected": "Comprobando la compatibilidad del mazo seleccionado…",
+      "evaluatingVisible": "Evaluando los mazos visibles…",
+      "remaining": "{{count}} restantes"
+    },
+    "compatibilityError": "Comprobación de compatibilidad no disponible: {{error}}",
+    "empty": {
+      "title": "Ningún mazo coincide con este filtro.",
+      "selectHint": "Importa un mazo compatible o cambia tu formato para ver los mazos disponibles.",
+      "manageHint": "Elige un filtro diferente o muestra todos los mazos para escoger de tu colección completa."
+    },
+    "sectionMyDecks": "Mis mazos",
+    "sectionStarterDecks": "Mazos iniciales",
+    "sectionLegalPrecons": "Precon legales",
+    "importDeckTile": "Importar mazo",
+    "preconstructedTile": "Preconstruido",
+    "browseAll": "Explorar todos",
+    "loadMore": "Cargar más",
+    "selectedDeck": "Mazo seleccionado",
+    "chooseDeckToContinue": "Elige un mazo para continuar"
+  },
+  "subscriptions": {
+    "emptyTitle": "Sin suscripciones a feeds",
+    "emptyDescription": "Suscríbete a feeds de mazos para obtener colecciones de mazos seleccionadas que se actualizan automáticamente.",
+    "feedMeta_one": "· {{count}} mazo · Actualizado el {{date}}",
+    "feedMeta_other": "· {{count}} mazos · Actualizado el {{date}}",
+    "error": "Error: {{error}}"
+  }
+}

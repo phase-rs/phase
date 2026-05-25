@@ -1,1 +1,210 @@
-{}
+{
+  "search": {
+    "title": "Rechercher",
+    "subtitle": "Ajoutez des cartes à la liste actuelle.",
+    "reset": "Réinitialiser",
+    "textPlaceholder": "Rechercher des cartes...",
+    "allTypes": "Tous les types",
+    "cmcMax": "CMC max :",
+    "sets": "Extensions",
+    "addSetPlaceholder": "Ajouter un code d'extension...",
+    "addSet": "Ajouter",
+    "removeSet": "Retirer {{name}}",
+    "emptyHint": "Ajoutez un filtre pour commencer à parcourir",
+    "searching": "Recherche...",
+    "searchFailed": "Échec de la recherche",
+    "results_one": "{{count}} résultat",
+    "results_other": "{{count}} résultats",
+    "browseFormat": {
+      "all": "Toutes les cartes"
+    }
+  },
+  "filters": {
+    "title": "Filtres",
+    "close": "Fermer les filtres",
+    "done": "Terminé",
+    "search": "Rechercher"
+  },
+  "deck": {
+    "backToDeck": "Retour au deck",
+    "listView": "Vue en liste",
+    "stackView": "Vue en pile"
+  },
+  "tabs": {
+    "ariaLabel": "Surface du constructeur de deck",
+    "deck": "Deck",
+    "info": "Infos"
+  },
+  "toolbar": {
+    "menu": "Menu",
+    "deckBuilder": "Constructeur de deck",
+    "untitledDeck": "Deck sans titre",
+    "deckName": "Nom du deck",
+    "format": "Format",
+    "bracket": "Palier",
+    "saved": "Enregistré ✓",
+    "clone": "Cloner",
+    "cloneTitle": "Enregistrer une copie sous un nouveau nom",
+    "loadDeck": "Charger un deck...",
+    "nameToSave": "Nommez le deck pour l'enregistrer"
+  },
+  "unsaved": {
+    "title": "Modifications non enregistrées",
+    "dismiss": "Fermer la boîte de dialogue",
+    "bodyLeaving": "Vous avez des modifications non enregistrées sur ce deck. Les enregistrer avant de quitter ?",
+    "bodyLoading": "Vous avez des modifications non enregistrées sur ce deck. Les enregistrer avant de charger un autre deck ?",
+    "discard": "Abandonner",
+    "saveAndContinue": "Enregistrer et continuer"
+  },
+  "card": {
+    "moveToSideboard": "Déplacer un {{name}} vers la réserve",
+    "moveToMain": "Déplacer un {{name}} vers le deck principal",
+    "removeOne": "Retirer un {{name}}",
+    "makeCommander": "Faire de {{name}} le commandant",
+    "makeCommanderTitle": "En faire mon commandant",
+    "chooseArtFor": "Choisir l'illustration pour {{name}}",
+    "alternateArtTap": "Illustration alternative disponible — touchez pour choisir",
+    "alternateArtRightClick": "Illustration alternative disponible — clic droit pour choisir",
+    "unsupportedExpand_one": "{{count}} mécanique non prise en charge ; développer les détails",
+    "unsupportedExpand_other": "{{count}} mécaniques non prises en charge ; développer les détails",
+    "unsupportedTitle_one": "{{count}} mécanique non prise en charge — cliquez pour développer",
+    "unsupportedTitle_other": "{{count}} mécaniques non prises en charge — cliquez pour développer"
+  },
+  "grid": {
+    "allFormats": "Tous",
+    "addCard": "Ajouter {{name}}",
+    "notLegal": "{{name}} - Non légal en {{format}}",
+    "notFormat": "Non {{format}}"
+  },
+  "deckList": {
+    "currentList": "Liste actuelle",
+    "import": "Importer",
+    "importTitle": "Importer un deck depuis du texte (format MTGA ou .dck)",
+    "export": "Exporter",
+    "exportTitle": "Exporter le deck",
+    "mainTab": "Principal ({{count}})",
+    "sideboardTab": "Réserve ({{count}})",
+    "mainDeckHeading_one": "Deck principal ({{count}} carte)",
+    "mainDeckHeading_other": "Deck principal ({{count}} cartes)",
+    "sideboardUnlimited": "Réserve ({{count}})",
+    "sideboardLimited": "Réserve ({{count}}/{{max}})",
+    "sideboardExceeds": "La réserve dépasse la limite de {{max}} cartes",
+    "sideboardEmptyHint": "Survolez une carte du deck principal et cliquez sur → pour la déplacer ici.",
+    "group": {
+      "Creatures": "Créatures",
+      "Spells": "Sorts",
+      "Lands": "Terrains"
+    },
+    "importModalTitle": "Importer un deck",
+    "pastePlaceholder": "Collez la liste du deck (format MTGA ou .dck)...",
+    "fromFile": "Depuis un fichier",
+    "parse": "Analyser",
+    "exportModalTitle": "Exporter le deck",
+    "saveToFile": "Enregistrer dans un fichier",
+    "copied": "Copié !",
+    "copy": "Copier"
+  },
+  "moveList": {
+    "empty": "Vide"
+  },
+  "stack": {
+    "deckView": "Vue du deck",
+    "visualDeckStack": "Pile visuelle du deck",
+    "mainBadge": "Principal {{count}}",
+    "sideboardBadge": "Réserve {{count}}",
+    "emptyHint": "Les cartes ajoutées apparaîtront ici sous forme de pile décalée.",
+    "commanderBadge": "Commandant",
+    "commanderLane": "Commandant",
+    "mainDeckLane": "Deck principal",
+    "noCommander": "Aucun commandant sélectionné.",
+    "mainEmpty": "Les cartes du deck principal apparaîtront ici.",
+    "cardCount_one": "{{count}} carte",
+    "cardCount_other": "{{count}} cartes",
+    "mainSideBadge": "{{main}} principal + {{side}} réserve",
+    "groupCards_one": "{{count}} carte",
+    "groupCards_other": "{{count}} cartes",
+    "group": {
+      "Creatures": "Créatures",
+      "Spells": "Sorts",
+      "Lands": "Terrains"
+    },
+    "sideboardGroup": "Réserve",
+    "addOne": "Ajouter un {{name}}",
+    "copyLimit": "{{name}} est à la limite de copies",
+    "removeOne": "Retirer un {{name}}",
+    "removeCommander": "Retirer {{name}} comme commandant"
+  },
+  "printingPicker": {
+    "title": "Choisir l'illustration",
+    "noPrintings": "Aucune impression alternative disponible pour cette carte.",
+    "filterPlaceholder": "Filtrer par extension ou numéro de collection…",
+    "filterAriaLabel": "Filtrer les impressions",
+    "count_one": "{{count}} impression",
+    "count_other": "{{count}} impressions",
+    "countMatching_one": "{{count}} impression correspondant à « {{query}} »",
+    "countMatching_other": "{{count}} impressions correspondant à « {{query}} »",
+    "useDefault": "Utiliser par défaut",
+    "noMatches": "Aucune impression ne correspond à votre filtre.",
+    "noImage": "Pas d'image",
+    "showMore_one": "Afficher plus ({{count}} restante)",
+    "showMore_other": "Afficher plus ({{count}} restantes)"
+  },
+  "stats": {
+    "formatLegality": "Légalité du format",
+    "engineCoverage": "Couverture du moteur",
+    "unsupportedTitle": "Non prises en charge :\n{{list}}"
+  },
+  "commanderPanel": {
+    "heading": "Commandant",
+    "noCommander": "Aucun commandant sélectionné",
+    "remove": "Retirer",
+    "identity": "Identité :",
+    "setAsCommander": "Définir comme commandant :",
+    "cardCount": "{{count}}/{{expected}} cartes",
+    "singletonViolations": "Violations du singleton : {{cards}}",
+    "colorViolations": "Violations de l'identité de couleur : {{cards}}"
+  },
+  "manaCurve": {
+    "title": "Courbe de mana",
+    "colors": "Couleurs"
+  },
+  "legality": {
+    "legal": "Légal",
+    "banned": "Banni",
+    "restricted": "Restreint",
+    "notLegal": "Non légal"
+  },
+  "contextMenu": {
+    "chooseArt": "Choisir l'illustration…",
+    "noAlternates": "Aucune impression alternative",
+    "clearOverride": "Effacer le remplacement d'illustration"
+  },
+  "bracket": {
+    "unavailable": "L'estimation du palier n'est pas disponible dans cette version.",
+    "addCommander": "Ajoutez un commandant pour voir l'estimation de votre palier.",
+    "estimated": "Estimé : B{{tier}} {{label}}",
+    "manual": "Manuel : B{{tier}} {{label}}",
+    "mismatch": " ⚠ incohérence",
+    "hideBreakdown": "Masquer le détail",
+    "showBreakdown": "Afficher le détail",
+    "hideBreakdownButton": "▲ Masquer le détail",
+    "showBreakdownButton": "▼ Afficher le détail",
+    "forced": "(B{{tier}} forcé)",
+    "dataVersion": "Données : {{version}}",
+    "aboutBrackets": "À propos des paliers ↗",
+    "estimatedChip": "Estimé : B{{tier}}",
+    "estimatedChipFull": "Palier estimé : B{{tier}} {{label}}"
+  },
+  "bracketPicker": {
+    "ariaLabel": "Palier du deck",
+    "unrated": "Non classé"
+  },
+  "warnings": {
+    "commanderCount": "Le deck contient {{count}} cartes (il en faut exactement {{expected}})",
+    "singleton": "{{name}} : plusieurs copies (format singleton)",
+    "colorIdentity": "{{name}} : en dehors de l'identité de couleur du commandant",
+    "minimumCount": "Le deck contient {{count}} cartes (minimum 60)",
+    "maxCopies": "{{name}} : {{count}} copies (max 4)",
+    "companionInMain": "{{name}} est votre compagnon mais figure aussi dans le deck principal — cela enfreint sa condition de construction. Retirez-le du deck principal pour l'utiliser comme compagnon."
+  }
+}
