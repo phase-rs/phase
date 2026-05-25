@@ -32,6 +32,15 @@
       "random": "Aleatorio",
       "customUrl": "URL personalizada",
       "none": "Ninguno"
+    },
+    "cardSizeOptions": {
+      "small": "Pequeño",
+      "medium": "Mediano",
+      "large": "Grande"
+    },
+    "logDefaultOptions": {
+      "open": "Abierto",
+      "closed": "Cerrado"
     }
   },
   "visual": {
@@ -45,7 +54,12 @@
     "clearArtOverrides_one": "Borrar todas las anulaciones de ilustración ({{count}})",
     "clearArtOverrides_other": "Borrar todas las anulaciones de ilustración ({{count}})",
     "clearArtOverridesConfirm_one": "¿Borrar la anulación de ilustración? ({{count}})",
-    "clearArtOverridesConfirm_other": "¿Borrar las {{count}} anulaciones de ilustración?"
+    "clearArtOverridesConfirm_other": "¿Borrar las {{count}} anulaciones de ilustración?",
+    "vfxQualityOptions": {
+      "full": "Completa",
+      "reduced": "Reducida",
+      "minimal": "Mínima"
+    }
   },
   "audio": {
     "title": "Audio",
@@ -106,7 +120,17 @@
     "slowest": "Lo más lento",
     "resetSliderLabel": "Restablecer {{label}} al valor predeterminado",
     "atDefault": "En el valor predeterminado",
-    "resetToDefault": "Restablecer al valor predeterminado"
+    "resetToDefault": "Restablecer al valor predeterminado",
+    "labels": {
+      "effects": "Ritmo de efectos",
+      "combat": "Ritmo de combate",
+      "banners": "Ritmo de carteles"
+    },
+    "descriptions": {
+      "effects": "Lanzamientos de hechizos, cambios de zona, muertes, cambios de vida, contadores, girar/enderezar.",
+      "combat": "Tiempo del daño de combate: cuánto permanecen bloqueadores y atacantes antes de que se resuelva el daño.",
+      "banners": "Visualización del cartel de inicio de turno."
+    }
   },
   "artChain": {
     "emptyState": "Usando la ilustración predeterminada de Scryfall. Añade reglas a continuación para personalizar.",

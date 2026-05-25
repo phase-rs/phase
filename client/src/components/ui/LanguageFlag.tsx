@@ -92,6 +92,16 @@ function FlagPT({ className }: { className?: string }) {
   );
 }
 
+function FlagPL({ className }: { className?: string }) {
+  // White over red, horizontal halves.
+  return (
+    <svg viewBox={VIEW_BOX} className={className} aria-hidden="true">
+      <rect width="60" height="40" fill="#fff" />
+      <rect y="20" width="60" height="20" fill="#DC143C" />
+    </svg>
+  );
+}
+
 export function LanguageFlag({ lng, className }: { lng: SupportedLng; className?: string }) {
   // Exhaustive over SupportedLng — a new language without a flag is a compile error.
   switch (lng) {
@@ -107,5 +117,7 @@ export function LanguageFlag({ lng, className }: { lng: SupportedLng; className?
       return <FlagIT className={className} />;
     case "pt":
       return <FlagPT className={className} />;
+    case "pl":
+      return <FlagPL className={className} />;
   }
 }

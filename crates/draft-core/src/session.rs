@@ -64,7 +64,9 @@ pub fn apply(
             winner_seat,
         } => apply_report_match_result(session, match_id, winner_seat),
         DraftAction::AdvanceRound => apply_advance_round(session),
-        DraftAction::ReplaceSeatWithBot { seat } => apply_replace_seat_with_bot(session, seat),
+        DraftAction::ReplaceSeatWithBot { seat, name } => {
+            apply_replace_seat_with_bot(session, seat, name)
+        }
     }
 }
 
@@ -229,6 +231,7 @@ fn generate_swiss_pairings(
             players: [*p1, *p2],
             match_id: format!("r{round}-t{table}"),
             status: PairingStatus::Pending,
+            winner: None,
         })
         .collect()
 }
@@ -249,6 +252,7 @@ fn generate_se_pairings(session: &DraftSession, round: u8) -> Vec<DraftPairing> 
                     players: [p1, p2],
                     match_id: format!("r{round}-t{table}"),
                     status: PairingStatus::Pending,
+                    winner: None,
                 }
             })
             .collect()
@@ -261,25 +265,9 @@ fn generate_se_pairings(session: &DraftSession, round: u8) -> Vec<DraftPairing> 
             .filter(|p| p.round == prev_round && p.status == PairingStatus::Complete)
             .collect();
 
-        // Winners: for each completed pairing, the winner is the player with more match_wins
-        // We determine winners from match records
         let winners: Vec<PlayerId> = prev_pairings
             .iter()
-            .map(|p| {
-                let r0 = session.match_records.get(&p.players[0]);
-                let r1 = session.match_records.get(&p.players[1]);
-                let w0 = r0.map_or(0, |r| r.match_wins);
-                let w1 = r1.map_or(0, |r| r.match_wins);
-                // In SE, the match result determines the winner. We look at which player
-                // gained a match_win most recently. Since match records are cumulative,
-                // we check: the player with more match_wins is the winner. If tied,
-                // player[0] advances (shouldn't happen with proper result reporting).
-                if w0 >= w1 {
-                    p.players[0]
-                } else {
-                    p.players[1]
-                }
-            })
+            .filter_map(|p| p.result_winner(&session.match_records))
             .collect();
 
         // Pair adjacent winners
@@ -294,6 +282,7 @@ fn generate_se_pairings(session: &DraftSession, round: u8) -> Vec<DraftPairing> 
                         players: [chunk[0], chunk[1]],
                         match_id: format!("r{round}-t{table}"),
                         status: PairingStatus::Pending,
+                        winner: None,
                     })
                 } else {
                     None
@@ -303,12 +292,71 @@ fn generate_se_pairings(session: &DraftSession, round: u8) -> Vec<DraftPairing> 
     }
 }
 
+fn apply_match_record_result(
+    records: &mut HashMap<PlayerId, DraftMatchRecord>,
+    players: [PlayerId; 2],
+    winner: Option<PlayerId>,
+) {
+    match winner {
+        Some(winner_pid) => {
+            let loser_pid = if players[0] == winner_pid {
+                players[1]
+            } else {
+                players[0]
+            };
+            ensure_match_record(records, winner_pid).match_wins += 1;
+            ensure_match_record(records, winner_pid).wins += 1;
+            ensure_match_record(records, loser_pid).match_losses += 1;
+            ensure_match_record(records, loser_pid).losses += 1;
+        }
+        None => {
+            for pid in players {
+                ensure_match_record(records, pid).draws += 1;
+            }
+        }
+    }
+}
+
+fn undo_match_record_result(
+    records: &mut HashMap<PlayerId, DraftMatchRecord>,
+    players: [PlayerId; 2],
+    winner: Option<PlayerId>,
+) {
+    match winner {
+        Some(winner_pid) => {
+            let loser_pid = if players[0] == winner_pid {
+                players[1]
+            } else {
+                players[0]
+            };
+            if let Some(record) = records.get_mut(&winner_pid) {
+                record.match_wins = record.match_wins.saturating_sub(1);
+                record.wins = record.wins.saturating_sub(1);
+            }
+            if let Some(record) = records.get_mut(&loser_pid) {
+                record.match_losses = record.match_losses.saturating_sub(1);
+                record.losses = record.losses.saturating_sub(1);
+            }
+        }
+        None => {
+            for pid in players {
+                if let Some(record) = records.get_mut(&pid) {
+                    record.draws = record.draws.saturating_sub(1);
+                }
+            }
+        }
+    }
+}
+
 fn apply_report_match_result(
     session: &mut DraftSession,
     match_id: String,
     winner_seat: Option<u8>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
-    if session.status != DraftStatus::MatchInProgress {
+    if !matches!(
+        session.status,
+        DraftStatus::MatchInProgress | DraftStatus::RoundComplete
+    ) {
         return Err(DraftError::InvalidTransition {
             from: session.status,
             action: "ReportMatchResult".to_string(),
@@ -324,28 +372,51 @@ fn apply_report_match_result(
             match_id: match_id.clone(),
         })?;
 
-    session.pairings[pairing_idx].status = PairingStatus::Complete;
-    let players = session.pairings[pairing_idx].players;
-
-    // Update match records
-    match winner_seat {
-        Some(winner) => {
-            let winner_pid = seat_player_id(session, winner);
-            let loser_pid = if players[0] == winner_pid {
-                players[1]
-            } else {
-                players[0]
-            };
-            ensure_match_record(&mut session.match_records, winner_pid).match_wins += 1;
-            ensure_match_record(&mut session.match_records, loser_pid).match_losses += 1;
-        }
-        None => {
-            // Draw
-            for &pid in &players {
-                ensure_match_record(&mut session.match_records, pid).draws += 1;
-            }
-        }
+    let pairing_round = session.pairings[pairing_idx].round;
+    if pairing_round != session.current_round {
+        return Err(DraftError::PairingNotInCurrentRound {
+            match_id,
+            current_round: session.current_round,
+        });
     }
+
+    if session.config.tournament_format == TournamentFormat::SingleElimination
+        && winner_seat.is_none()
+    {
+        return Err(DraftError::MatchWinnerRequired { match_id });
+    }
+
+    let players = session.pairings[pairing_idx].players;
+    let previous_status = session.pairings[pairing_idx].status;
+    let previous_winner = session.pairings[pairing_idx].result_winner(&session.match_records);
+    let winner_pid = match winner_seat {
+        Some(winner) => {
+            let pod_size = session.seats.len() as u8;
+            if winner >= pod_size {
+                return Err(DraftError::SeatOutOfRange {
+                    seat: winner,
+                    pod_size,
+                });
+            }
+            let pid = seat_player_id(session, winner);
+            if !players.contains(&pid) {
+                return Err(DraftError::SeatNotInPairing {
+                    seat: winner,
+                    match_id,
+                });
+            }
+            Some(pid)
+        }
+        None => None,
+    };
+
+    if previous_status == PairingStatus::Complete {
+        undo_match_record_result(&mut session.match_records, players, previous_winner);
+    }
+
+    session.pairings[pairing_idx].status = PairingStatus::Complete;
+    session.pairings[pairing_idx].winner = winner_pid;
+    apply_match_record_result(&mut session.match_records, players, winner_pid);
 
     let mut deltas = vec![DraftDelta::MatchResultRecorded {
         match_id,
@@ -408,19 +479,15 @@ fn apply_advance_round(session: &mut DraftSession) -> Result<Vec<DraftDelta>, Dr
 fn apply_replace_seat_with_bot(
     session: &mut DraftSession,
     seat: u8,
+    name: Option<String>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
     let pod_size = session.seats.len() as u8;
     if seat >= pod_size {
         return Err(DraftError::SeatOutOfRange { seat, pod_size });
     }
 
-    let old_name = match &session.seats[seat as usize] {
-        DraftSeat::Human { display_name, .. } => display_name.clone(),
-        DraftSeat::Bot { name } => name.clone(),
-    };
-
     session.seats[seat as usize] = DraftSeat::Bot {
-        name: format!("Bot (was {old_name})"),
+        name: name.unwrap_or_else(|| format!("Seat {}", seat + 1)),
     };
 
     Ok(vec![DraftDelta::SeatReplacedWithBot { seat }])
@@ -959,6 +1026,7 @@ mod tests {
         {
             pairing.status = PairingStatus::Complete;
             let winner = pairing.players[i % 2];
+            pairing.winner = Some(winner);
             ensure_match_record(&mut session.match_records, winner).match_wins += 1;
             let loser = pairing.players[(i + 1) % 2];
             ensure_match_record(&mut session.match_records, loser).match_losses += 1;
@@ -1042,6 +1110,97 @@ mod tests {
     }
 
     #[test]
+    fn single_elimination_advances_pairing_winners() {
+        let config = DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::SingleElimination,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..8)
+            .map(|i| DraftSeat::Human {
+                player_id: PlayerId(i),
+                display_name: format!("Player {i}"),
+                connected: true,
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "SE-TEST".to_string());
+        session.status = DraftStatus::Deckbuilding;
+
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        for (match_id, winner_seat) in [("r1-t0", 7), ("r1-t1", 6), ("r1-t2", 2), ("r1-t3", 4)] {
+            apply(
+                &mut session,
+                DraftAction::ReportMatchResult {
+                    match_id: match_id.to_string(),
+                    winner_seat: Some(winner_seat),
+                },
+                None,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(session.status, DraftStatus::RoundComplete);
+
+        apply(&mut session, DraftAction::AdvanceRound, None).unwrap();
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 2 },
+            None,
+        )
+        .unwrap();
+
+        let pairings: Vec<_> = session.pairings.iter().filter(|p| p.round == 2).collect();
+        assert_eq!(pairings.len(), 2);
+        assert_eq!(pairings[0].players, [PlayerId(7), PlayerId(6)]);
+        assert_eq!(pairings[1].players, [PlayerId(2), PlayerId(4)]);
+    }
+
+    #[test]
+    fn single_elimination_rejects_match_without_winner() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+        session.config.tournament_format = TournamentFormat::SingleElimination;
+
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let result = apply(
+            &mut session,
+            DraftAction::ReportMatchResult {
+                match_id: "r1-t0".to_string(),
+                winner_seat: None,
+            },
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(DraftError::MatchWinnerRequired { .. })
+        ));
+    }
+
+    #[test]
     fn test_report_result_updates_records() {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
@@ -1053,33 +1212,270 @@ mod tests {
         )
         .unwrap();
 
-        // Report seat 0 wins match r1-t0
+        let pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == "r1-t0")
+            .unwrap()
+            .clone();
+        let winner_pid = pairing.players[0];
+
         apply(
             &mut session,
             DraftAction::ReportMatchResult {
                 match_id: "r1-t0".to_string(),
-                winner_seat: Some(0),
+                winner_seat: Some(winner_pid.0),
             },
             None,
         )
         .unwrap();
 
-        let winner_record = session.match_records.get(&PlayerId(0)).unwrap();
+        let winner_record = session.match_records.get(&winner_pid).unwrap();
         assert_eq!(winner_record.match_wins, 1);
+        assert_eq!(winner_record.wins, 1);
 
-        // Find the loser (the other player in the pairing)
         let pairing = session
             .pairings
             .iter()
             .find(|p| p.match_id == "r1-t0")
             .unwrap();
-        let loser_pid = if pairing.players[0] == PlayerId(0) {
+        assert_eq!(pairing.winner, Some(winner_pid));
+        let loser_pid = if pairing.players[0] == winner_pid {
             pairing.players[1]
         } else {
             pairing.players[0]
         };
         let loser_record = session.match_records.get(&loser_pid).unwrap();
         assert_eq!(loser_record.match_losses, 1);
+        assert_eq!(loser_record.losses, 1);
+    }
+
+    #[test]
+    fn report_match_result_replaces_previous_result() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == "r1-t0")
+            .unwrap()
+            .clone();
+        let first_winner = pairing.players[0];
+        let second_winner = pairing.players[1];
+
+        apply(
+            &mut session,
+            DraftAction::ReportMatchResult {
+                match_id: pairing.match_id.clone(),
+                winner_seat: Some(first_winner.0),
+            },
+            None,
+        )
+        .unwrap();
+        apply(
+            &mut session,
+            DraftAction::ReportMatchResult {
+                match_id: pairing.match_id.clone(),
+                winner_seat: Some(second_winner.0),
+            },
+            None,
+        )
+        .unwrap();
+
+        let first_record = session.match_records.get(&first_winner).unwrap();
+        assert_eq!(first_record.match_wins, 0);
+        assert_eq!(first_record.match_losses, 1);
+        assert_eq!(first_record.wins, 0);
+        assert_eq!(first_record.losses, 1);
+
+        let second_record = session.match_records.get(&second_winner).unwrap();
+        assert_eq!(second_record.match_wins, 1);
+        assert_eq!(second_record.match_losses, 0);
+        assert_eq!(second_record.wins, 1);
+        assert_eq!(second_record.losses, 0);
+
+        let updated_pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == pairing.match_id)
+            .unwrap();
+        assert_eq!(updated_pairing.winner, Some(second_winner));
+    }
+
+    #[test]
+    fn report_match_result_replaces_legacy_completed_result() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == "r1-t0")
+            .unwrap()
+            .clone();
+        let first_winner = pairing.players[0];
+        let second_winner = pairing.players[1];
+
+        session
+            .pairings
+            .iter_mut()
+            .find(|p| p.match_id == pairing.match_id)
+            .unwrap()
+            .status = PairingStatus::Complete;
+        ensure_match_record(&mut session.match_records, first_winner).match_wins = 1;
+        ensure_match_record(&mut session.match_records, first_winner).wins = 1;
+        ensure_match_record(&mut session.match_records, second_winner).match_losses = 1;
+        ensure_match_record(&mut session.match_records, second_winner).losses = 1;
+
+        apply(
+            &mut session,
+            DraftAction::ReportMatchResult {
+                match_id: pairing.match_id.clone(),
+                winner_seat: Some(second_winner.0),
+            },
+            None,
+        )
+        .unwrap();
+
+        let first_record = session.match_records.get(&first_winner).unwrap();
+        assert_eq!(first_record.match_wins, 0);
+        assert_eq!(first_record.wins, 0);
+        assert_eq!(first_record.match_losses, 1);
+        assert_eq!(first_record.losses, 1);
+
+        let second_record = session.match_records.get(&second_winner).unwrap();
+        assert_eq!(second_record.match_wins, 1);
+        assert_eq!(second_record.wins, 1);
+        assert_eq!(second_record.match_losses, 0);
+        assert_eq!(second_record.losses, 0);
+    }
+
+    #[test]
+    fn report_match_result_can_override_after_round_complete() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let results: Vec<(String, u8)> = session
+            .pairings
+            .iter()
+            .filter(|p| p.round == 1)
+            .map(|p| (p.match_id.clone(), p.players[0].0))
+            .collect();
+
+        for (match_id, winner_seat) in results {
+            apply(
+                &mut session,
+                DraftAction::ReportMatchResult {
+                    match_id,
+                    winner_seat: Some(winner_seat),
+                },
+                None,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(session.status, DraftStatus::RoundComplete);
+
+        let pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == "r1-t0")
+            .unwrap()
+            .clone();
+
+        apply(
+            &mut session,
+            DraftAction::ReportMatchResult {
+                match_id: pairing.match_id.clone(),
+                winner_seat: Some(pairing.players[1].0),
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(session.status, DraftStatus::RoundComplete);
+        let updated_pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == pairing.match_id)
+            .unwrap();
+        assert_eq!(updated_pairing.winner, Some(pairing.players[1]));
+    }
+
+    #[test]
+    fn report_match_result_rejects_non_current_round_pairing() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let results: Vec<(String, u8)> = session
+            .pairings
+            .iter()
+            .filter(|p| p.round == 1)
+            .map(|p| (p.match_id.clone(), p.players[0].0))
+            .collect();
+
+        for (match_id, winner_seat) in results {
+            apply(
+                &mut session,
+                DraftAction::ReportMatchResult {
+                    match_id,
+                    winner_seat: Some(winner_seat),
+                },
+                None,
+            )
+            .unwrap();
+        }
+
+        apply(&mut session, DraftAction::AdvanceRound, None).unwrap();
+        apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 2 },
+            None,
+        )
+        .unwrap();
+
+        let result = apply(
+            &mut session,
+            DraftAction::ReportMatchResult {
+                match_id: "r1-t0".to_string(),
+                winner_seat: Some(0),
+            },
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(DraftError::PairingNotInCurrentRound { .. })
+        ));
     }
 
     #[test]
@@ -1094,14 +1490,19 @@ mod tests {
         )
         .unwrap();
 
-        // Report all 4 match results
-        for i in 0..4 {
-            let match_id = format!("r1-t{i}");
+        let results: Vec<(String, u8)> = session
+            .pairings
+            .iter()
+            .filter(|p| p.round == 1)
+            .map(|p| (p.match_id.clone(), p.players[0].0))
+            .collect();
+
+        for (match_id, winner_seat) in results {
             apply(
                 &mut session,
                 DraftAction::ReportMatchResult {
                     match_id,
-                    winner_seat: Some(i as u8),
+                    winner_seat: Some(winner_seat),
                 },
                 None,
             )
@@ -1144,7 +1545,10 @@ mod tests {
 
         let deltas = apply(
             &mut session,
-            DraftAction::ReplaceSeatWithBot { seat: 3 },
+            DraftAction::ReplaceSeatWithBot {
+                seat: 3,
+                name: Some("Chandra".to_string()),
+            },
             None,
         )
         .unwrap();
@@ -1152,7 +1556,7 @@ mod tests {
         assert!(deltas.contains(&DraftDelta::SeatReplacedWithBot { seat: 3 }));
         assert!(matches!(
             &session.seats[3],
-            DraftSeat::Bot { name } if name == "Bot (was Player 3)"
+            DraftSeat::Bot { name } if name == "Chandra"
         ));
     }
 
@@ -1162,7 +1566,10 @@ mod tests {
 
         let result = apply(
             &mut session,
-            DraftAction::ReplaceSeatWithBot { seat: 10 },
+            DraftAction::ReplaceSeatWithBot {
+                seat: 10,
+                name: None,
+            },
             None,
         );
         assert!(matches!(

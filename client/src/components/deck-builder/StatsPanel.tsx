@@ -6,6 +6,7 @@ import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import type { BracketEstimate, CommanderBracket } from "../../types/bracket";
 import { ManaCurve } from "./ManaCurve";
 import { BracketAuditPanel } from "./BracketAuditPanel";
+import { BracketPicker } from "./BracketPicker";
 
 const LEGALITY_STYLES: Record<string, string> = {
   legal: "bg-emerald-600/70 text-emerald-100",
@@ -41,6 +42,7 @@ interface StatsPanelProps {
   isCommander: boolean;
   estimate: BracketEstimate | null;
   manualBracket: CommanderBracket | null;
+  onBracketChange: (bracket: CommanderBracket | null) => void;
   auditEmptyReason?: "not-commander" | "no-commander" | "unsupported";
   onCardClick: (cardName: string) => void;
 }
@@ -52,6 +54,7 @@ export function StatsPanel({
   isCommander,
   estimate,
   manualBracket,
+  onBracketChange,
   auditEmptyReason,
   onCardClick,
 }: StatsPanelProps) {
@@ -65,12 +68,23 @@ export function StatsPanel({
   return (
     <div className="flex flex-col gap-3">
       {isCommander && (
-        <BracketAuditPanel
-          estimate={estimate}
-          manualBracket={manualBracket}
-          emptyReason={auditEmptyReason}
-          onCardClick={onCardClick}
-        />
+        <div className="space-y-2">
+          {/* The bracket picker lives beside the audit it's compared against, so
+              setting a bracket and seeing the deck's estimated tier (and any
+              mismatch) read as one unit. Both are Commander-only. */}
+          <div className="space-y-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-gray-500">
+              {t("toolbar.bracket")}
+            </span>
+            <BracketPicker value={manualBracket} onChange={onBracketChange} />
+          </div>
+          <BracketAuditPanel
+            estimate={estimate}
+            manualBracket={manualBracket}
+            emptyReason={auditEmptyReason}
+            onCardClick={onCardClick}
+          />
+        </div>
       )}
 
       <div className="rounded-[18px] border border-white/8 bg-black/18 p-3">

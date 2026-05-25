@@ -8,6 +8,8 @@
   "preview": {
     "holdCtrlBack": "Strg halten für Rückseite",
     "holdCtrlFront": "Strg halten für Vorderseite",
+    "holdCtrlFlip": "Strg halten zum Umdrehen",
+    "flip": "Umdrehen",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",
@@ -307,7 +309,9 @@
     "statHand": "Hand",
     "statCreatures": "Kreaturen",
     "statLands": "Länder",
-    "statOther": "Sonstige"
+    "statOther": "Sonstige",
+    "compactHud": "Kompaktes Gegner-HUD. Reduziert jeden Gegner auf eine einzelne schmale Zeile (Name + Leben); tippe auf einen Gegner, um sein gesamtes Spielfeld anzuzeigen.",
+    "expandHud": "Gegner-HUD erweitern. Zeigt die Handkarten und die Spielfeldaufschlüsselung jedes Gegners."
   },
   "combat": {
     "attackAll": "Alle angreifen",
@@ -380,7 +384,9 @@
     "nounTarget": "Ziel",
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
-    "skip": "Überspringen"
+    "skip": "Überspringen",
+    "chooseNewTarget": "Wähle das neue Ziel des Zauberspruchs",
+    "chooseNewTargetForSpell": "Wähle ein neues Ziel für {{spell}}"
   },
   "log": {
     "title": "Spielprotokoll",
@@ -1253,6 +1259,9 @@
     "proliferateSubtitle": "Wähle eine beliebige Anzahl bleibender Karten und Spieler mit Marken. Jedes gewählte Ziel erhält eine weitere Marke jeder Art, die bereits dort vorhanden ist.",
     "chooseObjectsTitle": "Bleibende Karten wählen",
     "chooseObjectsSubtitle": "Wähle eine beliebige Anzahl bleibender Karten. Du zahlst für jede gewählte Karte Kosten.",
+    "selectAll": "Alle",
+    "selectNone": "Keine",
+    "selectMine": "Meine Seite",
     "confirm": "Bestätigen"
   },
   "replacement": {
@@ -1266,7 +1275,8 @@
     "scopeSingle": "Wähle ein neues Ziel für den Zauberspruch",
     "scopeMulti": "Wähle neue Ziele für den Zauberspruch",
     "subtitle": "{{scope}}. Aktuell: {{current}}",
-    "confirm": "Bestätigen"
+    "confirm": "Bestätigen",
+    "badgeNewTarget": "Neues Ziel"
   },
   "separatePiles": {
     "chooserName": "Spieler {{number}}",
@@ -1327,5 +1337,27 @@
     "subtitleLabel": "Wähle eine Kennzeichnung für {{name}}",
     "subtitleVoteRemaining": "Gib eine Stimme ab ({{count}} verbleibend)",
     "subtitleVote": "Gib deine Stimme ab"
+  },
+  "advance": {
+    "resolve": "Auflösen",
+    "passPriority": "Priorität abgeben",
+    "toPhase": "Zu {{phase}}"
+  },
+  "outsideGame": {
+    "fromExile": "Aus dem Exil",
+    "fromSideboard": "Aus dem Sideboard"
+  },
+  "phaseName": {
+    "Upkeep": "Versorgung",
+    "Draw": "Ziehen",
+    "PreCombatMain": "Hauptphase 1",
+    "BeginCombat": "Kampfbeginn",
+    "DeclareAttackers": "Angreifer deklarieren",
+    "DeclareBlockers": "Blocker deklarieren",
+    "CombatDamage": "Kampfschaden",
+    "EndCombat": "Kampfende",
+    "PostCombatMain": "Hauptphase 2",
+    "End": "Endschritt",
+    "Cleanup": "Aufräumen"
   }
 }

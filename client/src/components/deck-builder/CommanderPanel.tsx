@@ -7,6 +7,7 @@ import {
   getColorIdentityViolations,
   getSingletonViolations,
 } from "./commanderUtils";
+import { mouseHoverPreview } from "./hoverPreview";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
 
@@ -26,6 +27,7 @@ interface CommanderPanelProps {
   isCommanderEligible: (name: string) => boolean;
   onSetCommander: (cardName: string) => void;
   onRemoveCommander: (cardName: string) => void;
+  onCardHover?: (cardName: string | null) => void;
 }
 
 
@@ -37,6 +39,7 @@ export function CommanderPanel({
   isCommanderEligible,
   onSetCommander,
   onRemoveCommander,
+  onCardHover,
 }: CommanderPanelProps) {
   const { t } = useTranslation("deck-builder");
   const identity = getCombinedColorIdentity(commanders, cardDataCache);
@@ -70,6 +73,7 @@ export function CommanderPanel({
           return (
             <div
               key={name}
+              {...mouseHoverPreview(onCardHover, name)}
               className="flex items-center justify-between rounded bg-purple-900/30 px-2 py-1.5"
             >
               <span className="text-sm font-medium text-purple-300">
@@ -113,6 +117,7 @@ export function CommanderPanel({
             <button
               key={name}
               onClick={() => onSetCommander(name)}
+              {...mouseHoverPreview(onCardHover, name)}
               className="block w-full truncate rounded bg-purple-800/40 px-2 py-1 text-left text-xs text-purple-300 hover:bg-purple-700/40"
             >
               {name}

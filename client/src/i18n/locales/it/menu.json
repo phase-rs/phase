@@ -4,7 +4,14 @@
   },
   "aiDifficulty": {
     "label": "Difficoltà IA",
-    "ariaLabel": "Difficoltà IA: {{difficulty}}"
+    "ariaLabel": "Difficoltà IA: {{difficulty}}",
+    "levels": {
+      "VeryEasy": "Molto facile",
+      "Easy": "Facile",
+      "Medium": "Media",
+      "Hard": "Difficile",
+      "VeryHard": "Molto difficile"
+    }
   },
   "bracketFilter": {
     "label": "Filtro bracket"
@@ -205,7 +212,8 @@
     "browseAll": "Sfoglia tutti",
     "loadMore": "Carica altri",
     "selectedDeck": "Mazzo selezionato",
-    "chooseDeckToContinue": "Scegli un mazzo per continuare"
+    "chooseDeckToContinue": "Scegli un mazzo per continuare",
+    "filterAll": "Tutti"
   },
   "subscriptions": {
     "emptyTitle": "Nessuna iscrizione ai feed",
@@ -213,5 +221,13 @@
     "feedMeta_one": "· {{count}} mazzo · Aggiornato {{date}}",
     "feedMeta_other": "· {{count}} mazzi · Aggiornato {{date}}",
     "error": "Errore: {{error}}"
+  },
+  "myDecksPage": {
+    "eyebrow": "Mazzi",
+    "title": "Mazzi.",
+    "description": "Apri una lista salvata, importane una nuova o continua nell'editor di mazzi."
+  },
+  "loadGameState": {
+    "readFailed": "Impossibile leggere il file"
   }
 }

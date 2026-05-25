@@ -1093,7 +1093,7 @@ export function MyDecks({
           >
             {FORMAT_FILTERS.map(({ key, label }) => (
               <option key={key} value={key}>
-                {label}
+                {key === "all" ? t("myDecks.filterAll") : label}
               </option>
             ))}
           </select>

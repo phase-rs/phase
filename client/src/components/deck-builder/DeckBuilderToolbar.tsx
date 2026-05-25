@@ -1,10 +1,8 @@
 import { useTranslation } from "react-i18next";
 
 import type { GameFormat } from "../../adapter/types";
-import type { CommanderBracket } from "../../types/bracket";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { FormatFilter } from "./FormatFilter";
-import { BracketPicker } from "./BracketPicker";
 
 function PencilIcon({ className }: { className?: string }) {
   return (
@@ -27,8 +25,6 @@ interface DeckBuilderToolbarProps {
   onLoad: (name: string) => void;
   format: GameFormat;
   onFormatChange: (format: GameFormat) => void;
-  bracket: CommanderBracket | null;
-  onBracketChange: (bracket: CommanderBracket | null) => void;
 }
 
 export function DeckBuilderToolbar({
@@ -44,8 +40,6 @@ export function DeckBuilderToolbar({
   onLoad,
   format,
   onFormatChange,
-  bracket,
-  onBracketChange,
 }: DeckBuilderToolbarProps) {
   const { t } = useTranslation("deck-builder");
   return (
@@ -99,14 +93,6 @@ export function DeckBuilderToolbar({
         <div className="hidden lg:block">
           <FormatFilter selected={format} onChange={onFormatChange} />
         </div>
-        {format === "Commander" && (
-          <div className="flex items-center gap-2">
-            <span className="shrink-0 text-[0.62rem] uppercase tracking-[0.22em] text-slate-500 lg:text-[0.68rem]">
-              {t("toolbar.bracket")}
-            </span>
-            <BracketPicker value={bracket} onChange={onBracketChange} />
-          </div>
-        )}
       </div>
 
       <div className="flex items-center gap-2">

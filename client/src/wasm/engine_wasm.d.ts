@@ -243,6 +243,15 @@ export function restore_game_state(json_str: string): void;
 export function resume_multiplayer_host_state(json_str: string): void;
 
 /**
+ * Search the loaded card database. The engine is the single authority for the
+ * rules data search filters on — format legality, set membership, card types,
+ * mana value, and colors — so deck-builder search runs here, never as a
+ * third-party API call. Returns `{ results, total }` (see `CardSearchResults`),
+ * or an error if the database is not loaded or the query is malformed.
+ */
+export function search_cards_js(query: any): any;
+
+/**
  * Select an action from merged scores using softmax.
  * Called after collecting scored candidates from parallel workers and merging.
  * `scores_json` is a JSON array of `[GameAction, score]` tuples.
@@ -323,6 +332,7 @@ export interface InitOutput {
     readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];
+    readonly search_cards_js: (a: any) => [number, number, number];
     readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
