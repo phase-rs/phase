@@ -209,8 +209,11 @@ pub(crate) fn extract_keyword_line(
     line: &str,
     mtgjson_keyword_names: &[String],
 ) -> Option<Vec<Keyword>> {
+    let line_without_reminder = strip_reminder_text(line);
+    let line = line_without_reminder.trim();
+
     if mtgjson_keyword_names.is_empty() {
-        return None;
+        return parse_mtgjson_missing_standalone_keyword_line(line);
     }
 
     if mtgjson_keyword_names.iter().any(|n| n == "mobilize") {
@@ -307,6 +310,15 @@ pub(crate) fn extract_keyword_line(
         Some(new_keywords)
     } else {
         None
+    }
+}
+
+fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keyword>> {
+    let lower = line.to_lowercase();
+    let keyword = parse_keyword_from_oracle(&lower)?;
+    match keyword {
+        Keyword::ForMirrodin => Some(vec![keyword]),
+        _ => None,
     }
 }
 
@@ -2167,6 +2179,24 @@ mod tests {
 
         let kw = parse_keyword_from_oracle("undaunted").unwrap();
         assert_eq!(kw, Keyword::Undaunted);
+
+        let kw = parse_keyword_from_oracle("for mirrodin!").unwrap();
+        assert_eq!(kw, Keyword::ForMirrodin);
+    }
+
+    #[test]
+    fn extract_keyword_line_for_mirrodin_without_mtgjson_keyword() {
+        let keywords = extract_keyword_line(
+            "For Mirrodin! (When this Equipment enters, create a 2/2 red Rebel creature token, then attach this to it.)",
+            &[],
+        )
+        .expect("For Mirrodin! should be extracted even when MTGJSON omits it");
+
+        assert_eq!(keywords, vec![Keyword::ForMirrodin]);
+        assert!(
+            extract_keyword_line("Flying", &[]).is_none(),
+            "the MTGJSON-missing path should stay scoped to known omissions"
+        );
     }
 
     #[test]

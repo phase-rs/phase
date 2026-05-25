@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -53,6 +54,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   manualExpanded,
   onExpand,
 }: GroupedPermanentProps) {
+  const { t } = useTranslation("game");
   const [pickerOpen, setPickerOpen] = useState(false);
   const playerId = usePlayerId();
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
@@ -154,7 +156,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
       : selectedTapCount > 0
         ? "ring-2 ring-emerald-400 shadow-[0_0_14px_4px_rgba(52,211,153,0.55)]"
         : canOpenPicker
-          ? "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]"
+          ? "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]"
           : "";
 
   if (renderMode === "single") {
@@ -179,6 +181,12 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
             objectId={group.ids[0]}
             onPrimaryClickOverride={canOpenPicker ? () => setPickerOpen(true) : undefined}
           />
+          {aggregateRingClass && (
+            <div
+              aria-hidden
+              className={`pointer-events-none absolute inset-[-3px] z-30 rounded-xl ${aggregateRingClass}`}
+            />
+          )}
         </div>
         <button
           type="button"
@@ -187,7 +195,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
             onExpand();
           }}
           className="absolute -left-3 -top-3 z-40 flex h-8 min-w-8 items-center justify-center rounded-full bg-black px-1.5 text-sm font-extrabold text-white ring-2 ring-white/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105"
-          aria-label={`Expand ${group.name} group`}
+          aria-label={t("permanent.expandGroup", { name: group.name })}
         >
           ×{group.count}
         </button>
@@ -199,10 +207,10 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
               setPickerOpen((open) => !open);
             }}
             className="absolute -bottom-2 left-1/2 z-40 -translate-x-1/2 rounded-full bg-amber-400 px-2 py-0.5 text-[10px] font-extrabold uppercase leading-none text-black ring-1 ring-black/40 shadow-[0_2px_8px_rgba(0,0,0,0.55)] transition-transform hover:scale-105 hover:bg-amber-300"
-            aria-label={`Choose ${group.name} token`}
+            aria-label={t("permanent.chooseToken", { name: group.name })}
             aria-expanded={pickerOpen}
           >
-            Pick
+            {t("permanent.pick")}
           </button>
         )}
         <CollapsedGroupBadges
@@ -294,22 +302,23 @@ function CollapsedGroupBadges({
   selectedAttackerCount,
   selectedTapCount,
 }: CollapsedGroupBadgesProps) {
+  const { t } = useTranslation("game");
   const actionCount = selectedAttackerCount || assignedBlockerCount || selectedTapCount;
   return (
     <div className="pointer-events-none absolute -right-2 top-1 z-40 flex flex-col items-end gap-1">
       {eligibleCount > 0 && (
         <span className="rounded bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold leading-none text-black shadow">
-          {eligibleCount} legal
+          {t("permanent.eligibleCount", { count: eligibleCount })}
         </span>
       )}
       {committedAttackerCount > 0 && (
         <span className="rounded bg-orange-600 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white shadow">
-          atk {committedAttackerCount}
+          {t("permanent.attackingCount", { count: committedAttackerCount })}
         </span>
       )}
       {actionCount > 0 && (
         <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-bold leading-none text-black shadow">
-          sel {actionCount}
+          {t("permanent.selectedCount", { count: actionCount })}
         </span>
       )}
     </div>
@@ -339,6 +348,7 @@ function CollapsedGroupPicker({
   combatClickHandler,
   onClose,
 }: CollapsedGroupPickerProps) {
+  const { t } = useTranslation("game");
   const selectedAttackerCount = context.eligibleIds.filter((id) => selectedAttackers.includes(id)).length;
   const selectedTapCount = context.eligibleIds.filter((id) => selectedCardIds.includes(id)).length;
 
@@ -371,7 +381,7 @@ function CollapsedGroupPicker({
           className="rounded px-1 text-slate-300 hover:bg-slate-800 hover:text-white"
           onClick={onClose}
         >
-          close
+          {t("permanent.close")}
         </button>
       </div>
       {context.mode === "attackers" && (
@@ -432,6 +442,7 @@ interface CountPickerControlsProps {
 }
 
 function CountPickerControls({ count, max, onChange }: CountPickerControlsProps) {
+  const { t } = useTranslation("game");
   return (
     <div className="grid grid-cols-4 gap-1">
       <button
@@ -456,7 +467,7 @@ function CountPickerControls({ count, max, onChange }: CountPickerControlsProps)
         disabled={count >= max}
         onClick={() => onChange(max)}
       >
-        All
+        {t("permanent.pickAll")}
       </button>
       <button
         type="button"
@@ -464,7 +475,7 @@ function CountPickerControls({ count, max, onChange }: CountPickerControlsProps)
         disabled={count <= 0}
         onClick={() => onChange(0)}
       >
-        None
+        {t("permanent.pickNone")}
       </button>
       <div className="col-span-4 text-center text-[11px] text-slate-300">
         {count} / {max}

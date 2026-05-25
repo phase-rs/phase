@@ -31,32 +31,47 @@ export function stripPeerIdPrefix(peerId: string): string {
     : peerId;
 }
 
-// Override PeerJS defaults -- their bundled TURN servers are broken
-const PEER_CONFIG: RTCConfiguration = {
-  iceServers: [
-    { urls: "stun:stun.relay.metered.ca:80" },
-    {
-      urls: "turn:global.relay.metered.ca:80",
-      username: "a267722d3eb02873687da73c",
-      credential: "ob5D/eUnCmkkf1Vp",
-    },
-    {
-      urls: "turn:global.relay.metered.ca:80?transport=tcp",
-      username: "a267722d3eb02873687da73c",
-      credential: "ob5D/eUnCmkkf1Vp",
-    },
-    {
-      urls: "turn:global.relay.metered.ca:443",
-      username: "a267722d3eb02873687da73c",
-      credential: "ob5D/eUnCmkkf1Vp",
-    },
-    {
-      urls: "turns:global.relay.metered.ca:443?transport=tcp",
-      username: "a267722d3eb02873687da73c",
-      credential: "ob5D/eUnCmkkf1Vp",
-    },
-  ],
+// ICE configuration. PeerJS's bundled TURN servers are broken, so we always
+// supply our own. Credentials are minted on demand (short-lived) by the lobby
+// Worker's /turn-credentials endpoint rather than hardcoded in the bundle —
+// previously static Metered credentials shipped in plaintext and could be
+// extracted to burn the relay quota.
+const TURN_CREDENTIALS_URL = "https://lobby.phase-rs.dev/turn-credentials";
+
+// Used when the credentials endpoint is unreachable or unconfigured. STUN-only:
+// direct and STUN-assisted connections still work; symmetric-NAT/CGNAT peers
+// can't relay until /turn-credentials is live.
+const FALLBACK_ICE_CONFIG: RTCConfiguration = {
+  iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }],
 };
+
+// Cache the fetched config well inside the credential TTL (server mints 24h
+// creds) so we don't refetch on every host/join/reconnect attempt.
+const ICE_CONFIG_CACHE_MS = 6 * 60 * 60 * 1000;
+let cachedIceConfig: { config: RTCConfiguration; expiresAt: number } | null = null;
+
+/**
+ * Fetch ephemeral ICE servers (STUN + short-lived TURN) from the lobby Worker.
+ * Cached for {@link ICE_CONFIG_CACHE_MS}. Falls back to STUN-only on any error
+ * so peer creation never blocks on the relay service being up.
+ */
+async function getPeerConfig(): Promise<RTCConfiguration> {
+  const now = Date.now();
+  if (cachedIceConfig && cachedIceConfig.expiresAt > now) {
+    return cachedIceConfig.config;
+  }
+  try {
+    const res = await fetch(TURN_CREDENTIALS_URL);
+    if (!res.ok) throw new Error(`turn-credentials HTTP ${res.status}`);
+    const data = (await res.json()) as { iceServers: RTCIceServer[] };
+    const config: RTCConfiguration = { iceServers: data.iceServers };
+    cachedIceConfig = { config, expiresAt: now + ICE_CONFIG_CACHE_MS };
+    return config;
+  } catch (err) {
+    console.warn("[P2P] TURN credential fetch failed; STUN-only fallback:", err);
+    return FALLBACK_ICE_CONFIG;
+  }
+}
 
 function traceP2P(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
   console.debug(`[P2P ${side} Trace]`, performance.now().toFixed(1), event, data ?? {});
@@ -227,10 +242,14 @@ async function openHostPeer(
     ? UNAVAILABLE_ID_RETRY_BACKOFF_MS.length + 1
     : 1;
 
+  // Fetch ICE config once up front so all retry attempts reuse it (and we don't
+  // hit the credentials endpoint per attempt).
+  const config = await getPeerConfig();
+
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-    const peer = new Peer(peerId, { config: PEER_CONFIG });
+    const peer = new Peer(peerId, { config });
     traceP2P("Host", "create-peer", { roomCode, peerId, attempt });
 
     try {
@@ -424,13 +443,15 @@ export async function hostRoom(
  * `DataConnection` drops and attempt auto-reconnect via
  * `peer.connect(hostPeerId)`.
  */
-export function joinRoom(code: string, signal?: AbortSignal, timeoutMs = 30_000): Promise<JoinResult> {
+export async function joinRoom(code: string, signal?: AbortSignal, timeoutMs = 30_000): Promise<JoinResult> {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  const config = await getPeerConfig();
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("Aborted", "AbortError"));
       return;
     }
-    const peer = new Peer({ config: PEER_CONFIG });
+    const peer = new Peer({ config });
     const peerId = PEER_ID_PREFIX + code;
     let opened = false;
     traceP2P("Guest", "create-peer", { code, peerId });

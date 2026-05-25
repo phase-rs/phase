@@ -73,11 +73,33 @@ function dataFileDefines(): Record<string, string> {
     __BUILD_HASH__: JSON.stringify(gitHash()),
     __AUDIO_BASE_URL__: JSON.stringify(process.env.AUDIO_BASE_URL || ""),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
+    __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
+    // True only for tagged production releases (release.yml sets RELEASE_BUILD).
+    // The staging deploy (deploy.yml) is also a production Vite build, so we
+    // cannot key off import.meta.env.PROD — that would surface the "try the
+    // preview" link on the preview site itself. dev + staging → false (hidden);
+    // tagged release → true (shown).
+    __IS_RELEASE_BUILD__: JSON.stringify(process.env.RELEASE_BUILD === "true"),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
+    // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
+    // The sidecars are listed in data-files.json, so on deploy they are uploaded
+    // to `${DATA_BASE_URL}/card-data.<lng>.json` and stripped from the Pages
+    // bundle — this template must point there, mirroring the manifest files. With
+    // no DATA_BASE_URL (local dev, Tauri offline) it resolves to the site-root
+    // copy in public/. A missing sidecar (404) degrades to English per-field
+    // (see ensureCardLocale). An explicit env override still wins.
+    __CARD_DATA_LOCALE_URL_TEMPLATE__: JSON.stringify(
+      process.env.CARD_DATA_LOCALE_URL_TEMPLATE ||
+        (base ? `${base}/card-data.{lng}.json` : "/card-data.{lng}.json"),
+    ),
   };
   for (const filename of manifest) {
-    // "card-names.json" → "__CARD_NAMES_URL__"
-    const token = `__${filename.replace(/\.json$/, "").replace(/-/g, "_").toUpperCase()}_URL__`;
+    // "card-names.json" → "__CARD_NAMES_URL__"; "card-data.de.json" →
+    // "__CARD_DATA_DE_URL__". Collapse both "-" and "." so dotted locale
+    // sidecars don't yield a dotted (member-expression) define key. The
+    // content-i18n code reads these via the {lng} template above, not the
+    // per-file token, but every manifest entry still gets a valid token.
+    const token = `__${filename.replace(/\.json$/, "").replace(/[.-]/g, "_").toUpperCase()}_URL__`;
     defines[token] = JSON.stringify(`${base}/${filename}`);
   }
   return defines;
@@ -133,6 +155,20 @@ export default defineConfig({
             options: {
               cacheName: "card-database",
               expiration: { maxEntries: 1, maxAgeSeconds: 2592000 },
+            },
+          },
+          {
+            // Per-locale content-i18n sidecars (`card-data.<lng>.json`) fetched
+            // from R2 (or public/ in dev/Tauri). The card-database pattern above
+            // does NOT match the `.<lng>.` infix, so these need their own rule.
+            // They are mutable (regenerated each deploy), so StaleWhileRevalidate
+            // serves the cached copy instantly — and offline — while refreshing
+            // in the background, giving non-English PWA users offline card text.
+            urlPattern: /card-data\.[a-z]{2}\.json$/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "card-locale-sidecars",
+              expiration: { maxEntries: 6, maxAgeSeconds: 2592000 },
             },
           },
           {

@@ -4,14 +4,14 @@ use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, ContinuousModification,
-    ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration, Effect, FilterProp,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PtValue, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
+    AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, Comparator,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration,
+    Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -364,39 +364,72 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
     }
 }
 
-/// CR 702.182a: Synthesize Job select trigger: when this Equipment enters,
-/// create a 1/1 colorless Hero creature token, then attach this Equipment to it.
-pub fn synthesize_job_select(face: &mut CardFace) {
+/// CR 603.6a + CR 205.3 + CR 105.2: Synthesize a "keyword ETB → create
+/// typed token → attach this Equipment" trigger. Shared shape for any
+/// keyword whose CR text follows the template:
+///
+///   "When this Equipment enters, create a <P/T> <color> <subtypes>
+///    creature token, then attach this Equipment to it."
+///
+/// Currently used by Job select (CR 702.182a — 1/1 colorless Hero), Living
+/// weapon (CR 702.92a — 0/0 black Phyrexian Germ), and For Mirrodin!
+/// (CR 702.163a — 2/2 red Rebel). Future keywords with the same shape can
+/// register here without copying the skeleton.
+///
+/// The helper prepends "Creature" to the subtype list internally so callers
+/// only pass the actual subtypes (`["Hero"]`, `["Phyrexian", "Germ"]`). The
+/// `keyword_matcher` closure gates synthesis on the presence of the
+/// originating keyword, and the idempotency guard is scoped to a
+/// ChangesZone trigger landing on the battlefield whose execute effect is
+/// `Effect::Token` with the matching token name — re-running synthesis
+/// never duplicates the trigger.
+#[allow(clippy::too_many_arguments)]
+fn synthesize_etb_token_attach_keyword(
+    face: &mut CardFace,
+    keyword_matcher: impl Fn(&Keyword) -> bool,
+    token_name: &str,
+    power: i32,
+    toughness: i32,
+    subtype_list: &[&str],
+    colors: &[ManaColor],
+    description: &str,
+) {
     use crate::types::ability::PtValue;
 
-    if !face
-        .keywords
-        .iter()
-        .any(|k| matches!(k, Keyword::JobSelect))
-    {
+    if !face.keywords.iter().any(keyword_matcher) {
         return;
     }
 
-    // Idempotency: skip if the Job select ETB Hero token trigger already exists.
+    // Idempotency: skip if the ETB token trigger for this token name already
+    // exists. Re-running the synthesis pipeline must never duplicate the
+    // trigger — otherwise re-loaded card data would fire multiple tokens
+    // per Equipment ETB.
     let already_has_trigger = face.triggers.iter().any(|t| {
         matches!(t.mode, TriggerMode::ChangesZone)
             && t.destination == Some(Zone::Battlefield)
             && matches!(t.valid_card, Some(TargetFilter::SelfRef))
             && matches!(
                 t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::Token { name, .. }) if name == "Hero"
+                Some(Effect::Token { name, .. }) if name == token_name
             )
     });
     if already_has_trigger {
         return;
     }
 
+    // CR 205.3: Token effect's `types` field stores both core types and
+    // subtypes in a single vector. Prepend "Creature" so callers pass only
+    // the actual creature subtypes.
+    let mut types = Vec::with_capacity(subtype_list.len() + 1);
+    types.push("Creature".to_string());
+    types.extend(subtype_list.iter().map(|s| s.to_string()));
+
     let token_effect = Effect::Token {
-        name: "Hero".to_string(),
-        power: PtValue::Fixed(1),
-        toughness: PtValue::Fixed(1),
-        types: vec!["Creature".to_string(), "Hero".to_string()],
-        colors: vec![],
+        name: token_name.to_string(),
+        power: PtValue::Fixed(power),
+        toughness: PtValue::Fixed(toughness),
+        types,
+        colors: colors.to_vec(),
         keywords: vec![],
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
@@ -416,9 +449,10 @@ pub fn synthesize_job_select(face: &mut CardFace) {
         },
     );
 
-    // CR 603.6a: Enters-the-battlefield abilities trigger when a permanent enters
-    // the battlefield. The trigger source must be on the battlefield for the
-    // evaluator to match, so `trigger_zones` must include `Zone::Battlefield`.
+    // CR 603.6a: Enters-the-battlefield abilities trigger when a permanent
+    // enters the battlefield. The trigger source must be on the battlefield
+    // for the evaluator to match, so `trigger_zones` must include
+    // `Zone::Battlefield`.
     face.triggers.push(
         TriggerDefinition::new(TriggerMode::ChangesZone)
             .destination(Zone::Battlefield)
@@ -427,7 +461,72 @@ pub fn synthesize_job_select(face: &mut CardFace) {
             .execute(
                 AbilityDefinition::new(AbilityKind::Spell, token_effect).sub_ability(attach_effect),
             )
-            .description("Job select — create Hero token and attach".to_string()),
+            .description(description.to_string()),
+    );
+}
+
+/// CR 702.182a: Synthesize Job select trigger: when this Equipment enters,
+/// create a 1/1 colorless Hero creature token, then attach this Equipment to it.
+pub fn synthesize_job_select(face: &mut CardFace) {
+    synthesize_etb_token_attach_keyword(
+        face,
+        |k| matches!(k, Keyword::JobSelect),
+        "Hero",
+        1,
+        1,
+        &["Hero"],
+        &[],
+        "Job select — create Hero token and attach",
+    );
+}
+
+/// CR 702.92a: Synthesize Living weapon trigger — when this Equipment enters,
+/// create a 0/0 black Phyrexian Germ creature token, then attach this
+/// Equipment to it. Structurally identical to `synthesize_job_select` (CR
+/// 702.182a) — both delegate to `synthesize_etb_token_attach_keyword`,
+/// differing only in the leaf-level axes (P/T, token name, subtype list,
+/// color, description).
+///
+/// CR 205.3m: "Phyrexian" and "Germ" are creature subtypes.
+/// CR 105.2: Phyrexian Germ tokens are black (single-color).
+///
+/// Issue #974 (Kaldra Compleat — "Living Weapon" doesn't work): the keyword
+/// was parsed into `Keyword::LivingWeapon` and stored on the card face, but
+/// no synthesis pass turned it into the rule-mandated ETB trigger, so the
+/// Equipment entered the battlefield with no companion Germ token and never
+/// auto-attached. Class affects ~15 cards (Batterskull, Flayer Husk,
+/// Mortarpod, Bonehoard, etc.) and Kaldra Compleat directly.
+pub fn synthesize_living_weapon(face: &mut CardFace) {
+    synthesize_etb_token_attach_keyword(
+        face,
+        |k| matches!(k, Keyword::LivingWeapon),
+        "Phyrexian Germ",
+        0,
+        0,
+        &["Phyrexian", "Germ"],
+        &[ManaColor::Black],
+        "Living weapon — create Phyrexian Germ token and attach",
+    );
+}
+
+/// CR 702.163a: Synthesize For Mirrodin! trigger — when this Equipment enters,
+/// create a 2/2 red Rebel creature token, then attach this Equipment to it.
+/// Structurally identical to `synthesize_job_select` and `synthesize_living_weapon` —
+/// all three delegate to `synthesize_etb_token_attach_keyword`, differing only
+/// in the leaf-level axes (P/T, token name, subtype list, color, description).
+///
+/// CR 205.3m: "Rebel" is a creature subtype.
+/// CR 105.2: For Mirrodin! tokens are red (single-color).
+pub fn synthesize_for_mirrodin(face: &mut CardFace) {
+    synthesize_etb_token_attach_keyword(
+        face,
+        |k| matches!(k, Keyword::ForMirrodin),
+        "Rebel",
+        2,
+        2,
+        &["Rebel"],
+        &[ManaColor::Red],
+        "For Mirrodin! — create Rebel token and attach",
     );
 }
 
@@ -1019,6 +1118,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         reveal: true,
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
                     },
                 )
                 .cost(composite_cost);
@@ -1097,6 +1197,40 @@ pub fn synthesize_scavenge(face: &mut CardFace) {
     face.abilities.extend(scavenge_abilities);
 }
 
+/// CR 702.107a: Synthesize the Outlast activated ability from a `Keyword::Outlast(cost)`.
+/// "Outlast [cost]" means "[Cost], {T}: Put a +1/+1 counter on this creature.
+/// Activate only as a sorcery."
+pub fn synthesize_outlast(face: &mut CardFace) {
+    let outlast_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            let Keyword::Outlast(cost) = kw else {
+                return None;
+            };
+            // CR 702.107a: Composite cost — pay mana, then tap this creature.
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![AbilityCost::Mana { cost: cost.clone() }, AbilityCost::Tap],
+            };
+            // CR 702.107a: "Put a +1/+1 counter on this creature."
+            let effect = Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            };
+            let mut def = AbilityDefinition::new(AbilityKind::Activated, effect)
+                .cost(composite_cost)
+                // CR 702.107a: "Activate only as a sorcery."
+                .sorcery_speed();
+            // Tag so "whenever you activate this creature's outlast ability" triggers fire.
+            def.ability_tag = Some(AbilityTag::Outlast);
+            Some(def)
+        })
+        .collect();
+
+    face.abilities.extend(outlast_abilities);
+}
+
 /// Convert a typecycling subtype string to a `TargetFilter` for library search.
 ///
 /// Single subtypes (e.g., "Plains", "Forest") → subtype filter.
@@ -1149,14 +1283,16 @@ pub fn synthesize_casualty(face: &mut CardFace) {
 
     // CR 702.153a: "As an additional cost, you may sacrifice a creature with power N or greater"
     if face.additional_cost.is_none() {
-        let sacrifice_filter =
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::PowerGE {
-                    value: QuantityExpr::Fixed {
-                        value: threshold as i32,
-                    },
-                }]),
-            );
+        let sacrifice_filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed {
+                    value: threshold as i32,
+                },
+            },
+        ]));
         face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
             target: sacrifice_filter,
             count: 1,
@@ -3084,9 +3220,18 @@ pub fn synthesize_all(face: &mut CardFace) {
     // Warp: no synthesis needed — runtime handled by Keyword::Warp directly
     synthesize_mobilize(face);
     synthesize_job_select(face);
+    // CR 702.92a: Living weapon — Equipment ETB trigger creating a 0/0
+    // black Phyrexian Germ creature token, then attaching this Equipment
+    // to it. Same shape as job select; both share the keyword-to-ETB-attach
+    // synthesis pattern.
+    synthesize_living_weapon(face);
+    // CR 702.163a: For Mirrodin! — same ETB-token-attach shape as living weapon
+    // and job select; creates a 2/2 red Rebel creature token.
+    synthesize_for_mirrodin(face);
     synthesize_level_up(face);
     synthesize_cycling(face);
     synthesize_scavenge(face);
+    synthesize_outlast(face);
     synthesize_casualty(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
@@ -7797,18 +7942,19 @@ mod sorcery_speed_invariant_tests {
 mod loyalty_sorcery_speed_tests {
     //! CR 606.3: Planeswalker loyalty abilities may only be activated during
     //! the controller's main phase with an empty stack, and only once per turn
-    //! per permanent. The parser must tag every loyalty line with both
-    //! `ActivationRestriction::AsSorcery` (CR 606.3 timing) and
-    //! `ActivationRestriction::OnlyOnceEachTurn` (CR 606.3 per-permanent
-    //! limit) so downstream consumers (and the shared invariant) see a
-    //! self-describing restriction set. The planeswalker activation path
-    //! (`game::planeswalker::can_activate_loyalty`) already gates loyalty
-    //! independently; these restrictions are defensive + invariant-preserving.
+    //! per permanent. The parser tags every loyalty line with
+    //! `ActivationRestriction::AsSorcery` (CR 606.3 timing) for downstream
+    //! consumers. It does NOT add `OnlyOnceEachTurn`: that restriction is
+    //! per-ability-index, while CR 606.3 is per-permanent across ALL loyalty
+    //! ability indices. The per-permanent cap is enforced authoritatively by
+    //! `game::planeswalker::can_activate_loyalty_ability` against
+    //! `obj.loyalty_activations_this_turn`. See `apply_loyalty_restrictions`
+    //! in `parser::oracle` for the rationale and The Chain Veil interaction.
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::ActivationRestriction;
 
     #[test]
-    fn loyalty_ability_parses_with_as_sorcery_and_once_each_turn() {
+    fn loyalty_ability_parses_with_as_sorcery() {
         // Jace, the Mind Sculptor reminder-text-like minimal loyalty line.
         let r = parse_oracle_text("+2: Draw a card.", "Test Planeswalker", &[], &[], &[]);
         assert_eq!(r.abilities.len(), 1);
@@ -7819,10 +7965,13 @@ mod loyalty_sorcery_speed_tests {
                 .contains(&ActivationRestriction::AsSorcery),
             "CR 606.3: AsSorcery restriction is pushed for loyalty"
         );
+        // CR 606.3: Loyalty's "once per turn per permanent" gate lives on the
+        // permanent counter, not on per-ability `OnlyOnceEachTurn`. The Chain
+        // Veil's cap-raise depends on this separation.
         assert!(
-            def.activation_restrictions
+            !def.activation_restrictions
                 .contains(&ActivationRestriction::OnlyOnceEachTurn),
-            "CR 606.3: OnlyOnceEachTurn restriction is pushed for loyalty"
+            "CR 606.3: OnlyOnceEachTurn must NOT be attached — the per-permanent counter is the gate"
         );
     }
 
@@ -7836,7 +7985,7 @@ mod loyalty_sorcery_speed_tests {
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
-        assert!(def
+        assert!(!def
             .activation_restrictions
             .contains(&ActivationRestriction::OnlyOnceEachTurn));
     }
@@ -9072,8 +9221,10 @@ mod bloodthirst_synthesis_tests {
             rulings: Vec::new(),
             is_game_changer: false,
             identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
                 scryfall_oracle_id: None,
             },
+            foreign_data: Vec::new(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -9850,5 +10001,230 @@ mod devour_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_devour(&mut face);
         assert!(face.replacements.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod living_weapon_synthesis_tests {
+    use super::*;
+    use crate::types::triggers::TriggerMode;
+
+    fn face_with_living_weapon() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::LivingWeapon);
+        face
+    }
+
+    /// CR 702.92a — Issue #974: Living weapon synthesis produces exactly one
+    /// ChangesZone ETB trigger whose execute chain is `Token(Phyrexian Germ,
+    /// 0/0 black) → Attach(SelfRef, LastCreated)`. Mirrors the job-select
+    /// regression shape (both share the keyword-to-ETB-attach synthesis
+    /// pattern), but the token spec is 0/0 black Phyrexian Germ instead of
+    /// 1/1 colorless Hero.
+    #[test]
+    fn synthesize_living_weapon_builds_etb_trigger_with_token_and_attach() {
+        let mut face = face_with_living_weapon();
+        synthesize_living_weapon(&mut face);
+
+        assert_eq!(face.triggers.len(), 1, "exactly one Living weapon trigger");
+        let trigger = &face.triggers[0];
+        assert!(
+            matches!(trigger.mode, TriggerMode::ChangesZone),
+            "trigger should be ChangesZone (ETB)",
+        );
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::SelfRef),
+            "trigger must scope to self-ETB only",
+        );
+
+        // Verify execute chain: Token(Phyrexian Germ 0/0 black) → Attach.
+        let execute = trigger.execute.as_ref().expect("trigger must have execute");
+        match execute.effect.as_ref() {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                ..
+            } => {
+                assert_eq!(name, "Phyrexian Germ");
+                assert!(matches!(power, crate::types::ability::PtValue::Fixed(0)));
+                assert!(matches!(
+                    toughness,
+                    crate::types::ability::PtValue::Fixed(0)
+                ));
+                assert!(types.contains(&"Creature".to_string()));
+                assert!(types.contains(&"Phyrexian".to_string()));
+                assert!(types.contains(&"Germ".to_string()));
+                assert_eq!(
+                    colors,
+                    &vec![crate::types::mana::ManaColor::Black],
+                    "Phyrexian Germ must be black",
+                );
+            }
+            other => panic!("expected Token effect, got {:?}", other),
+        }
+
+        // Verify sub_ability is Attach { attachment: SelfRef, target: LastCreated }.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("Token effect must chain to Attach sub_ability");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::LastCreated,
+                }
+            ),
+            "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
+            sub.effect,
+        );
+    }
+
+    /// Re-running synthesis must not duplicate the ETB trigger — otherwise
+    /// re-loaded card data would fire two Germ tokens per Equipment ETB.
+    #[test]
+    fn synthesize_living_weapon_is_idempotent() {
+        let mut face = face_with_living_weapon();
+        synthesize_living_weapon(&mut face);
+        let count = face.triggers.len();
+        synthesize_living_weapon(&mut face);
+        assert_eq!(face.triggers.len(), count);
+    }
+
+    /// Faces without the Living weapon keyword get no Germ-token trigger.
+    #[test]
+    fn synthesize_living_weapon_skips_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_living_weapon(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 603.6a: ETB triggers fire from the battlefield. The synthesized
+    /// ChangesZone trigger must list `Zone::Battlefield` in `trigger_zones`
+    /// or the runtime evaluator never matches a Living-Weapon Equipment's
+    /// ETB. Mirrors the job-select parity test so the shared
+    /// `synthesize_etb_token_attach_keyword` helper can't accidentally drop
+    /// the battlefield zone in a future refactor without both keyword
+    /// modules failing.
+    #[test]
+    fn synthesize_living_weapon_binds_battlefield_trigger_zone() {
+        let mut face = face_with_living_weapon();
+        synthesize_living_weapon(&mut face);
+        let trigger = &face.triggers[0];
+        assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+    }
+}
+
+#[cfg(test)]
+mod for_mirrodin_synthesis_tests {
+    use super::*;
+    use crate::types::triggers::TriggerMode;
+
+    fn face_with_for_mirrodin() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::ForMirrodin);
+        face
+    }
+
+    /// CR 702.163a: For Mirrodin! synthesis produces exactly one ChangesZone
+    /// ETB trigger whose execute chain is `Token(Rebel, 2/2 red) →
+    /// Attach(SelfRef, LastCreated)`. Shares the keyword-to-ETB-attach
+    /// synthesis pattern with Living weapon and Job select.
+    #[test]
+    fn synthesize_for_mirrodin_builds_etb_trigger_with_token_and_attach() {
+        let mut face = face_with_for_mirrodin();
+        synthesize_for_mirrodin(&mut face);
+
+        assert_eq!(face.triggers.len(), 1, "exactly one For Mirrodin! trigger");
+        let trigger = &face.triggers[0];
+        assert!(
+            matches!(trigger.mode, TriggerMode::ChangesZone),
+            "trigger should be ChangesZone (ETB)",
+        );
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::SelfRef),
+            "trigger must scope to self-ETB only",
+        );
+
+        // Verify execute chain: Token(Rebel, 2/2 red) → Attach.
+        let execute = trigger.execute.as_ref().expect("trigger must have execute");
+        match execute.effect.as_ref() {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                ..
+            } => {
+                assert_eq!(name, "Rebel");
+                assert!(matches!(power, crate::types::ability::PtValue::Fixed(2)));
+                assert!(matches!(
+                    toughness,
+                    crate::types::ability::PtValue::Fixed(2)
+                ));
+                assert!(types.contains(&"Creature".to_string()));
+                assert!(types.contains(&"Rebel".to_string()));
+                assert_eq!(
+                    colors,
+                    &vec![crate::types::mana::ManaColor::Red],
+                    "Rebel must be red (CR 702.163a)",
+                );
+            }
+            other => panic!("expected Token effect, got {:?}", other),
+        }
+
+        // Verify sub_ability is Attach { attachment: SelfRef, target: LastCreated }.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("Token effect must chain to Attach sub_ability");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::LastCreated,
+                }
+            ),
+            "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
+            sub.effect,
+        );
+    }
+
+    /// Re-running synthesis must not duplicate the ETB trigger.
+    #[test]
+    fn synthesize_for_mirrodin_is_idempotent() {
+        let mut face = face_with_for_mirrodin();
+        synthesize_for_mirrodin(&mut face);
+        let count = face.triggers.len();
+        synthesize_for_mirrodin(&mut face);
+        assert_eq!(face.triggers.len(), count);
+    }
+
+    /// Faces without the For Mirrodin! keyword get no Rebel-token trigger.
+    #[test]
+    fn synthesize_for_mirrodin_skips_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_for_mirrodin(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 603.6a: ETB triggers fire from the battlefield. The synthesized
+    /// ChangesZone trigger must list `Zone::Battlefield` in `trigger_zones`.
+    #[test]
+    fn synthesize_for_mirrodin_binds_battlefield_trigger_zone() {
+        let mut face = face_with_for_mirrodin();
+        synthesize_for_mirrodin(&mut face);
+        let trigger = &face.triggers[0];
+        assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
     }
 }

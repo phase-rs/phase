@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router";
 
 import type { GameFormat } from "../adapter/types";
@@ -31,6 +32,7 @@ import {
   type MultiplayerDraftPhase,
 } from "../stores/multiplayerDraftStore";
 import { useGameStore, saveActiveGame } from "../stores/gameStore";
+import { useCardDataStore } from "../stores/cardDataStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
 
 type ConnectionMode = "server" | "p2p";
@@ -48,6 +50,7 @@ type PendingAction =
       password?: string;
       format?: GameFormat;
       isP2P?: boolean;
+      reservationToken?: string | null;
       /**
        * Full lobby row, populated when the join originated from a lobby list
        * click (not from a typed code). Lets the deck-select view render
@@ -58,9 +61,16 @@ type PendingAction =
     };
 
 export function MultiplayerPage() {
+  const { t } = useTranslation("multiplayer");
   useAudioContext("lobby");
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Warm the shared card DB so host-setup deck legality checks are instant.
+  // Idempotent; closes the deep-link hole when opening /multiplayer directly.
+  useEffect(() => {
+    void useCardDataStore.getState().warm();
+  }, []);
 
   const startHosting = useMultiplayerStore((s) => s.startHosting);
   const startP2PHostingSession = useMultiplayerStore((s) => s.startP2PHostingSession);
@@ -139,7 +149,7 @@ export function MultiplayerPage() {
       joinCode?: string;
     } | null;
     if (!state?.deckRejected) return;
-    showToast(state.reason ?? "Deck was rejected by the host.");
+    showToast(state.reason ?? t("page.deckRejected"));
     setPendingAction({
       type: "join",
       code: state.joinCode ?? "",
@@ -266,29 +276,39 @@ export function MultiplayerPage() {
    * is referenced as an identifier (stable across renders via React).
    */
   const joinP2PRoom = useCallback(
-    async (code: string, initialPassword?: string): Promise<boolean> => {
+    async (
+      code: string,
+      initialPassword?: string,
+      reservationToken?: string | null,
+    ): Promise<boolean> => {
       let password = initialPassword;
       while (true) {
-        const result = await resolveGuestFromStore(code, password);
+        const result = await resolveGuestFromStore(code, password, { reservationToken });
         if (result.ok) {
           const gameId = crypto.randomUUID();
           useGameStore.setState({ gameId });
           const roomCode = stripPeerIdPrefix(result.peerInfo.host_peer_id);
+          if (result.peerInfo.reservation_token) {
+            window.sessionStorage.setItem(
+              `phase-p2p-reservation:${roomCode}`,
+              result.peerInfo.reservation_token,
+            );
+          }
           navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}`);
           return true;
         }
         if (result.reason === "password_required") {
-          const entered = window.prompt("This room requires a password:");
+          const entered = window.prompt(t("page.passwordPrompt"));
           if (!entered) return false;
           password = entered;
           continue;
         }
         if (result.reason === "build_mismatch") {
           setJoinErrorDialog({
-            title: "Client out of date",
+            title: t("page.joinErrorOutOfDateTitle"),
             message: result.message,
             primaryAction: {
-              label: "Refresh",
+              label: t("page.joinErrorRefresh"),
               onClick: () => window.location.reload(),
             },
           });
@@ -299,7 +319,7 @@ export function MultiplayerPage() {
           result.reason === "room_full"
         ) {
           setJoinErrorDialog({
-            title: "Can't join this room",
+            title: t("page.joinErrorCantJoinTitle"),
             message: result.message,
           });
           return false;
@@ -308,7 +328,7 @@ export function MultiplayerPage() {
         return false;
       }
     },
-    [navigate, resolveGuestFromStore, showToast],
+    [navigate, resolveGuestFromStore, showToast, t],
   );
 
   // Execute a pending action (host or join) with the currently active deck.
@@ -323,13 +343,13 @@ export function MultiplayerPage() {
     async (action: PendingAction): Promise<boolean> => {
       const deckName = localStorage.getItem(ACTIVE_DECK_KEY);
       if (!deckName) {
-        showToast("Select a deck before continuing.");
+        showToast(t("page.selectDeckFirst"));
         return false;
       }
 
       const parsedDeck = loadActiveDeck();
       if (!parsedDeck) {
-        showToast("Could not load deck. Try re-importing it.");
+        showToast(t("page.couldNotLoadDeck"));
         return false;
       }
 
@@ -346,7 +366,7 @@ export function MultiplayerPage() {
           if (compat.selected_format_compatible === false) {
             const reason =
               compat.selected_format_reasons[0]
-              ?? `Deck is not legal in ${validationFormat}.`;
+              ?? t("page.deckNotLegal", { format: validationFormat });
             showToast(reason);
             setPendingAction(action);
             setView("deck-select");
@@ -355,8 +375,8 @@ export function MultiplayerPage() {
         } catch (err) {
           showToast(
             err instanceof Error
-              ? `Deck check failed: ${err.message}`
-              : "Deck check failed.",
+              ? t("page.deckCheckFailed", { error: err.message })
+              : t("page.deckCheckFailedGeneric"),
           );
           return false;
         }
@@ -367,8 +387,38 @@ export function MultiplayerPage() {
       if (action.type === "host") {
         const deck = expandDeck();
         if (!deck) {
-          showToast("Could not load deck. Try re-importing it.");
+          showToast(t("page.couldNotLoadDeck"));
           return false;
+        }
+
+        const opponentCount = Math.max(0, action.settings.formatConfig.max_players - 1);
+        const aiSeatIndexes = new Set(action.settings.aiSeats.map((seat) => seat.seatIndex));
+        const allOpponentsAreAi =
+          opponentCount > 0
+          && Array.from({ length: opponentCount }, (_, i) => i + 1)
+            .every((seatIndex) => aiSeatIndexes.has(seatIndex));
+        if (allOpponentsAreAi) {
+          const sortedAiSeats = [...action.settings.aiSeats]
+            .sort((a, b) => a.seatIndex - b.seatIndex);
+          const aiSeats = sortedAiSeats.map((seat) => ({
+            difficulty: seat.difficulty,
+            deckName: seat.deckName,
+          }));
+          const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
+          const gameId = crypto.randomUUID();
+          clearWsSession();
+          saveActiveGame({
+            id: gameId,
+            mode: "ai",
+            difficulty: headDifficulty,
+            aiSeats,
+            formatConfig: action.settings.formatConfig,
+          });
+          useGameStore.setState({ gameId });
+          navigate(
+            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}`,
+          );
+          return true;
         }
 
         // Reachability + mode check for the hosting flow. We lean on the
@@ -415,7 +465,7 @@ export function MultiplayerPage() {
         const { code, password, context } = action;
 
         if (context?.is_p2p === true || action.isP2P === true) {
-          return joinP2PRoom(code, password);
+          return joinP2PRoom(code, password, action.reservationToken);
         }
 
         const p2pCode = parseRoomCode(code);
@@ -431,6 +481,12 @@ export function MultiplayerPage() {
         saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
         useGameStore.setState({ gameId });
         const params = new URLSearchParams({ mode: "join", code });
+        if (action.reservationToken) {
+          window.sessionStorage.setItem(
+            `phase-join-reservation:${code}`,
+            action.reservationToken,
+          );
+        }
         if (password) {
           params.set("password", password);
         }
@@ -439,7 +495,7 @@ export function MultiplayerPage() {
 
       return true;
     },
-    [expandDeck, startHosting, startP2PHostingSession, navigate, showToast, joinP2PRoom],
+    [expandDeck, startHosting, startP2PHostingSession, navigate, showToast, joinP2PRoom, t],
   );
 
   // Host setup complete → execute immediately if deck exists, otherwise prompt
@@ -471,10 +527,10 @@ export function MultiplayerPage() {
         await joinDraft({ roomCode: code, displayName: playerName });
         setView("draft-lobby");
       } catch {
-        showToast("Failed to join draft pod.");
+        showToast(t("page.failedToJoinDraft"));
       }
     },
-    [joinDraft, showToast],
+    [joinDraft, showToast, t],
   );
 
   // Join from lobby → execute immediately if deck exists, otherwise prompt
@@ -514,21 +570,32 @@ export function MultiplayerPage() {
       let resolvedFormat = format;
       let resolvedPassword = password;
       let resolvedIsP2P = context?.is_p2p === true;
-      if (!resolvedFormat) {
-        const result = await lookupJoinTargetFromStore(code, resolvedPassword);
-        if (result.ok) {
-          resolvedFormat = result.info.format_config?.format;
-          resolvedIsP2P = result.info.is_p2p;
-        } else if (result.reason === "password_required") {
-          const entered = window.prompt("This room requires a password:");
-          if (!entered) return;
-          resolvedPassword = entered;
-          const retry = await lookupJoinTargetFromStore(code, resolvedPassword);
-          if (retry.ok) {
-            resolvedFormat = retry.info.format_config?.format;
-            resolvedIsP2P = retry.info.is_p2p;
-          }
+      let reservationToken: string | null = null;
+      const reserveOptions = {
+        reserve: true,
+        displayName: useMultiplayerStore.getState().displayName || "Player",
+      };
+      const result = await lookupJoinTargetFromStore(code, resolvedPassword, reserveOptions);
+      if (result.ok) {
+        resolvedFormat = result.info.format_config?.format ?? resolvedFormat;
+        resolvedIsP2P = result.info.is_p2p;
+        reservationToken = result.info.reservation_token ?? null;
+      } else if (result.reason === "password_required") {
+        const entered = window.prompt(t("page.passwordPrompt"));
+        if (!entered) return;
+        resolvedPassword = entered;
+        const retry = await lookupJoinTargetFromStore(code, resolvedPassword, reserveOptions);
+        if (retry.ok) {
+          resolvedFormat = retry.info.format_config?.format ?? resolvedFormat;
+          resolvedIsP2P = retry.info.is_p2p;
+          reservationToken = retry.info.reservation_token ?? null;
+        } else {
+          showToast(retry.message);
+          return;
         }
+      } else {
+        showToast(result.message);
+        return;
       }
       const action: PendingAction = {
         type: "join",
@@ -536,16 +603,24 @@ export function MultiplayerPage() {
         password: resolvedPassword,
         format: resolvedFormat,
         isP2P: resolvedIsP2P,
+        reservationToken,
         context,
       };
       setPendingAction(action);
       setView("deck-select");
     },
-    [lookupJoinTargetFromStore, handleJoinDraftFromLobby],
+    [lookupJoinTargetFromStore, handleJoinDraftFromLobby, showToast, t],
   );
 
   const handleBack = () => {
     if (view === "deck-select") {
+      if (pendingAction?.type === "join" && pendingAction.reservationToken) {
+        void lookupJoinTargetFromStore(
+          pendingAction.code,
+          pendingAction.password,
+          { releaseReservationToken: pendingAction.reservationToken },
+        );
+      }
       // With a pending action the user clearly came from a host/join
       // attempt; without one they came from the "Change Deck" affordance,
       // and `deckSelectReturn` remembers which view rendered that button.
@@ -585,23 +660,23 @@ export function MultiplayerPage() {
 
   const title =
     view === "lobby"
-      ? "Join or host a table."
+      ? t("page.titleLobby")
       : view === "host-setup"
-        ? "Set up your table."
+        ? t("page.titleHostSetup")
         : view === "draft-lobby"
-          ? "Draft Pod"
-          : "Choose a deck.";
+          ? t("page.titleDraftLobby")
+          : t("page.titleDeckSelect");
 
   const description =
     view === "lobby"
-      ? "Browse available tables, join by code, or host a new match."
+      ? t("page.descriptionLobby")
       : view === "host-setup"
-        ? "Adjust format, privacy, and timing before opening the room."
+        ? t("page.descriptionHostSetup")
         : view === "draft-lobby"
-          ? "Waiting for players to join the draft pod."
+          ? t("page.descriptionDraftLobby")
           : selectedFormat
-            ? `Pick a deck for ${selectedFormat}.`
-            : "Pick the deck you want to bring online.";
+            ? t("page.descriptionDeckSelectFormat", { format: selectedFormat })
+            : t("page.descriptionDeckSelect");
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -619,7 +694,7 @@ export function MultiplayerPage() {
       <div className="menu-scene__sigil menu-scene__sigil--right" />
       <div className="menu-scene__haze" />
 
-      <MenuShell eyebrow="Multiplayer" title={title} description={description} layout="stacked">
+      <MenuShell eyebrow={t("page.eyebrow")} title={title} description={description} layout="stacked">
         <div className="flex w-full flex-col items-center">
         {/* Player identity — always available on lobby/host-setup so users
             can edit their name without hunting in Preferences. */}
@@ -633,20 +708,28 @@ export function MultiplayerPage() {
           <div className="mx-auto mb-4 flex w-full max-w-xl items-center justify-between gap-3 rounded-[16px] border border-white/8 bg-black/16 px-4 py-2.5">
             <div className="min-w-0">
               <div className="text-[0.6rem] uppercase tracking-[0.22em] text-slate-500">
-                Active Deck
+                {t("page.activeDeck")}
               </div>
               <div className="truncate text-sm font-medium text-white">{activeDeckName}</div>
             </div>
-            <button
-              onClick={() => {
-                setDeckSelectReturn(view as MultiplayerView);
-                setPendingAction(null);
-                setView("deck-select");
-              }}
-              className="shrink-0 text-xs text-slate-400 transition-colors hover:text-white"
-            >
-              Change
-            </button>
+            <div className="flex shrink-0 items-center gap-3">
+              <button
+                onClick={() => handleEditDeck(activeDeckName)}
+                className="text-xs text-slate-400 transition-colors hover:text-white"
+              >
+                {t("page.edit")}
+              </button>
+              <button
+                onClick={() => {
+                  setDeckSelectReturn(view as MultiplayerView);
+                  setPendingAction(null);
+                  setView("deck-select");
+                }}
+                className="text-xs text-slate-400 transition-colors hover:text-white"
+              >
+                {t("page.change")}
+              </button>
+            </div>
           </div>
         )}
 
@@ -658,7 +741,7 @@ export function MultiplayerPage() {
         {view === "host-setup" && !activeDeckName && (
           <div className="mx-auto mb-4 flex w-full max-w-xl items-center justify-between gap-3 rounded-[16px] border border-amber-500/20 bg-amber-500/8 px-4 py-2.5">
             <span className="text-xs text-amber-200">
-              No deck selected — you'll need to pick one before hosting.
+              {t("page.noDeckWarning")}
             </span>
             <button
               onClick={() => {
@@ -667,14 +750,19 @@ export function MultiplayerPage() {
               }}
               className="shrink-0 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-400/18"
             >
-              Pick Deck
+              {t("page.pickDeck")}
             </button>
           </div>
         )}
 
         {view === "lobby" && (
           <LobbyView
-            key={lobbyRetryKey}
+            // Remount on server change so local lobby state (playerCount,
+            // game list) resets and the subscription effect re-runs against
+            // the freshly-dialed socket — without this, switching servers
+            // left the previous region's PlayerCount on screen. lobbyRetryKey
+            // still drives the "Keep waiting" offline retry.
+            key={`${serverAddress}:${lobbyRetryKey}`}
             onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
             onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
             onHostDraft={experimentalFeatures ? handleHostDraft : undefined}
@@ -699,9 +787,9 @@ export function MultiplayerPage() {
             hostDisabled={liveCheck.status === "illegal" || liveCheck.status === "checking"}
             hostDisabledReason={
               liveCheck.status === "illegal"
-                ? `Deck is not legal in ${liveCheck.format}.`
+                ? t("page.deckNotLegal", { format: liveCheck.format })
                 : liveCheck.status === "checking"
-                  ? "Checking deck legality…"
+                  ? t("deckLegalityChip.checkingLegality")
                   : undefined
             }
           />
@@ -723,11 +811,11 @@ export function MultiplayerPage() {
             {pendingAction?.type === "join" && pendingAction.context && (
               <div className="mx-auto mb-4 w-full max-w-xl rounded-[16px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-2.5">
                 <div className="text-[0.6rem] uppercase tracking-[0.22em] text-cyan-300/70">
-                  Joining
+                  {t("page.joining")}
                 </div>
                 <div className="mt-1 text-sm text-cyan-100">
                   <span className="font-medium">
-                    {pendingAction.context.host_name || "Anonymous"}
+                    {pendingAction.context.host_name || t("page.anonymous")}
                   </span>
                   {pendingAction.context.format && (
                     <span className="text-cyan-200/70">
@@ -786,7 +874,7 @@ export function MultiplayerPage() {
             if (action.type === "host") {
               const deck = expandDeck();
               if (!deck) {
-                showToast("Could not load deck. Try re-importing it.");
+                showToast(t("page.couldNotLoadDeck"));
                 return;
               }
               void startP2PHostingSession(action.settings, deck, {
@@ -827,6 +915,7 @@ function DraftLobbyPanel({
   roomCode: string | null;
   onLeave: () => void;
 }) {
+  const { t } = useTranslation("multiplayer");
   const seats = useMultiplayerDraftStore((s) => s.seats);
   const joined = useMultiplayerDraftStore((s) => s.joined);
   const total = useMultiplayerDraftStore((s) => s.total);
@@ -836,7 +925,7 @@ function DraftLobbyPanel({
     <MenuPanel className="relative z-10 mx-auto flex w-full max-w-xl flex-col gap-5 px-4 py-5">
       <div className="flex items-center justify-between">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
-          Draft Pod
+          {t("draftLobbyPanel.draftPod")}
         </div>
         {roomCode && (
           <span className="rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-xs tracking-wider text-purple-400">
@@ -846,19 +935,19 @@ function DraftLobbyPanel({
       </div>
 
       {phase === "connecting" && (
-        <div className="text-sm text-slate-400">Connecting to draft pod...</div>
+        <div className="text-sm text-slate-400">{t("draftLobbyPanel.connecting")}</div>
       )}
 
       {phase === "error" && (
         <div className="rounded-[16px] border border-rose-400/20 bg-rose-500/[0.07] px-4 py-3 text-sm text-rose-200">
-          {error ?? "Connection failed."}
+          {error ?? t("draftLobbyPanel.connectionFailed")}
         </div>
       )}
 
       {(phase === "lobby" || phase === "connecting") && total > 0 && (
         <div className="flex flex-col gap-3">
           <div className="text-sm text-slate-300">
-            {joined}/{total} players joined
+            {t("draftLobbyPanel.playersJoined", { joined, total })}
           </div>
           <div className="flex flex-wrap gap-2">
             {seats.map((seat, i) => (
@@ -870,7 +959,7 @@ function DraftLobbyPanel({
                     : "border-white/8 bg-black/16 text-slate-500"
                 }`}
               >
-                {seat.display_name || `Seat ${i + 1}`}
+                {seat.display_name || t("draftLobbyPanel.seat", { number: i + 1 })}
               </div>
             ))}
           </div>
@@ -879,7 +968,7 @@ function DraftLobbyPanel({
 
       {phase === "drafting" && (
         <div className="text-sm text-emerald-300">
-          Draft in progress. The draft view will open automatically.
+          {t("draftLobbyPanel.draftInProgress")}
         </div>
       )}
 
@@ -887,13 +976,14 @@ function DraftLobbyPanel({
         onClick={onLeave}
         className={menuButtonClass({ tone: "neutral", size: "sm" })}
       >
-        Leave Draft
+        {t("draftLobbyPanel.leaveDraft")}
       </button>
     </MenuPanel>
   );
 }
 
 function DeckLegalityChip({ check }: { check: LiveCheck }) {
+  const { t } = useTranslation("multiplayer");
   if (check.status === "idle") return null;
 
   const base =
@@ -903,7 +993,7 @@ function DeckLegalityChip({ check }: { check: LiveCheck }) {
     return (
       <div className={`${base} border-white/8 bg-black/16`}>
         <span className="text-xs text-slate-400">
-          Checking deck against {check.format}…
+          {t("deckLegalityChip.checking", { format: check.format })}
         </span>
       </div>
     );
@@ -916,7 +1006,7 @@ function DeckLegalityChip({ check }: { check: LiveCheck }) {
         role="status"
       >
         <span className="text-xs font-medium text-emerald-200">
-          ✓ Legal in {check.format}
+          {t("deckLegalityChip.legal", { format: check.format })}
         </span>
       </div>
     );
@@ -931,7 +1021,7 @@ function DeckLegalityChip({ check }: { check: LiveCheck }) {
       role="alert"
     >
       <div className="text-xs font-medium text-rose-200">
-        Not legal in {check.format}
+        {t("deckLegalityChip.notLegal", { format: check.format })}
       </div>
       {reasons.length > 0 && (
         <ul className="mt-1 list-inside list-disc text-[11px] leading-5 text-rose-200/80">

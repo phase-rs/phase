@@ -35,6 +35,34 @@ pub(crate) struct DamageContext {
     pub(crate) combat_damage_poison: u32,
 }
 
+fn player_context_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<TargetRef> {
+    if matches!(
+        target_filter,
+        TargetFilter::Controller
+            | TargetFilter::OriginalController
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::PostReplacementSourceController
+    ) {
+        Some(TargetRef::Player(super::resolve_player_for_context_ref(
+            state,
+            ability,
+            target_filter,
+        )))
+    } else {
+        None
+    }
+}
+
 impl DamageContext {
     /// Build context by reading keywords from the source object.
     /// Returns None if source doesn't exist in state.
@@ -587,6 +615,9 @@ pub fn resolve(
     let effective_targets: &[TargetRef] = if matches!(target_filter, TargetFilter::SelfRef) {
         implicit = vec![TargetRef::Object(ability.source_id)];
         &implicit
+    } else if let Some(target) = player_context_target(state, ability, target_filter) {
+        implicit = vec![target];
+        &implicit
     } else if !ability.targets.is_empty() {
         if matches!(damage_source, Some(DamageSource::Target)) && ability.targets.len() > 1 {
             &ability.targets[1..]
@@ -824,6 +855,15 @@ fn collect_matching_players(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != source_controller && p.life_gained_this_turn > 0
                     }
+                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
+                    // damage this turn (`damage_dealt_this_turn` ledger).
+                    PlayerFilter::OpponentDealtCombatDamage => {
+                        p.id != source_controller
+                            && state.damage_dealt_this_turn.iter().any(|r| {
+                                r.is_combat
+                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
+                            })
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -941,6 +981,15 @@ pub fn resolve_each_player(
                     }
                     PlayerFilter::OpponentGainedLife => {
                         p.id != ability.controller && p.life_gained_this_turn > 0
+                    }
+                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
+                    // damage this turn (`damage_dealt_this_turn` ledger).
+                    PlayerFilter::OpponentDealtCombatDamage => {
+                        p.id != ability.controller
+                            && state.damage_dealt_this_turn.iter().any(|r| {
+                                r.is_combat
+                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
+                            })
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -1401,6 +1450,7 @@ mod tests {
                             count: QuantityExpr::Ref {
                                 qty: QuantityRef::EventContextAmount,
                             },
+                            face_down: false,
                         },
                     ))
                     .description("Crumbling Sanctuary prevention shield".to_string()),

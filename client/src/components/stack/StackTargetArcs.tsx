@@ -3,13 +3,14 @@ import { createPortal } from "react-dom";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { getArcPath } from "../targeting/arcPath.ts";
-import { getStackEntryTargets } from "./stackTargets.ts";
-import type { ObjectId, StackEntry } from "../../adapter/types.ts";
+import type { ObjectId, StackEntry, StackEntryDisplay } from "../../adapter/types.ts";
 
 interface StackTargetArcsProps {
   stack: StackEntry[];
   activeEntryId: ObjectId | null;
   isCollapsed: boolean;
+  detailsByEntry: Record<string, StackEntryDisplay>;
+  stackEntryRepresentatives: Map<ObjectId, ObjectId>;
 }
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -33,7 +34,13 @@ const MUTED = "#9CA3AF";
 
 // ── Component ────────────────────────────────────────────────────────────
 
-export function StackTargetArcs({ stack, activeEntryId, isCollapsed }: StackTargetArcsProps) {
+export function StackTargetArcs({
+  stack,
+  activeEntryId,
+  isCollapsed,
+  detailsByEntry,
+  stackEntryRepresentatives,
+}: StackTargetArcsProps) {
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const isMinimal = vfxQuality === "minimal";
 
@@ -46,12 +53,15 @@ export function StackTargetArcs({ stack, activeEntryId, isCollapsed }: StackTarg
   const arcData = useMemo(() => {
     const result: ArcDatum[] = [];
     for (const entry of stack) {
-      const targets = getStackEntryTargets(entry);
+      const targets = detailsByEntry[String(entry.id)]?.targets ?? [];
       for (let i = 0; i < targets.length; i++) {
-        const target = targets[i];
+        const target = targets[i].target;
         let targetSelector: string;
         if ("Object" in target) {
-          targetSelector = `[data-object-id="${target.Object}"]`;
+          const representative = stackEntryRepresentatives.get(target.Object);
+          targetSelector = representative != null
+            ? `[data-stack-entry="${representative}"]`
+            : `[data-object-id="${target.Object}"]`;
         } else {
           targetSelector = `[data-player-hud="${target.Player}"]`;
         }
@@ -64,7 +74,7 @@ export function StackTargetArcs({ stack, activeEntryId, isCollapsed }: StackTarg
       }
     }
     return result;
-  }, [stack]);
+  }, [detailsByEntry, stack, stackEntryRepresentatives]);
 
   const positions = useStackArcPositions(arcData);
 

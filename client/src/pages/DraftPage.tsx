@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router";
 
@@ -22,10 +23,10 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 
 // ── Format Picker ─────────────────────────────────────────────────────
 
-const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; label: string; description: string }> = [
-  { value: "single", label: "Single Match", description: "Play one Bo1 match with your drafted deck." },
-  { value: "bo3", label: "Best of Three", description: "Play a Bo3 match with sideboarding between games." },
-  { value: "run", label: "Full Run", description: "Play Bo1 matches until you reach 7 wins or 3 losses." },
+const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: string; descKey: string }> = [
+  { value: "single", labelKey: "formatPicker.single.label", descKey: "formatPicker.single.description" },
+  { value: "bo3", labelKey: "formatPicker.bo3.label", descKey: "formatPicker.bo3.description" },
+  { value: "run", labelKey: "formatPicker.run.label", descKey: "formatPicker.run.description" },
 ];
 
 type DraftSetupMode = "set" | "cube";
@@ -42,7 +43,8 @@ const DEFAULT_CUBE_SETTINGS: CubeDraftSettings = {
 };
 
 function CubeSetupPanel() {
-  const [cubeName, setCubeName] = useState("Custom Cube");
+  const { t } = useTranslation("draft");
+  const [cubeName, setCubeName] = useState(t("cubeSetup.defaultCubeName"));
   const [cubeText, setCubeText] = useState("");
   const [cubeUrl, setCubeUrl] = useState("");
   const [settings, setSettings] = useState<CubeDraftSettings>(DEFAULT_CUBE_SETTINGS);
@@ -75,7 +77,7 @@ function CubeSetupPanel() {
     try {
       setCubeText(await fetchCubeList(cubeUrl));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch cube list");
+      setError(err instanceof Error ? err.message : t("cubeSetup.fetchError"));
     } finally {
       setLoading(false);
     }
@@ -88,7 +90,7 @@ function CubeSetupPanel() {
       const { difficulty, startCubeDraft } = useDraftStore.getState();
       await startCubeDraft(cubeText, cubeName, settings, difficulty);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start cube draft");
+      setError(err instanceof Error ? err.message : t("cubeSetup.startError"));
     } finally {
       setLoading(false);
     }
@@ -100,26 +102,26 @@ function CubeSetupPanel() {
     <div className="flex flex-col gap-4">
       <div className="grid gap-3 md:grid-cols-[1fr_220px_220px_220px]">
         <label className="flex flex-col gap-1">
-          <span className="text-xs uppercase tracking-[0.16em] text-white/35">Cube Name</span>
+          <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.cubeName")}</span>
           <input
             value={cubeName}
             onChange={(e) => setCubeName(e.target.value)}
             className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50"
           />
         </label>
-        <NumberField label="Seats" value={settings.pod_size} min={2} max={16} onChange={(v) => updateSetting("pod_size", v)} />
-        <NumberField label="Packs" value={settings.pack_count} min={1} max={6} onChange={(v) => updateSetting("pack_count", v)} />
-        <NumberField label="Pack Size" value={settings.cards_per_pack} min={1} max={30} onChange={(v) => updateSetting("cards_per_pack", v)} />
+        <NumberField label={t("cubeSetup.seats")} value={settings.pod_size} min={2} max={16} onChange={(v) => updateSetting("pod_size", v)} />
+        <NumberField label={t("cubeSetup.packs")} value={settings.pack_count} min={1} max={6} onChange={(v) => updateSetting("pack_count", v)} />
+        <NumberField label={t("cubeSetup.packSize")} value={settings.cards_per_pack} min={1} max={30} onChange={(v) => updateSetting("cards_per_pack", v)} />
       </div>
 
       <div className="grid gap-3 md:grid-cols-[220px_1fr_auto]">
-        <NumberField label="Min Deck" value={settings.min_deck_size} min={1} max={100} onChange={(v) => updateSetting("min_deck_size", v)} />
+        <NumberField label={t("cubeSetup.minDeck")} value={settings.min_deck_size} min={1} max={100} onChange={(v) => updateSetting("min_deck_size", v)} />
         <label className="flex flex-col gap-1">
-          <span className="text-xs uppercase tracking-[0.16em] text-white/35">CubeCobra Export URL</span>
+          <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.exportUrl")}</span>
           <input
             value={cubeUrl}
             onChange={(e) => setCubeUrl(e.target.value)}
-            placeholder="Paste a raw export URL, or paste the list below"
+            placeholder={t("cubeSetup.exportUrlPlaceholder")}
             className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
           />
         </label>
@@ -129,13 +131,13 @@ function CubeSetupPanel() {
           disabled={loading || !cubeUrl.trim()}
           className={menuButtonClass({ tone: "neutral", size: "md", disabled: loading || !cubeUrl.trim(), className: "self-end" })}
         >
-          Load URL
+          {t("cubeSetup.loadUrl")}
         </button>
       </div>
 
       <div className="grid gap-3 md:grid-cols-[260px_1fr]">
         <label className="flex flex-col gap-1">
-          <span className="text-xs uppercase tracking-[0.16em] text-white/35">Deck Addables</span>
+          <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.deckAddables")}</span>
           <select
             value={settings.addable_cards.policy}
             onChange={(e) =>
@@ -149,17 +151,17 @@ function CubeSetupPanel() {
             }
             className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50"
           >
-            <option value="StandardBasics">Standard basics</option>
-            <option value="StandardBasicsPlusCustom">Basics plus custom</option>
-            <option value="CustomOnly">Custom only</option>
+            <option value="StandardBasics">{t("cubeSetup.addablesStandardBasics")}</option>
+            <option value="StandardBasicsPlusCustom">{t("cubeSetup.addablesBasicsPlusCustom")}</option>
+            <option value="CustomOnly">{t("cubeSetup.addablesCustomOnly")}</option>
           </select>
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-xs uppercase tracking-[0.16em] text-white/35">Custom Addable Cards</span>
+          <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.customAddableCards")}</span>
           <textarea
             value={customAddables}
             onChange={(e) => updateCustomAddables(e.target.value)}
-            placeholder="One card name per line"
+            placeholder={t("cubeSetup.customAddablePlaceholder")}
             className="min-h-10 resize-y rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
           />
         </label>
@@ -182,7 +184,7 @@ function CubeSetupPanel() {
           disabled={!canStart}
           className={menuButtonClass({ tone: "emerald", size: "lg", disabled: !canStart })}
         >
-          Start Cube Draft
+          {t("cubeSetup.startCubeDraft")}
         </button>
       </div>
     </div>
@@ -218,14 +220,15 @@ function NumberField({
 }
 
 function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
+  const { t } = useTranslation("draft");
   const runFormat = useDraftStore((s) => s.runFormat);
   const setRunFormat = useDraftStore((s) => s.setRunFormat);
 
   return (
     <div className="flex flex-col items-center gap-8 py-16">
       <div className="text-center">
-        <h1 className="menu-display text-3xl text-white">Your deck is ready</h1>
-        <p className="mt-2 text-sm text-white/45">Choose how you want to play.</p>
+        <h1 className="menu-display text-3xl text-white">{t("formatPicker.title")}</h1>
+        <p className="mt-2 text-sm text-white/45">{t("formatPicker.subtitle")}</p>
       </div>
 
       <div className="flex w-full max-w-lg flex-col gap-3">
@@ -253,9 +256,9 @@ function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
             </div>
             <div className="min-w-0 flex-1">
               <div className={`text-base font-semibold ${runFormat === opt.value ? "text-emerald-100" : "text-white"}`}>
-                {opt.label}
+                {t(opt.labelKey)}
               </div>
-              <p className="mt-1 text-sm text-white/40">{opt.description}</p>
+              <p className="mt-1 text-sm text-white/40">{t(opt.descKey)}</p>
             </div>
           </button>
         ))}
@@ -266,7 +269,7 @@ function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
         onClick={onLaunch}
         className={menuButtonClass({ tone: "emerald", size: "lg" })}
       >
-        Start Match
+        {t("formatPicker.startMatch")}
       </button>
     </div>
   );
@@ -275,6 +278,7 @@ function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
 // ── Between Matches ───────────────────────────────────────────────────
 
 function BetweenMatches({ onNext, onEnd }: { onNext: () => void; onEnd: () => void }) {
+  const { t } = useTranslation("draft");
   const runState = useDraftStore((s) => s.runState);
   const runFormat = useDraftStore((s) => s.runFormat);
 
@@ -286,13 +290,13 @@ function BetweenMatches({ onNext, onEnd }: { onNext: () => void; onEnd: () => vo
 
   return (
     <div className="flex flex-col items-center gap-8 py-16">
-      <h1 className="menu-display text-3xl text-white">Draft Run</h1>
+      <h1 className="menu-display text-3xl text-white">{t("run.draftRun")}</h1>
 
       <RecordSummary wins={wins} losses={losses} draws={draws} limits={limits} />
 
       <MatchHistory results={runState.results} />
 
-      <p className="text-sm text-white/45">Up next — Match {matchNumber}</p>
+      <p className="text-sm text-white/45">{t("run.upNext", { number: matchNumber })}</p>
 
       <div className="flex items-center gap-3">
         <button
@@ -300,14 +304,14 @@ function BetweenMatches({ onNext, onEnd }: { onNext: () => void; onEnd: () => vo
           onClick={onNext}
           className={menuButtonClass({ tone: "emerald", size: "lg" })}
         >
-          Next Match
+          {t("run.nextMatch")}
         </button>
         <button
           type="button"
           onClick={onEnd}
           className={menuButtonClass({ tone: "neutral", size: "md" })}
         >
-          End Run
+          {t("run.endRun")}
         </button>
       </div>
     </div>
@@ -317,6 +321,7 @@ function BetweenMatches({ onNext, onEnd }: { onNext: () => void; onEnd: () => vo
 // ── Run Complete ──────────────────────────────────────────────────────
 
 function RunComplete({ onDone }: { onDone: () => void }) {
+  const { t } = useTranslation("draft");
   const runState = useDraftStore((s) => s.runState);
   const runFormat = useDraftStore((s) => s.runFormat);
 
@@ -345,12 +350,14 @@ function RunComplete({ onDone }: { onDone: () => void }) {
           />
         )}
         <h1 className="menu-display relative text-3xl text-white">
-          {perfect ? "Perfect Run" : hitMaxWins ? "Run Complete" : "Run Over"}
+          {perfect ? t("run.perfectRun") : hitMaxWins ? t("run.runComplete") : t("run.runOver")}
         </h1>
         <p className="relative text-white/55">
           {hitMaxWins
-            ? `You finished ${wins}–${losses}. ${perfect ? "Flawless." : "Congratulations!"}`
-            : `You finished with a ${wins}–${losses} record.`}
+            ? perfect
+              ? t("run.finishedFlawless", { wins, losses })
+              : t("run.finishedCongrats", { wins, losses })
+            : t("run.finishedRecord", { wins, losses })}
         </p>
       </div>
 
@@ -363,7 +370,7 @@ function RunComplete({ onDone }: { onDone: () => void }) {
         onClick={onDone}
         className={menuButtonClass({ tone: "neutral", size: "lg" })}
       >
-        Done
+        {t("run.done")}
       </button>
     </motion.div>
   );
@@ -394,15 +401,16 @@ function RecordSummary({
   draws: number;
   limits: { maxWins: number; maxLosses: number };
 }) {
+  const { t } = useTranslation("draft");
   return (
     <div className="flex flex-col items-center gap-2">
       <div className="flex items-center gap-8">
-        <RecordTrack label="Wins" count={wins} max={limits.maxWins} color="emerald" />
-        <RecordTrack label="Losses" count={losses} max={limits.maxLosses} color="red" />
+        <RecordTrack label={t("run.wins")} count={wins} max={limits.maxWins} color="emerald" />
+        <RecordTrack label={t("run.losses")} count={losses} max={limits.maxLosses} color="red" />
       </div>
       {draws > 0 && (
         <span className="text-xs uppercase tracking-wider text-white/35">
-          + {draws} draw{draws > 1 ? "s" : ""}
+          {t("run.drawCount", { count: draws })}
         </span>
       )}
     </div>
@@ -442,10 +450,11 @@ function RecordTrack({
 }
 
 function MatchHistory({ results }: { results: DraftRunState["results"] }) {
+  const { t } = useTranslation("draft");
   if (results.length === 0) return null;
   return (
     <div className="flex flex-col items-center gap-2">
-      <span className="text-[0.62rem] font-medium uppercase tracking-[0.18em] text-white/30">Match Log</span>
+      <span className="text-[0.62rem] font-medium uppercase tracking-[0.18em] text-white/30">{t("run.matchLog")}</span>
       <div className="flex items-center gap-1">
         {results.map((r, i) => (
           <div
@@ -457,9 +466,16 @@ function MatchHistory({ results }: { results: DraftRunState["results"] }) {
                   ? "bg-red-500/18 text-red-300"
                   : "bg-slate-500/18 text-slate-300"
             }`}
-            title={`Match ${i + 1}: ${r.result}`}
+            title={t("run.matchResultTitle", {
+              number: i + 1,
+              result: t(`run.result.${r.result}`),
+            })}
           >
-            {r.result === "win" ? "W" : r.result === "loss" ? "L" : "D"}
+            {r.result === "win"
+              ? t("run.resultShort.win")
+              : r.result === "loss"
+                ? t("run.resultShort.loss")
+                : t("run.resultShort.draw")}
           </div>
         ))}
       </div>
@@ -470,6 +486,7 @@ function MatchHistory({ results }: { results: DraftRunState["results"] }) {
 // ── Main Component ────────────────────────────────────────────────────
 
 export function DraftPage() {
+  const { t } = useTranslation("draft");
   const phase = useDraftStore((s) => s.phase);
   const reset = useDraftStore((s) => s.reset);
   const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
@@ -567,7 +584,7 @@ export function DraftPage() {
         {!resumeLoading && phase === "setup" && (
           <div className="mx-auto w-full max-w-4xl">
             <h1 className="mb-8 menu-display text-3xl text-white">
-              {setupMode === "cube" ? "Cube Draft" : "Quick Draft"}
+              {setupMode === "cube" ? t("page.cubeDraftTitle") : t("page.quickDraftTitle")}
             </h1>
             {experimentalFeatures && (
               <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
@@ -582,7 +599,7 @@ export function DraftPage() {
                         : "text-white/50 hover:bg-white/6 hover:text-white/75"
                     }`}
                   >
-                    {mode === "set" ? "Set Draft" : "Cube"}
+                    {mode === "set" ? t("page.setDraftTab") : t("page.cubeTab")}
                   </button>
                 ))}
               </div>

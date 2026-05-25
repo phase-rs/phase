@@ -341,7 +341,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             },
         )
     }
@@ -503,6 +503,7 @@ mod tests {
         face.abilities.push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Dig {
+                player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: None,
                 keep_count: Some(3),
@@ -527,6 +528,7 @@ mod tests {
         face.abilities.push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Dig {
+                player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
                 destination: Some(Zone::Exile),
                 keep_count: Some(1),

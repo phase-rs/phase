@@ -1,17 +1,19 @@
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 interface BackButtonProps {
   onClick: () => void;
 }
 
 export function BackButton({ onClick }: BackButtonProps) {
+  const { t } = useTranslation("menu");
   return (
     <motion.button
       onClick={onClick}
       className="fixed left-4 top-4 z-30 flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-white/25 bg-white/8 text-white/60 backdrop-blur-sm transition-colors hover:bg-white/14 hover:text-white"
       whileHover={{ scale: 1.06 }}
       whileTap={{ scale: 0.94 }}
-      aria-label="Back"
+      aria-label={t("backButton.label")}
     >
       <svg
         xmlns="http://www.w3.org/2000/svg"

@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { ScryfallCard } from "../../services/scryfall";
 import type { DeckEntry } from "../../services/deckParser";
 import {
@@ -36,6 +38,7 @@ export function CommanderPanel({
   onSetCommander,
   onRemoveCommander,
 }: CommanderPanelProps) {
+  const { t } = useTranslation("deck-builder");
   const identity = getCombinedColorIdentity(commanders, cardDataCache);
   const colorViolations = getColorIdentityViolations(deck, commanders, cardDataCache);
   const singletonViolations = getSingletonViolations(deck, cardDataCache);
@@ -53,14 +56,14 @@ export function CommanderPanel({
   return (
     <div className="space-y-3">
       <h4 className="text-xs font-semibold uppercase text-gray-500">
-        Commander
+        {t("commanderPanel.heading")}
       </h4>
 
       {/* Commander slots */}
       <div className="space-y-2">
         {commanders.length === 0 && (
           <div className="rounded border border-dashed border-gray-700 p-3 text-center text-xs text-gray-500">
-            No commander selected
+            {t("commanderPanel.noCommander")}
           </div>
         )}
         {commanders.map((name) => {
@@ -76,7 +79,7 @@ export function CommanderPanel({
                 onClick={() => onRemoveCommander(name)}
                 className="text-xs text-red-400 hover:text-red-300"
               >
-                Remove
+                {t("commanderPanel.remove")}
               </button>
             </div>
           );
@@ -86,7 +89,7 @@ export function CommanderPanel({
       {/* Color identity display */}
       {commanders.length > 0 && (
         <div className="flex items-center gap-1">
-          <span className="text-[10px] text-gray-500">Identity:</span>
+          <span className="text-[10px] text-gray-500">{t("commanderPanel.identity")}</span>
           {WUBRG_COLORS.map((c) => (
             <span
               key={c}
@@ -105,7 +108,7 @@ export function CommanderPanel({
       {/* Set as commander buttons */}
       {eligibleCommanders.length > 0 && (
         <div className="space-y-1">
-          <span className="text-[10px] text-gray-500">Set as commander:</span>
+          <span className="text-[10px] text-gray-500">{t("commanderPanel.setAsCommander")}</span>
           {eligibleCommanders.map((name) => (
             <button
               key={name}
@@ -123,16 +126,16 @@ export function CommanderPanel({
         <div
           className={`text-xs ${totalCards === expectedDeckSize ? "text-green-400" : "text-yellow-400"}`}
         >
-          {totalCards}/{expectedDeckSize} cards
+          {t("commanderPanel.cardCount", { count: totalCards, expected: expectedDeckSize })}
         </div>
         {singletonViolations.length > 0 && (
           <div className="text-xs text-red-400">
-            Singleton violations: {singletonViolations.join(", ")}
+            {t("commanderPanel.singletonViolations", { cards: singletonViolations.join(", ") })}
           </div>
         )}
         {colorViolations.length > 0 && (
           <div className="text-xs text-red-400">
-            Color identity violations: {colorViolations.join(", ")}
+            {t("commanderPanel.colorViolations", { cards: colorViolations.join(", ") })}
           </div>
         )}
       </div>

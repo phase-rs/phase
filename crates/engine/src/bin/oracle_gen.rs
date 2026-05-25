@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
-use engine::database::mtgjson::{load_atomic_cards, AtomicCard, Ruling};
+use engine::database::mtgjson::{load_atomic_cards, AtomicCard, Ruling, SetFile};
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
@@ -48,6 +48,109 @@ struct CardExportEntry {
 
 fn is_clean_signals(sig: &BracketSignals) -> bool {
     sig.is_clean()
+}
+
+/// A localized card face for the per-language content-i18n sidecars. Only display
+/// fields are carried (name/oracle text/type line); the engine never consumes
+/// these — they're overlaid at the frontend display layer. Fields are omitted
+/// when absent so the consumer falls back to English per-field.
+#[derive(Debug, Clone, Serialize, Default)]
+struct LocalizedFace {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oracle_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    type_line: Option<String>,
+}
+
+impl LocalizedFace {
+    fn is_empty(&self) -> bool {
+        self.name.is_none() && self.oracle_text.is_none() && self.type_line.is_none()
+    }
+}
+
+/// Map an MTGJSON `foreignData.language` (full English language name) to the
+/// supported UI locale code, or `None` for languages we don't ship.
+fn locale_code(language: &str) -> Option<&'static str> {
+    match language {
+        "Spanish" => Some("es"),
+        "French" => Some("fr"),
+        "German" => Some("de"),
+        "Italian" => Some("it"),
+        "Portuguese (Brazil)" => Some("pt"),
+        _ => None,
+    }
+}
+
+/// Collect a single-faced card's localized printings into the per-locale sidecar
+/// maps, keyed by the same lowercased name used for the English `face_index` so
+/// the frontend overlay is a direct lookup.
+///
+/// Single-faced only, by design. MTGJSON `foreignData` is *card-level*: a
+/// multi-face card exposes one combined `"A // B"` `name` and one combined
+/// `text`, with no reliable per-face split. Writing that combined name under a
+/// single face's key produces wrong data (e.g. "Emerita des Konflikts //
+/// Lightning Bolt" as the German name of Lightning Bolt), and — because a
+/// multi-face back face can share a key with a classic standalone card (see
+/// `insert_face`) — would clobber the canonical card the way `insert_face`
+/// specifically prevents for the English index. Restricting collection to
+/// single-faced cards keeps the sidecar consistent with `face_index`'s winners:
+/// every key holds either the correct single-faced localization or nothing (→
+/// English fallback), never a wrong value. Multi-face localization is deferred
+/// until per-face localized text can be sourced and integrated into
+/// `insert_face`'s single winner decision.
+fn collect_localized(
+    sidecars: &mut BTreeMap<&'static str, BTreeMap<String, LocalizedFace>>,
+    key: &str,
+    source: &AtomicCard,
+) {
+    for fd in &source.foreign_data {
+        let Some(code) = locale_code(&fd.language) else {
+            continue;
+        };
+        let localized = LocalizedFace {
+            name: fd.name.clone(),
+            oracle_text: fd.text.clone(),
+            type_line: fd.type_line.clone(),
+        };
+        if localized.is_empty() {
+            continue;
+        }
+        sidecars
+            .entry(code)
+            .or_default()
+            .entry(key.to_string())
+            .or_insert(localized);
+    }
+}
+
+/// Atomically write a localized sidecar to `<dir>/card-data.<code>.json` (tmp +
+/// rename, since Tilt's card-data resource may run this concurrently).
+fn write_sidecar(dir: &Path, code: &str, map: &BTreeMap<String, LocalizedFace>) {
+    let final_path = dir.join(format!("card-data.{code}.json"));
+    let tmp_path = dir.join(format!("card-data.{code}.json.tmp"));
+    let json = serde_json::to_string(map).expect("Failed to serialize localized sidecar");
+    std::fs::write(&tmp_path, json)
+        .unwrap_or_else(|e| panic!("Failed to write {}: {e}", tmp_path.display()));
+    std::fs::rename(&tmp_path, &final_path)
+        .unwrap_or_else(|e| panic!("Failed to promote {}: {e}", final_path.display()));
+}
+
+fn hidden_multiface_key(key: &str, entry: &CardExportEntry) -> Option<String> {
+    let oracle_id = entry.face.scryfall_oracle_id.as_ref()?;
+    entry.layout.as_ref()?;
+    Some(format!("{key} [{oracle_id}]"))
+}
+
+fn insert_hidden_multiface(
+    face_index: &mut BTreeMap<String, CardExportEntry>,
+    key: &str,
+    entry: CardExportEntry,
+) {
+    if let Some(hidden_key) = hidden_multiface_key(key, &entry) {
+        face_index.entry(hidden_key).or_insert(entry);
+    }
 }
 
 fn bracket_signals_for_face(
@@ -104,18 +207,21 @@ fn insert_face(
     let new_printings = entry.printings.len();
 
     if new_wins {
+        let existing = existing.clone();
         tracing::debug!(
             "Face collision on '{key}': replacing prior entry ({existing_oracle:?}, \
              {existing_printings} printings) with entry from MTGJSON key '{mtgjson_key}' \
              ({new_oracle:?}, {new_printings} printings)"
         );
-        face_index.insert(key, entry);
+        face_index.insert(key.clone(), entry);
+        insert_hidden_multiface(face_index, &key, existing);
     } else {
         tracing::debug!(
             "Face collision on '{key}': keeping prior entry ({existing_oracle:?}, \
              {existing_printings} printings) over entry from MTGJSON key '{mtgjson_key}' \
              ({new_oracle:?}, {new_printings} printings)"
         );
+        insert_hidden_multiface(face_index, &key, entry);
     }
 }
 
@@ -141,26 +247,6 @@ fn build_export_layout(
     } else {
         CardLayout::Single(build_oracle_face(&faces[0], oracle_id))
     }
-}
-
-/// Minimal deserialization structs for MTGJSON set files — only reads card name + rarity.
-#[derive(Deserialize)]
-struct SetFile {
-    data: SetData,
-}
-
-#[derive(Deserialize)]
-struct SetData {
-    cards: Vec<SetCard>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetCard {
-    name: String,
-    #[serde(default)]
-    face_name: Option<String>,
-    rarity: String,
 }
 
 /// Scan all set files in `data/mtgjson/sets/` to build a map of lowercased card name
@@ -241,6 +327,69 @@ fn build_rarity_map(mtgjson_path: &std::path::Path) -> HashMap<String, BTreeSet<
     map
 }
 
+#[derive(Default, Clone)]
+struct TokenSourceMetadata {
+    related_token_ids: BTreeSet<String>,
+    source_printing_ids: BTreeSet<String>,
+}
+
+fn build_token_source_metadata(
+    mtgjson_path: &std::path::Path,
+) -> HashMap<String, TokenSourceMetadata> {
+    let sets_dir = mtgjson_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("sets");
+
+    if !sets_dir.exists() {
+        return HashMap::new();
+    }
+
+    let mut map: HashMap<String, TokenSourceMetadata> = HashMap::new();
+    let entries = match std::fs::read_dir(&sets_dir) {
+        Ok(entries) => entries,
+        Err(_) => return HashMap::new(),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(set_file) = serde_json::from_str::<SetFile>(&data) else {
+            continue;
+        };
+        for card in set_file.data.cards {
+            if card.related_cards.tokens.is_empty() && card.identifiers.scryfall_id.is_none() {
+                continue;
+            }
+            let key = card
+                .face_name
+                .as_deref()
+                .unwrap_or(&card.name)
+                .to_lowercase();
+            let entry = map.entry(key).or_default();
+            entry
+                .related_token_ids
+                .extend(card.related_cards.tokens.into_iter());
+            if let Some(id) = card.identifiers.scryfall_id {
+                entry.source_printing_ids.insert(id);
+            }
+        }
+    }
+    map
+}
+
+fn stamp_token_source_metadata(face: &mut CardFace, map: &HashMap<String, TokenSourceMetadata>) {
+    if let Some(metadata) = map.get(&face.name.to_lowercase()) {
+        face.metadata.related_token_ids = metadata.related_token_ids.iter().cloned().collect();
+        face.metadata.source_printing_ids = metadata.source_printing_ids.iter().cloned().collect();
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -269,6 +418,7 @@ fn main() {
     let mut mtgjson_override: Option<PathBuf> = None;
     let mut names_out: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut sidecar_dir: Option<PathBuf> = None;
     let mut stats = false;
     let mut filter_names: Vec<String> = Vec::new();
     #[cfg(feature = "forge")]
@@ -300,6 +450,14 @@ fn main() {
                     process::exit(1);
                 }
                 output = Some(PathBuf::from(&args[i]));
+            }
+            "--sidecar-dir" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --sidecar-dir requires a path argument");
+                    process::exit(1);
+                }
+                sidecar_dir = Some(PathBuf::from(&args[i]));
             }
             "--stats" => {
                 stats = true;
@@ -375,6 +533,7 @@ fn main() {
 
     // Scan per-set MTGJSON files to build a card name → rarities map.
     let rarity_map = build_rarity_map(&mtgjson_path);
+    let token_source_metadata = build_token_source_metadata(&mtgjson_path);
 
     // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
     // directly from MTGJSON `isGameChanger`; this file covers policy axes that
@@ -425,6 +584,9 @@ fn main() {
     };
 
     let mut face_index: BTreeMap<String, CardExportEntry> = BTreeMap::new();
+    // Per-locale localized face data for content-i18n sidecars, keyed by the same
+    // lowercased face name as `face_index`.
+    let mut sidecars: BTreeMap<&'static str, BTreeMap<String, LocalizedFace>> = BTreeMap::new();
     let mut total_cards = 0u32;
     let mut cards_with_unimplemented = 0u32;
 
@@ -483,11 +645,12 @@ fn main() {
             {
                 let key = face_ref.name.to_lowercase();
                 let legalities = legalities_by_face.remove(&key).unwrap_or_default();
-                let face = face_ref.clone();
+                let mut face = face_ref.clone();
                 #[cfg(feature = "forge")]
                 if let Some(ref fi) = forge_index {
                     engine::database::forge::apply_forge_fallback(&mut face, fi);
                 }
+                stamp_token_source_metadata(&mut face, &token_source_metadata);
                 let layout_str = match layout_kind {
                     LayoutKind::Single => None,
                     _ => Some(faces[0].layout.clone()),
@@ -504,6 +667,10 @@ fn main() {
                     .cloned()
                     .unwrap_or_default();
                 let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
+                // Localized sidecars cover single-faced cards only — see
+                // `collect_localized`. Multi-face `foreignData` is a combined
+                // "A // B" name with no reliable per-face split, so these faces
+                // fall back to English at the display layer.
                 insert_face(
                     &mut face_index,
                     mtgjson_key.as_str(),
@@ -520,11 +687,12 @@ fn main() {
                 );
             }
         } else {
-            let face = build_oracle_face(&faces[0], oracle_id);
+            let mut face = build_oracle_face(&faces[0], oracle_id);
             #[cfg(feature = "forge")]
             if let Some(ref fi) = forge_index {
                 engine::database::forge::apply_forge_fallback(&mut face, fi);
             }
+            stamp_token_source_metadata(&mut face, &token_source_metadata);
             let key = face.name.to_lowercase();
             let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
 
@@ -537,6 +705,7 @@ fn main() {
                 .cloned()
                 .unwrap_or_default();
             let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
+            collect_localized(&mut sidecars, &key, &faces[0]);
             insert_face(
                 &mut face_index,
                 mtgjson_key.as_str(),
@@ -573,6 +742,23 @@ fn main() {
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", out_path.display()));
     } else {
         println!("{json}");
+    }
+
+    // Emit per-locale content-i18n sidecars (card-data.<code>.json) into the
+    // sidecar dir, independent of whether the main export went to stdout or a file.
+    if let Some(ref dir) = sidecar_dir {
+        for (code, map) in &sidecars {
+            write_sidecar(dir, code, map);
+        }
+        eprintln!(
+            "Localized sidecars written: {} locales ({})",
+            sidecars.len(),
+            sidecars
+                .iter()
+                .map(|(c, m)| format!("{c}:{}", m.len()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
 
     if let Some(names_path) = names_out {
@@ -1133,6 +1319,40 @@ mod tests {
             rarities: BTreeSet::new(),
             bracket_signals: BracketSignals::default(),
         }
+    }
+
+    #[test]
+    fn insert_face_preserves_losing_multiface_entry_under_hidden_key() {
+        let mut map = BTreeMap::new();
+        insert_face(
+            &mut map,
+            "Emeritus of Truce // Swords to Plowshares",
+            "swords to plowshares".to_string(),
+            make_entry("sos-oracle", &["SOS"], Some("prepare")),
+        );
+        insert_face(
+            &mut map,
+            "Swords to Plowshares",
+            "swords to plowshares".to_string(),
+            make_entry("paper-oracle", &["2ED", "ICE", "MMA"], None),
+        );
+
+        assert_eq!(
+            map["swords to plowshares"]
+                .face
+                .scryfall_oracle_id
+                .as_deref(),
+            Some("paper-oracle"),
+            "canonical face-name lookup still prefers the standalone card"
+        );
+        assert_eq!(
+            map["swords to plowshares [sos-oracle]"]
+                .face
+                .scryfall_oracle_id
+                .as_deref(),
+            Some("sos-oracle"),
+            "printed-card rehydration must retain the prepare back face"
+        );
     }
 
     #[test]

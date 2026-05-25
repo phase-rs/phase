@@ -1,4 +1,4 @@
-use crate::types::ability::{AdditionalCost, BeholdCostAction};
+use crate::types::ability::{AbilityCost, AdditionalCost, BeholdCostAction};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, WaitingFor,
@@ -88,6 +88,17 @@ pub(super) fn handle_discard_for_cost(
         chosen,
         events,
     )
+}
+
+pub(super) fn handle_activation_cost_one_of_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    costs: &[AbilityCost],
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting::handle_activation_cost_one_of_choice(state, player, pending, costs, index, events)
 }
 
 pub(super) fn handle_sacrifice_for_cost(
@@ -217,6 +228,19 @@ pub(super) fn handle_choose_mana_color(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     mana_abilities::handle_choose_mana_color(state, pending_mana_ability, prompt, chosen, events)
+}
+
+/// CR 605.3a: Bulk-activate identical, choice-free sibling mana sources with the
+/// color just chosen (the player's other Treasures, etc.). Thin forward to the
+/// engine authority in `mana_abilities`.
+pub(super) fn batch_activate_mana_siblings(
+    state: &mut GameState,
+    pending_mana_ability: &PendingManaAbility,
+    chosen: &crate::types::game_state::ManaChoice,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    mana_abilities::batch_activate_mana_siblings(state, pending_mana_ability, chosen, count, events)
 }
 
 pub(super) fn handle_pay_mana_ability_mana(

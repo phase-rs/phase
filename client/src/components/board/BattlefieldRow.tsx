@@ -1,4 +1,5 @@
 import { useRef, useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -56,6 +57,7 @@ function getCreatureScale(groupCount: number, display: "art_crop" | "full_card")
 }
 
 export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowProps) {
+  const { t } = useTranslation("game");
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const isCompactHeight = useIsCompactHeight();
   const combatMode = useUiStore((s) => s.combatMode);
@@ -216,8 +218,8 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
           type="button"
           className="absolute right-1 top-1 z-50 flex h-7 w-7 items-center justify-center rounded-full bg-black/85 text-white ring-1 ring-white/70 shadow-[0_2px_8px_rgba(0,0,0,0.7)] transition-transform hover:scale-105 hover:bg-slate-800"
           onClick={() => setExpandedGroupIds(new Set())}
-          aria-label="Regroup duplicate creature groups"
-          title="Regroup duplicate creature groups"
+          aria-label={t("board.regroupCreatures")}
+          title={t("board.regroupCreatures")}
         >
           <span aria-hidden="true" className="flex flex-col items-center gap-0.5">
             <span className="block h-0.5 w-3 rounded bg-current" />

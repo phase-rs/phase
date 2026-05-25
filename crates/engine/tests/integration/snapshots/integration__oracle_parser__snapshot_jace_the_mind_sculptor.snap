@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
-assertion_line: 96
 expression: result
 ---
 {
@@ -9,12 +8,15 @@ expression: result
       "kind": "Activated",
       "effect": {
         "type": "Dig",
+        "player": {
+          "type": "Player"
+        },
         "count": {
           "type": "Fixed",
           "value": 1
         },
         "destination": null,
-        "keep_count": null,
+        "keep_count": 0,
         "up_to": false,
         "filter": {
           "type": "Any"
@@ -60,9 +62,6 @@ expression: result
       "activation_restrictions": [
         {
           "type": "AsSorcery"
-        },
-        {
-          "type": "OnlyOnceEachTurn"
         }
       ],
       "condition": null,
@@ -129,9 +128,6 @@ expression: result
       "activation_restrictions": [
         {
           "type": "AsSorcery"
-        },
-        {
-          "type": "OnlyOnceEachTurn"
         }
       ],
       "condition": null,
@@ -165,9 +161,6 @@ expression: result
       "activation_restrictions": [
         {
           "type": "AsSorcery"
-        },
-        {
-          "type": "OnlyOnceEachTurn"
         }
       ],
       "condition": null,
@@ -240,9 +233,6 @@ expression: result
       "activation_restrictions": [
         {
           "type": "AsSorcery"
-        },
-        {
-          "type": "OnlyOnceEachTurn"
         }
       ],
       "condition": null,

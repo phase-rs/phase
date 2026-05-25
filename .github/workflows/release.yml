@@ -130,8 +130,8 @@ jobs:
 
       - name: Stub phase-server sidecar + bundled resources for tauri-build
         # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`
-        # and `resources: { "../public/card-data.json": "data/card-data.json" }`,
-        # so tauri-build's resource resolver requires both paths to exist
+        # and bundled data resources, so tauri-build's resource resolver
+        # requires those paths to exist
         # at check time. The real sidecar / card-data are produced by the
         # build-tauri matrix; for the preflight we only need the paths to
         # exist (tauri-build validates existence, not content). Empty
@@ -140,6 +140,7 @@ jobs:
           mkdir -p client/src-tauri/binaries client/public
           touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
           touch client/public/card-data.json
+          touch client/public/draft-pools.json
 
       - name: cargo check phase-tauri
         # phase-tauri is excluded from the root workspace (client/src-tauri),
@@ -230,11 +231,19 @@ jobs:
         # Reads data/mtgjson/sets/*.json → writes client/public/draft-pools.json.
         # Included in data-files.json manifest so it's uploaded to R2 and
         # stripped from the Pages dist automatically.
-        run: cargo run --release --bin draft-pool-gen
+        # Profile `tool`, not `release`: this is a one-shot JSON transform, not a
+        # shipped binary. `release` is the WASM-size profile (lto + codegen-units=1)
+        # — the slowest compile in the repo. draft-pool-gen lives in draft-core
+        # and can't take `--features cli`, so it gets its own `[tool,default]`
+        # engine fingerprint regardless; `tool` just makes that compile cheap.
+        run: cargo run --profile tool --bin draft-pool-gen
 
       - name: Validate card-data against engine schema
         # Deploy gate — refuse to ship card-data the current engine cannot parse.
-        run: cargo run --release --bin card-data-validate -- client/public/card-data.json
+        # `--profile tool --features cli` matches gen-card-data.sh's build above,
+        # so the engine + this bin are already compiled — a cache hit, not a
+        # second (release+LTO) engine compile.
+        run: cargo run --profile tool --features cli --bin card-data-validate -- client/public/card-data.json
 
       - name: Compute content-addressed card-data filename
         id: card-data-hash
@@ -250,6 +259,7 @@ jobs:
       - name: Generate Scryfall data
         run: |
           ./scripts/gen-scryfall-images.sh
+          ./scripts/gen-scryfall-token-images.sh
           ./scripts/gen-scryfall-sets.sh
           ./scripts/gen-scryfall-printings.sh
 
@@ -274,11 +284,23 @@ jobs:
           jq --arg h "$CARD_DATA_HASH" '. + {card_data_hash: $h}' client/public/coverage-data.json > client/public/coverage-data.json.tmp
           mv client/public/coverage-data.json.tmp client/public/coverage-data.json
 
-      - name: Upload Scryfall image lookup artifact
+      - name: Stage frontend data files artifact
+        run: |
+          rm -rf release-data
+          mkdir -p release-data
+          while IFS= read -r f; do
+            if [ ! -f "client/public/$f" ]; then
+              echo "::error::Expected data file client/public/$f was not generated"
+              exit 1
+            fi
+            cp "client/public/$f" "release-data/$f"
+          done < <(jq -r '.[]' data-files.json)
+
+      - name: Upload frontend data files artifact
         uses: actions/upload-artifact@v4
         with:
-          name: scryfall-data
-          path: client/public/scryfall-data.json
+          name: frontend-data-files
+          path: release-data/*
           if-no-files-found: error
           retention-days: 1
 
@@ -293,6 +315,10 @@ jobs:
           DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
           CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/${{ steps.card-data-hash.outputs.filename }}"
           AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
+          # Tagged production release: surfaces the "try the preview build" CTA
+          # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
+          # deploy (deploy.yml) deliberately omits this so it never self-links.
+          RELEASE_BUILD: "true"
         run: |
           cd client
           pnpm install --frozen-lockfile
@@ -378,6 +404,121 @@ jobs:
           path: client/public/card-data.json
           retention-days: 1
 
+      - name: Upload draft pools artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: draft-pools
+          path: client/public/draft-pools.json
+          retention-days: 1
+
+  # ── Server binary compile (linux musl, shared) ──────────────────────────────
+  # Compiles the static musl binary ONCE per release run. Consumed by both
+  # build-server-image (prebuilt Docker image) and build-server's linux leg
+  # (release archive), so neither pays a redundant ~10min compile. Needs nothing
+  # the data pipeline produces, so it starts immediately.
+  build-server-binary:
+    name: Build Server Binary (linux)
+    needs: [resolve-release-ref]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-server-linux
+
+      - name: Install musl tools and target
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build phase-server (static musl)
+        # No chmod here: upload-artifact strips the executable bit anyway; both
+        # consumers (image build, archive packaging) re-apply it.
+        run: |
+          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
+
+      - name: Upload server binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-binary-linux
+          path: phase-server
+          if-no-files-found: error
+          retention-days: 1
+
+  build-server-image:
+    name: Build Server Image
+    needs: [resolve-release-ref, build-wasm, build-server-binary]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Download card data
+        uses: actions/download-artifact@v4
+        with:
+          name: card-data
+          path: data
+
+      - name: Download draft pools
+        uses: actions/download-artifact@v4
+        with:
+          name: draft-pools
+          path: data
+
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary-linux
+          path: .
+
+      - name: Verify build context
+        run: |
+          test -s phase-server
+          chmod +x phase-server
+          test -s data/card-data.json
+          test -s data/draft-pools.json
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push release image
+        # BINARY_STAGE=prebuilt: copy the musl binary from build-server-binary
+        # instead of compiling in-container — the build is just apt + COPY.
+        uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          push: true
+          build-args: |
+            BINARY_STAGE=prebuilt
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}
+            ${{ env.IMAGE_NAME }}:latest
+
   deploy-production:
     name: Deploy Production (Cloudflare Pages)
     needs: [build-wasm, release]
@@ -391,15 +532,83 @@ jobs:
           path: dist
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=phase-rs --commit-dirty=true
 
+  deploy-lobby-worker:
+    # Builds the Rust lobby-broker -> WASM and deploys the Cloudflare Worker +
+    # Durable Object (the matchmaking broker). Independent of the Pages deploy —
+    # the DO is reachable via its own endpoint and is not yet the client's
+    # DEFAULT_SERVER. Redeploys are idempotent (the [[migrations]] tag is only
+    # applied once). The wasm build is driven by wrangler's [build] command
+    # (scripts/build-broker-wasm.sh), so the rust/wasm toolchain must be on PATH.
+    name: Deploy Lobby Worker (Cloudflare)
+    needs: [resolve-release-ref]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release-ref.outputs.release_sha }}
+
+      - name: Detect lobby Worker source
+        id: lobby-worker
+        run: |
+          if [ -d lobby-worker ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "lobby-worker/ is not present in this release commit; skipping lobby Worker deploy."
+          fi
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.lobby-worker.outputs.exists == 'true'
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+
+      - uses: taiki-e/install-action@v2
+        if: steps.lobby-worker.outputs.exists == 'true'
+        with:
+          # Must match the pinned wasm-bindgen crate version in
+          # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
+          tool: wasm-bindgen-cli@0.2.121
+
+      - name: Cache binaryen
+        id: binaryen-cache
+        if: steps.lobby-worker.outputs.exists == 'true'
+        uses: actions/cache@v4
+        with:
+          path: binaryen-version_123
+          key: binaryen-123-x86_64-linux
+
+      - name: Install binaryen
+        if: steps.lobby-worker.outputs.exists == 'true' && steps.binaryen-cache.outputs.cache-hit != 'true'
+        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+
+      - name: Add binaryen to PATH
+        if: steps.lobby-worker.outputs.exists == 'true'
+        run: echo "$PWD/binaryen-version_123/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy lobby Worker to Cloudflare
+        if: steps.lobby-worker.outputs.exists == 'true'
+        # `wrangler deploy` runs the [build] command in lobby-worker/wrangler.toml
+        # (scripts/build-broker-wasm.sh release): cargo build -> wasm32,
+        # wasm-bindgen, wasm-opt. The toolchain installed above is inherited.
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.94.0"
+          workingDirectory: lobby-worker
+          command: deploy
+
   build-server:
     name: Build Server (${{ matrix.os }})
-    needs: [resolve-release-ref, tauri-preflight, build-wasm]
+    needs: [resolve-release-ref, tauri-preflight, build-wasm, build-server-binary]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     env:
@@ -433,20 +642,31 @@ jobs:
         with:
           cache-shared-key: rust-server-${{ matrix.os }}
 
-      - name: Install musl tools
-        if: matrix.triple == 'x86_64-unknown-linux-musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          rustup target add x86_64-unknown-linux-musl
-
-      - name: Build phase-server
+      - name: Build phase-server (macOS/Windows)
+        # Linux musl is compiled once in build-server-binary and reused below;
+        # only the non-musl targets compile here.
+        if: matrix.triple != 'x86_64-unknown-linux-musl'
         run: cargo build --profile server-release --bin phase-server --target ${{ matrix.triple }}
+
+      - name: Download prebuilt linux binary
+        # Reuse the single musl build from build-server-binary, placed at the
+        # canonical target path so the packaging step is identical across OSes.
+        if: matrix.triple == 'x86_64-unknown-linux-musl'
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary-linux
+          path: target/x86_64-unknown-linux-musl/server-release
 
       - name: Download card data
         uses: actions/download-artifact@v4
         with:
           name: card-data
+          path: staging/data
+
+      - name: Download draft pools
+        uses: actions/download-artifact@v4
+        with:
+          name: draft-pools
           path: staging/data
 
       - name: Package server archive (Unix)
@@ -457,7 +677,7 @@ jobs:
           cp "target/${{ matrix.triple }}/server-release/phase-server" staging/
           chmod +x staging/phase-server
           cd staging
-          tar czf ../${{ matrix.artifact }}.tar.gz phase-server data/card-data.json
+          tar czf ../${{ matrix.artifact }}.tar.gz phase-server data/card-data.json data/draft-pools.json
         shell: bash
 
       - name: Package server archive (Windows)
@@ -465,7 +685,7 @@ jobs:
         run: |
           $Tag = $env:RELEASE_TAG
           Copy-Item "target/${{ matrix.triple }}/server-release/phase-server.exe" "staging/"
-          Compress-Archive -Path "staging/phase-server.exe","staging/data/card-data.json" -DestinationPath "${{ matrix.artifact }}.zip"
+          Compress-Archive -Path "staging/phase-server.exe","staging/data/card-data.json","staging/data/draft-pools.json" -DestinationPath "${{ matrix.artifact }}.zip"
         shell: pwsh
 
       - name: Generate checksum (Unix)
@@ -596,18 +816,26 @@ jobs:
           name: card-data
           path: client/public
 
-      - name: Download Scryfall image lookup data
+      - name: Download frontend data files
         if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: scryfall-data
+          name: frontend-data-files
           path: client/public
 
       - name: Verify Tauri bundled data files
         if: steps.macos-signing.outputs.skip != 'true'
         run: |
           test -s client/public/card-data.json
-          test -s client/public/scryfall-data.json
+          node - <<'NODE'
+          const fs = require("fs");
+          const files = JSON.parse(fs.readFileSync("data-files.json", "utf8"));
+          for (const file of files) {
+            const path = `client/public/${file}`;
+            const stat = fs.statSync(path);
+            if (stat.size === 0) throw new Error(`${path} is empty`);
+          }
+          NODE
         shell: bash
 
       - name: Build phase-server sidecar
@@ -648,6 +876,10 @@ jobs:
         if: steps.macos-signing.outputs.skip != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
+          # tauri-action runs beforeBuildCommand (pnpm build) as a child process,
+          # so this reaches vite.config.ts. Surfaces the preview-build CTA in the
+          # desktop app too (it routes through openExternal → shell open).
+          RELEASE_BUILD: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -682,30 +914,18 @@ jobs:
           retention-days: 90
 
   deploy-server:
-    name: Deploy Server (beebs)
-    needs: [resolve-release-ref, build-server, release]
+    name: Deploy Server (beebs, disabled)
+    needs: [resolve-release-ref, build-server-image, release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: ${{ always() && needs.build-server.result == 'success' && needs.release.result == 'success' }}
+    if: ${{ false }}
+    permissions:
+      contents: read
+      packages: read
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
-      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_SHA }}
-
-      - name: Download server artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: phase-server-linux-x86_64
-          path: artifact
-
-      - name: Extract archive
-        run: |
-          mkdir -p staging
-          tar xzf artifact/phase-server-linux-x86_64.tar.gz -C staging
-
       - name: Set up SSH
         run: |
           mkdir -p ~/.ssh
@@ -714,35 +934,50 @@ jobs:
           ssh-keyscan -p 29292 -H ${{ secrets.DEPLOY_HOST_BEEBS }} >> ~/.ssh/known_hosts
 
       - name: Deploy to beebs
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           SSH="ssh -p 29292 -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
-          SCP="scp -P 29292 -i ~/.ssh/deploy_key"
+          IMAGE="${IMAGE_NAME}:${RELEASE_TAG}"
 
-          # Upload binary, card data, and service file (service file ensures --lobby-only flag is applied)
-          $SCP staging/phase-server staging/data/card-data.json deploy/phase-server.service ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}:/tmp/
+          $SSH "set -euo pipefail \
+            && (sudo systemctl stop phase-server || true) \
+            && (sudo systemctl disable phase-server || true) \
+            && (sudo systemctl mask phase-server || true) \
+            && echo '$GHCR_TOKEN' | sudo docker login ghcr.io -u '${{ github.actor }}' --password-stdin \
+            && sudo docker pull '$IMAGE' \
+            && (sudo docker stop --time 30 phase-server || true) \
+            && (sudo docker rm phase-server || true) \
+            && sudo docker volume create phase-server-data >/dev/null \
+            && sudo docker run -d \
+              --name phase-server \
+              --restart unless-stopped \
+              -p 127.0.0.1:9374:9374 \
+              -v phase-server-data:/var/lib/phase-server \
+              -e PHASE_LOBBY_ONLY=true \
+              -e PHASE_CORS_ORIGIN='*' \
+              -e RUST_LOG=info \
+              '$IMAGE'"
 
-          # Stop, install, start
-          $SSH "sudo systemctl stop phase-server || true \
-            && sudo cp /tmp/phase-server /opt/phase-server/phase-server \
-            && sudo chmod +x /opt/phase-server/phase-server \
-            && sudo cp /tmp/card-data.json /opt/phase-server/data/card-data.json \
-            && sudo cp /tmp/phase-server.service /etc/systemd/system/phase-server.service \
-            && sudo systemctl daemon-reload \
-            && sudo chown -R phase:phase /opt/phase-server \
-            && sudo systemctl start phase-server \
-            && rm -f /tmp/phase-server /tmp/card-data.json /tmp/phase-server.service"
-
-          echo "Deployed phase-server $RELEASE_TAG to beebs"
+          echo "Deployed $IMAGE to beebs"
 
       - name: Verify deployment
         run: |
-          sleep 2
           SSH="ssh -p 29292 -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
-          $SSH "sudo systemctl is-active phase-server"
+          $SSH "set -euo pipefail \
+            && for attempt in \$(seq 1 30); do \
+              if curl -fsS http://127.0.0.1:9374/health; then \
+                sudo docker ps --filter name=phase-server --filter status=running --format '{{.Names}}' | grep -qx phase-server; \
+                exit 0; \
+              fi; \
+              sleep 1; \
+            done; \
+            sudo docker logs --tail 50 phase-server || true; \
+            exit 1"
 
   release:
     name: Create GitHub Release
-    needs: [resolve-release-ref, build-wasm, build-server, build-tauri]
+    needs: [resolve-release-ref, build-wasm, build-server, build-server-image, build-tauri]
     # CalVer production releases require full Tauri updater output so the
     # stable desktop updater never points at a partial nightly. Legacy v0.*
     # releases keep the older permissive behavior.
@@ -750,6 +985,7 @@ jobs:
       always() &&
       needs.build-wasm.result == 'success' &&
       needs.build-server.result == 'success' &&
+      needs.build-server-image.result == 'success' &&
       (
         needs.build-tauri.result == 'success' ||
         (needs.resolve-release-ref.outputs.is_calver != 'true' && needs.build-tauri.result == 'failure')

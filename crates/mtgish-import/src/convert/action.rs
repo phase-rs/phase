@@ -2173,6 +2173,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target: TargetFilter::Controller,
                     card_filter: filter_mod::cards_to_filter(cards)?,
                     count: None,
+                    random: false,
                     choice_optional: false,
                 },
                 Effect::DiscardCard {
@@ -2201,6 +2202,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target: TargetFilter::Controller,
                     card_filter: filter_mod::cards_to_filter(cards)?,
                     count: None,
+                    random: false,
                     choice_optional: false,
                 },
                 Effect::ChangeZone {
@@ -2617,6 +2619,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // pure peek: no selection prompt, no zone move, and `last_revealed_ids`
         // is populated for follow-up conditions/actions.
         Action::LookAtTopOfLibrary => Effect::Dig {
+            player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
             destination: None,
             keep_count: Some(0),
@@ -2745,7 +2748,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // CR 701.27: Counter spell.
         Action::CounterSpell(_spell) => Effect::Counter {
             target: TargetFilter::StackSpell,
-            source_static: None,
+            source_rider: None,
         },
 
         // CR 800.4 / CR 110.2: Gain control.
@@ -3313,6 +3316,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ExileTopCardOfLibrary => Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            face_down: false,
         },
 
         // CR 701.13 + CR 400.7: "Exile the top N cards of your library." Same
@@ -3321,6 +3325,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ExileTheTopNumberCardsOfLibrary(n) => Effect::ExileTop {
             player: TargetFilter::Controller,
             count: quantity::convert(n)?,
+            face_down: false,
         },
 
         // CR 701.20a: "Reveal the top card of your library." Maps onto
@@ -3341,6 +3346,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: TargetFilter::Controller,
             card_filter: TargetFilter::Any,
             count: None,
+            random: false,
             choice_optional: false,
         },
 
@@ -3739,15 +3745,37 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 needed_variant: "exiled-card pick (zone-scoped target, not named-choice)".into(),
             });
         }
-        // CR 608.2d: "choose an ability from this list" — the option set is
-        // a list of abilities (Vec<CheckHasable>), not labels/strings. The
-        // engine's `ChoiceType::Labeled` carries `Vec<String>`; ability
-        // identifiers don't have a stable string form here. Strict-fail.
-        Action::ChooseACheckableAbility(_) => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "ChoiceType",
-                needed_variant: "ability-from-list choice (CheckHasable, not Vec<String>)".into(),
-            });
+        // CR 608.2d: "Choose an ability the target has, then remove it" —
+        // used by Urborg and Walking Sponge. The option set is a typed list
+        // of `engine::Keyword`s emitted into `ChoiceType::Keyword`; the
+        // dependent `LosesAbility(TheChosenAbility)` inside the same
+        // ActionList reads back the chosen keyword via
+        // `ContinuousModification::RemoveChosenKeyword`. Phyrexian Splicer
+        // additionally requires `Cost::ChooseACheckableAbility` (not the
+        // `Action::` variant handled here) and
+        // `LayerEffect::AddAbilityVariable(TheChosenAbility)` (not
+        // `LosesAbility`); both are out of scope for this change. Empty
+        // option lists strict-fail (the runtime would surface an empty
+        // NamedChoice prompt, which is rules-incorrect — CR 608.2d requires
+        // a non-empty option set). Unmappable `CheckHasable` variants
+        // (Enchant, AnyKicker, …) strict-fail individually so the gap
+        // report names the exact missing shape rather than collapsing onto
+        // a generic tag.
+        Action::ChooseACheckableAbility(checkhasables) => {
+            if checkhasables.is_empty() {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "ChoiceType::Keyword",
+                    needed_variant: "empty CheckHasable option list".into(),
+                });
+            }
+            let options: Vec<_> = checkhasables
+                .iter()
+                .map(static_effect::check_hasable_to_keyword_option)
+                .collect::<ConvResult<_>>()?;
+            Effect::Choose {
+                choice_type: ChoiceType::Keyword { options },
+                persist: true,
+            }
         }
         // CR 608.2d: "choose colors" without a fixed count — distinct from
         // the `ChooseTwoColors` ETB-axis variant (which has its own engine
@@ -4078,6 +4106,7 @@ fn convert_look_at_top(
         // `last_revealed_ids` without prompting for a selection.
         [L::PutTheRemainingCardsOnTopOfLibraryInAnyOrder]
         | [L::LeaveRemainingCardsOnTopOfLibraryInSameOrder] => Ok(Effect::Dig {
+            player: TargetFilter::Controller,
             count,
             destination: None,
             keep_count: Some(0),
@@ -4094,6 +4123,7 @@ fn convert_look_at_top(
         [L::PutAGenericCardIntoHand, L::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder]
         | [L::PutAGenericCardIntoHand, L::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder] => {
             Ok(Effect::Dig {
+                player: TargetFilter::Controller,
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
@@ -4109,6 +4139,7 @@ fn convert_look_at_top(
         // family).
         [L::PutAGenericCardIntoGraveyard, L::PutTheRemainingCardsOnTopOfLibraryInAnyOrder] => {
             Ok(Effect::Dig {
+                player: TargetFilter::Controller,
                 count,
                 destination: Some(Zone::Graveyard),
                 keep_count: Some(1),
@@ -4127,6 +4158,7 @@ fn convert_look_at_top(
         [L::MayRevealACardOfTypeAndPutIntoHand(cards), L::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder]
         | [L::MayRevealACardOfTypeAndPutIntoHand(cards), L::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder] => {
             Ok(Effect::Dig {
+                player: TargetFilter::Controller,
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
@@ -4141,6 +4173,7 @@ fn convert_look_at_top(
         // then put the rest into your graveyard."
         [L::MayRevealACardOfTypeAndPutIntoHand(cards), L::PutTheRemainingCardsIntoGraveyard] => {
             Ok(Effect::Dig {
+                player: TargetFilter::Controller,
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
@@ -4198,6 +4231,7 @@ fn convert_reveal_top_dig(
     match dispositions {
         [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
             Ok(Effect::Dig {
+                player: TargetFilter::Controller,
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
@@ -4209,6 +4243,7 @@ fn convert_reveal_top_dig(
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
             Ok(Effect::Dig {
+                player: TargetFilter::Controller,
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
@@ -4220,6 +4255,7 @@ fn convert_reveal_top_dig(
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutAGenericCardIntoHand, RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
             Ok(Effect::Dig {
+                player: TargetFilter::Controller,
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
@@ -4232,6 +4268,7 @@ fn convert_reveal_top_dig(
         [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
         | [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder] => {
             Ok(Effect::Dig {
+                player: TargetFilter::Controller,
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
@@ -4244,6 +4281,7 @@ fn convert_reveal_top_dig(
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
         | [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder] => {
             Ok(Effect::Dig {
+                player: TargetFilter::Controller,
                 count,
                 destination: Some(Zone::Hand),
                 keep_count: Some(1),
@@ -5194,19 +5232,24 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
         Effect::RevealHand {
             card_filter,
             count,
+            random,
             choice_optional,
             ..
         } => Effect::RevealHand {
             target: target_filter,
             card_filter,
             count,
+            random,
             choice_optional,
         },
         // CR 701.10 + CR 115.2: "Target player exiles the top N cards
         // of their library."
-        Effect::ExileTop { count, .. } => Effect::ExileTop {
+        Effect::ExileTop {
+            count, face_down, ..
+        } => Effect::ExileTop {
             player: target_filter,
             count,
+            face_down,
         },
         // CR 111.10 + CR 115.2: "Target player creates a [token]." The
         // `Effect::Token.owner` slot is already a `TargetFilter` —
@@ -5251,6 +5294,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             count,
             reveal,
             selection_constraint,
+            split,
             ..
         } => Effect::SearchLibrary {
             filter,
@@ -5258,6 +5302,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             reveal,
             target_player: Some(target_filter),
             selection_constraint,
+            split,
         },
         // No player-target slot on this effect. Strict-fail so the
         // shape-mismatch surfaces in the report rather than silently
@@ -5826,6 +5871,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         reveal,
         target_player: None,
         selection_constraint,
+        split: None,
     });
     out.push(Effect::ChangeZone {
         origin: Some(Zone::Library),
@@ -5887,6 +5933,7 @@ fn convert_multi_filter_search_library(
             reveal,
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
+            split: None,
         });
         out.push(Effect::ChangeZone {
             origin: Some(Zone::Library),

@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { menuButtonClass } from "../menu/buttonStyles";
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -17,33 +19,32 @@ interface Step {
   text: string;
 }
 
-const QUICK_STEPS: Step[] = [
-  { icon: "1", text: "You'll open 3 packs of 14 cards each" },
-  { icon: "2", text: "Pick one card per pack, then pass the rest to AI drafters" },
-  { icon: "3", text: "Packs alternate direction each round — left, right, left" },
-  { icon: "4", text: "After all picks, build a 40-card deck and play a match" },
-];
-
-function podSteps(podSize: number): Step[] {
-  return [
-    { icon: "1", text: `You're drafting with ${podSize} players in a pod` },
-    { icon: "2", text: "Open 3 packs of 14 cards — pick one, pass the rest" },
-    { icon: "3", text: "Packs alternate direction each round — left, right, left" },
-    { icon: "4", text: "After drafting, build a 40-card deck and play tournament matches" },
-  ];
-}
-
 // ── Component ───────────────────────────────────────────────────────────
 
 export function DraftIntro({ mode, podSize = 8, onContinue }: DraftIntroProps) {
-  const steps = mode === "quick" ? QUICK_STEPS : podSteps(podSize);
-  const title = mode === "quick" ? "Quick Draft" : "Pod Draft";
+  const { t } = useTranslation("draft");
+
+  const quickSteps: Step[] = [
+    { icon: "1", text: t("intro.quick.step1") },
+    { icon: "2", text: t("intro.quick.step2") },
+    { icon: "3", text: t("intro.quick.step3") },
+    { icon: "4", text: t("intro.quick.step4") },
+  ];
+  const podStepList: Step[] = [
+    { icon: "1", text: t("intro.pod.step1", { count: podSize }) },
+    { icon: "2", text: t("intro.pod.step2") },
+    { icon: "3", text: t("intro.pod.step3") },
+    { icon: "4", text: t("intro.pod.step4") },
+  ];
+
+  const steps = mode === "quick" ? quickSteps : podStepList;
+  const title = mode === "quick" ? t("intro.quickTitle") : t("intro.podTitle");
 
   return (
     <div className="mx-auto flex w-full max-w-lg flex-col items-center gap-8 py-12">
       <div className="flex flex-col items-center gap-2">
         <h1 className="menu-display text-3xl text-white">{title}</h1>
-        <p className="text-sm text-white/50">Here's how it works</p>
+        <p className="text-sm text-white/50">{t("intro.subtitle")}</p>
       </div>
 
       <div className="flex w-full flex-col gap-3">
@@ -66,7 +67,7 @@ export function DraftIntro({ mode, podSize = 8, onContinue }: DraftIntroProps) {
         onClick={onContinue}
         className={menuButtonClass({ tone: "emerald", size: "lg" })}
       >
-        Start Drafting
+        {t("intro.startDrafting")}
       </button>
     </div>
   );

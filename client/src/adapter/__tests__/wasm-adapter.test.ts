@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { WasmAdapter } from "../wasm-adapter";
+import { EngineWorkerClient } from "../engine-worker-client";
 import type { EngineAdapter, GameState, SubmitResult } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
 
@@ -8,6 +9,9 @@ const mockWorkerClient = {
   initialize: vi.fn().mockResolvedValue(undefined),
   loadCardDb: vi.fn().mockResolvedValue(100),
   loadCardDbFromUrl: vi.fn().mockResolvedValue(100),
+  evaluateDeckCompatibility: vi
+    .fn()
+    .mockResolvedValue({ standard: { compatible: true, reasons: [] } }),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -64,6 +68,40 @@ describe("WasmAdapter", () => {
       await adapter.initialize();
       await adapter.initialize();
       expect(mockWorkerClient.initialize).toHaveBeenCalledOnce();
+    });
+
+    it("dedupes concurrent calls into one worker (no orphaned instance)", async () => {
+      // Two callers race before the first settles (e.g. menu card-DB warm vs an
+      // un-gated Resume click). Without the in-flight guard each would spawn a
+      // worker, orphaning the first ~90 MB instance.
+      await Promise.all([adapter.initialize(), adapter.initialize()]);
+      expect(vi.mocked(EngineWorkerClient)).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.initialize).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("warmCardDatabase", () => {
+    it("initializes and loads the card database, flipping the latch", async () => {
+      await adapter.warmCardDatabase();
+      expect(mockWorkerClient.initialize).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(adapter.cardDbLoaded).toBe(true);
+    });
+
+    it("throws when the database fails to load (so the store can show error)", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("boom"));
+      await expect(adapter.warmCardDatabase()).rejects.toThrow();
+      expect(adapter.cardDbLoaded).toBe(false);
+    });
+  });
+
+  describe("checkDeckCompatibility", () => {
+    it("ensures the DB is loaded then delegates to the worker", async () => {
+      const request = { main_deck: ["Forest"], sideboard: [], commander: [] };
+      const result = await adapter.checkDeckCompatibility(request);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.evaluateDeckCompatibility).toHaveBeenCalledWith(request);
+      expect(result).toEqual({ standard: { compatible: true, reasons: [] } });
     });
   });
 

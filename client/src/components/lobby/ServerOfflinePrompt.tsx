@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "../menu/buttonStyles";
 
@@ -16,6 +17,7 @@ export function ServerOfflinePrompt({
   onKeepWaiting,
   serverAddress,
 }: ServerOfflinePromptProps) {
+  const { t } = useTranslation("multiplayer");
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70" />
@@ -26,12 +28,10 @@ export function ServerOfflinePrompt({
         className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md"
       >
         <h2 className="text-base font-semibold text-white">
-          Matchmaking unreachable
+          {t("serverOfflinePrompt.title")}
         </h2>
         <p className="mt-3 text-sm leading-6 text-slate-300">
-          We couldn&apos;t reach the game server, so the public lobby is
-          unavailable right now. You can still play by sharing a direct code
-          with a friend.
+          {t("serverOfflinePrompt.message")}
         </p>
         {serverAddress && (
           <p className="mt-2 font-mono text-[10px] text-slate-500 break-all">
@@ -44,14 +44,14 @@ export function ServerOfflinePrompt({
             onClick={onKeepWaiting}
             className={menuButtonClass({ tone: "neutral", size: "sm" })}
           >
-            Keep trying
+            {t("serverOfflinePrompt.keepTrying")}
           </button>
           <button
             type="button"
             onClick={onUseDirect}
             className={menuButtonClass({ tone: "cyan", size: "sm" })}
           >
-            Use direct code
+            {t("serverOfflinePrompt.useDirectCode")}
           </button>
         </div>
       </motion.div>

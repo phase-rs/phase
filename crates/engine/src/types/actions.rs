@@ -401,6 +401,10 @@ pub enum GameAction {
     ChooseUnlessCostBranch {
         choice: UnlessCostBranch,
     },
+    /// CR 118.12a: Choose which branch of a disjunctive activation cost to pay.
+    ChooseActivationCostBranch {
+        index: usize,
+    },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Pay or decline the aggregate
     /// combat tax (Ghostly Prison, Propaganda, Sphere of Safety, Windborn Muse).
     /// On accept the engine deducts the locked-in total and completes the paused
@@ -534,8 +538,17 @@ pub enum GameAction {
     /// Shape mirrors the prompt variant (`SingleColor` or `Combination`).
     /// `AnyCombination` prompts submit a `Combination` vector with one entry
     /// per produced mana unit.
+    ///
+    /// CR 605.3a: `count` (default 1) bulk-activates `count - 1` additional
+    /// identical, choice-free mana sources (e.g. a player's other Treasures)
+    /// with the same color in one round-trip — each is an independent mana
+    /// ability that resolves before the next (CR 605.3c). Only honored for a
+    /// `SingleColor` prompt answering a `ManaAbility` context; capped by the
+    /// engine-computed `PendingManaAbility::batch_siblings`.
     ChooseManaColor {
         choice: super::game_state::ManaChoice,
+        #[serde(default = "default_one")]
+        count: u32,
     },
     /// CR 605.3a + CR 601.2h + CR 107.4e: Answer the
     /// `WaitingFor::PayManaAbilityMana` prompt by picking one of the legal
@@ -648,6 +661,9 @@ pub enum DebugAction {
     Mill { player_id: PlayerId, count: u32 },
     /// Shuffle a player's library.
     ShuffleLibrary { player_id: PlayerId },
+    /// Start a proliferate choice for a player using the real proliferate
+    /// resolver (CR 701.34a).
+    Proliferate { player_id: PlayerId },
 
     // ── Object Property Manipulation ──────────────────────────────────────
     /// Overwrite base power/toughness (layer 7a input). Marks layers dirty.
@@ -725,10 +741,8 @@ pub enum DebugAction {
     },
     /// Explicitly run state-based actions. Use after a batch of raw mutations.
     RunStateBasedActions,
-    /// Create a token with explicit characteristics on the battlefield.
-    /// `characteristics` is the same body shape used by `TokenSpec` and
-    /// `TokenPreset`; the WASM handler fills in runtime fields (script_name,
-    /// source_id, controller, tapped, etc.) at create-time.
+    /// Create a token on the battlefield, either from a catalog preset or
+    /// explicit custom characteristics.
     ///
     /// `enter_with_counters` is plumbed straight through to
     /// `TokenSpec::enter_with_counters` and travels the same replacement
@@ -739,12 +753,51 @@ pub enum DebugAction {
     /// `TokenSpec::enter_with_counters` — same semantics, real pipeline.
     /// CR 122.6a (counters placed at ETB), CR 614.1 (replacement window),
     /// CR 704.5f (0-toughness SBA — why this field exists).
-    CreateToken {
+    CreateToken { request: DebugTokenRequest },
+    /// Create a token copy of an existing object using the real copy-token
+    /// resolver (CR 707.2).
+    CreateTokenCopy {
+        source_id: ObjectId,
+        owner: PlayerId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DebugTokenRequest {
+    Preset {
+        preset_id: String,
+        owner: PlayerId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
+    },
+    Custom {
         owner: PlayerId,
         characteristics: super::proposed_event::TokenCharacteristics,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
     },
+}
+
+impl DebugTokenRequest {
+    pub fn owner(&self) -> PlayerId {
+        match self {
+            Self::Preset { owner, .. } | Self::Custom { owner, .. } => *owner,
+        }
+    }
+
+    pub fn enter_with_counters(&self) -> &[(CounterType, u32)] {
+        match self {
+            Self::Preset {
+                enter_with_counters,
+                ..
+            }
+            | Self::Custom {
+                enter_with_counters,
+                ..
+            } => enter_with_counters,
+        }
+    }
 }
 
 impl DebugAction {
@@ -822,6 +875,9 @@ impl DebugAction {
             }
             DebugAction::ShuffleLibrary { player_id } => {
                 format!("ShuffleLibrary ({})", player_label(*player_id))
+            }
+            DebugAction::Proliferate { player_id } => {
+                format!("Proliferate ({})", player_label(*player_id))
             }
             DebugAction::SetBasePowerToughness {
                 object_id,
@@ -917,29 +973,43 @@ impl DebugAction {
                 player_label(*active_player)
             ),
             DebugAction::RunStateBasedActions => "RunStateBasedActions".to_string(),
-            DebugAction::CreateToken {
-                owner,
-                characteristics,
-                enter_with_counters,
-            } => {
-                let counters = if enter_with_counters.is_empty() {
+            DebugAction::CreateToken { request } => {
+                let counters = if request.enter_with_counters().is_empty() {
                     String::new()
                 } else {
-                    let parts: Vec<String> = enter_with_counters
+                    let parts: Vec<String> = request
+                        .enter_with_counters()
                         .iter()
                         .map(|(ct, n)| format!("{n} {}", ct.as_str()))
                         .collect();
                     format!(" with {}", parts.join(", "))
                 };
+                let token_label = match request {
+                    DebugTokenRequest::Preset { preset_id, .. } => preset_id.as_str(),
+                    DebugTokenRequest::Custom {
+                        characteristics, ..
+                    } => characteristics.display_name.as_str(),
+                };
                 format!(
                     "CreateToken ({} for {}{})",
-                    characteristics.display_name,
-                    player_label(*owner),
+                    token_label,
+                    player_label(request.owner()),
                     counters
                 )
             }
+            DebugAction::CreateTokenCopy { source_id, owner } => format!(
+                "CreateTokenCopy ({} for {})",
+                obj(*source_id),
+                player_label(*owner)
+            ),
         }
     }
+}
+
+/// Serde default for `GameAction::ChooseManaColor::count` — a single activation
+/// when the field is absent (every pre-batch client/serialized action).
+fn default_one() -> u32 {
+    1
 }
 
 impl GameAction {
@@ -1074,11 +1144,11 @@ impl GameAction {
             | GameAction::Concede { .. }
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
-            | GameAction::RevokeDebugPermission { .. } => None,
+            | GameAction::RevokeDebugPermission { .. }
+            | GameAction::ChooseActivationCostBranch { .. } => None,
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

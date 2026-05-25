@@ -13,53 +13,39 @@ concurrency:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
+
+# The exact commit to deploy. Shared by every job so they all check out the
+# same tree (the head of the CI run that triggered this deploy, or HEAD on a
+# manual dispatch). Workflow-level env may reference the github context.
+env:
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
 
 jobs:
-  build-and-deploy:
-    name: Build & Deploy Staging
+  # ── Data pipeline ──────────────────────────────────────────────────────────
+  # Generates card data + all shared JSON, uploads them to R2, and emits the
+  # content-addressed card-data filename consumed by the frontend build. Runs in
+  # parallel with build-wasm. Native (tool-profile) builds only — no wasm32, no
+  # binaryen.
+  card-data:
+    name: Card data & R2
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+    outputs:
+      card_data_filename: ${{ steps.card-data-hash.outputs.filename }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: wasm32-unknown-unknown
-          cache-shared-key: rust-wasm
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-bindgen-cli@0.2.121
-
-      - name: Cache binaryen
-        id: binaryen-cache
-        uses: actions/cache@v4
-        with:
-          path: binaryen-version_123
-          key: binaryen-123-x86_64-linux
-
-      - name: Install binaryen
-        if: steps.binaryen-cache.outputs.cache-hit != 'true'
-        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
-
-      - name: Add binaryen to PATH
-        run: echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
+          cache-shared-key: rust-tool
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: client/pnpm-lock.yaml
 
       - name: Set cache keys
         id: cache-keys
@@ -80,80 +66,65 @@ jobs:
           curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
 
       - name: Generate card data and coverage (from source)
-        # Single source of truth: scripts/gen-card-data.sh produces all 7
-        # public JSON files (card-data, card-data-meta, card-names, coverage-data,
-        # coverage-summary, decks, set-list). The deploy must use the same
-        # generator the local dev workflow does — no YAML reimplementation.
+        # Single source of truth: scripts/gen-card-data.sh produces all public
+        # JSON files. The deploy must use the same generator the local dev
+        # workflow does — no YAML reimplementation. Mirrors card-data.json +
+        # coverage-data.json into data/ so downstream steps read from data/.
         run: |
           mkdir -p data
           ./scripts/gen-card-data.sh
-          # gen-card-data.sh mirrors card-data.json + coverage-data.json into
-          # data/ itself, so downstream steps (validate, hash, badges) can
-          # read from data/ without the workflow knowing the layout.
 
       - name: Download draft set data
         # fetch-draft-sets.sh needs SetList.json (produced by gen-card-data.sh).
-        # Per-set files land in data/mtgjson/sets/ which is covered by the
-        # mtgjson cache — subsequent runs skip already-downloaded sets.
+        # Per-set files land in data/mtgjson/sets/, covered by the mtgjson cache.
         run: ./scripts/fetch-draft-sets.sh
 
       - name: Generate draft pools
-        # Reads data/mtgjson/sets/*.json → writes client/public/draft-pools.json.
-        # Included in data-files.json manifest so it's uploaded to R2 and
-        # stripped from the Pages dist automatically.
-        run: cargo run --release --bin draft-pool-gen
+        # Profile `tool`, not `release`: a one-shot JSON transform. draft-pool-gen
+        # lives in draft-core and can't take --features cli, so it gets its own
+        # [tool,default] engine fingerprint; tool keeps that compile cheap.
+        run: cargo run --profile tool --bin draft-pool-gen
 
       - name: Validate card-data against engine schema
         # Deploy gate — parse the freshly produced card-data through the same
-        # `CardDatabase::from_export` path the WASM uses at runtime. Catches
-        # "this commit's engine cannot read this commit's card-data" before R2
-        # ever sees a broken file. Pairs with the content-addressed copy below.
-        run: cargo run --release --bin card-data-validate -- data/card-data.json
+        # CardDatabase::from_export path the WASM uses at runtime, before R2 sees
+        # it. --profile tool --features cli matches gen-card-data.sh → cache hit.
+        run: cargo run --profile tool --features cli --bin card-data-validate -- data/card-data.json
 
       - name: Compute content-addressed card-data filename
         id: card-data-hash
-        # Pin each WASM bundle to the exact card-data it was built against by
-        # publishing card-data at `card-data-<hash>.json` (immutable URL with
-        # long cache) and baking that URL into the JS bundle via Vite's
-        # `__CARD_DATA_URL__` define. New deploys publish a new hash; old WASM
-        # bundles in browser caches keep resolving their own old hashed URL.
-        # WASM/card-data schema drift across deploys becomes structurally
-        # impossible.
+        # Pin each WASM bundle to the exact card-data it was built against via an
+        # immutable card-data-<hash>.json URL baked into the JS bundle. New
+        # deploys publish a new hash; old browser caches keep resolving theirs.
         run: |
           HASH=$(sha256sum data/card-data.json | awk '{print substr($1, 1, 16)}')
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
           echo "filename=card-data-$HASH.json" >> "$GITHUB_OUTPUT"
-          cp data/card-data.json "data/card-data-$HASH.json"
-          cp "data/card-data-$HASH.json" "client/public/card-data-$HASH.json"
+          cp "data/card-data.json" "client/public/card-data-$HASH.json"
           echo "Content-addressed card-data: card-data-$HASH.json"
 
       - name: Generate Scryfall data
         run: |
           ./scripts/gen-scryfall-images.sh
+          ./scripts/gen-scryfall-token-images.sh
           ./scripts/gen-scryfall-sets.sh
           ./scripts/gen-scryfall-printings.sh
 
       - name: Generate coverage badge endpoints
+        # --profile tool --features cli matches gen-card-data.sh → cache hit.
         run: |
-          cargo run --release --bin coverage-report -- data/ --write-stats data/coverage-stats.json > /dev/null
+          cargo run --profile tool --features cli --bin coverage-report -- data/ --write-stats data/coverage-stats.json > /dev/null
           ./scripts/gen-badge-endpoints.sh data/coverage-stats.json data/badges
 
       - name: Run semantic audit
-        # Produces data/semantic-audit.json with structured findings for cards
-        # that parse without `Unimplemented` markers but disagree semantically
-        # with their Oracle text. Consumed by docs/AI-CONTRIBUTOR.md's pre-flight
-        # gate so autonomous LLM contributors can distinguish "actually
-        # supported" from "parses, but parses wrong."
-        # Pass data/ explicitly — the binary's default lookup is
-        # `client/public/card-data.json`, but gen-card-data.sh mirrors to data/
-        # in both workflows so this is the portable path.
+        # Structured findings for cards that parse cleanly but disagree
+        # semantically with their Oracle text. Consumed by AI-CONTRIBUTOR.md's
+        # pre-flight gate. Pass data/ explicitly (binary defaults to client/public).
         run: cargo semantic-audit data/
 
       - name: Stamp shared card_data_hash on coverage + audit JSONs
-        # Both files are uploaded to R2 as separate PUTs with no transactional
-        # guarantee. Embedding the same card_data_hash in both lets downstream
-        # consumers (notably AI contributors per docs/AI-CONTRIBUTOR.md) verify
-        # they're reading a consistent snapshot before trusting the gate.
+        # Both upload to R2 as separate PUTs with no transactional guarantee.
+        # The shared hash lets consumers verify a consistent snapshot.
         env:
           CARD_DATA_HASH: ${{ steps.card-data-hash.outputs.hash }}
         run: |
@@ -162,18 +133,15 @@ jobs:
           mv client/public/coverage-data.json.tmp client/public/coverage-data.json
 
       - name: Upload data to R2 (staging)
-        # Single source of truth: data-files.json at the repo root lists every
-        # shared JSON the frontend fetches. Add a filename there and it is
-        # automatically picked up by vite.config.ts (defines), this upload
-        # loop, and the verify step below.
+        # data-files.json is the single source of truth for every shared JSON the
+        # frontend fetches — it drives this loop, the verify step, and the dist
+        # strip in build-pages.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
-          # Content-addressed card-data: immutable, year-long cache. Each WASM
-          # bundle is baked with its own hashed URL, so old browser caches
-          # keep resolving the old hash after this deploy publishes a new one.
+          # Content-addressed card-data: immutable, year-long cache.
           npx wrangler r2 object put "phase-rs-data/staging/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
@@ -214,8 +182,106 @@ jobs:
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           [ "$fail" = "0" ]
 
+      - name: Stage server data artifact
+        # card-data.json + draft-pools.json are baked into the server image by
+        # push-server-image. They are NOT in data-files.json (the server reads them
+        # from disk, not R2), so they ship via artifact instead.
+        run: |
+          mkdir -p server-data
+          cp data/card-data.json server-data/card-data.json
+          cp client/public/draft-pools.json server-data/draft-pools.json
+          test -s server-data/card-data.json
+          test -s server-data/draft-pools.json
+
+      - name: Upload server data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-data
+          path: server-data/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── WASM build (parallel with card-data) ────────────────────────────────────
+  # Compiles the engine + draft WASM bundles. Depends on nothing the data
+  # pipeline produces — card-data is fetched at runtime — so it runs fully in
+  # parallel. The output feeds the frontend build via artifact.
+  build-wasm:
+    name: Build WASM
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+
+      - name: Cache binaryen
+        id: binaryen-cache
+        uses: actions/cache@v4
+        with:
+          path: binaryen-version_123
+          key: binaryen-123-x86_64-linux
+
+      - name: Install binaryen
+        if: steps.binaryen-cache.outputs.cache-hit != 'true'
+        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+
+      - name: Add binaryen to PATH
+        run: echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
+
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: client/src/wasm/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Frontend + Pages deploy (needs card-data hash + WASM) ───────────────────
+  build-pages:
+    name: Build & Deploy Pages
+    needs: [card-data, build-wasm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm
+          path: client/src/wasm
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
 
       - name: Use preview icons
         run: |
@@ -230,12 +296,11 @@ jobs:
       - name: Build frontend
         env:
           # Standardized data URL config — see vite.config.ts. DATA_BASE_URL is
-          # the directory holding every shared JSON; each `__*_URL__` resolves
-          # to a filename under it. CARD_DATA_URL is the one exception, pinned
-          # to the content-addressed copy so the WASM bundle is locked to the
-          # exact card-data it was built against.
+          # the directory holding every shared JSON; CARD_DATA_URL is pinned to
+          # the content-addressed copy so the WASM bundle is locked to the exact
+          # card-data it was built against (filename from the card-data job).
           DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging"
-          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/${{ steps.card-data-hash.outputs.filename }}"
+          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/${{ needs.card-data.outputs.card_data_filename }}"
           AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
         run: |
           cd client
@@ -243,21 +308,15 @@ jobs:
           pnpm build
 
       - name: Remove R2-hosted data files from dist (Pages ships only the shell)
-        # Single source of truth: data-files.json lists every JSON the frontend
-        # fetches from R2. The same manifest drives the R2 upload loop above —
-        # this step is its inverse, stripping those files from the Pages
-        # bundle so we never double-ship bytes. Adding a new data file is
-        # now one line in data-files.json and nothing else.
+        # data-files.json lists every JSON the frontend fetches from R2; this is
+        # the inverse of the R2 upload loop, stripping those files from the Pages
+        # bundle so we never double-ship bytes.
         #
         # Separately handled:
         #   - card-data.json (non-manifest; kept in public/ for Tauri + server
-        #     bundles + local dev, but never deployed to Pages)
-        #   - card-data-<16hex>.json[.br] (content-addressed, lives on R2;
-        #     glob matches only 16-hex suffixes, cannot match the 4-char
-        #     `meta` suffix). This replaces the previous `find -regex` which
-        #     used GNU find's default "emacs" regex flavor where `?` is a
-        #     literal — so `\(\.br\)?` matched nothing and the 80 MiB hashed
-        #     file slipped through, exceeding Pages' 25 MiB per-file cap.
+        #     bundles + local dev, never deployed to Pages)
+        #   - card-data-<16hex>.json[.br] (content-addressed, lives on R2; glob
+        #     matches only 16-hex suffixes, cannot match the 4-char `meta` suffix)
         shell: bash
         run: |
           shopt -s nullglob
@@ -282,3 +341,117 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@v4
+
+  # ── Server binary compile (parallel with card-data) ─────────────────────────
+  # phase-server is compiled NATIVELY as a static musl binary, then uploaded as
+  # an artifact for push-server-image to bake into the runtime image. The compile
+  # needs nothing the data pipeline produces, so it deliberately has no `needs:`
+  # and overlaps card-data's ~10min run instead of serializing behind it.
+  #
+  # NOTE: this is a cold ~10min compile every run. Swatinem's rust-cache (via
+  # setup-rust-toolchain) caches registry/git deps but prunes the workspace
+  # crates' own artifacts, so the optimized server-release build of the engine
+  # crate recompiles each time. The win here is parallelism, not incrementality;
+  # warming the workspace compile would need sccache or similar.
+  build-server-binary:
+    name: Build server binary
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-server
+
+      - name: Install musl tools and target
+        # The musl target must be added explicitly with `rustup target add`, not
+        # via setup-rust-toolchain's `targets:` input: rust-toolchain.toml pins
+        # the toolchain and its own `targets` list (wasm32 only), which overrides
+        # the action input. Mirrors release.yml's Linux server build.
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build phase-server (static musl)
+        # Static musl binary: no glibc dependency, so it runs on the slim debian
+        # runtime regardless of this runner's glibc. Mirrors release.yml's Linux
+        # server build.
+        # No chmod here: upload-artifact strips the executable bit anyway;
+        # push-server-image re-applies it (and the Dockerfile chmods in-image).
+        run: |
+          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
+
+      - name: Upload server binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-binary
+          path: phase-server
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Server image push (needs binary + data) ─────────────────────────────────
+  # Pure packaging step: pulls the prebuilt musl binary and the server data,
+  # then BINARY_STAGE=prebuilt makes Docker just apt + COPY (no compile). Gated
+  # on both producers so it starts the moment the slower of the two finishes.
+  push-server-image:
+    name: Build & push server image
+    needs: [build-server-binary, card-data]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Download server binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary
+          path: .
+
+      - name: Download server data artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: server-data
+          path: data
+
+      - name: Verify build context
+        run: |
+          test -s phase-server
+          chmod +x phase-server
+          test -s data/card-data.json
+          test -s data/draft-pools.json
+
+      - name: Compute image tags
+        id: image
+        run: echo "short_sha=${DEPLOY_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push preview image
+        # BINARY_STAGE=prebuilt makes Docker copy the prebuilt musl binary
+        # instead of compiling in-container — the build is just apt + COPY.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            BINARY_STAGE=prebuilt
+          tags: |
+            ${{ env.IMAGE_NAME }}:preview
+            ${{ env.IMAGE_NAME }}:sha-${{ steps.image.outputs.short_sha }}
