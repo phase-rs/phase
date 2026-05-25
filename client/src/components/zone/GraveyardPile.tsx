@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
@@ -33,6 +35,7 @@ function TopCard({ cardName }: { cardName: string }) {
 }
 
 export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
+  const { t } = useTranslation("game");
   const graveyard = useGameStore(
     (s) => s.gameState?.players[playerId]?.graveyard ?? EMPTY,
   );
@@ -64,7 +67,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
     <button
       onClick={onClick}
       className={`group relative cursor-pointer ${hasTargetableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
-      title={`Graveyard (${count})`}
+      title={t("zone.graveyardTitle", { count })}
       data-graveyard-pile={playerId}
       style={{ width: w, height: h }}
     >

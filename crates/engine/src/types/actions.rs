@@ -91,6 +91,18 @@ pub enum UnlessCostBranch {
     Pay { index: usize },
 }
 
+/// CR 400.11 + CR 406.3: One discriminated selection committed for an
+/// outside-game choice. The two source pools (sideboard and face-up exile) are
+/// expressed as parallel variants so the action wire format is uniform.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum OutsideGameSelection {
+    /// CR 400.11a: A copy from the player's sideboard, identified by its slot.
+    Sideboard { sideboard_index: usize },
+    /// CR 406.3: A face-up exile object the player owns.
+    FaceUpExile { object_id: ObjectId },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type", content = "data")]
 pub enum GameAction {
@@ -162,8 +174,11 @@ pub enum GameAction {
     SelectCards {
         cards: Vec<ObjectId>,
     },
+    /// CR 400.11 + CR 406.3: Player commits one or more selections from the
+    /// offered outside-game pool. Each selection is a discriminated source —
+    /// a sideboard slot (wishboard) or a face-up exile object (Karn / Coax).
     ChooseOutsideGameCards {
-        sideboard_indices: Vec<usize>,
+        selections: Vec<OutsideGameSelection>,
     },
     SelectTargets {
         targets: Vec<TargetRef>,

@@ -6,7 +6,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_actions_full};
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::{
     estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
@@ -233,6 +233,26 @@ pub fn get_card_face_data(name: &str) -> JsValue {
             Some(face) => to_js(face),
             None => JsValue::NULL,
         }
+    })
+}
+
+/// Search the loaded card database. The engine is the single authority for the
+/// rules data search filters on — format legality, set membership, card types,
+/// mana value, and colors — so deck-builder search runs here, never as a
+/// third-party API call. Returns `{ results, total }` (see `CardSearchResults`),
+/// or an error if the database is not loaded or the query is malformed.
+#[wasm_bindgen]
+pub fn search_cards_js(query: JsValue) -> Result<JsValue, JsValue> {
+    let query: CardSearchQuery = serde_wasm_bindgen::from_value(query)
+        .map_err(|e| JsValue::from_str(&format!("Invalid search query: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&db.search(&query)))
     })
 }
 

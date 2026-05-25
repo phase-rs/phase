@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useDraftStore } from "../../stores/draftStore";
 import type { PoolSortMode } from "../../stores/draftStore";
@@ -167,10 +168,10 @@ function ColorPips({ colors }: { colors: string[] }) {
 
 // ── Sort mode tabs ──────────────────────────────────────────────────────
 
-const SORT_MODES: Array<{ mode: PoolSortMode; label: string }> = [
-  { mode: "color", label: "Color" },
-  { mode: "type", label: "Type" },
-  { mode: "cmc", label: "CMC" },
+const SORT_MODES: Array<{ mode: PoolSortMode; labelKey: string }> = [
+  { mode: "color", labelKey: "pool.sortColor" },
+  { mode: "type", labelKey: "pool.sortType" },
+  { mode: "cmc", labelKey: "pool.sortCmc" },
 ];
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -181,6 +182,7 @@ interface PoolPanelProps {
 }
 
 export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = {}) {
+  const { t } = useTranslation("draft");
   const quickView = useDraftStore((s) => s.view);
   const poolSortMode = useDraftStore((s) => s.poolSortMode);
   const poolPanelOpen = useDraftStore((s) => s.poolPanelOpen);
@@ -206,7 +208,7 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
           <span className={`transition-transform ${poolPanelOpen ? "rotate-0" : "-rotate-90"}`}>
             ▼
           </span>
-          <span className="font-medium">{pool.length} cards drafted</span>
+          <span className="font-medium">{t("pool.cardsDrafted", { count: pool.length })}</span>
         </button>
       </div>
 
@@ -216,7 +218,7 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
         <>
           {/* Sort tabs */}
           <div className="flex gap-1 border-b border-white/8 px-3 py-2">
-            {SORT_MODES.map(({ mode, label }) => (
+            {SORT_MODES.map(({ mode, labelKey }) => (
               <button
                 key={mode}
                 onClick={() => setPoolSortMode(mode)}
@@ -226,7 +228,7 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
                     : "text-white/40 hover:bg-white/5 hover:text-white/70"
                 }`}
               >
-                {label}
+                {t(labelKey)}
               </button>
             ))}
           </div>
@@ -265,7 +267,7 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
 
             {pool.length === 0 && (
               <div className="py-4 text-center text-xs text-white/30">
-                No cards drafted yet
+                {t("pool.empty")}
               </div>
             )}
           </div>

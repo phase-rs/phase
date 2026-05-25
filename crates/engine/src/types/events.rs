@@ -322,6 +322,11 @@ pub enum GameEvent {
         counter_type: CounterType,
         count: u32,
     },
+    /// CR 702.100b: A creature evolved because one or more +1/+1 counters were
+    /// put on it as a result of its evolve ability resolving.
+    Evolved {
+        object_id: ObjectId,
+    },
     CounterRemoved {
         object_id: ObjectId,
         counter_type: CounterType,

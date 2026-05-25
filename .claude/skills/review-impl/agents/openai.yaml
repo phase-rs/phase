@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Implementation"
+  short_description: "Find implementation review gaps"
+  default_prompt: "Use $review-impl to review the current diff for implementation gaps."

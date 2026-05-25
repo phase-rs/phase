@@ -42,6 +42,16 @@ pub fn resolve(
     let values = compute_current_copiable_values(state, target_id)
         .ok_or(EffectError::ObjectNotFound(target_id))?;
 
+    // Display identity follows the copy: carry the source's image pointer so the
+    // copying object renders the copied card's art. Not a CR 707.2 copiable
+    // value (kept off `CopiableValues`); rides on the modification so it reverts
+    // with the effect. The source is guaranteed present — the copiable-values
+    // lookup above returned `Some` for `target_id`.
+    let source_printed_ref = state
+        .objects
+        .get(&target_id)
+        .and_then(|o| o.printed_ref.clone());
+
     // CR 122.1 + CR 614.1c: `AddCounterOnEnter` is consumed at resolution
     // (not layered) — partition the modifications so the layer pipeline only
     // sees the layered variants and the counter-on-enter variants are
@@ -52,6 +62,7 @@ pub fn resolve(
 
     let mut modifications = vec![ContinuousModification::CopyValues {
         values: Box::new(values),
+        printed_ref: source_printed_ref,
     }];
     modifications.extend(layered_mods);
 
@@ -314,6 +325,61 @@ mod tests {
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&source_id].name, "Copy Source");
         assert_eq!(state.objects[&source_id].power, Some(1));
+    }
+
+    #[test]
+    fn become_copy_propagates_source_printed_ref_and_reverts_at_cleanup() {
+        // Display identity follows the copy: a creature that becomes a copy of
+        // another renders the copied card's art (its `printed_ref`), and on a
+        // temporary copy that art reverts to its own when the effect expires —
+        // the same lifecycle as name/P-T. Drives the real pipeline (resolve →
+        // evaluate_layers → cleanup → evaluate_layers), asserting the revert.
+        let mut state = GameState::new_two_player(42);
+
+        let copied_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "copied-oracle-id".to_string(),
+            face_name: "Target Bear".to_string(),
+        };
+        let own_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "own-oracle-id".to_string(),
+            face_name: "Copy Source".to_string(),
+        };
+
+        let target_id = create_creature(&mut state, 1, PlayerId(0), "Target Bear", 2, 2);
+        {
+            let target = state.objects.get_mut(&target_id).unwrap();
+            target.printed_ref = Some(copied_ref.clone());
+            target.base_printed_ref = Some(copied_ref.clone());
+        }
+        let source_id = create_creature(&mut state, 2, PlayerId(0), "Copy Source", 1, 1);
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.printed_ref = Some(own_ref.clone());
+            source.base_printed_ref = Some(own_ref.clone());
+        }
+
+        let mut events = Vec::new();
+        let ability = make_copy_ability(
+            target_id,
+            source_id,
+            PlayerId(0),
+            Some(Duration::UntilEndOfTurn),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&source_id].printed_ref,
+            Some(copied_ref),
+            "while the copy is active, the copying object renders the copied card's art"
+        );
+
+        execute_cleanup(&mut state, &mut events);
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&source_id].printed_ref,
+            Some(own_ref),
+            "when the temporary copy expires, the art reverts to the object's own"
+        );
     }
 
     #[test]

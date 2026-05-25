@@ -4,7 +4,8 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, space0};
-use nom::combinator::{not, opt, peek, value};
+use nom::combinator::{all_consuming, not, opt, peek, value};
+use nom::sequence::preceded;
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
@@ -209,8 +210,11 @@ pub(crate) fn extract_keyword_line(
     line: &str,
     mtgjson_keyword_names: &[String],
 ) -> Option<Vec<Keyword>> {
+    let line_without_reminder = strip_reminder_text(line);
+    let line = line_without_reminder.trim();
+
     if mtgjson_keyword_names.is_empty() {
-        return None;
+        return parse_mtgjson_missing_standalone_keyword_line(line);
     }
 
     if mtgjson_keyword_names.iter().any(|n| n == "mobilize") {
@@ -283,6 +287,11 @@ pub(crate) fn extract_keyword_line(
             // Prefix match: Oracle text has more detail (e.g. "protection from red").
             // Extract the full parameterized keyword.
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                if matches!(kw, Keyword::Ripple)
+                    && mtgjson_keyword_names.contains(&keyword_display_name(&kw))
+                {
+                    continue;
+                }
                 new_keywords.push(kw);
                 continue;
             }
@@ -307,6 +316,15 @@ pub(crate) fn extract_keyword_line(
         Some(new_keywords)
     } else {
         None
+    }
+}
+
+fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keyword>> {
+    let lower = line.to_lowercase();
+    let keyword = parse_keyword_from_oracle(&lower)?;
+    match keyword {
+        Keyword::ForMirrodin => Some(vec![keyword]),
+        _ => None,
     }
 }
 
@@ -856,6 +874,20 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.60a: Ripple N — when you cast this spell, you may reveal the top N cards
+    // of your library and cast any with the same name without paying their mana cost.
+    // Keyword::Ripple is currently a unit variant (N is not yet tracked by the engine).
+    // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels.
+    if all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("ripple "),
+        nom_primitives::parse_number,
+    ))
+    .parse(text)
+    .is_ok()
+    {
+        return Some(Keyword::Ripple);
+    }
+
     // For parameterized keywords, find the first space to split name from parameter.
     // Oracle format: "protection from multicolored" → name="protection", rest="from multicolored"
     // Oracle format: "ward {2}" → name="ward", rest="{2}"
@@ -1379,6 +1411,37 @@ mod tests {
         // CR 702.85a: Cascade is a no-parameter keyword.
         let kw = parse_keyword_from_oracle("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.60a: Ripple N triggers when the spell is cast. The engine
+    /// currently stores `Keyword::Ripple` as a unit variant, so supported
+    /// numeric suffixes map to that variant while trailing text is rejected.
+    #[test]
+    fn parse_keyword_from_oracle_ripple() {
+        assert_eq!(
+            parse_keyword_from_oracle("ripple 4"),
+            Some(Keyword::Ripple),
+            "ripple 4 (Surging Aether oracle text)"
+        );
+        assert_eq!(
+            parse_keyword_from_oracle("ripple 2"),
+            Some(Keyword::Ripple),
+            "ripple 2 — numeric variant still maps to unit Ripple"
+        );
+        assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
+    }
+
+    #[test]
+    fn extract_keyword_line_ripple_does_not_duplicate_mtgjson_keyword() {
+        let mtgjson_kws = vec!["ripple".to_string()];
+
+        let result = extract_keyword_line("Ripple 4", &mtgjson_kws)
+            .expect("Ripple N line should be recognized as a keyword line");
+
+        assert!(
+            result.is_empty(),
+            "MTGJSON already carries Keyword::Ripple; Oracle validation must not add a duplicate"
+        );
     }
 
     /// CR 702.85a: Full Oracle text for Bloodbraid Elf and Shardless Agent
@@ -2167,6 +2230,24 @@ mod tests {
 
         let kw = parse_keyword_from_oracle("undaunted").unwrap();
         assert_eq!(kw, Keyword::Undaunted);
+
+        let kw = parse_keyword_from_oracle("for mirrodin!").unwrap();
+        assert_eq!(kw, Keyword::ForMirrodin);
+    }
+
+    #[test]
+    fn extract_keyword_line_for_mirrodin_without_mtgjson_keyword() {
+        let keywords = extract_keyword_line(
+            "For Mirrodin! (When this Equipment enters, create a 2/2 red Rebel creature token, then attach this to it.)",
+            &[],
+        )
+        .expect("For Mirrodin! should be extracted even when MTGJSON omits it");
+
+        assert_eq!(keywords, vec![Keyword::ForMirrodin]);
+        assert!(
+            extract_keyword_line("Flying", &[]).is_none(),
+            "the MTGJSON-missing path should stay scoped to known omissions"
+        );
     }
 
     #[test]

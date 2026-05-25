@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { GamePreset } from "../../services/presets";
 import { deletePreset, loadPresets } from "../../services/presets";
@@ -15,6 +16,7 @@ interface GamePresetsProps {
 }
 
 export function GamePresets({ onSelectPreset }: GamePresetsProps) {
+  const { t } = useTranslation("menu");
   const [presets, setPresets] = useState<GamePreset[]>([]);
 
   useEffect(() => {
@@ -31,7 +33,7 @@ export function GamePresets({ onSelectPreset }: GamePresetsProps) {
 
   return (
     <div className="flex flex-col items-center gap-3">
-      <h3 className="text-sm font-medium text-slate-500">Quick Start</h3>
+      <h3 className="text-sm font-medium text-slate-500">{t("gamePresets.heading")}</h3>
       <div className="flex flex-wrap justify-center gap-3">
         {presets.map((preset) => (
           <button

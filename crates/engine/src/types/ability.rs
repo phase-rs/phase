@@ -6,6 +6,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -97,6 +98,25 @@ pub enum SearchSelectionConstraint {
     /// card"). The chosen set must be assignable to the printed descriptions,
     /// with each physical card used for at most one description slot.
     MatchEachFilter { filters: Vec<TargetFilter> },
+}
+
+/// CR 400.11 + CR 406.3: Candidate pool for outside-game searches. The
+/// baseline pool is the player's sideboard; Karn/Coax-class text widens that
+/// pool to include owned face-up exile cards that match the same filter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum OutsideGameSourcePool {
+    /// CR 400.11a: Tournament sideboard / casual outside-the-game collection.
+    #[default]
+    Sideboard,
+    /// CR 400.11a + CR 406.3: Sideboard plus matching owned face-up exile.
+    SideboardAndFaceUpExile,
+}
+
+impl OutsideGameSourcePool {
+    pub fn includes_face_up_exile(self) -> bool {
+        matches!(self, OutsideGameSourcePool::SideboardAndFaceUpExile)
+    }
 }
 
 /// CR 701.23a + CR 608.2c: A search whose found set is partitioned between two
@@ -2797,6 +2817,22 @@ pub enum QuantityRef {
         property: ObjectProperty,
         filter: TargetFilter,
     },
+    /// CR 107.1: The [min/max], across every player in the game, of the number
+    /// of **battlefield** objects matching `filter` that the player controls
+    /// (the game counts only in integers). Each player's per-player count is
+    /// computed as if `filter`'s
+    /// controller clause were that player (CR 109.5 "you"/"your" rebinding),
+    /// then `aggregate` reduces the per-player counts to one integer. Used by
+    /// Balance / Restore Balance / Balancing Act for "the number of [lands]
+    /// controlled by the player who controls the fewest". `aggregate = Min` is
+    /// the "fewest" reading; `aggregate = Max` covers "most"; `Sum` is accepted
+    /// for completeness. Battlefield-scoped only: the hand-zone analogue ("the
+    /// fewest cards in any player's hand") is `HandSize { player: AllPlayers {
+    /// aggregate } }` — do NOT route hand counts through this variant.
+    ControlledByEachPlayer {
+        filter: TargetFilter,
+        aggregate: AggregateFunction,
+    },
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.
@@ -5186,6 +5222,15 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 701.3d: Unattach every matching Equipment from a matched host while
+    /// leaving that Equipment on the battlefield. `attachment` scopes which
+    /// attached objects move; `target` scopes the host object.
+    UnattachAll {
+        #[serde(default = "default_target_filter_any")]
+        attachment: TargetFilter,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// CR 701.25a: Surveil N — look at the top N cards, then put any number
     /// into the graveyard and the rest on top in any order.
     /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
@@ -5610,6 +5655,9 @@ pub enum Effect {
     /// CR 400.11/400.11a + CR 701.23j: Choose card(s) the player owns from
     /// outside the game. For tournament-style play, the bounded accessible set
     /// is the player's current sideboard, which is not modeled as a zone.
+    ///
+    /// CR 400.11 + CR 406.3: Candidate source pool. Defaults to sideboard;
+    /// Karn/Coax-class text widens the pool to include owned face-up exile.
     SearchOutsideGame {
         filter: TargetFilter,
         #[serde(default = "default_quantity_one")]
@@ -5618,6 +5666,8 @@ pub enum Effect {
         reveal: bool,
         #[serde(default = "default_zone_hand")]
         destination: Zone,
+        #[serde(default, skip_serializing_if = "is_default_outside_game_source_pool")]
+        source_pool: OutsideGameSourcePool,
     },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
@@ -6544,6 +6594,10 @@ fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool
     matches!(c, SearchSelectionConstraint::None)
 }
 
+fn is_default_outside_game_source_pool(pool: &OutsideGameSourcePool) -> bool {
+    matches!(pool, OutsideGameSourcePool::Sideboard)
+}
+
 fn default_zone_hand() -> Zone {
     Zone::Hand
 }
@@ -7016,6 +7070,7 @@ impl Effect {
             | Effect::GainControl { target, .. }
             | Effect::ControlNextTurn { target, .. }
             | Effect::Attach { target, .. }
+            | Effect::UnattachAll { target, .. }
             | Effect::Fight { target, .. }
             | Effect::Bounce { target, .. }
             | Effect::SwitchPT { target, .. }
@@ -7057,7 +7112,15 @@ impl Effect {
             | Effect::Double { target, .. }
             | Effect::SetLifeTotal { target, .. }
             | Effect::GiveControl { target, .. }
-            | Effect::RemoveFromCombat { target, .. } => Some(target),
+            | Effect::RemoveFromCombat { target, .. }
+            // CR 115.7 + CR 115.1: "Change the target of target spell or ability"
+            // (Bolt Bend, Redirect, Misdirection) targets the stack spell/ability
+            // it will retarget. That target is chosen as the spell is cast (CR
+            // 115.1), so it must be surfaced here — both to build the cast-time
+            // target slot and so resolution-time re-validation (CR 608.2b) checks
+            // it against the StackSpell/StackAbility filter instead of the
+            // battlefield-only default (which would always fizzle a stack target).
+            | Effect::ChangeTargets { target, .. } => Some(target),
 
             // CR 109.4 + CR 115.1 + CR 707.2: `CopyTokenOf` has two
             // potentially-targetable axes — the copy *source* (`target`) and
@@ -7181,7 +7244,6 @@ impl Effect {
             | Effect::MadnessCast { .. }
             | Effect::GiftDelivery { .. }
             | Effect::ExchangeControl { .. }
-            | Effect::ChangeTargets { .. }
             | Effect::Manifest { .. }
             | Effect::ManifestDread
             | Effect::LoseTheGame
@@ -7278,6 +7340,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GainControl { .. } => "GainControl",
         Effect::ControlNextTurn { .. } => "ControlNextTurn",
         Effect::Attach { .. } => "Attach",
+        Effect::UnattachAll { .. } => "UnattachAll",
         Effect::Surveil { .. } => "Surveil",
         Effect::Fight { .. } => "Fight",
         Effect::Bounce { .. } => "Bounce",
@@ -7452,6 +7515,7 @@ pub enum EffectKind {
     ControlNextTurn,
     Attach,
     AttachAll,
+    UnattachAll,
     Surveil,
     Fight,
     Bounce,
@@ -7629,6 +7693,7 @@ impl From<&Effect> for EffectKind {
             Effect::GainControl { .. } => EffectKind::GainControl,
             Effect::ControlNextTurn { .. } => EffectKind::ControlNextTurn,
             Effect::Attach { .. } => EffectKind::Attach,
+            Effect::UnattachAll { .. } => EffectKind::UnattachAll,
             Effect::Surveil { .. } => EffectKind::Surveil,
             Effect::Fight { .. } => EffectKind::Fight,
             Effect::Bounce { .. } => EffectKind::Bounce,
@@ -7917,6 +7982,8 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
 pub enum AbilityTag {
     /// CR 702.142a: This ability originated from a Boast keyword definition.
     Boast,
+    /// CR 702.100a: This ability originated from an Evolve keyword definition.
+    Evolve,
     /// CR 702.177a: This ability originated from an Exhaust keyword definition.
     Exhaust,
     /// CR 702.107a: This ability originated from an Outlast keyword definition.
@@ -8616,6 +8683,11 @@ pub enum AbilityCondition {
     AdditionalCostPaidInstead,
     /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
     IfYouDo,
+    /// CR 608.2c: "If you won" — sub_ability executes only if this ability's
+    /// controller won the triggering event, such as a clash or coin flip. Falls
+    /// back to `optional_effect_performed` for in-chain clash continuations
+    /// whose parent effect records the result directly.
+    EventOutcomeWon,
     /// CR 603.12: "When you do" — reflexive trigger that fires based on whether the
     /// parent's trigger event actually occurred. For a non-cost parent (e.g. a
     /// `BecomeCopy` reflexive or a copy/exile replacement sub-ability) the "do"
@@ -8929,6 +9001,10 @@ pub struct SpellContext {
     /// the resolution-time battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controller_controlled_as_cast: Vec<TargetFilter>,
+    /// CR 702: Keyword origin carried from the parsed/synthesized definition
+    /// into runtime resolution for keyword-specific events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_tag: Option<AbilityTag>,
 }
 
 impl SpellContext {
@@ -9394,12 +9470,18 @@ pub enum ReplacementCondition {
     /// step, AND the player has not yet drawn a card during this step
     /// (`cards_drawn_this_step == 0`); otherwise `true` (apply replacement).
     ExceptFirstDrawInDrawStep,
-    /// CR 614.1d: "if you control a [filter]" — replacement applies only while
-    /// the controller has at least one permanent matching `filter` on the
-    /// battlefield. Positive form of `UnlessControlsMatching`. Used by
-    /// Worship ("if you control a creature, damage that would reduce your
-    /// life total to less than 1 reduces it to 1 instead").
-    IfControlsMatching { filter: TargetFilter },
+    /// CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
+    /// while the controller has at least `minimum` permanents matching `filter` on
+    /// the battlefield. `minimum = 1` covers the singular "if you control a [type]"
+    /// form (used by Worship); higher values cover "if you control N or more [type]"
+    /// forms (used by creature lands such as Lair of the Hydra, Hall of Storm Giants).
+    /// The filter MUST have `ControllerRef::You` pre-set by the parser.
+    /// Positive form of `UnlessControlsMatching` / `UnlessControlsCountMatching`.
+    IfControlsMatching {
+        #[serde(default = "default_one")]
+        minimum: u32,
+        filter: TargetFilter,
+    },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
@@ -9504,6 +9586,13 @@ pub struct CounterTriggerFilter {
     pub threshold: Option<u32>,
 }
 
+/// CR 705.2: Typed result filter for coin-flip triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoinFlipResult {
+    Won,
+    Lost,
+}
+
 /// Trigger definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerDefinition {
@@ -9595,6 +9684,10 @@ pub struct TriggerDefinition {
     /// `DamageDealtOnce`); ignored by other modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_amount: Option<(Comparator, u32)>,
+    /// CR 705.2: Coin-flip result filter for FlippedCoin trigger mode.
+    /// When `Some(Won)`, fires only on wins; `Some(Lost)` only on losses; `None` fires on any flip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coin_flip_result: Option<CoinFlipResult>,
 }
 
 impl TriggerDefinition {
@@ -9626,6 +9719,7 @@ impl TriggerDefinition {
             attack_target_filter: None,
             player_actions: None,
             damage_amount: None,
+            coin_flip_result: None,
         }
     }
 
@@ -9756,6 +9850,17 @@ pub struct StaticDefinition {
     /// `StaticDefinition` must reach `layers.rs` only with `condition: None`.
     #[serde(default)]
     pub condition: Option<StaticCondition>,
+    /// CR 101.2 + CR 109.5: Per-affected-player applicability gate.
+    ///
+    /// Distinct from `condition` (the source-relative CR 604.1 FUNCTIONING gate,
+    /// evaluated against the source's controller upstream by
+    /// `battlefield_active_statics`). `per_player_condition` is evaluated against
+    /// the AFFECTED player (the caster for `CantBeCast`; the attacking creature's
+    /// controller for `CantAttack`) via `restrictions::evaluate_condition`. Used by
+    /// "each opponent who [did X] this turn can't [Y]" prohibitions (Angelic
+    /// Arbiter). `None` = unconditional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_player_condition: Option<ParsedCondition>,
     #[serde(default)]
     pub affected_zone: Option<Zone>,
     #[serde(default)]
@@ -9783,6 +9888,7 @@ impl StaticDefinition {
             affected: None,
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9807,6 +9913,14 @@ impl StaticDefinition {
 
     pub fn condition(mut self, cond: StaticCondition) -> Self {
         self.condition = Some(cond);
+        self
+    }
+
+    /// CR 101.2 + CR 109.5: Set the per-affected-player applicability gate.
+    /// Evaluated against the affected player (caster / attacking creature's
+    /// controller), not the source controller. Mirrors `.condition()`.
+    pub fn per_player_condition(mut self, cond: ParsedCondition) -> Self {
+        self.per_player_condition = Some(cond);
         self
     }
 
@@ -10384,6 +10498,14 @@ pub struct CopiableValues {
 pub enum ContinuousModification {
     CopyValues {
         values: Box<CopiableValues>,
+        /// Display-identity pointer of the copy source (oracle id + displayed
+        /// face name). NOT a CR 707.2 copiable characteristic — it carries no
+        /// rules weight and is deliberately kept off `CopiableValues`. It rides
+        /// on the modification so the copy's art is applied (and reverts) through
+        /// the same layer pass as the copied characteristics. `None` when the
+        /// source is a true token with no printed identity.
+        #[serde(default)]
+        printed_ref: Option<PrintedCardRef>,
     },
     /// CR 707.9 + CR 707.2: Override the copy's name after `CopyValues` applies.
     /// Used by "enter as a copy, except its name is X" (e.g., Superior Spider-Man's
@@ -11593,6 +11715,7 @@ mod tests {
             attack_target_filter: None,
             player_actions: None,
             damage_amount: None,
+            coin_flip_result: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
@@ -11613,6 +11736,7 @@ mod tests {
                 ContinuousModification::AddToughness { value: 1 },
             ],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -11849,6 +11973,7 @@ mod tests {
                 affected: Some(TargetFilter::SelfRef),
                 modifications: vec![ContinuousModification::AddPower { value: 3 }],
                 condition: None,
+                per_player_condition: None,
                 affected_zone: None,
                 effect_zone: None,
                 active_zones: vec![],

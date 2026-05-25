@@ -1,3 +1,6 @@
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
+
 import type { CastingVariant, GameAction, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -9,26 +12,28 @@ type CastingVariantChoice = Extract<
   { type: "CastingVariantChoice" }
 >;
 
-const VARIANT_LABELS: Partial<Record<CastingVariant["type"], string>> = {
-  Normal: "Cast Normally",
-  Adventure: "Cast as Adventure",
-  Omen: "Cast as Omen",
-  Warp: "Cast with Warp",
-  Escape: "Cast with Escape",
-  Retrace: "Cast with Retrace",
-  Harmonize: "Cast with Harmonize",
-  Flashback: "Cast with Flashback",
-  Aftermath: "Cast with Aftermath",
-  GraveyardPermission: "Cast from Graveyard",
-  HandPermission: "Cast from Hand",
-  Miracle: "Cast with Miracle",
-  Madness: "Cast with Madness",
-  Evoke: "Cast with Evoke",
-  Suspend: "Cast from Suspend",
-  Plot: "Cast from Plot",
-  Foretell: "Cast from Foretell",
-  Overload: "Cast with Overload",
-  Bestow: "Cast with Bestow",
+// Maps each engine `CastingVariant` discriminant to its i18n key leaf. Variants
+// not listed fall back to the parameterized `variantFallback`.
+const VARIANT_KEYS: Partial<Record<CastingVariant["type"], string>> = {
+  Normal: "variantNormal",
+  Adventure: "variantAdventure",
+  Omen: "variantOmen",
+  Warp: "variantWarp",
+  Escape: "variantEscape",
+  Retrace: "variantRetrace",
+  Harmonize: "variantHarmonize",
+  Flashback: "variantFlashback",
+  Aftermath: "variantAftermath",
+  GraveyardPermission: "variantGraveyardPermission",
+  HandPermission: "variantHandPermission",
+  Miracle: "variantMiracle",
+  Madness: "variantMadness",
+  Evoke: "variantEvoke",
+  Suspend: "variantSuspend",
+  Plot: "variantPlot",
+  Foretell: "variantForetell",
+  Overload: "variantOverload",
+  Bestow: "variantBestow",
 };
 
 export function CastingVariantModal() {
@@ -54,13 +59,14 @@ function CastingVariantContent({
   data: CastingVariantChoice["data"];
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
+  const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[data.object_id]);
   if (!obj) return null;
 
   return (
     <DialogShell
-      eyebrow="Cast"
-      title="Choose Cast"
+      eyebrow={t("castingVariant.eyebrow")}
+      title={t("castingVariant.title")}
       subtitle={obj.name}
     >
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
@@ -76,7 +82,7 @@ function CastingVariantContent({
             className="rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/30"
           >
             <span className="font-semibold text-white">
-              {labelForVariant(option.variant)}
+              {labelForVariant(option.variant, t)}
             </span>
             <span className="ml-2">
               <ManaCostSymbols cost={option.mana_cost} />
@@ -88,6 +94,9 @@ function CastingVariantContent({
   );
 }
 
-function labelForVariant(variant: CastingVariant): string {
-  return VARIANT_LABELS[variant.type] ?? `Cast with ${variant.type}`;
+function labelForVariant(variant: CastingVariant, t: TFunction<"game">): string {
+  const key = VARIANT_KEYS[variant.type];
+  return key
+    ? t(`castingVariant.${key}`)
+    : t("castingVariant.variantFallback", { type: variant.type });
 }

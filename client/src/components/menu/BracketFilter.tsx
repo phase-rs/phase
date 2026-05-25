@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   BRACKET_LABEL,
   COMMANDER_BRACKETS,
@@ -11,12 +13,13 @@ interface Props {
 }
 
 export function BracketFilter({ selected, onChange }: Props) {
+  const { t } = useTranslation("menu");
   const toggle = (b: CommanderBracket) => {
     onChange(selected.includes(b) ? selected.filter((x) => x !== b) : [...selected, b].sort((a, b) => a - b));
   };
 
   return (
-    <div className="flex flex-wrap gap-1.5" role="group" aria-label="Bracket filter">
+    <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("bracketFilter.label")}>
       {COMMANDER_BRACKETS.map((b) => {
         const active = selected.includes(b);
         return (

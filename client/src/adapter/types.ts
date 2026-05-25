@@ -201,10 +201,29 @@ export interface DeckPoolEntry {
   count: number;
 }
 
+/**
+ * Discriminated source for a single outside-game candidate. Sideboard entries
+ * carry their full `CardFace` so the UI can render them without a sideboard
+ * lookup; face-up exile candidates are addressed by their in-game `ObjectId`.
+ * Mirrors Rust `OutsideGameChoiceSource` (engine `types/game_state.rs`).
+ */
+export type OutsideGameChoiceSource =
+  | { type: "Sideboard"; data: { sideboard_index: number; card: CardFacePartial } }
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
+
 export interface OutsideGameChoiceEntry {
-  sideboard_index: number;
-  entry: DeckPoolEntry;
+  source: OutsideGameChoiceSource;
+  count: number;
+  name: string;
 }
+
+/**
+ * One committed selection on `GameAction::ChooseOutsideGameCards`. Mirrors
+ * Rust `OutsideGameSelection` (engine `types/actions.rs`).
+ */
+export type OutsideGameSelection =
+  | { type: "Sideboard"; data: { sideboard_index: number } }
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
 
 export interface OutsideGameCardUse {
   player: PlayerId;
@@ -972,7 +991,7 @@ export type WaitingFor =
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
-  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]> } }
+  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidate_descriptions?: string[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
@@ -988,7 +1007,7 @@ export type WaitingFor =
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; constraint?: SearchSelectionConstraint; split?: SearchDestinationSplit | null } }
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
-  | { type: "OutsideGameChoice"; data: { player: PlayerId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
+  | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
@@ -1313,7 +1332,7 @@ export type GameAction =
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
-  | { type: "ChooseOutsideGameCards"; data: { sideboard_indices: number[] } }
+  | { type: "ChooseOutsideGameCards"; data: { selections: OutsideGameSelection[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
   | { type: "ChooseTarget"; data: { target: TargetRef | null } }
   | { type: "ChoosePair"; data: { partner: ObjectId | null } }

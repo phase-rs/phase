@@ -112,20 +112,39 @@ export class WasmAdapter implements EngineAdapter {
   // Fallback: direct WASM on main thread (only used if Worker fails)
   private fallback: MainThreadFallback | null = null;
 
+  // In-flight init dedupe. The `initialized` flag only flips *after* the worker
+  // handshake resolves, so without this a second concurrent `initialize()`
+  // (e.g. menu card-DB warm racing an un-gated Resume click) would pass the
+  // flag check and spawn a second EngineWorkerClient, orphaning the first
+  // worker's ~90 MB instance. Concurrent callers share one promise.
+  private initPromise: Promise<void> | null = null;
+
   async initialize(): Promise<void> {
     if (this.initialized) return;
-    try {
-      this.engine = new EngineWorkerClient();
-      await this.engine.initialize();
-    } catch {
-      // Worker creation failed — fall back to main-thread WASM
-      console.warn(
-        "Web Worker creation failed, falling back to main-thread WASM",
-      );
-      this.engine = null;
-      this.fallback = await createMainThreadFallback();
-    }
-    this.initialized = true;
+    if (this.initPromise) return this.initPromise;
+    const pending = (async () => {
+      try {
+        this.engine = new EngineWorkerClient();
+        await this.engine.initialize();
+      } catch {
+        // Worker creation failed — fall back to main-thread WASM
+        console.warn(
+          "Web Worker creation failed, falling back to main-thread WASM",
+        );
+        this.engine = null;
+        this.fallback = await createMainThreadFallback();
+      }
+      this.initialized = true;
+    })();
+    // If init rejects (worker AND fallback both fail), clear the cached promise
+    // so a later call retries instead of replaying a stuck rejection forever.
+    // `pending` is returned so the current caller still sees the error; only
+    // future callers get a fresh attempt — matching the pre-dedupe semantics.
+    pending.catch(() => {
+      this.initPromise = null;
+    });
+    this.initPromise = pending;
+    return pending;
   }
 
   private async ensureCardDb(): Promise<void> {
@@ -423,6 +442,36 @@ export class WasmAdapter implements EngineAdapter {
     return this.fallback!.estimateBracketForDeck(deck);
   }
 
+  /**
+   * Eagerly load the card database into the shared worker so later compat
+   * checks and game init are instant. Public entry point for the menu/page
+   * warm. Unlike the best-effort `ensureCardDb` (used by Debug CreateCard),
+   * this surfaces failure so `cardDataStore` can show an `error` status — the
+   * underlying cause is still logged inside `ensureCardDb`.
+   */
+  async warmCardDatabase(): Promise<void> {
+    await this.initialize();
+    await this.ensureCardDb();
+    if (!this.cardDbLoaded) {
+      throw new Error("Card database failed to load");
+    }
+  }
+
+  /**
+   * Run a stateless deck-compatibility check against the shared worker's card
+   * database. Replaces the former dedicated compatibility worker — one engine
+   * instance now serves both compat checks and gameplay (a CARD_DB read only,
+   * no game-state mutation), mirroring the existing `estimateBracket` query.
+   */
+  async checkDeckCompatibility(request: unknown): Promise<unknown> {
+    await this.initialize();
+    await this.ensureCardDb();
+    if (this.engine) {
+      return this.engine.evaluateDeckCompatibility(request);
+    }
+    return this.fallback!.evaluateDeckCompatibility(request);
+  }
+
   dispose(): void {
     // Clear the singleton reference so getSharedAdapter() creates a fresh
     // instance if called after dispose (e.g., error recovery code paths).
@@ -434,6 +483,7 @@ export class WasmAdapter implements EngineAdapter {
     this.aiPoolFailed = false;
     this.fallback = null;
     this.initialized = false;
+    this.initPromise = null;
     this.cardDbLoaded = false;
   }
 
@@ -519,6 +569,7 @@ interface MainThreadFallback {
     firstPlayer?: number,
   ): Promise<SubmitResult>;
   estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
+  evaluateDeckCompatibility(request: unknown): Promise<unknown>;
 }
 
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
@@ -640,5 +691,10 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         if (isBracketEstimate(r)) return r;
         throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
       }),
+
+    // Card DB is loaded into this same `@wasm/engine` module singleton by
+    // `ensureCardDatabase` (engineRuntime), so the query reads it directly.
+    evaluateDeckCompatibility: (request: unknown) =>
+      enqueue(() => wasm.evaluate_deck_compatibility_js(request)),
   };
 }

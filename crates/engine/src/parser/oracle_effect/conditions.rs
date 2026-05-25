@@ -2264,7 +2264,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
             .parse(lower.as_str())
             .is_ok()
     {
-        return Some(AbilityCondition::IfYouDo);
+        return Some(AbilityCondition::EventOutcomeWon);
     }
 
     if alt((
