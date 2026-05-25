@@ -291,6 +291,8 @@
     "phased": "Phased",
     "followingActiveOpponent": "Following active opponent. Focus switches to the opponent whose turn it is.",
     "followActiveOpponent": "Follow active opponent. Focus will switch to the opponent whose turn it is.",
+    "compactHud": "Compact opponent HUD. Collapses each opponent to a single thin row (name + life); tap an opponent to focus their full board.",
+    "expandHud": "Expand opponent HUD. Shows each opponent's hand and board breakdown.",
     "targetPlayer": "Target {{name}}",
     "viewBoardThenTarget": "View {{name}}'s board (click again to target {{name}})",
     "viewBoard": "View {{name}}'s board",
@@ -315,6 +317,13 @@
     "confirmAttackers": "Confirm Attackers ({{count}})",
     "confirmBlockers": "Confirm Blockers ({{count}})",
     "clickAttackerToAssignBlocker": "Click an attacker to assign blocker",
+    "menaceRequirement": "Must be blocked by {{count}} or not at all",
+    "blockNeedsBadge": "Needs {{required}}",
+    "blockProgressBadge": "{{assigned}} / {{required}}",
+    "blockSatisfiedBadge": "✓ {{required}}",
+    "blockIncompleteAttacker": "{{assigned}} of {{required}} blockers assigned",
+    "blockIncomplete_one": "{{count}} attacker needs another blocker",
+    "blockIncomplete_other": "{{count}} attackers need another blocker",
     "assignDamageTitle": "Assign {{amount}} Combat Damage",
     "assignDamageSubtitle": "{{name}} — Remaining: {{remaining}}",
     "assignDamageButton": "Assign Damage",
@@ -357,6 +366,8 @@
     "chooseTargetForCopySlot": "Choose target for copy: slot {{current}} of {{total}}",
     "chooseNewTargetForCopy": "Choose new target for copy",
     "chooseTargetForCopy": "Choose target for copy",
+    "chooseNewTarget": "Choose the spell's new target",
+    "chooseNewTargetForSpell": "Choose a new target for {{spell}}",
     "chooseCreatureToExplore": "Choose which creature explores next",
     "tapUntappedCreatures_one": "Tap {{count}} untapped creature",
     "tapUntappedCreatures_other": "Tap {{count}} untapped creatures",
@@ -745,6 +756,7 @@
       "title": "Choose Ring-bearer",
       "subtitle": "Choose a creature you control"
     },
+    "reorderHint": "Drag to reorder · the top card is drawn first",
     "scry": {
       "title": "Scry",
       "subtitle_one": "Look at the top {{count}} card of your library",
@@ -1252,7 +1264,8 @@
     "scopeSingle": "Choose a new target for the spell",
     "scopeMulti": "Choose new targets for the spell",
     "subtitle": "{{scope}}. Current: {{current}}",
-    "confirm": "Confirm"
+    "confirm": "Confirm",
+    "badgeNewTarget": "New target"
   },
   "separatePiles": {
     "chooserName": "Player {{number}}",

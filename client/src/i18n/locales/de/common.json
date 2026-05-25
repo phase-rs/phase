@@ -1,1 +1,202 @@
-{}
+{
+  "actions": {
+    "cancel": "Abbrechen",
+    "save": "Speichern",
+    "close": "Schließen",
+    "closeNamed": "{{name}} schließen"
+  },
+  "modal": {
+    "defaultEyebrow": "Workspace-Werkzeug"
+  },
+  "pausedBanner": {
+    "message": "Spiel pausiert — {{reason}}"
+  },
+  "fullscreen": {
+    "enter": "Vollbild starten",
+    "exit": "Vollbild beenden"
+  },
+  "buildBadge": {
+    "downloading": "wird heruntergeladen… {{progress}}%",
+    "checking": "wird geprüft…",
+    "updating": "wird aktualisiert…",
+    "updatePending": "Aktualisierung nach dem Spiel ausstehend",
+    "cards": "Karten {{age}} ({{commit}})",
+    "cardDataTitle": "Kartendaten erzeugt am {{date}} aus {{commit}}",
+    "checkForUpdates": "Nach Updates suchen",
+    "updaterDebugInfo": "Updater-Debug-Informationen",
+    "updaterIssue": "Updater-Problem: {{error}}",
+    "updateIssue": "Update-Problem",
+    "updated": "aktualisiert"
+  },
+  "gameMenu": {
+    "menu": "Spielmenü",
+    "sandboxTools": "Sandbox-Werkzeuge",
+    "sandboxToolsTitle": "Sandbox-Werkzeuge — beliebigen Spielzustand einrichten (`)",
+    "resume": "Fortsetzen",
+    "settings": "Einstellungen",
+    "helpShortcuts": "Hilfe & Tastenkürzel",
+    "showAiHand": "KI-Hand anzeigen",
+    "hideAiHand": "KI-Hand verbergen",
+    "concede": "Aufgeben",
+    "backToDraft": "Zurück zum Draft",
+    "mainMenu": "Hauptmenü",
+    "cards": "Karten {{commit}}",
+    "cardDataTitle": "Kartendaten: {{date}}"
+  },
+  "volume": {
+    "mute": "Stummschalten",
+    "unmute": "Stummschaltung aufheben",
+    "volume": "Lautstärke"
+  },
+  "hostControl": {
+    "seatHost": "Host",
+    "seatPlayer": "Spieler",
+    "seatOpen": "Frei",
+    "seatAi": "KI ({{difficulty}})",
+    "waiting": "Warten…",
+    "seatLabel": "Platz {{id}}",
+    "addAi": "KI hinzufügen",
+    "remove": "Entfernen",
+    "human": "Mensch",
+    "kick": "Rauswerfen",
+    "replaceAi": "Durch KI ersetzen",
+    "random": "Zufällig",
+    "connecting": "Verbinden…",
+    "cancelHosting": "Hosting abbrechen",
+    "kickConfirm": "{{name}} aus dem Raum werfen?",
+    "replaceConfirm": "{{name}} durch KI ersetzen? Dadurch wird der Spieler aus dem Raum entfernt.",
+    "fallbackPlayerName": "Spieler {{number}}",
+    "seatsOccupied": "{{occupied}}/{{total}} Plätze belegt",
+    "startGame": "Spiel starten",
+    "startNow": "Jetzt starten",
+    "fillWithAi": "Mit KI auffüllen"
+  },
+  "grantDebug": {
+    "heading": "Sandbox: Debug-Berechtigungen",
+    "description": "Erlaube anderen Spielern, Debug-Aktionen auszuführen. Ihre Aktionen werden öffentlich protokolliert.",
+    "playerLabel": "Spieler {{number}}",
+    "revoke": "ENTZIEHEN",
+    "grant": "GEWÄHREN"
+  },
+  "help": {
+    "eyebrow": "Hilfe",
+    "title": "Hilfe & Tastenkürzel",
+    "subtitle": "Digitaler Magic-Ablauf für Papierspieler: Stopps, Priorität, Abgeben und Wiederherstellungswerkzeuge.",
+    "closeHelp": "Hilfe schließen",
+    "searchPlaceholder": "Hilfe oder Tastenkürzel durchsuchen",
+    "whatCanIDo": "Was kann ich jetzt tun?",
+    "recoveryTitle": "Wiederherstellungswerkzeuge",
+    "recoveryDescription": "Wenn sich eine Karte fehlerhaft verhält, exportiere zuerst den Zustand. Das erweiterte Debug-Panel steht zur Verfügung, wenn du das Spiel inspizieren oder anpassen musst.",
+    "copyState": "Zustand kopieren",
+    "exportState": "Zustand exportieren",
+    "openAdvancedDebug": "Erweitertes Debug öffnen",
+    "sections": {
+      "Flow": "Ablauf",
+      "Shortcuts": "Tastenkürzel",
+      "Recovery": "Wiederherstellung"
+    },
+    "status": {
+      "copied": "Spielzustand in die Zwischenablage kopiert.",
+      "copyFailed": "Spielzustand konnte nicht kopiert werden.",
+      "exported": "{{filename}} exportiert.",
+      "exportFailed": "Spielzustand konnte nicht exportiert werden."
+    },
+    "prompt": {
+      "starting": "Das Spiel startet oder stellt den Zustand wieder her.",
+      "gameOver": "Das Spiel ist vorbei.",
+      "mulliganDecide": "Entscheide, ob du diese Starthand behältst oder einen Mulligan nimmst.",
+      "mulliganWaitDecide": "Warten, bis ein anderer Spieler über seine Starthand entscheidet.",
+      "mulliganBottom": "Wähle Karten, die du nach dem Behalten einer Mulligan-Hand unter die Bibliothek legst.",
+      "mulliganWaitBottom": "Warten, bis ein anderer Spieler seinen Mulligan abschließt.",
+      "openingHandBottom": "Wähle eine Karte, die du unter die Bibliothek legst, bevor die normalen Mulligans beginnen.",
+      "openingHandWait": "Warten, bis ein anderer Spieler seine Starthand auflöst.",
+      "waitOther": "Warten, bis ein anderer Spieler handelt.",
+      "priorityStack": "Du hast Priorität mit etwas auf dem Stapel. Auflösen gibt die Priorität ab, damit das oberste Objekt aufgelöst werden kann.",
+      "priorityAutoPass": "Du hast Priorität. Der Client kann ruhige Fenster automatisch abgeben, sofern kein Stopp oder die volle Kontrolle aktiv ist.",
+      "priorityActions": "Du hast Priorität. Du kannst verfügbare Karten nutzen oder abgeben, um den Zug voranzubringen.",
+      "priorityPass": "Du hast Priorität. Abgeben fährt mit dem nächsten Schritt oder Spieler fort.",
+      "manaPayment": "Bezahle Mana für den anstehenden Zauberspruch oder die Fähigkeit. Drücke T, um verfügbare Länder zu tappen.",
+      "targetSelection": "Wähle das hervorgehobene legale Ziel oder brich ab, falls die Eingabeaufforderung es erlaubt.",
+      "declareAttackers": "Wähle Angreifer und bestätige die Angreifer. Du kannst auch mit keinem angreifen.",
+      "declareBlockers": "Wähle Blocker und ordne sie Angreifern zu, dann bestätige die Blocker.",
+      "chooseXValue": "Wähle einen Wert für X, bevor du mit dem Zauberspruch oder der Fähigkeit fortfährst.",
+      "payAmountChoice": "Wähle, wie viel der angeforderten Ressource du bezahlst.",
+      "default": "Das Spiel wartet auf deine Wahl. Folge der aktiven Eingabeaufforderung, um fortzufahren."
+    },
+    "entries": {
+      "automaticPhaseSkips": {
+        "title": "Automatische Phasenübersprünge",
+        "body": "Phasenübersprünge erfolgen automatisch. Nutze Stopps oder volle Kontrolle, wenn du Prioritätsfenster im Papierstil möchtest."
+      },
+      "phaseStops": {
+        "title": "Phasenstopps",
+        "body": "Ein Stopp pausiert vor diesem Schritt, ähnlich wie wenn du im Papierspiel sagst, dass du vor dem Kampf, vor dem Ziehen oder vor dem Endschritt handeln möchtest."
+      },
+      "fullControl": {
+        "title": "Volle Kontrolle",
+        "body": "Volle Kontrolle verhindert, dass Prioritätsfenster übersprungen werden, einschließlich Stellen, an denen der digitale Client das Spiel normalerweise weiterlaufen lassen würde."
+      },
+      "resolve": {
+        "title": "Auflösen",
+        "body": "Auflösen bedeutet, dass du die Priorität abgibst, damit der oberste Zauberspruch oder die oberste Fähigkeit auf dem Stapel aufgelöst werden kann, wenn alle anderen ebenfalls abgeben."
+      },
+      "passToEnd": {
+        "title": "Bis zum Ende abgeben",
+        "body": "Bis zum Ende abgeben gibt die Priorität für den Zug weiter ab, sofern keine Wahl, kein Stopp oder die volle Kontrolle unterbricht."
+      },
+      "manaPayment": {
+        "title": "Manabezahlung",
+        "body": "Während der Manabezahlung kannst du Länder manuell tappen oder T drücken, um verfügbare Länder zu tappen."
+      },
+      "combatDeclarations": {
+        "title": "Kampferklärungen",
+        "body": "Das Spiel fragt nur während der Erklärungsschritte nach Angreifern und Blockern. Wähle Kreaturen und bestätige dann die Erklärung."
+      },
+      "openHelp": {
+        "title": "Hilfe öffnen",
+        "body": "Diese Hilfeübersicht öffnen."
+      },
+      "passPriority": {
+        "title": "Priorität abgeben",
+        "body": "Priorität abgeben oder durch die aktuelle Prioritätsaufforderung weitergehen."
+      },
+      "undo": {
+        "title": "Rückgängig",
+        "body": "Die letzte lokale Aktion rückgängig machen, die keine verborgenen Informationen aufgedeckt hat."
+      },
+      "cancel": {
+        "title": "Abbrechen",
+        "body": "Die aktuelle Auswahl, Manabezahlung, Zielauswahl oder das automatische Abgeben abbrechen, sofern verfügbar."
+      },
+      "advancedDebugPanel": {
+        "title": "Erweitertes Debug-Panel",
+        "body": "Das erweiterte Debug-Panel öffnen. Die meisten Spieler sollten zuerst mit den Wiederherstellungswerkzeugen beginnen."
+      },
+      "reportOrExportState": {
+        "title": "Zustand melden oder exportieren",
+        "body": "Wenn sich eine Karte fehlerhaft verhält, exportiere den aktuellen Spielzustand, damit die exakte Brettposition reproduziert werden kann."
+      },
+      "boardRightClickMenu": {
+        "title": "Rechtsklick-Menü des Spielfelds",
+        "body": "Klicke auf dem Desktop mit der rechten Maustaste auf eine leere Stelle des Spielfelds, um das Spielprotokoll, die Wiederherstellungs-/Debug-Werkzeuge und die Hintergrundeinstellungen aufzurufen."
+      }
+    },
+    "flowNudge": {
+      "message": "Phasenübersprünge erfolgen automatisch. Nutze Stopps oder volle Kontrolle, wenn du Prioritätsfenster im Papierstil möchtest.",
+      "dismiss": "Schließen",
+      "learnFlow": "Ablauf kennenlernen"
+    },
+    "sandboxNudge": {
+      "message": "Richte mit den <tools>Sandbox-Werkzeugen</tools> einen beliebigen Spielzustand ein — füge Karten und Spielsteine hinzu, ändere Leben und Marken, kopiere bleibende Karten oder springe zwischen Phasen. Öffne sie jederzeit mit der Taste <key>`</key>.",
+      "dismiss": "Schließen",
+      "open": "Sandbox-Werkzeuge öffnen"
+    }
+  },
+  "splash": {
+    "ready": "Bereit",
+    "loading": "Wird geladen..."
+  },
+  "turnBanner": {
+    "turn": "Zug {{number}}"
+  }
+}

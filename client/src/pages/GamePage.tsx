@@ -27,6 +27,7 @@ import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
+import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
@@ -192,16 +193,18 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" =
+  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
         ? "p2p-join"
-        : rawMode === "host" || rawMode === "join"
-          ? "online"
-          : rawMode === "ai"
-            ? "ai"
-            : "local";
+        : rawMode === "draft-match"
+          ? "draft-match"
+          : rawMode === "host" || rawMode === "join"
+            ? "online"
+            : rawMode === "ai"
+              ? "ai"
+              : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -1257,6 +1260,10 @@ function GamePageContent({
       {/* Combat SVG overlays: blocker assignments + attack target arrows */}
       <BlockAssignmentLines />
       <AttackTargetLines />
+      {/* Per-attacker "needs N blockers" badges (menace / "blocked by N or more").
+          Self-gates: renders nothing unless the local player is assigning blockers
+          to attackers that carry a minimum-blocker requirement. */}
+      <BlockRequirementBadges />
 
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />

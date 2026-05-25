@@ -74,7 +74,7 @@ Produce a step-by-step implementation plan using the skill checklist as your gui
 
 ### Step 6: Review the plan
 
-Run `/review-engine-plan` to send your plan through architectural review. Address all feedback from the reviewer. Repeat until the reviewer identifies no remaining gaps (max 3 rounds). If gaps remain after 3 rounds, note them explicitly as open items.
+Run the `$review-engine-plan` skill to send your plan through independent architectural review. Address all feedback from the reviewer, then re-review the full revised plan with fresh context. Repeat until a full review round returns no gaps. Do not accept open architectural gaps unless a true human design decision or environment blocker prevents resolution.
 
 ## Output
 

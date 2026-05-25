@@ -1,1 +1,210 @@
-{}
+{
+  "search": {
+    "title": "Cerca",
+    "subtitle": "Aggiungi carte alla lista corrente.",
+    "reset": "Reimposta",
+    "textPlaceholder": "Cerca carte...",
+    "allTypes": "Tutti i tipi",
+    "cmcMax": "CMC max:",
+    "sets": "Set",
+    "addSetPlaceholder": "Aggiungi codice set...",
+    "addSet": "Aggiungi",
+    "removeSet": "Rimuovi {{name}}",
+    "emptyHint": "Aggiungi un filtro per iniziare a sfogliare",
+    "searching": "Ricerca...",
+    "searchFailed": "Ricerca fallita",
+    "results_one": "{{count}} risultato",
+    "results_other": "{{count}} risultati",
+    "browseFormat": {
+      "all": "Tutte le carte"
+    }
+  },
+  "filters": {
+    "title": "Filtri",
+    "close": "Chiudi filtri",
+    "done": "Fatto",
+    "search": "Cerca"
+  },
+  "deck": {
+    "backToDeck": "Torna al mazzo",
+    "listView": "Vista elenco",
+    "stackView": "Vista pila"
+  },
+  "tabs": {
+    "ariaLabel": "Superficie del costruttore di mazzi",
+    "deck": "Mazzo",
+    "info": "Info"
+  },
+  "toolbar": {
+    "menu": "Menu",
+    "deckBuilder": "Costruttore di mazzi",
+    "untitledDeck": "Mazzo senza titolo",
+    "deckName": "Nome del mazzo",
+    "format": "Formato",
+    "bracket": "Bracket",
+    "saved": "Salvato ✓",
+    "clone": "Clona",
+    "cloneTitle": "Salva una copia con un nuovo nome",
+    "loadDeck": "Carica mazzo...",
+    "nameToSave": "Dai un nome al mazzo per salvarlo"
+  },
+  "unsaved": {
+    "title": "Modifiche non salvate",
+    "dismiss": "Ignora finestra",
+    "bodyLeaving": "Hai modifiche non salvate per questo mazzo. Salvarle prima di uscire?",
+    "bodyLoading": "Hai modifiche non salvate per questo mazzo. Salvarle prima di caricare un altro mazzo?",
+    "discard": "Scarta",
+    "saveAndContinue": "Salva e continua"
+  },
+  "card": {
+    "moveToSideboard": "Sposta una {{name}} nella sideboard",
+    "moveToMain": "Sposta una {{name}} nel mazzo principale",
+    "removeOne": "Rimuovi una {{name}}",
+    "makeCommander": "Rendi {{name}} il comandante",
+    "makeCommanderTitle": "Rendi questo il mio comandante",
+    "chooseArtFor": "Scegli l'illustrazione per {{name}}",
+    "alternateArtTap": "Illustrazione alternativa disponibile — tocca per scegliere",
+    "alternateArtRightClick": "Illustrazione alternativa disponibile — clic destro per scegliere",
+    "unsupportedExpand_one": "{{count}} meccanica non supportata; espandi dettagli",
+    "unsupportedExpand_other": "{{count}} meccaniche non supportate; espandi dettagli",
+    "unsupportedTitle_one": "{{count}} meccanica non supportata — clicca per espandere",
+    "unsupportedTitle_other": "{{count}} meccaniche non supportate — clicca per espandere"
+  },
+  "grid": {
+    "allFormats": "Tutti",
+    "addCard": "Aggiungi {{name}}",
+    "notLegal": "{{name}} - Non legale in {{format}}",
+    "notFormat": "Non {{format}}"
+  },
+  "deckList": {
+    "currentList": "Lista corrente",
+    "import": "Importa",
+    "importTitle": "Importa mazzo da testo (formato MTGA o .dck)",
+    "export": "Esporta",
+    "exportTitle": "Esporta mazzo",
+    "mainTab": "Principale ({{count}})",
+    "sideboardTab": "Sideboard ({{count}})",
+    "mainDeckHeading_one": "Mazzo principale ({{count}} carta)",
+    "mainDeckHeading_other": "Mazzo principale ({{count}} carte)",
+    "sideboardUnlimited": "Sideboard ({{count}})",
+    "sideboardLimited": "Sideboard ({{count}}/{{max}})",
+    "sideboardExceeds": "La sideboard supera il limite di {{max}} carte",
+    "sideboardEmptyHint": "Passa il mouse su una carta del mazzo principale e clicca → per spostarla qui.",
+    "group": {
+      "Creatures": "Creature",
+      "Spells": "Magie",
+      "Lands": "Terre"
+    },
+    "importModalTitle": "Importa mazzo",
+    "pastePlaceholder": "Incolla la lista del mazzo (formato MTGA o .dck)...",
+    "fromFile": "Da file",
+    "parse": "Analizza",
+    "exportModalTitle": "Esporta mazzo",
+    "saveToFile": "Salva su file",
+    "copied": "Copiato!",
+    "copy": "Copia"
+  },
+  "moveList": {
+    "empty": "Vuoto"
+  },
+  "stack": {
+    "deckView": "Vista mazzo",
+    "visualDeckStack": "Pila visiva del mazzo",
+    "mainBadge": "Principale {{count}}",
+    "sideboardBadge": "Sideboard {{count}}",
+    "emptyHint": "Le carte aggiunte appariranno qui come pila sfalsata.",
+    "commanderBadge": "Comandante",
+    "commanderLane": "Comandante",
+    "mainDeckLane": "Mazzo principale",
+    "noCommander": "Nessun comandante selezionato.",
+    "mainEmpty": "Le carte del mazzo principale appariranno qui.",
+    "cardCount_one": "{{count}} carta",
+    "cardCount_other": "{{count}} carte",
+    "mainSideBadge": "{{main}} principale + {{side}} side",
+    "groupCards_one": "{{count}} carta",
+    "groupCards_other": "{{count}} carte",
+    "group": {
+      "Creatures": "Creature",
+      "Spells": "Magie",
+      "Lands": "Terre"
+    },
+    "sideboardGroup": "Sideboard",
+    "addOne": "Aggiungi una {{name}}",
+    "copyLimit": "{{name}} ha raggiunto il limite di copie",
+    "removeOne": "Rimuovi una {{name}}",
+    "removeCommander": "Rimuovi {{name}} come comandante"
+  },
+  "printingPicker": {
+    "title": "Scegli illustrazione",
+    "noPrintings": "Nessuna stampa alternativa disponibile per questa carta.",
+    "filterPlaceholder": "Filtra per set o numero di collezione…",
+    "filterAriaLabel": "Filtra stampe",
+    "count_one": "{{count}} stampa",
+    "count_other": "{{count}} stampe",
+    "countMatching_one": "{{count}} stampa corrispondente a “{{query}}”",
+    "countMatching_other": "{{count}} stampe corrispondenti a “{{query}}”",
+    "useDefault": "Usa predefinita",
+    "noMatches": "Nessuna stampa corrisponde al tuo filtro.",
+    "noImage": "Nessuna immagine",
+    "showMore_one": "Mostra altre ({{count}} rimanente)",
+    "showMore_other": "Mostra altre ({{count}} rimanenti)"
+  },
+  "stats": {
+    "formatLegality": "Legalità nel formato",
+    "engineCoverage": "Copertura del motore",
+    "unsupportedTitle": "Non supportate:\n{{list}}"
+  },
+  "commanderPanel": {
+    "heading": "Comandante",
+    "noCommander": "Nessun comandante selezionato",
+    "remove": "Rimuovi",
+    "identity": "Identità:",
+    "setAsCommander": "Imposta come comandante:",
+    "cardCount": "{{count}}/{{expected}} carte",
+    "singletonViolations": "Violazioni singleton: {{cards}}",
+    "colorViolations": "Violazioni dell'identità di colore: {{cards}}"
+  },
+  "manaCurve": {
+    "title": "Curva del mana",
+    "colors": "Colori"
+  },
+  "legality": {
+    "legal": "Legale",
+    "banned": "Bandita",
+    "restricted": "Ristretta",
+    "notLegal": "Non legale"
+  },
+  "contextMenu": {
+    "chooseArt": "Scegli illustrazione…",
+    "noAlternates": "Nessuna stampa alternativa",
+    "clearOverride": "Cancella sostituzione illustrazione"
+  },
+  "bracket": {
+    "unavailable": "La stima del bracket non è disponibile in questa build.",
+    "addCommander": "Aggiungi un comandante per vedere la stima del tuo bracket.",
+    "estimated": "Stimato: B{{tier}} {{label}}",
+    "manual": "Manuale: B{{tier}} {{label}}",
+    "mismatch": " ⚠ discordanza",
+    "hideBreakdown": "Nascondi dettagli",
+    "showBreakdown": "Mostra dettagli",
+    "hideBreakdownButton": "▲ Nascondi dettagli",
+    "showBreakdownButton": "▼ Mostra dettagli",
+    "forced": "(forzato B{{tier}})",
+    "dataVersion": "Dati: {{version}}",
+    "aboutBrackets": "Informazioni sui bracket ↗",
+    "estimatedChip": "Stimato: B{{tier}}",
+    "estimatedChipFull": "Bracket stimato: B{{tier}} {{label}}"
+  },
+  "bracketPicker": {
+    "ariaLabel": "Bracket del mazzo",
+    "unrated": "Senza valutazione"
+  },
+  "warnings": {
+    "commanderCount": "Il mazzo ha {{count}} carte (ne servono esattamente {{expected}})",
+    "singleton": "{{name}}: più copie (formato singleton)",
+    "colorIdentity": "{{name}}: fuori dall'identità di colore del comandante",
+    "minimumCount": "Il mazzo ha {{count}} carte (minimo 60)",
+    "maxCopies": "{{name}}: {{count}} copie (max 4)",
+    "companionInMain": "{{name}} è il tuo compagno ma è anche nel mazzo principale — questo viola la sua condizione di costruzione del mazzo. Rimuovilo dal mazzo principale per usarlo come compagno."
+  }
+}

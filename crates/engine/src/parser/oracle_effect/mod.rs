@@ -43,7 +43,7 @@ use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, CardPlayMode,
     CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
     CombatDamageScope, Comparator, ConjureCard, ContinuousModification, ControllerRef,
     DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget, Duration, Effect,
@@ -4980,6 +4980,218 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
     def.player_scope = Some(PlayerFilter::All);
     def.sub_ability = Some(Box::new(put_counter));
     Some(def)
+}
+
+/// The two equalization verbs Balance / Restore Balance / Balancing Act use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EqualizeVerb {
+    Sacrifice,
+    Discard,
+}
+
+/// CR 107.1b: Build the "keep N, dispose the rest" effect for one Balance
+/// clause. "Each player keeps the minimum, disposes the rest" is identically
+/// "each player disposes (their own count − the minimum)". Operand order is
+/// load-bearing: `left` MUST be the per-player count and `right` MUST be the
+/// cross-player minimum. The `Difference` resolver takes `.abs()`, which masks
+/// a `left >= right` invariant — `left >= right` always holds here because the
+/// per-player count includes the minimizing player, and the §8 clause-local
+/// snapshot freezes `right` so an earlier APNAP player's sacrifices cannot
+/// shrink it below a later player's `left`. A swapped pair (or an unsnapshot
+/// minimum) would mis-clamp a positive disposal count instead of yielding 0.
+fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
+    match verb {
+        // CR 701.21a: battlefield clause — "lands they control" / "creatures
+        // they control". `filter` carries `controller: You`, rebound to the
+        // iterating player by the `player_scope` driver.
+        EqualizeVerb::Sacrifice => {
+            let left = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: filter.clone(),
+                },
+            };
+            let right = QuantityExpr::Ref {
+                qty: QuantityRef::ControlledByEachPlayer {
+                    filter: filter.clone(),
+                    aggregate: AggregateFunction::Min,
+                },
+            };
+            Effect::Sacrifice {
+                target: filter,
+                // CR 107.1b: left = per-player count, right = minimum.
+                count: QuantityExpr::Difference {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                min_count: 0,
+            }
+        }
+        // CR 701.9a: hand clause — "cards they control" in hand. No battlefield
+        // filter: `HandSize { ScopedPlayer }` is the iterating player's hand
+        // size, `HandSize { AllPlayers { Min } }` the cross-player minimum.
+        EqualizeVerb::Discard => {
+            let left = QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            };
+            let right = QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Min,
+                        exclude: None,
+                    },
+                },
+            };
+            Effect::Discard {
+                // CR 107.1b: left = per-player count, right = minimum.
+                count: QuantityExpr::Difference {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            }
+        }
+    }
+}
+
+/// Force a type-phrase filter's controller clause to "you control" so the
+/// `player_scope` driver scopes it to the iterating player. Balance's "lands
+/// they control" has the "they control" consumed by an outer `tag()`, so the
+/// inner `parse_type_phrase` sees only the bare type word.
+fn balance_filter_you_control(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            ..tf
+        }),
+        other => other,
+    }
+}
+
+/// Arm B — Balance's first sentence: "each player chooses a number of
+/// [type-phrase] they control equal to [min-quantity], then
+/// sacrifices/discards the rest". The verb branch determines the clause type;
+/// the `[type-phrase]` is consumed by the nom-typed `parse_type_phrase`.
+fn parse_balance_arm_b(input: &str) -> OracleResult<'_, (EqualizeVerb, TargetFilter)> {
+    let (input, _) = tag("each player chooses a number of ").parse(input)?;
+    let (input, filter) = super::oracle_nom::target::parse_type_phrase(input)?;
+    let (input, _) = tag(" they control equal to ").parse(input)?;
+    // CR 107.1b: the min-quantity phrase MUST parse to the equalization shape
+    // (`ControlledByEachPlayer { aggregate: Min, .. }` — "the number of [type]
+    // controlled by the player who controls the fewest"). The parsed ref is
+    // not retained because the verb branch substitutes the zone-correct
+    // minimum directly, but its STRUCTURE is load-bearing: accepting any other
+    // quantity here would mis-intercept superficially similar text (e.g.,
+    // "equal to the number of cards in their hand") and emit a Balance chain
+    // that mis-clamps disposal counts. If the inner ref doesn't match the
+    // equalization shape, fail so the parser falls through to its normal path.
+    let saved = input;
+    let (input, parsed_qty) = nom_quantity::parse_quantity_ref.parse(input)?;
+    if !matches!(
+        parsed_qty,
+        QuantityRef::ControlledByEachPlayer {
+            aggregate: AggregateFunction::Min,
+            ..
+        }
+    ) {
+        return Err(nom::Err::Error(OracleError::new(
+            saved,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    let (input, _) = tag(", then ").parse(input)?;
+    let (input, verb) = alt((
+        value(EqualizeVerb::Sacrifice, tag("sacrifices")),
+        value(EqualizeVerb::Discard, tag("discards")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" the rest").parse(input)?;
+    Ok((input, (verb, filter)))
+}
+
+/// Arm C — Balance's "the same way" continuation: "players / each player
+/// [verb]s [type-phrase] ... the same way". Subject is an `alt()`; the clause
+/// list is 1-or-2 `(verb, filter)` pairs joined by " and ". The verb wraps
+/// `opt(tag("s"))` to accept both the bare ("Players discard") and `-s`
+/// ("Each player discards") inflections. The `alt()` over the verb makes the
+/// Balance-vs-Restore-Balance clause-order reversal a non-issue.
+fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, TargetFilter)>> {
+    use nom::character::complete::space1;
+    use nom::multi::separated_list1;
+
+    let (input, _) = alt((tag("players "), tag("each player "))).parse(input)?;
+    let (input, pairs) = separated_list1(
+        tag(" and "),
+        (
+            terminated(
+                alt((
+                    value(EqualizeVerb::Discard, tag("discard")),
+                    value(EqualizeVerb::Sacrifice, tag("sacrifice")),
+                )),
+                opt(tag("s")),
+            ),
+            preceded(space1, super::oracle_nom::target::parse_type_phrase),
+        ),
+    )
+    .parse(input)?;
+    let (input, _) = tag(" the same way").parse(input)?;
+    Ok((input, pairs))
+}
+
+/// CR 107.1 + CR 608.2e: Whole-line interceptor for the Balance equalization
+/// class (Balance, Restore Balance, Balancing Act).
+///
+/// Arm B parses the first sentence and Arm C parses the "the same way"
+/// continuation. Each clause lowers to a `player_scope: All`
+/// `Effect::Sacrifice` / `Effect::Discard` with a `QuantityExpr::Difference`
+/// count; the clauses are chained via `sub_ability` as three independent steps
+/// (CR 608.2e — each clause computes its own minimum at its own resolution
+/// time, guaranteed by the §8 per-link clause-minimum snapshot).
+pub(crate) fn try_parse_balance_equalization(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_lowercase();
+
+    let parsed = nom_on_lower(text, &lower, |input| {
+        let (input, first) = parse_balance_arm_b(input)?;
+        let (input, _) = tag(". ").parse(input)?;
+        let (input, rest) = parse_balance_arm_c(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, (first, rest)))
+    });
+    let ((first, rest), _) = parsed?;
+
+    // Build the clause list: the Arm B clause followed by the Arm C clauses.
+    let mut clauses: Vec<(EqualizeVerb, TargetFilter)> = Vec::with_capacity(1 + rest.len());
+    clauses.push(first);
+    clauses.extend(rest);
+
+    // Lower each (verb, filter) into a `player_scope: All` link, chained via
+    // `sub_ability` (CR 608.2e — three independent steps).
+    let mut links: Vec<AbilityDefinition> = clauses
+        .into_iter()
+        .map(|(verb, filter)| {
+            let filter = balance_filter_you_control(filter);
+            let mut def = AbilityDefinition::new(kind, balance_clause_effect(verb, filter));
+            def.player_scope = Some(PlayerFilter::All);
+            def.sub_link = SubAbilityLink::SequentialSibling;
+            def
+        })
+        .collect();
+
+    // Fold the chain back-to-front so each link's `sub_ability` is the next.
+    let mut chain = links.pop()?;
+    while let Some(mut prev) = links.pop() {
+        prev.sub_ability = Some(Box::new(chain));
+        chain = prev;
+    }
+    Some(chain)
 }
 
 /// Parse "for each" quantity patterns on draw/life/damage/mill effects.
@@ -10726,6 +10938,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_balance_equalization(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
@@ -10741,6 +10956,9 @@ pub(crate) fn parse_effect_chain_with_context(
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
+        return def;
+    }
+    if let Some(def) = try_parse_balance_equalization(text, kind) {
         return def;
     }
     let ir = parse_effect_chain_ir(text, kind, ctx);
@@ -37480,6 +37698,170 @@ mod snapshot_tests {
                     }
                 )),
             "no ScopedPlayer ref may survive in the chain, got {tf:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Balance equalization parser arms (try_parse_balance_equalization)
+    // -----------------------------------------------------------------------
+
+    /// Assert a `Difference { ObjectCount(Land, You), ControlledByEachPlayer }`
+    /// sacrifice link with `player_scope: All`.
+    fn assert_land_sacrifice_clause(def: &AbilityDefinition) {
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        let Effect::Sacrifice { target, count, .. } = &*def.effect else {
+            panic!("expected Effect::Sacrifice, got {:?}", def.effect);
+        };
+        assert!(
+            matches!(
+                target,
+                TargetFilter::Typed(tf)
+                    if tf.controller == Some(ControllerRef::You)
+                    && tf.type_filters == vec![TypeFilter::Land]
+            ),
+            "sacrifice target must be lands you control, got {target:?}"
+        );
+        let QuantityExpr::Difference { left, right } = count else {
+            panic!("sacrifice count must be a Difference, got {count:?}");
+        };
+        assert!(matches!(
+            &**left,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+        assert!(matches!(
+            &**right,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ControlledByEachPlayer {
+                    aggregate: AggregateFunction::Min,
+                    ..
+                }
+            }
+        ));
+    }
+
+    /// Assert a `Difference { HandSize(ScopedPlayer), HandSize(AllPlayers Min) }`
+    /// discard link with `player_scope: All`.
+    fn assert_hand_discard_clause(def: &AbilityDefinition) {
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        let Effect::Discard { target, count, .. } = &*def.effect else {
+            panic!("expected Effect::Discard, got {:?}", def.effect);
+        };
+        assert_eq!(*target, TargetFilter::Controller);
+        let QuantityExpr::Difference { left, right } = count else {
+            panic!("discard count must be a Difference, got {count:?}");
+        };
+        assert!(matches!(
+            &**left,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer
+                }
+            }
+        ));
+        assert!(matches!(
+            &**right,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Min,
+                        ..
+                    }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn balance_parses_to_three_link_equalization_chain() {
+        // Arm B (sacrifice lands) + Arm C (discard cards, sacrifice creatures).
+        let def = parse_effect_chain(
+            "Each player chooses a number of lands they control equal to the number of lands controlled by the player who controls the fewest, then sacrifices the rest. Players discard cards and sacrifice creatures the same way.",
+            AbilityKind::Spell,
+        );
+        // Link 1: sacrifice lands.
+        assert_land_sacrifice_clause(&def);
+        // Link 2: discard cards.
+        let link2 = def.sub_ability.as_ref().expect("expected discard clause");
+        assert_hand_discard_clause(link2);
+        // Link 3: sacrifice creatures.
+        let link3 = link2
+            .sub_ability
+            .as_ref()
+            .expect("expected creature sacrifice clause");
+        assert_eq!(link3.player_scope, Some(PlayerFilter::All));
+        let Effect::Sacrifice { target, .. } = &*link3.effect else {
+            panic!("link 3 must be Effect::Sacrifice, got {:?}", link3.effect);
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::You)
+                && tf.type_filters == vec![TypeFilter::Creature]
+        ));
+        // The chain ends after three links.
+        assert!(link3.sub_ability.is_none(), "chain must be exactly 3 links");
+    }
+
+    #[test]
+    fn restore_balance_reversed_clause_order_parses() {
+        // Restore Balance reverses the "the same way" clause order
+        // (sacrifice creatures before discard cards) — the `alt()` over the
+        // verb handles it for free.
+        let def = parse_effect_chain(
+            "Each player chooses a number of lands they control equal to the number of lands controlled by the player who controls the fewest, then sacrifices the rest. Players sacrifice creatures and discard cards the same way.",
+            AbilityKind::Spell,
+        );
+        assert_land_sacrifice_clause(&def);
+        let link2 = def.sub_ability.as_ref().expect("expected clause 2");
+        // Reversed: clause 2 is the creature sacrifice.
+        assert!(matches!(&*link2.effect, Effect::Sacrifice { .. }));
+        let link3 = link2.sub_ability.as_ref().expect("expected clause 3");
+        assert_hand_discard_clause(link3);
+        assert!(link3.sub_ability.is_none());
+    }
+
+    #[test]
+    fn balancing_act_single_continuation_clause_parses() {
+        // Balancing Act: "Each player" subject + a single "the same way" clause.
+        let def = parse_effect_chain(
+            "Each player chooses a number of permanents they control equal to the number of permanents controlled by the player who controls the fewest, then sacrifices the rest. Each player discards cards the same way.",
+            AbilityKind::Spell,
+        );
+        // Link 1: sacrifice permanents.
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(&*def.effect, Effect::Sacrifice { .. }));
+        // Link 2: the single discard continuation.
+        let link2 = def.sub_ability.as_ref().expect("expected discard clause");
+        assert_hand_discard_clause(link2);
+        assert!(link2.sub_ability.is_none(), "chain must be exactly 2 links");
+    }
+
+    #[test]
+    fn non_balance_text_is_not_intercepted() {
+        // The interceptor must not fire on unrelated "each player" text.
+        assert!(
+            try_parse_balance_equalization("Each player draws a card.", AbilityKind::Spell)
+                .is_none(),
+            "interceptor must only match the Balance equalization shape"
+        );
+    }
+
+    #[test]
+    fn balance_arm_b_rejects_non_equalization_quantity() {
+        // CR 107.1b: Arm B must REQUIRE the equalization-shape quantity
+        // (`ControlledByEachPlayer { aggregate: Min, .. }`) — a superficially
+        // similar phrase whose inner quantity is unrelated (here: a hand-size
+        // ref) must NOT be intercepted. Confirms Arm B verifies the structure
+        // rather than discarding the parsed ref.
+        assert!(
+            try_parse_balance_equalization(
+                "Each player chooses a number of lands they control equal to the number of cards in their hand, then sacrifices the rest. Players discard cards and sacrifice creatures the same way.",
+                AbilityKind::Spell,
+            )
+            .is_none(),
+            "interceptor must reject inputs whose inner quantity is not the equalization shape"
         );
     }
 }

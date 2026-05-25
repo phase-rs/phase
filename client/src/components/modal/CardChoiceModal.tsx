@@ -1,14 +1,23 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
+import { motion, Reorder } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import { CardImage } from "../card/CardImage.tsx";
-import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
-import type { GameObject, ManaCost, ManaType, ObjectId, TargetFilter, WaitingFor } from "../../adapter/types.ts";
+import type {
+  GameObject,
+  ManaCost,
+  ManaType,
+  ObjectId,
+  OutsideGameChoiceEntry,
+  OutsideGameSelection,
+  TargetFilter,
+  WaitingFor,
+} from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
@@ -62,21 +71,6 @@ type SaddleMount = Extract<WaitingFor, { type: "SaddleMount" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type ChooseRingBearer = Extract<WaitingFor, { type: "ChooseRingBearer" }>;
 const CHOICE_CARD_IMAGE_CLASS = "";
-const SCRY_CARD_IMAGE_CLASS = "";
-
-function objectImageProps(obj: GameObject) {
-  const { name, faceIndex, oracleId, faceName } = cardImageLookup(obj);
-  const isToken = obj.display_source === "Token";
-  return {
-    cardName: name,
-    faceIndex,
-    oracleId,
-    faceName,
-    isToken,
-    tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: isToken ? obj.token_image_ref : undefined,
-  };
-}
 
 function CostActionFooter({
   onCancel,
@@ -319,6 +313,9 @@ export function CardChoiceModal() {
       return <DistributeAmongModal data={waitingFor.data} />;
     case "RetargetChoice":
       if (!canActForWaitingState) return null;
+      // CR 115.7: Single-target retargets are picked directly on the board via
+      // TargetingOverlay; only multi-target (`All`-scope) retargets need the dialog.
+      if (waitingFor.data.scope.type === "Single") return null;
       return <RetargetChoiceModal data={waitingFor.data} />;
     case "ProliferateChoice":
       if (!canActForWaitingState) return null;
@@ -416,16 +413,41 @@ function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
 
 // ── Scry Modal ──────────────────────────────────────────────────────────────
 
-function ScryModal({ data }: { data: ScryChoice["data"] }) {
-  const { t } = useTranslation("game");
+// ── Reorderable Top Choice (shared by Scry + Surveil) ────────────────────────
+//
+// Scry (CR 701.22a) and Surveil (CR 701.25a) are the same operation: look at the
+// top N cards, keep any number on top "in any order", and send the rest to a
+// "rest" zone (bottom of library for scry, graveyard for surveil). This shared
+// modal lets the player both choose which cards stay on top and drag them into
+// the desired draw order. The submitted `SelectCards` payload is the ordered
+// keep-on-top set — the engine routes every unlisted card to the rest zone.
+function ReorderableTopChoice({
+  cards,
+  title,
+  subtitle,
+  keepLabel,
+  restLabel,
+  reorderHint,
+  keepTone,
+}: {
+  cards: ObjectId[];
+  title: string;
+  subtitle: string;
+  keepLabel: string;
+  restLabel: string;
+  reorderHint: string;
+  keepTone: "emerald" | "blue";
+}) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
-  // Track which cards go to bottom (default: all on top)
-  const [bottomSet, setBottomSet] = useState<Set<ObjectId>>(new Set());
+  // Full left-to-right order; also the top-to-bottom order of the kept cards.
+  const [order, setOrder] = useState<ObjectId[]>(cards);
+  // Cards moved off the top (to bottom of library / graveyard).
+  const [restSet, setRestSet] = useState<Set<ObjectId>>(new Set());
 
-  const toggleBottom = useCallback((id: ObjectId) => {
-    setBottomSet((prev) => {
+  const toggleRest = useCallback((id: ObjectId) => {
+    setRestSet((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
         next.delete(id);
@@ -437,71 +459,108 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
   }, []);
 
   const handleConfirm = useCallback(() => {
-    // Send cards that stay on top (not in bottomSet)
-    const topCards = data.cards.filter((id) => !bottomSet.has(id));
-    dispatch({ type: "SelectCards", data: { cards: topCards } });
-  }, [dispatch, data.cards, bottomSet]);
+    // Kept cards, in drag order, are sent as the keep-on-top set.
+    const keep = order.filter((id) => !restSet.has(id));
+    dispatch({ type: "SelectCards", data: { cards: keep } });
+  }, [dispatch, order, restSet]);
 
   if (!objects) return null;
 
   const overlayWidthClassName =
-    data.cards.length <= 1
+    cards.length <= 1
       ? "max-w-[22rem] sm:max-w-[26rem] lg:max-w-[30rem]"
-      : data.cards.length === 2
+      : cards.length === 2
         ? "max-w-[30rem] sm:max-w-[38rem] lg:max-w-[46rem]"
         : "max-w-[38rem] sm:max-w-[48rem] lg:max-w-[58rem]";
 
+  const keepRing =
+    keepTone === "emerald"
+      ? "ring-emerald-400/70 hover:shadow-[0_0_16px_rgba(100,220,150,0.3)]"
+      : "ring-blue-400/70 hover:shadow-[0_0_16px_rgba(100,150,255,0.3)]";
+  const keepBtn = keepTone === "emerald" ? "bg-emerald-500/80" : "bg-blue-500/80";
+  const keepBadge = keepTone === "emerald" ? "bg-emerald-500/90" : "bg-blue-500/90";
+
+  // 1-based draw position among the kept cards (top of library = 1).
+  const keepOrder = order.filter((id) => !restSet.has(id));
+
   return (
     <ChoiceOverlay
-      title={t("cardChoice.scry.title")}
-      subtitle={t("cardChoice.scry.subtitle", { count: data.cards.length })}
+      title={title}
+      subtitle={subtitle}
       maxWidthClassName={overlayWidthClassName}
       footer={<ConfirmButton onClick={handleConfirm} />}
     >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
+      <Reorder.Group
+        as="div"
+        axis="x"
+        values={order}
+        onReorder={setOrder}
+        className="mx-auto flex min-h-0 flex-1 items-center justify-center gap-2 overflow-x-auto px-1 py-2 lg:gap-3"
+      >
+        {order.map((id) => {
           const obj = objects[id];
           if (!obj) return null;
-          const isBottom = bottomSet.has(id);
+          const isRest = restSet.has(id);
+          const position = keepOrder.indexOf(id) + 1;
           return (
-            <motion.div
+            <Reorder.Item
               key={id}
-              className="relative flex flex-col items-center gap-2"
-              initial={{ opacity: 0, y: 40, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              as="div"
+              value={id}
+              className="relative flex shrink-0 cursor-grab flex-col items-center gap-2 active:cursor-grabbing"
+              whileDrag={{ scale: 1.05, zIndex: 20 }}
             >
-              <motion.div
-                className={`cursor-pointer rounded-lg transition ${
-                  isBottom
-                    ? "opacity-50 ring-2 ring-red-400/70"
-                    : "ring-2 ring-emerald-400/70 hover:shadow-[0_0_16px_rgba(100,220,150,0.3)]"
+              <div
+                className={`relative rounded-lg ring-2 transition ${
+                  isRest ? "opacity-50 ring-red-400/70" : keepRing
                 }`}
-                whileHover={{ scale: 1.05, y: -6 }}
-                onClick={() => toggleBottom(id)}
                 {...hoverProps(id)}
               >
                 <CardImage
                   {...objectImageProps(obj)}
                   size="normal"
-                  className={SCRY_CARD_IMAGE_CLASS}
+                  className={CHOICE_CARD_IMAGE_CLASS}
                 />
-              </motion.div>
+                {!isRest && (
+                  <div
+                    className={`pointer-events-none absolute left-1 top-1 flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold text-white ${keepBadge}`}
+                  >
+                    {position}
+                  </div>
+                )}
+              </div>
               <button
-                onClick={() => toggleBottom(id)}
-                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
-                  isBottom
-                    ? "bg-red-500/80 text-white"
-                    : "bg-emerald-500/80 text-white"
+                onClick={() => toggleRest(id)}
+                className={`rounded-full px-3 py-1 text-xs font-bold text-white transition ${
+                  isRest ? "bg-red-500/80" : keepBtn
                 }`}
               >
-                {isBottom ? t("cardChoice.badges.bottom") : t("cardChoice.badges.top")}
+                {isRest ? restLabel : keepLabel}
               </button>
-            </motion.div>
+            </Reorder.Item>
           );
         })}
-      </ScrollableCardStrip>
+      </Reorder.Group>
+      <p className="mt-1 shrink-0 text-center text-xs text-slate-400">{reorderHint}</p>
     </ChoiceOverlay>
+  );
+}
+
+function ScryModal({ data }: { data: ScryChoice["data"] }) {
+  const { t } = useTranslation("game");
+  return (
+    <ReorderableTopChoice
+      // Remount on a new card set so drag order / toggles reset between
+      // back-to-back scry choices (matches Dig/Search reset-on-data pattern).
+      key={data.cards.join("-")}
+      cards={data.cards}
+      title={t("cardChoice.scry.title")}
+      subtitle={t("cardChoice.scry.subtitle", { count: data.cards.length })}
+      keepLabel={t("cardChoice.badges.top")}
+      restLabel={t("cardChoice.badges.bottom")}
+      reorderHint={t("cardChoice.reorderHint")}
+      keepTone="emerald"
+    />
   );
 }
 
@@ -633,83 +692,19 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
 
 function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
   const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  // Track which cards go to graveyard (default: all stay on top)
-  const [graveyardSet, setGraveyardSet] = useState<Set<ObjectId>>(new Set());
-
-  const toggleGraveyard = useCallback((id: ObjectId) => {
-    setGraveyardSet((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  const handleConfirm = useCallback(() => {
-    dispatch({
-      type: "SelectCards",
-      data: { cards: Array.from(graveyardSet) },
-    });
-  }, [dispatch, graveyardSet]);
-
-  if (!objects) return null;
-
   return (
-    <ChoiceOverlay
+    <ReorderableTopChoice
+      // Remount on a new card set so drag order / toggles reset between
+      // back-to-back surveil choices (matches Dig/Search reset-on-data pattern).
+      key={data.cards.join("-")}
+      cards={data.cards}
       title={t("cardChoice.surveil.title")}
       subtitle={t("cardChoice.surveil.subtitle", { count: data.cards.length })}
-      footer={<ConfirmButton onClick={handleConfirm} />}
-    >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const toGraveyard = graveyardSet.has(id);
-          return (
-            <motion.div
-              key={id}
-              className="relative flex flex-col items-center gap-2"
-              initial={{ opacity: 0, y: 40, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-            >
-              <motion.div
-                className={`cursor-pointer rounded-lg transition ${
-                  toGraveyard
-                    ? "opacity-50 ring-2 ring-red-400/70"
-                    : "ring-2 ring-blue-400/70 hover:shadow-[0_0_16px_rgba(100,150,255,0.3)]"
-                }`}
-                whileHover={{ scale: 1.05, y: -6 }}
-                onClick={() => toggleGraveyard(id)}
-                {...hoverProps(id)}
-              >
-                <CardImage
-                  {...objectImageProps(obj)}
-                  size="normal"
-                  className={CHOICE_CARD_IMAGE_CLASS}
-                />
-              </motion.div>
-              <button
-                onClick={() => toggleGraveyard(id)}
-                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
-                  toGraveyard
-                    ? "bg-red-500/80 text-white"
-                    : "bg-blue-500/80 text-white"
-                }`}
-              >
-                {toGraveyard ? t("cardChoice.badges.graveyard") : t("cardChoice.badges.keep")}
-              </button>
-            </motion.div>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
+      keepLabel={t("cardChoice.badges.keep")}
+      restLabel={t("cardChoice.badges.graveyard")}
+      reorderHint={t("cardChoice.reorderHint")}
+      keepTone="blue"
+    />
   );
 }
 
@@ -969,35 +964,79 @@ function SearchPartitionModal({ data }: { data: SearchPartitionChoice["data"] })
   );
 }
 
+/**
+ * Stable string key for an `OutsideGameChoiceEntry`. Sideboard and face-up
+ * exile entries share the modal's selection state, so their identities must
+ * not collide as raw numbers — namespacing by source variant keeps the two
+ * pools disjoint.
+ */
+function entryKey(entry: OutsideGameChoiceEntry): string {
+  switch (entry.source.type) {
+    case "Sideboard":
+      return `sb:${entry.source.data.sideboard_index}`;
+    case "FaceUpExile":
+      return `fx:${entry.source.data.object_id}`;
+  }
+}
+
+/**
+ * Lower an `OutsideGameChoiceEntry` to the wire-format `OutsideGameSelection`
+ * the engine consumes. Sideboard entries strip the embedded `CardFace`; exile
+ * entries pass through their `object_id` unchanged.
+ */
+function entryToSelection(entry: OutsideGameChoiceEntry): OutsideGameSelection {
+  switch (entry.source.type) {
+    case "Sideboard":
+      return {
+        type: "Sideboard",
+        data: { sideboard_index: entry.source.data.sideboard_index },
+      };
+    case "FaceUpExile":
+      return {
+        type: "FaceUpExile",
+        data: { object_id: entry.source.data.object_id },
+      };
+  }
+}
+
 function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const [selectedCounts, setSelectedCounts] = useState<Map<number, number>>(new Map());
-  const availableCounts = useMemo(
-    () => new Map(data.choices.map((choice) => [choice.sideboard_index, choice.entry.count])),
-    [data.choices],
-  );
-  const selectedIndices = useMemo(
+  // Map keyed by `entryKey(entry)` → number of copies the user has selected.
+  const [selectedCounts, setSelectedCounts] = useState<Map<string, number>>(new Map());
+
+  const entriesByKey = useMemo(() => {
+    const map = new Map<string, OutsideGameChoiceEntry>();
+    for (const entry of data.choices) {
+      map.set(entryKey(entry), entry);
+    }
+    return map;
+  }, [data.choices]);
+
+  const selections: OutsideGameSelection[] = useMemo(
     () =>
-      Array.from(selectedCounts.entries()).flatMap(([sideboardIndex, count]) => {
-        const availableCount = availableCounts.get(sideboardIndex) ?? 0;
-        return Array.from({ length: Math.min(count, availableCount) }, () => sideboardIndex);
+      Array.from(selectedCounts.entries()).flatMap(([key, count]) => {
+        const entry = entriesByKey.get(key);
+        if (!entry) return [];
+        const clamped = Math.min(count, entry.count);
+        return Array.from({ length: clamped }, () => entryToSelection(entry));
       }),
-    [availableCounts, selectedCounts],
+    [entriesByKey, selectedCounts],
   );
+
   const minCount = data.up_to ? 0 : data.count;
-  const countValid = selectedIndices.length >= minCount && selectedIndices.length <= data.count;
+  const countValid = selections.length >= minCount && selections.length <= data.count;
 
   const toggleSelect = useCallback(
-    (sideboardIndex: number, maxCopies: number) => {
+    (key: string, maxCopies: number) => {
       setSelectedCounts((prev) => {
         const next = new Map(prev);
-        const current = next.get(sideboardIndex) ?? 0;
+        const current = next.get(key) ?? 0;
         const selectedTotal = Array.from(prev.values()).reduce((sum, count) => sum + count, 0);
         if (current > 0 && (current >= maxCopies || selectedTotal >= data.count)) {
-          next.delete(sideboardIndex);
+          next.delete(key);
         } else if (selectedTotal < data.count) {
-          next.set(sideboardIndex, current + 1);
+          next.set(key, current + 1);
         }
         return next;
       });
@@ -1009,38 +1048,47 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
     if (countValid) {
       dispatch({
         type: "ChooseOutsideGameCards",
-        data: { sideboard_indices: selectedIndices },
+        data: { selections },
       });
     }
-  }, [countValid, dispatch, selectedIndices]);
+  }, [countValid, dispatch, selections]);
 
   return (
     <ChoiceOverlay
       title={t("cardChoice.outsideGame.title")}
-      subtitle={data.up_to ? t("cardChoice.outsideGame.subtitleUpTo", { count: data.count }) : t("cardChoice.outsideGame.subtitleExact", { count: data.count })}
+      subtitle={
+        data.up_to
+          ? t("cardChoice.outsideGame.subtitleUpTo", { count: data.count })
+          : t("cardChoice.outsideGame.subtitleExact", { count: data.count })
+      }
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
       <div className="flex max-h-[60vh] min-w-[280px] flex-col gap-2 overflow-y-auto p-1">
-        {data.choices.map((choice) => {
-          const selectedCount = Math.min(
-            selectedCounts.get(choice.sideboard_index) ?? 0,
-            choice.entry.count,
-          );
+        {data.choices.map((entry) => {
+          const key = entryKey(entry);
+          const selectedCount = Math.min(selectedCounts.get(key) ?? 0, entry.count);
           const isSelected = selectedCount > 0;
+          const sourceLabel =
+            entry.source.type === "FaceUpExile" ? "From exile" : "From sideboard";
           return (
             <button
-              key={choice.sideboard_index}
+              key={key}
               type="button"
               className={`flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm transition ${
                 isSelected
                   ? "border-emerald-400 bg-emerald-500/20 text-white"
                   : "border-white/15 bg-black/30 text-zinc-100 hover:bg-white/10"
               }`}
-              onClick={() => toggleSelect(choice.sideboard_index, choice.entry.count)}
+              onClick={() => toggleSelect(key, entry.count)}
             >
-              <span>{choice.entry.card.name}</span>
+              <span className="flex flex-col">
+                <span>{entry.name}</span>
+                <span className="text-[10px] uppercase tracking-wide text-zinc-400">
+                  {sourceLabel}
+                </span>
+              </span>
               <span className="text-xs text-zinc-400">
-                {isSelected ? `${selectedCount}/` : ""}x{choice.entry.count}
+                {isSelected ? `${selectedCount}/` : ""}x{entry.count}
               </span>
             </button>
           );
@@ -1051,10 +1099,8 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
 }
 
 function outsideGameChoiceKey(data: OutsideGameChoice["data"]) {
-  const choicesKey = data.choices
-    .map((choice) => `${choice.sideboard_index}:${choice.entry.count}`)
-    .join(",");
-  return `${data.player}:${data.count}:${data.up_to ?? false}:${data.destination}:${choicesKey}`;
+  const choicesKey = data.choices.map((entry) => `${entryKey(entry)}:${entry.count}`).join(",");
+  return `${data.player}:${data.source_id}:${data.count}:${data.up_to ?? false}:${data.destination}:${choicesKey}`;
 }
 
 // ── Choose From Zone Modal ───────────────────────────────────────────────────

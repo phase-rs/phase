@@ -57,6 +57,7 @@ fn ninja_pump_static() -> StaticDefinition {
             ContinuousModification::AddToughness { value: 1 },
         ],
         condition: None,
+        per_player_condition: None,
         affected_zone: None,
         effect_zone: None,
         active_zones: vec![],
@@ -495,24 +496,19 @@ fn kaito_not_animated_without_loyalty_counters() {
 fn kaito_surveil_and_draw() {
     let (mut runner, kaito_id) = setup_kaito_on_battlefield(Phase::PostCombatMain);
 
-    // Add cards to P0's library for draw/surveil
+    // Add cards to P0's library for draw/surveil. `create_object` already adds
+    // the object to the owner's library zone — a manual `push_back` here would
+    // double-add each card, malforming the library with duplicate ObjectIds.
     for i in 0..5u32 {
         let state = runner.state_mut();
         let card_id = CardId(state.next_object_id);
-        let id = zones::create_object(
+        zones::create_object(
             state,
             card_id,
             P0,
             format!("Library Card {}", i),
             Zone::Library,
         );
-        state
-            .players
-            .iter_mut()
-            .find(|p| p.id == P0)
-            .unwrap()
-            .library
-            .push_back(id);
     }
 
     // Mark opponent (P1) as having lost life this turn
@@ -547,9 +543,11 @@ fn kaito_surveil_and_draw() {
     // Resolve the ability fully
     for _ in 0..30 {
         match &runner.state().waiting_for {
-            WaitingFor::SurveilChoice { .. } => {
-                // Put all cards on top (select none to go to bottom)
-                let _ = runner.act(GameAction::SelectCards { cards: vec![] });
+            WaitingFor::SurveilChoice { cards, .. } => {
+                // CR 701.25a: the payload is the keep-on-top set — pass every
+                // looked-at card to keep them all on top (none milled).
+                let keep = cards.clone();
+                let _ = runner.act(GameAction::SelectCards { cards: keep });
             }
             WaitingFor::Priority { .. } => {
                 let _ = runner.act(GameAction::PassPriority);

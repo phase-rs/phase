@@ -18,7 +18,7 @@ import {
   type DraftPeerSession,
 } from "../network/draftPeerSession";
 import { DRAFT_PROTOCOL_VERSION } from "../network/draftProtocol";
-import type { DraftP2PMessage } from "../network/draftProtocol";
+import type { DraftMatchLaunch, DraftP2PMessage } from "../network/draftProtocol";
 import {
   saveDraftGuestSession,
   clearDraftGuestSession,
@@ -37,7 +37,7 @@ export type DraftGuestEvent =
   | { type: "pairing"; round: number; table: number; opponentName: string; matchHostPeerId: string; matchId: string }
   | { type: "matchResult"; matchId: string; winnerSeat: number | null }
   | { type: "timerSync"; remainingMs: number }
-  | { type: "matchStart"; matchId: string; round: number; opponentSeat: number; opponentName: string; matchHostPeerId: string; isMatchHost: boolean }
+  | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
   | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
@@ -266,12 +266,7 @@ export class P2PDraftGuest {
       case "draft_match_start": {
         this.emit({
           type: "matchStart",
-          matchId: msg.matchId,
-          round: msg.round,
-          opponentSeat: msg.opponentSeat,
-          opponentName: msg.opponentName,
-          matchHostPeerId: msg.matchHostPeerId,
-          isMatchHost: msg.isMatchHost,
+          launch: msg.launch,
         });
         break;
       }

@@ -1,1 +1,202 @@
-{}
+{
+  "actions": {
+    "cancel": "Annulla",
+    "save": "Salva",
+    "close": "Chiudi",
+    "closeNamed": "Chiudi {{name}}"
+  },
+  "modal": {
+    "defaultEyebrow": "Strumento dello spazio di lavoro"
+  },
+  "pausedBanner": {
+    "message": "Partita in pausa — {{reason}}"
+  },
+  "fullscreen": {
+    "enter": "Attiva schermo intero",
+    "exit": "Esci da schermo intero"
+  },
+  "buildBadge": {
+    "downloading": "download in corso… {{progress}}%",
+    "checking": "controllo…",
+    "updating": "aggiornamento…",
+    "updatePending": "aggiornamento in attesa al termine della partita",
+    "cards": "carte {{age}} ({{commit}})",
+    "cardDataTitle": "Dati carte generati il {{date}} da {{commit}}",
+    "checkForUpdates": "Controlla aggiornamenti",
+    "updaterDebugInfo": "Info di debug dell'aggiornatore",
+    "updaterIssue": "Problema dell'aggiornatore: {{error}}",
+    "updateIssue": "problema di aggiornamento",
+    "updated": "aggiornato"
+  },
+  "gameMenu": {
+    "menu": "Menu di gioco",
+    "sandboxTools": "Strumenti Sandbox",
+    "sandboxToolsTitle": "Strumenti Sandbox — imposta qualsiasi stato del campo (`)",
+    "resume": "Riprendi",
+    "settings": "Impostazioni",
+    "helpShortcuts": "Aiuto e scorciatoie",
+    "showAiHand": "Mostra mano IA",
+    "hideAiHand": "Nascondi mano IA",
+    "concede": "Concedi",
+    "backToDraft": "Torna al Draft",
+    "mainMenu": "Menu principale",
+    "cards": "carte {{commit}}",
+    "cardDataTitle": "Dati carte: {{date}}"
+  },
+  "volume": {
+    "mute": "Disattiva audio",
+    "unmute": "Riattiva audio",
+    "volume": "Volume"
+  },
+  "hostControl": {
+    "seatHost": "Host",
+    "seatPlayer": "Giocatore",
+    "seatOpen": "Libero",
+    "seatAi": "IA ({{difficulty}})",
+    "waiting": "In attesa…",
+    "seatLabel": "Posto {{id}}",
+    "addAi": "Aggiungi IA",
+    "remove": "Rimuovi",
+    "human": "Umano",
+    "kick": "Espelli",
+    "replaceAi": "Sostituisci con IA",
+    "random": "Casuale",
+    "connecting": "Connessione…",
+    "cancelHosting": "Annulla hosting",
+    "kickConfirm": "Espellere {{name}} dalla stanza?",
+    "replaceConfirm": "Sostituire {{name}} con un'IA? Questo lo rimuove dalla stanza.",
+    "fallbackPlayerName": "Giocatore {{number}}",
+    "seatsOccupied": "{{occupied}}/{{total}} posti occupati",
+    "startGame": "Avvia partita",
+    "startNow": "Avvia ora",
+    "fillWithAi": "Riempi con IA"
+  },
+  "grantDebug": {
+    "heading": "Sandbox: permessi di debug",
+    "description": "Concedi ad altri giocatori la possibilità di inviare azioni di debug. Le loro azioni vengono registrate pubblicamente.",
+    "playerLabel": "Giocatore {{number}}",
+    "revoke": "REVOCA",
+    "grant": "CONCEDI"
+  },
+  "help": {
+    "eyebrow": "Aiuto",
+    "title": "Aiuto e scorciatoie",
+    "subtitle": "Il flusso di Magic digitale per giocatori cartacei: stop, priorità, passaggi e strumenti di ripristino.",
+    "closeHelp": "Chiudi aiuto",
+    "searchPlaceholder": "Cerca aiuto o scorciatoie",
+    "whatCanIDo": "Cosa posso fare adesso?",
+    "recoveryTitle": "Strumenti di ripristino",
+    "recoveryDescription": "Se una carta non funziona correttamente, esporta prima lo stato. Il pannello di debug avanzato è disponibile quando devi ispezionare o regolare la partita.",
+    "copyState": "Copia stato",
+    "exportState": "Esporta stato",
+    "openAdvancedDebug": "Apri debug avanzato",
+    "sections": {
+      "Flow": "Flusso",
+      "Shortcuts": "Scorciatoie",
+      "Recovery": "Ripristino"
+    },
+    "status": {
+      "copied": "Stato della partita copiato negli appunti.",
+      "copyFailed": "Impossibile copiare lo stato della partita.",
+      "exported": "Esportato {{filename}}.",
+      "exportFailed": "Impossibile esportare lo stato della partita."
+    },
+    "prompt": {
+      "starting": "La partita sta iniziando o ripristinando lo stato.",
+      "gameOver": "La partita è terminata.",
+      "mulliganDecide": "Scegli se tenere questa mano iniziale o fare un mulligan.",
+      "mulliganWaitDecide": "In attesa che un altro giocatore decida la sua mano iniziale.",
+      "mulliganBottom": "Scegli le carte da mettere in fondo dopo aver tenuto una mano dopo il mulligan.",
+      "mulliganWaitBottom": "In attesa che un altro giocatore completi il suo mulligan.",
+      "openingHandBottom": "Scegli una carta da mettere in fondo prima che inizino i mulligan normali.",
+      "openingHandWait": "In attesa che un altro giocatore risolva la sua mano iniziale.",
+      "waitOther": "In attesa che un altro giocatore agisca.",
+      "priorityStack": "Hai la priorità con qualcosa in pila. Risolvi passa la priorità così l'oggetto in cima può risolversi.",
+      "priorityAutoPass": "Hai la priorità. Il client può passare automaticamente le finestre tranquille a meno che non sia attivo uno stop o il Controllo totale.",
+      "priorityActions": "Hai la priorità. Puoi usare le carte disponibili o passare per far procedere il turno.",
+      "priorityPass": "Hai la priorità. Passare continua al passo o giocatore successivo.",
+      "manaPayment": "Paga il mana per la magia o abilità in sospeso. Premi T per TAPpare le terre disponibili.",
+      "targetSelection": "Scegli il bersaglio legale evidenziato o annulla se il prompt lo consente.",
+      "declareAttackers": "Scegli gli attaccanti, poi conferma gli attaccanti. Puoi anche attaccare con nessuno.",
+      "declareBlockers": "Scegli i bloccanti e assegnali agli attaccanti, poi conferma i bloccanti.",
+      "chooseXValue": "Scegli un valore per X prima di continuare con la magia o abilità.",
+      "payAmountChoice": "Scegli quanto della risorsa richiesta pagare.",
+      "default": "La partita è in attesa della tua scelta. Segui il prompt attivo per continuare."
+    },
+    "entries": {
+      "automaticPhaseSkips": {
+        "title": "Salti di fase automatici",
+        "body": "I salti di fase sono automatici. Usa gli stop o il Controllo totale quando vuoi finestre di priorità in stile cartaceo."
+      },
+      "phaseStops": {
+        "title": "Stop di fase",
+        "body": "Uno stop mette in pausa prima di quel passo, simile a dire che puoi agire prima del combattimento, prima della pesca o prima del passo finale nel cartaceo."
+      },
+      "fullControl": {
+        "title": "Controllo totale",
+        "body": "Il Controllo totale impedisce che le finestre di priorità vengano saltate, inclusi i punti in cui il client digitale normalmente farebbe procedere la partita."
+      },
+      "resolve": {
+        "title": "Risolvi",
+        "body": "Risolvi significa che passi la priorità così la magia o abilità in cima alla pila può risolversi se anche tutti gli altri passano."
+      },
+      "passToEnd": {
+        "title": "Passa fino alla fine",
+        "body": "Passa fino alla fine continua a passare la priorità per il turno a meno che una scelta, uno stop o il Controllo totale non interrompa."
+      },
+      "manaPayment": {
+        "title": "Pagamento del mana",
+        "body": "Durante il pagamento del mana, puoi TAPpare le terre manualmente o premere T per TAPpare le terre disponibili."
+      },
+      "combatDeclarations": {
+        "title": "Dichiarazioni di combattimento",
+        "body": "La partita chiede attaccanti e bloccanti solo durante i passi di dichiarazione. Scegli le creature, poi conferma la dichiarazione."
+      },
+      "openHelp": {
+        "title": "Apri Aiuto",
+        "body": "Apri questa scheda di aiuto."
+      },
+      "passPriority": {
+        "title": "Passa la priorità",
+        "body": "Passa la priorità o avanza attraverso il prompt di priorità corrente."
+      },
+      "undo": {
+        "title": "Annulla",
+        "body": "Annulla l'ultima azione locale che non ha rivelato informazioni nascoste."
+      },
+      "cancel": {
+        "title": "Annulla",
+        "body": "Annulla la selezione corrente, il pagamento del mana, la selezione del bersaglio o il passaggio automatico quando disponibile."
+      },
+      "advancedDebugPanel": {
+        "title": "Pannello di debug avanzato",
+        "body": "Apri il pannello di debug avanzato. La maggior parte dei giocatori dovrebbe iniziare prima con gli Strumenti di ripristino."
+      },
+      "reportOrExportState": {
+        "title": "Segnala o esporta stato",
+        "body": "Se una carta non funziona correttamente, esporta lo stato corrente della partita così la posizione esatta del campo può essere riprodotta."
+      },
+      "boardRightClickMenu": {
+        "title": "Menu del campo con tasto destro",
+        "body": "Su desktop, fai clic destro su uno spazio vuoto del campo per il registro di gioco, gli strumenti di ripristino/debug e le impostazioni dello sfondo."
+      }
+    },
+    "flowNudge": {
+      "message": "I salti di fase sono automatici. Usa gli stop o il Controllo totale quando vuoi finestre di priorità in stile cartaceo.",
+      "dismiss": "Ignora",
+      "learnFlow": "Scopri il flusso"
+    },
+    "sandboxNudge": {
+      "message": "Imposta qualsiasi stato del campo con <tools>Strumenti Sandbox</tools> — aggiungi carte e pedine, cambia punti vita e segnalini, copia permanenti o salta le fasi. Aprilo in qualsiasi momento con il tasto <key>`</key>.",
+      "dismiss": "Ignora",
+      "open": "Apri Strumenti Sandbox"
+    }
+  },
+  "splash": {
+    "ready": "Pronto",
+    "loading": "Caricamento..."
+  },
+  "turnBanner": {
+    "turn": "Turno {{number}}"
+  }
+}

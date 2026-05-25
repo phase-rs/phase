@@ -11,10 +11,22 @@ use super::turns;
 /// CR 117.4: When all players pass in succession, the top object on the stack resolves
 /// (or the phase advances if the stack is empty).
 /// Any non-pass action clears the set (handled by callers via `reset_priority`).
-pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
-    // Record this player's pass
-    let current = state.priority_player;
-    state.priority_passes.insert(current);
+/// `current_seat` is the player who *holds* priority (the semantic seat), which
+/// the caller must supply — it is NOT necessarily `state.priority_player`. Under
+/// a turn-control effect (CR 723, e.g. Mindslaver) these differ: per CR 723.5
+/// the controller makes the controlled player's decisions and per CR 723.8 still
+/// makes their own, so `priority_player` (re-derived as the authorized submitter
+/// by `sync_priority_player_from_waiting_for`) collapses onto the controller for
+/// *both* seats. Tracking that submitter here would let `priority_passes` never
+/// accumulate more than one entry, so "all players pass in succession" could
+/// never be satisfied — an infinite soft-lock. Pass the seat from `waiting_for`.
+pub fn handle_priority_pass(
+    current_seat: PlayerId,
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    // Record this seat's pass (CR 117.4).
+    state.priority_passes.insert(current_seat);
 
     // Also maintain legacy counter for transition period
     state.priority_pass_count += 1;
@@ -58,7 +70,10 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
         }
     } else {
         // CR 117.3d: Player passed; priority moves to next player in turn order.
-        let next = next_priority_player(state);
+        // Advance from the semantic seat that just passed (`current_seat`), not
+        // from `priority_player` — under CR 723 turn-control the latter is the
+        // controller, which would mis-seat the cursor.
+        let next = next_priority_player(state, current_seat);
         state.priority_player = next;
 
         events.push(GameEvent::PriorityPassed { player_id: next });
@@ -69,18 +84,20 @@ pub fn handle_priority_pass(state: &mut GameState, events: &mut Vec<GameEvent>) 
 
 /// Determine the next player to receive priority, using APNAP order (CR 101.4).
 ///
-/// For non-team formats: next living player in seat order after current priority player.
+/// `current` is the semantic seat that just passed (the player who held
+/// priority), which under CR 723 turn-control is distinct from
+/// `state.priority_player` (the authorized submitter). Callers must pass the
+/// seat, not the submitter.
+///
+/// For non-team formats: next living player in seat order after `current`.
 /// For team-based formats (2HG): CR 101.4 APNAP within teams — active team members first,
 /// then opponent team members.
-fn next_priority_player(state: &GameState) -> PlayerId {
+fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
     if state.format_config.team_based {
         // 2HG: APNAP order within teams
         // Build the full APNAP order and find the next player who hasn't passed
         let order = players::apnap_order(state);
-        let current_idx = order
-            .iter()
-            .position(|&id| id == state.priority_player)
-            .unwrap_or(0);
+        let current_idx = order.iter().position(|&id| id == current).unwrap_or(0);
         for offset in 1..=order.len() {
             let idx = (current_idx + offset) % order.len();
             let candidate = order[idx];
@@ -89,10 +106,10 @@ fn next_priority_player(state: &GameState) -> PlayerId {
             }
         }
         // Fallback (shouldn't reach here if called before all have passed)
-        players::next_player(state, state.priority_player)
+        players::next_player(state, current)
     } else {
         // Non-team: simple clockwise in seat order
-        players::next_player(state, state.priority_player)
+        players::next_player(state, current)
     }
 }
 
@@ -140,7 +157,7 @@ mod tests {
         let mut state = setup();
         let mut events = Vec::new();
 
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         assert!(matches!(
             result,
@@ -160,7 +177,7 @@ mod tests {
         state.priority_player = PlayerId(1);
 
         let mut events = Vec::new();
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         // Should advance past combat to PostCombatMain
         assert!(matches!(result, WaitingFor::Priority { .. }));
@@ -204,7 +221,7 @@ mod tests {
             .push(crate::types::card_type::CoreType::Instant);
 
         let mut events = Vec::new();
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         assert!(matches!(
             result,
@@ -237,7 +254,7 @@ mod tests {
         let mut state = setup_three_player();
         let mut events = Vec::new();
 
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         // P0 passes, priority goes to P1
         assert!(matches!(
@@ -256,9 +273,9 @@ mod tests {
         let mut events = Vec::new();
 
         // P0 passes
-        handle_priority_pass(&mut state, &mut events);
+        handle_priority_pass(state.priority_player, &mut state, &mut events);
         // P1 passes
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         // Still not all 3 have passed, priority goes to P2
         assert!(matches!(
@@ -276,11 +293,11 @@ mod tests {
         let mut events = Vec::new();
 
         // P0 passes
-        handle_priority_pass(&mut state, &mut events);
+        handle_priority_pass(state.priority_player, &mut state, &mut events);
         // P1 passes
-        handle_priority_pass(&mut state, &mut events);
+        handle_priority_pass(state.priority_player, &mut state, &mut events);
         // P2 passes - all 3 have passed
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         // Should advance phase (empty stack)
         assert!(matches!(result, WaitingFor::Priority { .. }));
@@ -309,7 +326,7 @@ mod tests {
         let mut events = Vec::new();
 
         // P0 passes
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         // Should skip P1 and go to P2
         assert!(matches!(
@@ -329,9 +346,9 @@ mod tests {
         let mut events = Vec::new();
 
         // P0 passes -> P2
-        handle_priority_pass(&mut state, &mut events);
+        handle_priority_pass(state.priority_player, &mut state, &mut events);
         // P2 passes -> both living players passed
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         // Should advance phase (2 living players both passed)
         assert!(matches!(result, WaitingFor::Priority { .. }));
@@ -350,7 +367,7 @@ mod tests {
         let mut events = Vec::new();
 
         // P0 (active team member) passes
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         // In APNAP order with P0 active: P0, P1 (teammate), P2, P3
         // Next should be P1 (teammate on active team)
@@ -373,10 +390,10 @@ mod tests {
         let mut events = Vec::new();
 
         // All 4 pass in APNAP order
-        handle_priority_pass(&mut state, &mut events); // P0
-        handle_priority_pass(&mut state, &mut events); // P1
-        handle_priority_pass(&mut state, &mut events); // P2
-        let result = handle_priority_pass(&mut state, &mut events); // P3
+        handle_priority_pass(state.priority_player, &mut state, &mut events); // P0
+        handle_priority_pass(state.priority_player, &mut state, &mut events); // P1
+        handle_priority_pass(state.priority_player, &mut state, &mut events); // P2
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events); // P3
 
         // All passed, should advance
         assert!(matches!(result, WaitingFor::Priority { .. }));
@@ -441,7 +458,7 @@ mod tests {
         });
 
         let mut events = Vec::new();
-        let result = handle_priority_pass(&mut state, &mut events);
+        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         // RevealHand should set RevealChoice, and priority pass should preserve it
         assert!(

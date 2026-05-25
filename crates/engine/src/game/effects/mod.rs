@@ -5,14 +5,14 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CostPaidObjectSnapshot, Effect,
-    EffectError, EffectKind, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
+    EffectError, EffectKind, FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
     RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink,
     TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoMayChoice, DayNight, GameState, LKISnapshot, MayTriggerAutoChoiceKey, PendingContinuation,
-    WaitingFor, ZoneChangeRecord,
+    AutoMayChoice, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
+    MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -1031,6 +1031,211 @@ fn split_player_scope_chain(
     scoped.player_scope = None;
     let tail = detach_after_player_scope_local_chain(&mut scoped);
     (scoped, tail)
+}
+
+/// CR 608.2e: Collect cross-player equalization quantity references from a
+/// `QuantityExpr`. These are the refs whose value would shift as an APNAP
+/// fan-out mutates the board — `ControlledByEachPlayer` (battlefield extremum)
+/// and `HandSize { AllPlayers }` (hand extremum). The per-player `left` operand
+/// of a `Difference` is intentionally NOT collected: it must re-resolve per
+/// iterating player.
+fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a QuantityRef>) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if matches!(
+                qty,
+                QuantityRef::ControlledByEachPlayer { .. }
+                    | QuantityRef::HandSize {
+                        player: PlayerScope::AllPlayers { .. }
+                    }
+            ) {
+                out.push(qty);
+            }
+        }
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => collect_clause_minimum_refs(inner, out),
+        QuantityExpr::Sum { exprs } => {
+            for e in exprs {
+                collect_clause_minimum_refs(e, out);
+            }
+        }
+        QuantityExpr::Difference { left, right } => {
+            collect_clause_minimum_refs(left, out);
+            collect_clause_minimum_refs(right, out);
+        }
+    }
+}
+
+/// CR 608.2e (§8): Capture this `player_scope` link's equalization extrema
+/// against the board as it stands NOW — before the APNAP fan-out begins. The
+/// snapshot is stored on `state.clause_minimum_snapshot` and consulted by the
+/// `ControlledByEachPlayer` / `HandSize { AllPlayers }` resolver arms so every
+/// player in the fan-out sees the same pre-clause minimum.
+///
+/// Always overwrites `state.clause_minimum_snapshot` — to `Some` when the
+/// clause carries a cross-player extremum, to `None` otherwise. This makes
+/// every `player_scope` link entry a fresh per-link reset point, so clause N+1
+/// (whose `after_scope` recursion re-enters the driver) never inherits clause
+/// N's frozen value. It must NOT be cleared on the interactive-pause path:
+/// when clause N pauses mid-fan-out, the remaining clause-N players resume via
+/// `pending_continuation` as bare single-scoped effects that do NOT re-enter
+/// this driver, so they depend on the snapshot persisting. The depth-0
+/// chain-entry clear in `resolve_ability_chain` disposes of any residual
+/// snapshot once the whole resolution ends.
+///
+/// The snapshot field is cleared to `None` as the very first step here, before
+/// any ref is resolved. This makes the live-resolve below genuinely happen with
+/// no stale snapshot in `state` — clause N+1's capture starts from a clean
+/// slate and never reads clause N's frozen value, so each ref evaluates live
+/// exactly once here against the clause's pre-clause board. The safety is
+/// structural rather than relying on the three cards' clauses using
+/// pairwise-distinct `QuantityRef` keys.
+fn capture_clause_minimum_snapshot(state: &mut GameState, scoped_template: &ResolvedAbility) {
+    // CR 608.2e: values are locked when the clause starts resolving, so each
+    // clause must capture against its own pre-clause board.
+    //
+    // Per-link reset: clear any previous clause's snapshot before resolving so
+    // the live-resolve below sees a clean slate and a stale value is never
+    // consulted, even when clause N+1 shares a `QuantityRef` key with clause N.
+    //
+    // The unconditional clear is LOAD-BEARING for clause-independence within a
+    // single Balance resolution: clause N's snapshot may legitimately still be
+    // present here (clause N's `after_scope` recursion intentionally leaves it
+    // for `apply()` to dispose of), and we must NOT inherit it into clause
+    // N+1's capture. This also relies on the single-cell invariant documented
+    // on `ClauseMinimumSnapshot` — any previous snapshot is consumed here by
+    // being overwritten, which is sound only because no nested player-scope
+    // ability-chain resolution occurs during a clause's fan-out (see the
+    // type's doc-comment). If that invariant is ever broken in the future,
+    // the field must become a Vec stack and this unconditional clear must
+    // become a stack push.
+    state.clause_minimum_snapshot = None;
+    let mut exprs = Vec::new();
+    collect_ability_quantity_exprs(scoped_template, &mut exprs);
+    let mut refs: Vec<&QuantityRef> = Vec::new();
+    for expr in exprs {
+        collect_clause_minimum_refs(expr, &mut refs);
+    }
+    if refs.is_empty() {
+        return;
+    }
+    let mut snapshot = ClauseMinimumSnapshot::default();
+    for qty in refs {
+        let value = crate::game::quantity::resolve_quantity_with_targets(
+            state,
+            &QuantityExpr::Ref { qty: qty.clone() },
+            scoped_template,
+        );
+        snapshot.insert(qty.clone(), value);
+    }
+    state.clause_minimum_snapshot = Some(snapshot);
+}
+
+fn collect_ability_quantity_exprs<'a>(
+    ability: &'a ResolvedAbility,
+    out: &mut Vec<&'a QuantityExpr>,
+) {
+    let mut current = Some(ability);
+    while let Some(node) = current {
+        collect_effect_quantity_exprs(&node.effect, out);
+        current = node.sub_ability.as_deref();
+    }
+}
+
+/// The dynamic quantity expressions of an effect, if it carries any whose
+/// equalization extrema must be clause-snapshot.
+fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a QuantityExpr>) {
+    match effect {
+        Effect::ChangeSpeed { amount, .. }
+        | Effect::DealDamage { amount, .. }
+        | Effect::Draw { count: amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. }
+        | Effect::AddCounter { count: amount, .. }
+        | Effect::Sacrifice { count: amount, .. }
+        | Effect::Mill { count: amount, .. }
+        | Effect::Scry { count: amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
+        | Effect::Dig { count: amount, .. }
+        | Effect::Surveil { count: amount, .. }
+        | Effect::Discard { count: amount, .. }
+        | Effect::SearchLibrary { count: amount, .. }
+        | Effect::SearchOutsideGame { count: amount, .. }
+        | Effect::ExileTop { count: amount, .. }
+        | Effect::CopyTokenOf { count: amount, .. }
+        | Effect::PutCounter { count: amount, .. }
+        | Effect::PutCounterAll { count: amount, .. }
+        | Effect::AddPendingETBCounters { count: amount, .. }
+        | Effect::FlipCoins { count: amount, .. }
+        | Effect::Seek { count: amount, .. }
+        | Effect::SetLifeTotal { amount, .. }
+        | Effect::Manifest { count: amount, .. }
+        | Effect::GivePlayerCounter { count: amount, .. }
+        | Effect::GainEnergy { amount, .. }
+        | Effect::Discover {
+            mana_value_limit: amount,
+        }
+        | Effect::PutAtLibraryPosition { count: amount, .. }
+        | Effect::GrantExtraLoyaltyActivations { amount, .. }
+        | Effect::SkipNextTurn { count: amount, .. }
+        | Effect::SkipNextStep { count: amount, .. }
+        | Effect::Incubate { count: amount, .. }
+        | Effect::Amass { count: amount, .. }
+        | Effect::Monstrosity { count: amount, .. }
+        | Effect::Bolster { count: amount, .. }
+        | Effect::Adapt { count: amount, .. } => out.push(amount),
+        Effect::Token {
+            count,
+            enter_with_counters,
+            ..
+        } => {
+            out.push(count);
+            for (_, count) in enter_with_counters {
+                out.push(count);
+            }
+        }
+        Effect::Conjure { cards, .. } => {
+            for card in cards {
+                out.push(&card.count);
+            }
+        }
+        Effect::ChooseDrawnThisTurnPayOrTopdeck {
+            count,
+            life_payment,
+            ..
+        } => {
+            out.push(count);
+            out.push(life_payment);
+        }
+        Effect::PreventDamage { amount_dynamic, .. }
+        | Effect::RevealHand {
+            count: amount_dynamic,
+            ..
+        }
+        | Effect::BounceAll {
+            count: amount_dynamic,
+            ..
+        } => {
+            if let Some(amount) = amount_dynamic {
+                out.push(amount);
+            }
+        }
+        Effect::MoveCounters {
+            count: Some(count), ..
+        } => out.push(count),
+        Effect::ExileFromTopUntil {
+            until: crate::types::ability::UntilCondition::CumulativeThreshold { threshold, .. },
+            ..
+        } => out.push(threshold),
+        _ => {}
+    }
 }
 
 /// CR 601.2c: Extract SharesQuality filter properties from an effect's target filter.
@@ -2156,6 +2361,12 @@ pub fn resolve_ability_chain(
         state.last_effect_amount = None;
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
+        // CR 608.2e: The clause-local equalization snapshot is resolution-
+        // scoped. It is overwritten per `player_scope` link within a chain
+        // (and survives the interactive `EffectZoneChoice` drain, which
+        // resumes at depth 1), so clearing it only at depth-0 chain entry
+        // disposes of any residue without disturbing an in-flight Balance.
+        state.clause_minimum_snapshot = None;
         // CR 603.7: Chain-local tracked-set identity — resets per top-level
         // ability resolution so compound zone changes within one chain
         // coalesce into a single tracked set, while unrelated resolutions
@@ -2339,6 +2550,13 @@ fn resolve_chain_body(
 
         let initial_waiting_for = state.waiting_for.clone();
         let mut paused = false;
+        // CR 608.2e: each clause's equalization minimum is fixed when that
+        // clause begins; the snapshot is per `player_scope` link, captured
+        // before fan-out (the board is now exactly the clause's pre-clause
+        // state) and cleared when the link completes — so clause N+1 re-enters
+        // the driver with the field `None` and re-captures against the
+        // post-clause-N board. See §8 of the Balance plan.
+        capture_clause_minimum_snapshot(state, &scoped_template);
         for (i, pid) in matching_players.iter().enumerate() {
             let mut scoped = scoped_template.clone();
             scoped.set_original_controller_recursive(controller);
@@ -2367,6 +2585,13 @@ fn resolve_chain_body(
                     }
                     tail = Some(Box::new(remaining_scoped));
                 }
+                // CR 608.2e: do NOT clear the clause snapshot here — the
+                // remaining clause-N players resume via `pending_continuation`
+                // as bare single-scoped effects (no `player_scope`, so they do
+                // not re-enter this driver to re-capture) and must see the same
+                // frozen extremum. The next `player_scope` link's
+                // `capture_clause_minimum_snapshot` overwrites it; `apply()`
+                // disposes of any residue once resolution ends.
                 if tail.is_some() {
                     append_to_pending_continuation(state, tail);
                 }
@@ -2411,6 +2636,11 @@ fn resolve_chain_body(
             publish_tracked_set(state, affected_ids);
         }
         if !paused {
+            // CR 608.2e: this `player_scope` clause has completed. Clear its
+            // frozen values before running any following instruction; if the
+            // tail is another `player_scope` clause, that recursive entry will
+            // capture its own fresh snapshot against the post-this-clause board.
+            state.clause_minimum_snapshot = None;
             if let Some(after_scope) = after_scope {
                 resolve_ability_chain(state, &after_scope, events, depth + 1)?;
             }

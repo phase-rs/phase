@@ -687,6 +687,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
+    // CR 101.2 + CR 109.5: "Each opponent who [did X] this turn can't [Y]" —
+    // per-affected-player conditional prohibition (Angelic Arbiter). Must run
+    // BEFORE the generic "can't attack" arm and the `parse_cant_cast_type_spells`
+    // dispatch so the per-player predicate is preserved and the attack clause is
+    // not misparsed as a SelfRef restriction.
+    if let Some(def) = parse_per_player_conditional_prohibition(&tp, &text) {
+        return Some(def);
+    }
     if let Some(def) = parse_every_creature_type_static(&tp, &text) {
         return Some(def);
     }
@@ -6473,6 +6481,93 @@ fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
     )
 }
 
+/// CR 101.2 + CR 109.5 + CR 508.1 + CR 601.3a: "Each [scope] who [did X] this turn
+/// can't [Y]" — a static prohibition gated on a PER-AFFECTED-PLAYER turn-activity
+/// predicate (Angelic Arbiter).
+///
+/// The two clauses are:
+/// - "Each opponent who attacked with a creature this turn can't cast spells."
+///   → `CantBeCast { who: Opponents }` + `per_player_condition: YouAttackedThisTurn`
+///   (CR 601.3a cast prohibition).
+/// - "Each opponent who cast a spell this turn can't attack with creatures."
+///   → `CantAttack` with `affected = opponents' creatures` +
+///   `per_player_condition: YouCastSpellThisTurn { filter: None }` (CR 508.1
+///   declare-attackers prohibition).
+///
+/// The turn-activity predicate is stored in `per_player_condition` (CR 109.5:
+/// evaluated against the AFFECTED player — the caster, or the attacking creature's
+/// controller), NEVER in `condition` (which is the source-relative functioning
+/// gate). `condition` stays `None` so the prohibition is not globally gated.
+///
+/// Composed from the shared `strip_casting_prohibition_subject` building block plus
+/// nom `tag`/`alt`/`value` — no string-matching dispatch.
+fn parse_per_player_conditional_prohibition(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // 1. Strip the subject → scope. For "each opponent who ..." this yields
+    //    (Opponents, "who ..."). Only opponent-scoped prohibitions are modeled
+    //    by this combinator today (the only printed text class).
+    let (who, predicate) = strip_casting_prohibition_subject(tp.lower)?;
+    if who != ProhibitionScope::Opponents {
+        return None;
+    }
+
+    // 2. Strip the relative-clause marker and parse the per-player predicate.
+    let rest = nom_tag_lower(predicate, predicate, "who ")?;
+    let (rest, cond) = alt((
+        value(
+            ParsedCondition::YouAttackedThisTurn,
+            tag::<_, _, OracleError<'_>>("attacked with a creature this turn"),
+        ),
+        value(
+            ParsedCondition::YouCastSpellThisTurn { filter: None },
+            tag::<_, _, OracleError<'_>>("cast a spell this turn"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // 3. Strip the prohibition connector " can't " and dispatch on the verb.
+    let rest = nom_tag_lower(rest, rest, " can't ")?;
+
+    // CR 601.3a: "... can't cast spells" — cast-side prohibition.
+    if let Some(tail) = nom_tag_lower(rest, rest, "cast spells") {
+        if tail.trim_end_matches('.').is_empty() {
+            return Some(
+                StaticDefinition::new(StaticMode::CantBeCast { who })
+                    .per_player_condition(cond)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
+    // CR 508.1: "... can't attack with creatures" — attack-side prohibition. The
+    // `affected` filter is opponents' creatures (CR 109.5: `ControllerRef::Opponent`
+    // resolves against the source's controller), so the remote CantAttack scan in
+    // combat restricts the Arbiter-controller's opponents' creatures.
+    //
+    // INVARIANT: `per_player_condition` on a CantAttack/CantAttackOrBlock static is
+    // only honored on the remote-scan path (`check_static_ability`). The intrinsic
+    // `active_static_definitions` path in combat does NOT apply it, so the `affected`
+    // filter here must stay a remote filter (opponents' creatures), never SelfRef —
+    // a SelfRef CantAttack would be applied unconditionally, bypassing the gate.
+    if let Some(tail) = nom_tag_lower(rest, rest, "attack with creatures") {
+        if tail.trim_end_matches('.').is_empty() {
+            let affected =
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+            return Some(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(affected)
+                    .per_player_condition(cond)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
+    None
+}
+
 /// CR 101.2: Parse casting prohibition from Oracle text.
 /// Handles multiple patterns:
 /// - "[Subject] can't cast [type] spells" (Steel Golem, Hymn of the Wilds)
@@ -6503,19 +6598,11 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
         return Some(def);
     }
 
-    // --- "Each opponent who attacked [with a creature] this turn can't cast spells" ---
-    // CR 101.2: Conditional subject with turn-scoped attack condition — approximate
-    // as opponent-scoped prohibition since the condition is game-state dependent.
-    if nom_tag_lower(tp, tp, "each opponent who attacked").is_some()
-        && nom_primitives::scan_contains(tp, "can't cast spells")
-    {
-        return Some(
-            StaticDefinition::new(StaticMode::CantBeCast {
-                who: ProhibitionScope::Opponents,
-            })
-            .description(text.to_string()),
-        );
-    }
+    // NOTE: "Each opponent who attacked with a creature this turn can't cast
+    // spells" is handled earlier in `parse_static_line_inner` by
+    // `parse_per_player_conditional_prohibition`, which preserves the per-affected-
+    // player turn-activity predicate (CR 101.2 + CR 601.3a) instead of approximating
+    // it as an unconditional opponent cast-lock.
 
     // 1. Strip subject → scope
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
@@ -17790,7 +17877,9 @@ mod tests {
 
     #[test]
     fn cant_cast_opponent_attacked_this_turn() {
-        // CR 101.2: "Each opponent who attacked this turn can't cast spells"
+        // CR 101.2 + CR 601.3a: "Each opponent who attacked with a creature this
+        // turn can't cast spells" — the per-affected-player turn-activity predicate
+        // must be preserved in `per_player_condition`, NOT dropped (Angelic Arbiter).
         let def = parse_static_line(
             "Each opponent who attacked with a creature this turn can't cast spells.",
         )
@@ -17801,6 +17890,40 @@ mod tests {
                 who: ProhibitionScope::Opponents,
             }
         );
+        assert_eq!(
+            def.per_player_condition,
+            Some(ParsedCondition::YouAttackedThisTurn),
+            "the turn-activity predicate must be carried, not approximated away"
+        );
+        // `condition` (the source-relative functioning gate) must stay None so the
+        // prohibition is not globally gated on/off.
+        assert_eq!(def.condition, None);
+    }
+
+    #[test]
+    fn cant_attack_opponent_cast_spell_this_turn() {
+        // CR 508.1 + CR 109.5: "Each opponent who cast a spell this turn can't
+        // attack with creatures" — restricts OPPONENTS' creatures, not the source
+        // (Angelic Arbiter). Regression guard against the prior SelfRef misparse.
+        let def = parse_static_line(
+            "Each opponent who cast a spell this turn can't attack with creatures.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent)
+            )),
+            "affected must be opponents' creatures (CR 109.5)"
+        );
+        // Regression guard: the prior misparse set affected = SelfRef.
+        assert_ne!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.per_player_condition,
+            Some(ParsedCondition::YouCastSpellThisTurn { filter: None }),
+        );
+        assert_eq!(def.condition, None);
     }
 
     // --- Group A: Enchanted land type changes ---

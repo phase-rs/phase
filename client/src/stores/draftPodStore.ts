@@ -101,6 +101,13 @@ const initialState: DraftPodState = {
   configError: null,
 };
 
+function normalizePodConfig(config: PodConfig): PodConfig {
+  if (config.tournamentFormat === "SingleElimination") {
+    return { ...config, podSize: 8 };
+  }
+  return config;
+}
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
@@ -109,7 +116,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     setConfig: (partial) => {
       set((prev) => ({
-        config: { ...prev.config, ...partial },
+        config: normalizePodConfig({ ...prev.config, ...partial }),
         configError: null,
       }));
     },
