@@ -2820,6 +2820,56 @@ pub(super) fn parse_utility_imperative_ast(
             return Some(UtilityImperativeAst::Transform { target });
         }
     }
+    // CR 613.4d: switch power and toughness — two surface forms (sibling branches):
+    //   - prepositional: "switch the power and toughness of <target>" (Inversion
+    //     Behemoth class — supports the "(each of) any number of target X"
+    //     distribution, with multi_target recovered by
+    //     `extract_switch_pt_multi_target` in the post-parse fixup. Authorizing
+    //     rule for variable-count targeting: CR 115.1d.)
+    //   - possessive: "switch <target>'s power and toughness" (single-target
+    //     class — Inversion of Fortune, Twiddle's siblings).
+    // Try prepositional first so the more specific "the power and toughness of"
+    // shape is consumed before the bare "switch <target>" form runs.
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value((), tag("switch the power and toughness of ")).parse(input)
+    }) {
+        // Strip the optional "each of " and "any number of " distribution
+        // prefixes so `parse_target` sees a bare target phrase. The quantifier
+        // itself is recovered as a `MultiTargetSpec` in mod.rs via
+        // `extract_switch_pt_multi_target` (parallel to the DealDamage / Double
+        // counter fixups). Walking the lowercased view in lock-step with the
+        // original text preserves casing for `parse_target`.
+        let rest_lower = rest.to_ascii_lowercase();
+        let mut consumed = 0usize;
+        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("each of ").parse(rest_lower.as_str())
+        {
+            consumed = rest_lower.len() - after.len();
+        }
+        let after_each_lower = &rest_lower[consumed..];
+        if let Ok((after, _)) =
+            tag::<_, _, OracleError<'_>>("any number of ").parse(after_each_lower)
+        {
+            consumed += after_each_lower.len() - after.len();
+        }
+        let target_text = &rest[consumed..];
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
+        let rem_lower = rem.trim_start().to_ascii_lowercase();
+        // The trailing duration ("until end of turn") is stripped upstream by
+        // `strip_trailing_duration`; in that case `rem` is empty. Accept either
+        // form so the branch also matches when this parser is invoked directly
+        // on text that retains the duration (e.g. unit tests).
+        let rem_after_duration = tag::<_, _, OracleError<'_>>("until end of turn")
+            .parse(rem_lower.as_str())
+            .map(|(rest, _)| rest)
+            .unwrap_or(rem_lower.as_str());
+        let mut terminal = alt((
+            value((), eof),
+            value((), all_consuming(tag::<_, _, OracleError<'_>>("."))),
+        ));
+        if terminal.parse(rem_after_duration).is_ok() {
+            return Some(UtilityImperativeAst::SwitchPT { target });
+        }
+    }
     // CR 613.4d: "switch [target]'s power and toughness"
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("switch ")).parse(input))
