@@ -1,5 +1,10 @@
 [
   "card-data-meta.json",
+  "card-data.de.json",
+  "card-data.es.json",
+  "card-data.fr.json",
+  "card-data.it.json",
+  "card-data.pt.json",
   "card-names.json",
   "coverage-data.json",
   "coverage-summary.json",
