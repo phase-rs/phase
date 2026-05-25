@@ -6110,6 +6110,13 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     if matches!(clause.effect, Effect::DealDamage { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_deal_damage_multi_target(text);
     }
+    // CR 115.1d: Post-parse fixup for SwitchPT prepositional form. The
+    // imperative parser strips "any number of" / "each of" to keep `parse_target`
+    // bare, so the MultiTargetSpec is rebuilt from the original text here
+    // (parallel to the DealDamage / Double counter fixups above).
+    if matches!(clause.effect, Effect::SwitchPT { .. }) && clause.multi_target.is_none() {
+        clause.multi_target = extract_switch_pt_multi_target(text);
+    }
     if matches!(
         clause.effect,
         Effect::Double {
@@ -14958,6 +14965,45 @@ fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
 fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let after_each_of = strip_after(&lower, "damage to each of ")?;
+    let (_, multi_target) = strip_optional_target_prefix(after_each_of);
+    multi_target
+}
+
+/// CR 115.1d + CR 613.4d: Recover the `MultiTargetSpec` for the prepositional
+/// SwitchPT form ("switch the power and toughness of <subject>"). The
+/// imperative parser strips "each of" and "any number of" so `parse_target`
+/// sees a bare target phrase; this helper rebuilds the spec from the original
+/// text. Mirrors `extract_double_counter_multi_target` — the only axis of
+/// variation is the verb prefix.
+fn extract_switch_pt_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    let (_, target_text) = preceded(
+        tag::<_, _, OracleError<'_>>("switch the power and toughness of "),
+        rest,
+    )
+    .parse(lower.as_str())
+    .ok()?;
+    // The distribution prefix "each of " is optional ("switch ... of each of
+    // any number of target creatures" vs "switch ... of any number of target
+    // creatures"); both surface the same MultiTargetSpec.
+    let after_each_of = tag::<_, _, OracleError<'_>>("each of ")
+        .parse(target_text)
+        .map(|(rest, _)| rest)
+        .unwrap_or(target_text);
+    if let Ok((after_any_number, _)) =
+        tag::<_, _, OracleError<'_>>("any number of ").parse(after_each_of)
+    {
+        if alt((
+            tag::<_, _, OracleError<'_>>("target "),
+            tag("other target "),
+            tag("another target "),
+        ))
+        .parse(after_any_number)
+        .is_ok()
+        {
+            return Some(MultiTargetSpec::unlimited(0));
+        }
+    }
     let (_, multi_target) = strip_optional_target_prefix(after_each_of);
     multi_target
 }
@@ -32176,6 +32222,42 @@ mod tests {
                 }
             ),
             "expected SwitchPT with SelfRef, got: {e:?}"
+        );
+    }
+
+    /// CR 613.4d: prepositional surface form ("switch the power and toughness
+    /// of target creature") — single-target sibling of the possessive form.
+    #[test]
+    fn effect_switch_pt_prepositional_single_target() {
+        let e = parse_effect("switch the power and toughness of target creature until end of turn");
+        assert!(
+            matches!(e, Effect::SwitchPT { .. }),
+            "expected SwitchPT, got: {e:?}"
+        );
+    }
+
+    /// CR 613.4d + CR 115.1d: Inversion Behemoth class — "switch the power and
+    /// toughness of each of any number of target creatures" must parse to
+    /// `Effect::SwitchPT` carrying a typed creature filter, with
+    /// `MultiTargetSpec::unlimited(0)` recovered on the clause so the spell
+    /// allows any number of targets.
+    #[test]
+    fn effect_switch_pt_any_number_of_target_creatures_is_multi_targeted() {
+        let clause = parse_effect_clause(
+            "switch the power and toughness of each of any number of target creatures until end of turn",
+            &mut ParseContext::default(),
+        );
+
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::SwitchPT {
+                    target: TargetFilter::Typed(_),
+                }
+            ),
+            "expected SwitchPT {{ target: Typed(..) }}, got: {:?}",
+            clause.effect
         );
     }
 
