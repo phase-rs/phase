@@ -10307,8 +10307,9 @@ fn parse_all_subject_are_color(tp: &TextPair<'_>, description: &str) -> Option<S
 
 /// CR 105.1 / CR 105.2c: Parse a color expression terminating an
 /// "All [subject] are ___" static. Accepts either the literal word "colorless"
-/// (→ empty color set, CR 105.2c) or any color list recognized by
-/// `parse_color_list` — single color, "X and Y", or "X, Y, and Z" (CR 105.1).
+/// (→ empty color set, CR 105.2c), "all/every color" (→ WUBRG, CR 105.2), or
+/// any color list recognized by `parse_color_list` — single color, "X and Y",
+/// or "X, Y, and Z" (CR 105.1).
 /// Input must be fully consumed by the combinator path; trailing content
 /// returns `None` so the outer dispatcher falls through.
 fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
@@ -18396,6 +18397,17 @@ mod tests {
             def.modifications,
             vec![ContinuousModification::SetColor {
                 colors: vec![ManaColor::White, ManaColor::Blue]
+            }]
+        );
+    }
+
+    #[test]
+    fn static_all_creatures_are_all_colors() {
+        let def = parse_static_line("All creatures are all colors.").unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: ManaColor::ALL.to_vec()
             }]
         );
     }
