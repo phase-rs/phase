@@ -4062,7 +4062,7 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
         if let Ok((rest, tf)) = nom_target::parse_type_filter_word(after_number) {
             let trimmed = rest.trim_start();
             // Only consume if followed by "card"/"cards" (not standalone)
-            if trimmed.starts_with("card") {
+            if tag::<_, _, OracleError<'_>>("card").parse(trimmed).is_ok() {
                 let captured = if matches!(tf, TypeFilter::Card) {
                     None
                 } else {
