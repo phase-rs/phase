@@ -862,6 +862,11 @@ pub(super) fn parse_subject_application(
                 })
             } else if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
                 TargetFilter::ScopedPlayer
+            } else if matches!(
+                ctx.relative_player_scope,
+                Some(ControllerRef::ParentTargetController)
+            ) {
+                TargetFilter::ParentTargetController
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
@@ -3220,6 +3225,22 @@ mod tests {
         let result = parse_subject_application("that player", &mut ctx);
         assert!(result.is_some());
         assert_eq!(result.unwrap().affected, TargetFilter::TriggeringPlayer);
+    }
+
+    #[test]
+    fn parse_subject_that_player_trigger_context_honors_parent_target_controller_scope() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            relative_player_scope: Some(ControllerRef::ParentTargetController),
+            ..ParseContext::default()
+        };
+        let result = parse_subject_application("that player", &mut ctx);
+
+        assert!(result.is_some());
+        assert_eq!(
+            result.unwrap().affected,
+            TargetFilter::ParentTargetController
+        );
     }
 
     // CR 115.1d: "any number of target" subject prefix tests

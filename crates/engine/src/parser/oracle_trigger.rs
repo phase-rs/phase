@@ -546,6 +546,38 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
     false
 }
 
+fn condition_introduces_damage_source_controller_player(cond_lower: &str) -> bool {
+    let input = cond_lower.trim_start();
+    let input = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(input)
+    .map(|(rest, _)| rest)
+    .unwrap_or(input);
+    let Ok((rest, source_filter)) = parse_damage_source_subject(input) else {
+        return false;
+    };
+    let TargetFilter::Typed(TypedFilter {
+        controller: Some(ControllerRef::Opponent),
+        ..
+    }) = source_filter
+    else {
+        return false;
+    };
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("deals ").parse(rest) else {
+        return false;
+    };
+    let Ok((after_damage, _)) = parse_damage_predicate_tail(rest) else {
+        return false;
+    };
+
+    matches!(
+        parse_damage_to_qualifier(after_damage),
+        Some(TargetFilter::Controller)
+    )
+}
+
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
 /// The card_name is used for self-reference substitution.
@@ -640,7 +672,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
     // TargetPlayer resolution inside the trigger effect body.
-    if condition_introduces_target_player(&cond_lower) {
+    if condition_introduces_damage_source_controller_player(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+    } else if condition_introduces_target_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
     } else if condition_introduces_scoped_phase_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
@@ -15733,6 +15767,18 @@ mod tests {
             ))
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let execute = def.execute.as_ref().expect("trigger execute");
+        match execute.effect.as_ref() {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::ParentTargetController),
+                    ..
+                }) => assert_eq!(type_filters.as_slice(), [TypeFilter::Permanent]),
+                other => panic!("expected source-controller sacrifice filter, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
     }
     // ── Work Item 4: Transforms Into Self ─────────────────────────
 
