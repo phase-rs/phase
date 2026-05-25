@@ -5526,8 +5526,21 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // misclassify the subject.
     let (rest, color) = opt(terminated(nom_primitives::parse_color, tag(" "))).parse(rest)?;
 
+    // CR 109.4: Head noun — "source" (any), a card type, or a negated type
+    // prefix ("noncreature source"). The negated variant uses
+    // `TypeFilter::Non(Box::new(…))` so the runtime filter excludes that type.
     let (rest, head_type) = alt((
-        value(None, tag::<_, _, OracleError<'_>>("source")),
+        value(
+            Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+            (
+                tag::<_, _, OracleError<'_>>("noncreature source"),
+                opt(tag("s")),
+            ),
+        ),
+        value(
+            None,
+            (tag::<_, _, OracleError<'_>>("source"), opt(tag("s"))),
+        ),
         value(Some(TypeFilter::Creature), tag("creature")),
         value(Some(TypeFilter::Artifact), tag("artifact")),
         value(Some(TypeFilter::Enchantment), tag("enchantment")),
@@ -15753,6 +15766,26 @@ mod tests {
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
+
+    #[test]
+    fn trigger_noncreature_source_you_control_deals_damage() {
+        let def = parse_trigger_line(
+            "Whenever a noncreature source you control deals damage, you gain that much life.",
+            "Tamanoa",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.damage_amount, None);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                    .controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(def.valid_target, None);
+    }
+
     #[test]
     fn trigger_source_opponent_controls_deals_damage_to_you_michiko() {
         let def = parse_trigger_line(
@@ -15779,6 +15812,22 @@ mod tests {
             },
             other => panic!("expected Sacrifice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn trigger_noncreature_source_deals_damage_to_player() {
+        let def = parse_trigger_line(
+            "Whenever a noncreature source deals damage to a player, draw a card.",
+            "Test",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(
+                Box::new(TypeFilter::Creature)
+            ))))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
     }
     // ── Work Item 4: Transforms Into Self ─────────────────────────
 
