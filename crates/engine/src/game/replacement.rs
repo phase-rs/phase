@@ -2532,14 +2532,22 @@ fn evaluate_replacement_condition(
             }
             _ => false,
         },
-        // CR 614.1d: "if you control a [filter]" — replacement applies only while
-        // the controller has at least one permanent matching the filter on the battlefield.
-        // Used by Worship.
-        ReplacementCondition::IfControlsMatching { filter } => {
+        // CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
+        // while the controller has at least `minimum` permanents matching `filter` on
+        // the battlefield. minimum=1 covers the singular "a [type]" form (Worship);
+        // higher values cover "N or more [type]" forms (Lair of the Hydra, etc.).
+        ReplacementCondition::IfControlsMatching { minimum, filter } => {
             let ctx = FilterContext::from_source_with_controller(source_id, controller);
-            state.objects.values().any(|o| {
-                o.zone == Zone::Battlefield && matches_target_filter(state, o.id, filter, &ctx)
-            })
+            let matching_count = state
+                .objects
+                .values()
+                .filter(|o| {
+                    o.zone == Zone::Battlefield
+                        && o.id != source_id
+                        && matches_target_filter(state, o.id, filter, &ctx)
+                })
+                .count();
+            matching_count >= *minimum as usize
         }
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
