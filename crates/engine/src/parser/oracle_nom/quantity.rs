@@ -1475,13 +1475,6 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
 /// "you control" / "an opponent controls" suffix as un-consumed remainder
 /// (which would cause `parse_quantity_ref`'s `rest.is_empty()` check to fail).
 /// Soul's Majesty, Predator's Rapport, and similar.
-///
-/// NOTE: the controller-qualified variants ("target creature you control",
-/// "target creature an opponent controls") flatten to scope-only — the
-/// controller constraint is dropped. If a future mass-destroy card uses
-/// "target creature you control's power", the anchor synthesis at
-/// `imperative.rs::lower_imperative_family_ast` (Fell the Mighty intercept)
-/// will need to widen the anchor to include the controller scope. See #933.
 fn parse_target_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(

@@ -1,8 +1,8 @@
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ControllerRef, Effect, GameRestriction, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, ObjectScope, PlayerFilter, QuantityExpr,
-    QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext, TargetChoiceTiming,
-    TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, CardTypeSetSource, CastManaSpentMetric, ControllerRef,
+    Effect, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+    ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
+    SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -1498,9 +1498,35 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::DistinctCardTypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
-        } => filter_references_target_creature_quantity(filter),
+        | QuantityRef::Aggregate { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
+        | QuantityRef::DistinctColorsAmongPermanents { filter } => {
+            filter_references_target_creature_quantity(filter)
+        }
+        QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(filter_references_target_creature_quantity),
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            filter_references_target_creature_quantity(source)
+                || filter_references_target_creature_quantity(target)
+        }
+        QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Objects { filter } => {
+                filter_references_target_creature_quantity(filter)
+            }
+            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+        },
+        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+            CastManaSpentMetric::FromSource { source_filter } => {
+                filter_references_target_creature_quantity(source_filter)
+            }
+            CastManaSpentMetric::Total | CastManaSpentMetric::DistinctColors => false,
+        },
         QuantityRef::PlayerCount {
             filter: crate::types::ability::PlayerFilter::ControlsPermanent { filter, .. },
         } => filter_references_target_creature_quantity(filter),
@@ -3365,12 +3391,13 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, Comparator, ContinuousModification, CounterTransferMode,
+        AbilityCost, AbilityKind, AggregateFunction, CardTypeSetSource, CastManaObjectScope,
+        CastManaSpentMetric, Comparator, ContinuousModification, CountScope, CounterTransferMode,
         Duration, Effect, FilterProp, GameRestriction, LibraryPosition, ModalChoice,
-        ModalSelectionConstraint, MultiTargetSpec, ProhibitedActivity, PtStat, PtValue,
-        PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter, UnlessPayModifier,
+        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity,
+        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry,
+        RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -5623,6 +5650,92 @@ mod tests {
         assert!(!crate::game::filter::matches_target_filter(
             &state, small, &filter, &ctx
         ));
+    }
+
+    #[test]
+    fn target_creature_quantity_walker_recurses_through_nested_filter_refs() {
+        let target_power_filter = || {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                },
+            ]))
+        };
+
+        let fixed_filter = || {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 2 },
+                },
+            ]))
+        };
+
+        let shares_quality = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(Box::new(target_power_filter())),
+                relation: SharedQualityRelation::Shares,
+            },
+        ]));
+        assert!(filter_references_target_creature_quantity(&shares_quality));
+
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Max,
+                property: ObjectProperty::ManaValue,
+                filter: target_power_filter(),
+            },
+        };
+        assert!(quantity_expr_references_target_creature(&aggregate));
+
+        let damage = QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(fixed_filter()),
+                target: Box::new(target_power_filter()),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+            },
+        };
+        assert!(quantity_expr_references_target_creature(&damage));
+
+        let spell_filter = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: Some(target_power_filter()),
+            },
+        };
+        assert!(quantity_expr_references_target_creature(&spell_filter));
+
+        let card_types = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::Objects {
+                    filter: target_power_filter(),
+                },
+            },
+        };
+        assert!(quantity_expr_references_target_creature(&card_types));
+
+        let mana_spent = QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: target_power_filter(),
+                },
+            },
+        };
+        assert!(quantity_expr_references_target_creature(&mana_spent));
+
+        assert!(!filter_references_target_creature_quantity(&fixed_filter()));
     }
 
     /// CR 115.1 + CR 611.2c: Continuous effects whose affected set is
