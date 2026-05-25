@@ -239,10 +239,10 @@ pub(super) fn parse_fixed_become_pt_prefix(text: &str) -> Option<(i32, i32, &str
 /// are `Variable("X")`. Returns `None` for `*/*`, fixed P/T, or asymmetric X
 /// (e.g. "X/1" — not yet supported in this path, falls through to other parsers).
 ///
-/// This enables creature-land animate abilities like "{X}{G}: Until end of turn,
-/// ~ becomes an X/X green Hydra creature" (Lair of the Hydra, Hall of Storm Giants,
-/// Mishra's Factory, Wandering Fumarole, etc.) to produce SetPowerDynamic +
-/// SetToughnessDynamic modifications keyed to CostXPaid.
+/// This enables X-cost creature-land animate abilities like "{X}{G}: Until end
+/// of turn, ~ becomes an X/X green Hydra creature" (Lair of the Hydra) to
+/// produce SetPowerDynamic + SetToughnessDynamic modifications keyed to
+/// CostXPaid.
 fn parse_cost_x_become_pt_prefix(text: &str) -> Option<&str> {
     let (rest, (power, toughness)) = nom_primitives::parse_pt_value.parse(text).ok()?;
     match (power, toughness) {
@@ -929,7 +929,7 @@ mod test_den_bugbear {
     /// CR 107.3 + CR 107.3a: "{X}{G}: Until end of turn, ~ becomes an X/X green Hydra creature"
     /// The X/X P/T in a "becomes" predicate must map to CostXPaid (not Variable("X")),
     /// so the animate effect reads cost_x_paid at resolution rather than failing to resolve X.
-    /// Covers Lair of the Hydra, Hall of Storm Giants, Mishra's Factory, Wandering Fumarole, etc.
+    /// Covers Lair of the Hydra and future X-cost X/X animation patterns.
     #[test]
     fn animation_spec_x_x_becomes_cost_x_paid() {
         use crate::types::ability::{ContinuousModification, QuantityExpr, QuantityRef};

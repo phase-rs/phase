@@ -1394,9 +1394,9 @@ fn parse_enters_tapped_if_controls(
 /// Extract "if you control N or more [type phrase]" condition (CR 614.1d).
 ///
 /// The "if you control" prefix is the positive form: the replacement APPLIES
-/// when the controller has at least `minimum` matching permanents (excluding
-/// the source itself). Counterpart to `parse_controls_typed_condition` which
-/// handles the "unless you control" negative form.
+/// when the controller has at least `minimum` matching permanents. Source
+/// exclusion is filter-driven: "other" injects `FilterProp::Another`, while
+/// forms without "other" count the source if it matches.
 fn parse_if_controls_count_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     // CR 614.1d: "if you control N or more [type]" — extract the minimum count
     // and the type phrase that follows.
