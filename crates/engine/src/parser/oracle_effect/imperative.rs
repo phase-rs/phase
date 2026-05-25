@@ -2858,10 +2858,11 @@ pub(super) fn parse_utility_imperative_ast(
         // `strip_trailing_duration`; in that case `rem` is empty. Accept either
         // form so the branch also matches when this parser is invoked directly
         // on text that retains the duration (e.g. unit tests).
-        if rem_lower.is_empty()
-            || rem_lower.starts_with('.')
-            || rem_lower.starts_with("until end of turn")
-        {
+        let rem_after_duration = tag::<_, _, OracleError<'_>>("until end of turn")
+            .parse(rem_lower.as_str())
+            .map(|(rest, _)| rest)
+            .unwrap_or(rem_lower.as_str());
+        if rem_after_duration.is_empty() || rem_after_duration.starts_with('.') {
             return Some(UtilityImperativeAst::SwitchPT { target });
         }
     }
