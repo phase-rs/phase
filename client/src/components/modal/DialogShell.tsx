@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useEffect, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useOptionalDialogPeek } from "./dialogPeekContext.ts";
 
@@ -22,7 +23,7 @@ const SIZE_CLASS: Record<NonNullable<DialogShellProps["size"]>, string> = {
 };
 
 export function DialogShell({
-  eyebrow = "Game Choice",
+  eyebrow,
   eyebrowClassName,
   title,
   subtitle,
@@ -32,7 +33,9 @@ export function DialogShell({
   footer,
   onClose,
 }: DialogShellProps) {
+  const { t } = useTranslation("game");
   const peek = useOptionalDialogPeek();
+  const resolvedEyebrow = eyebrow ?? t("dialogShell.eyebrow");
 
   // Esc-to-close: standard modal contract. Only attach when the dialog is
   // dismissable (consumers like ChoiceOverlay that omit `onClose` have a
@@ -84,7 +87,7 @@ export function DialogShell({
         >
           <div className={cardClass}>
             <DialogHeader
-              eyebrow={eyebrow}
+              eyebrow={resolvedEyebrow}
               eyebrowClassName={eyebrowClassName}
               title={title}
               subtitle={subtitle}
@@ -142,6 +145,7 @@ export function DialogHeader({
  * since the dialog is blocking content the player likely wants to see.
  */
 export function PeekTab({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslation("game");
   const shouldReduceMotion = useReducedMotion();
 
   // Glow is offset to the right (+x in box-shadow) so it visually radiates
@@ -153,8 +157,8 @@ export function PeekTab({ onClick }: { onClick: () => void }) {
     <motion.button
       type="button"
       onClick={onClick}
-      aria-label="Move dialog out of the way"
-      title="Peek at the battlefield"
+      aria-label={t("dialogShell.peekAria")}
+      title={t("dialogShell.peekTitle")}
       animate={
         shouldReduceMotion
           ? undefined
@@ -194,12 +198,13 @@ export const PeekButton = PeekTab;
  * get one.
  */
 function CloseButton({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation("game");
   return (
     <button
       type="button"
       onClick={onClose}
-      aria-label="Close"
-      title="Close (Esc)"
+      aria-label={t("dialogShell.close")}
+      title={t("dialogShell.closeTitle")}
       className="absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center rounded-full text-slate-400 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 lg:right-3 lg:top-3"
     >
       <svg

@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { panelId, tabId, type DeckBuilderSurface } from "./deckBuilderTabs";
 
 interface DeckBuilderTabBarProps {
@@ -7,9 +8,9 @@ interface DeckBuilderTabBarProps {
   deckCount: number;
 }
 
-const TABS: { id: DeckBuilderSurface; label: string }[] = [
-  { id: "deck", label: "Deck" },
-  { id: "info", label: "Info" },
+const TABS: { id: DeckBuilderSurface; labelKey: string }[] = [
+  { id: "deck", labelKey: "tabs.deck" },
+  { id: "info", labelKey: "tabs.info" },
 ];
 
 export function DeckBuilderTabBar({
@@ -17,6 +18,7 @@ export function DeckBuilderTabBar({
   onSurfaceChange,
   deckCount,
 }: DeckBuilderTabBarProps) {
+  const { t } = useTranslation("deck-builder");
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   // APG tablist keyboard model with automatic activation: arrow keys move both
@@ -38,7 +40,7 @@ export function DeckBuilderTabBar({
   return (
     <div
       role="tablist"
-      aria-label="Deck builder surface"
+      aria-label={t("tabs.ariaLabel")}
       className="flex shrink-0 gap-1 border-b border-white/8 bg-black/12 px-2 py-1.5 md:hidden"
     >
       {TABS.map((tab, index) => {
@@ -65,7 +67,7 @@ export function DeckBuilderTabBar({
                 : "text-slate-400 hover:bg-white/6 hover:text-slate-200"
             }`}
           >
-            {tab.label}
+            {t(tab.labelKey)}
             {tab.id === "deck" && deckCount > 0 && (
               <span className="rounded-full bg-white/14 px-1.5 text-[0.7rem] tabular-nums text-slate-200">
                 {deckCount}

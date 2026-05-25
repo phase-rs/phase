@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
@@ -90,6 +91,7 @@ export function DeckBuilder({
     isCommanderEligible,
     handleRemoveCommander,
   } = useDeckBuilder({ format, onFormatChange, initialDeckName, searchFilters });
+  const { t } = useTranslation("deck-builder");
 
   // Deck-first: the main canvas shows the deck unless a search is active, in
   // which case it shows the results grid (cleared via "Back to deck").
@@ -247,7 +249,7 @@ export function DeckBuilder({
         {filtersOpen && (
           <button
             type="button"
-            aria-label="Close filters"
+            aria-label={t("filters.close")}
             onClick={() => setFiltersOpen(false)}
             className="fixed inset-0 z-30 bg-black/60 lg:hidden"
           />
@@ -260,7 +262,7 @@ export function DeckBuilder({
           ref={filterPanelRef}
           role={filtersAsDialog ? "dialog" : undefined}
           aria-modal={filtersAsDialog ? true : undefined}
-          aria-label={filtersAsDialog ? "Filters" : undefined}
+          aria-label={filtersAsDialog ? t("filters.title") : undefined}
           className={
             filtersOpen
               ? "fixed inset-y-0 left-0 z-40 flex w-[min(20rem,85vw)] flex-col border-r border-white/10 bg-[#0b1020]/96 backdrop-blur-md lg:static lg:z-auto lg:w-64 lg:bg-black/12"
@@ -268,13 +270,13 @@ export function DeckBuilder({
           }
         >
           <div className="flex shrink-0 items-center justify-between border-b border-white/8 px-4 py-3">
-            <span className="text-sm font-semibold text-white">Filters</span>
+            <span className="text-sm font-semibold text-white">{t("filters.title")}</span>
             <button
               type="button"
               onClick={() => setFiltersOpen(false)}
               className="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
             >
-              Done
+              {t("filters.done")}
             </button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto pb-16">
@@ -310,18 +312,18 @@ export function DeckBuilder({
               }`}
             >
               <FunnelIcon />
-              Search
+              {t("filters.search")}
             </button>
 
             {searchActive ? (
               <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-400">{searchResults.length} results</span>
+                <span className="text-xs text-slate-400">{t("search.results", { count: searchResults.length })}</span>
                 <button
                   type="button"
                   onClick={onResetSearch}
                   className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-xs text-slate-200 hover:bg-white/6"
                 >
-                  &larr; Back to deck
+                  &larr; {t("deck.backToDeck")}
                 </button>
               </div>
             ) : (
@@ -331,9 +333,9 @@ export function DeckBuilder({
                     key={view}
                     type="button"
                     onClick={() => setDeckView(view)}
-                    aria-label={`${view === "list" ? "List" : "Stack"} view`}
+                    aria-label={view === "list" ? t("deck.listView") : t("deck.stackView")}
                     aria-pressed={deckView === view}
-                    title={`${view === "list" ? "List" : "Stack"} view`}
+                    title={view === "list" ? t("deck.listView") : t("deck.stackView")}
                     className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
                       deckView === view
                         ? "bg-white/14 text-white"
@@ -471,19 +473,20 @@ export function DeckBuilder({
           className="fixed inset-0 z-[120] flex items-center justify-center p-4"
           role="dialog"
           aria-modal="true"
-          aria-label="Unsaved changes"
+          aria-label={t("unsaved.title")}
         >
           <button
             type="button"
-            aria-label="Dismiss dialog"
+            aria-label={t("unsaved.dismiss")}
             className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
             onClick={() => setPendingAction(null)}
           />
           <div className="relative z-10 w-full max-w-sm rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-5 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
-            <h2 className="text-base font-semibold text-white">Unsaved changes</h2>
+            <h2 className="text-base font-semibold text-white">{t("unsaved.title")}</h2>
             <p className="mt-1.5 text-sm text-slate-400">
-              You have unsaved changes to this deck. Save them before
-              {pendingAction.type === "back" ? " leaving" : " loading another deck"}?
+              {pendingAction.type === "back"
+                ? t("unsaved.bodyLeaving")
+                : t("unsaved.bodyLoading")}
             </p>
             <div className="mt-4 flex flex-wrap justify-end gap-2">
               <button
@@ -491,23 +494,23 @@ export function DeckBuilder({
                 onClick={() => setPendingAction(null)}
                 className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6"
               >
-                Cancel
+                {t("common:actions.cancel")}
               </button>
               <button
                 type="button"
                 onClick={confirmDiscardThen}
                 className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-sm text-red-200 hover:bg-red-500/20"
               >
-                Discard
+                {t("unsaved.discard")}
               </button>
               <button
                 type="button"
                 onClick={confirmSaveThen}
                 disabled={!deckName.trim()}
-                title={deckName.trim() ? undefined : "Name the deck to save it"}
+                title={deckName.trim() ? undefined : t("toolbar.nameToSave")}
                 className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-sm text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
               >
-                Save &amp; continue
+                {t("unsaved.saveAndContinue")}
               </button>
             </div>
           </div>

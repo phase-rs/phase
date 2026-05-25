@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -10,6 +11,7 @@ import { targetKey, targetLabel } from "./targetRef.ts";
 type RetargetChoice = Extract<WaitingFor, { type: "RetargetChoice" }>;
 
 export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
 
@@ -26,18 +28,18 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
 
   const scopeLabel =
     data.scope.type === "Single"
-      ? "Choose a new target for the spell"
-      : "Choose new targets for the spell";
+      ? t("retargetChoice.scopeSingle")
+      : t("retargetChoice.scopeMulti");
 
   const currentLabel = data.current_targets
-    .map((t) => targetLabel(t, objects))
+    .map((target) => targetLabel(target, objects))
     .join(", ");
 
   return (
     <ChoiceOverlay
-      title="Change Target"
-      subtitle={`${scopeLabel}. Current: ${currentLabel}`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={selected.length === 0} label="Confirm" />}
+      title={t("retargetChoice.title")}
+      subtitle={t("retargetChoice.subtitle", { scope: scopeLabel, current: currentLabel })}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selected.length === 0} label={t("retargetChoice.confirm")} />}
     >
       <div className="mb-4 space-y-2">
         {data.legal_new_targets.map((target) => {

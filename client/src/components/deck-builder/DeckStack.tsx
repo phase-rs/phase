@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useCardImage } from "../../hooks/useCardImage";
 import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
@@ -127,7 +128,7 @@ function buildTypeGroups(entries: DeckStackItem[]): DeckStackTypeGroup[] {
     if (currentRank === null || currentEntries.length === 0) return;
     groups.push({
       key: `type-${currentRank}`,
-      title: currentRank === 0 ? "Creatures" : currentRank === 1 ? "Spells" : "Lands",
+      title: currentRank === 0 ? "group.Creatures" : currentRank === 1 ? "group.Spells" : "group.Lands",
       entries: currentEntries,
     });
   };
@@ -167,6 +168,7 @@ function DeckStackCard({
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
+  const { t } = useTranslation("deck-builder");
   const { src, isLoading } = useCardImage(item.name, { size: "normal", sourcePrinting: item.sourcePrinting });
   const printingsLoaded = usePrintingsLoaded();
   const oracleId = printingsLoaded ? resolveOracleIdSync(item.name) : null;
@@ -219,7 +221,7 @@ function DeckStackCard({
           </span>
           {isCommander && (
             <span className="rounded-full bg-fuchsia-200/95 px-2 py-0.5 text-[10px] font-bold text-fuchsia-950">
-              Commander
+              {t("stack.commanderBadge")}
             </span>
           )}
         </div>
@@ -228,7 +230,7 @@ function DeckStackCard({
             onClick={handleAdd}
             disabled={!canAdd}
             className="absolute right-10 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-emerald-300 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-500/85 hover:text-white disabled:cursor-not-allowed disabled:text-slate-500 disabled:hover:bg-black/78"
-            title={canAdd ? `Add one ${item.name}` : `${item.name} is at the copy limit`}
+            title={canAdd ? t("stack.addOne", { name: item.name }) : t("stack.copyLimit", { name: item.name })}
           >
             +
           </button>
@@ -238,8 +240,8 @@ function DeckStackCard({
           className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-red-300 opacity-0 transition group-hover:opacity-100 hover:bg-red-500/85 hover:text-white"
           title={
             item.section === "commander"
-              ? `Remove ${item.name} as commander`
-              : `Remove one ${item.name}`
+              ? t("stack.removeCommander", { name: item.name })
+              : t("stack.removeOne", { name: item.name })
           }
         >
           -
@@ -266,7 +268,7 @@ function DeckStackCard({
         {hasAlternates && (
           <span
             className="pointer-events-none absolute bottom-1.5 right-2 z-10 text-sm text-sky-400 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
-            title="Alternate art available — right-click to choose"
+            title={t("card.alternateArtRightClick")}
           >
             ✦
           </span>
@@ -305,6 +307,7 @@ function DeckStackSectionLane({
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
+  const { t } = useTranslation("deck-builder");
   const typeGroups = useMemo(() => {
     const base = showTypeSections
       ? buildTypeGroups(entries)
@@ -334,11 +337,13 @@ function DeckStackSectionLane({
                 {showGroupHeaders && (
                   <div className="mb-3 flex items-center gap-3">
                     <div className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-slate-500">
-                      {group.title}
+                      {t(`stack.${group.title}`)}
                     </div>
                     <div className="h-px flex-1 bg-white/8" />
                     <div className="text-[11px] text-slate-500">
-                      {group.entries.reduce((sum, entry) => sum + entry.count, 0)} cards
+                      {t("stack.groupCards", {
+                        count: group.entries.reduce<number>((sum, entry) => sum + entry.count, 0),
+                      })}
                     </div>
                   </div>
                 )}
@@ -378,6 +383,7 @@ export function DeckStack({
   onRemoveCommander,
   onCardHover,
 }: DeckStackProps) {
+  const { t } = useTranslation("deck-builder");
   const sections = useMemo(
     () => createDeckStackItems(deck, commanders, cardDataCache),
     [deck, commanders, cardDataCache],
@@ -407,7 +413,7 @@ export function DeckStack({
   const sideboardGroups = useMemo<DeckStackTypeGroup[]>(
     () =>
       sections.sideboard.length > 0
-        ? [{ key: "sideboard", title: "Sideboard", entries: sections.sideboard }]
+        ? [{ key: "sideboard", title: "sideboardGroup", entries: sections.sideboard }]
         : [],
     [sections.sideboard],
   );
@@ -437,16 +443,16 @@ export function DeckStack({
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <div className="flex items-center justify-between border-b border-white/8 px-3 py-2">
         <div>
-          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Deck View</div>
-          <div className="mt-1 text-sm font-semibold text-white">Visual Deck Stack</div>
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("stack.deckView")}</div>
+          <div className="mt-1 text-sm font-semibold text-white">{t("stack.visualDeckStack")}</div>
         </div>
         <div className="flex items-center gap-2 text-[11px] text-slate-300">
           <span className="rounded-full border border-white/10 bg-black/20 px-2 py-1">
-            Main {mainDeckCount}
+            {t("stack.mainBadge", { count: mainDeckCount })}
           </span>
           {sideboardCount > 0 && (
             <span className="rounded-full border border-white/10 bg-black/20 px-2 py-1">
-              Sideboard {sideboardCount}
+              {t("stack.sideboardBadge", { count: sideboardCount })}
             </span>
           )}
         </div>
@@ -455,16 +461,16 @@ export function DeckStack({
       <div className="flex-1 overflow-auto px-3 pt-4 pb-16">
         {!hasCards ? (
           <div className="flex h-full items-center justify-center rounded-[20px] border border-dashed border-white/10 bg-black/12 text-sm text-slate-500">
-            Added cards will appear here as a staggered stack.
+            {t("stack.emptyHint")}
           </div>
         ) : (
           <div className="flex min-h-full flex-col gap-4">
             {sections.commander.length > 0 && (
               <DeckStackSectionLane
-                title="Commander"
-                badge={`${sections.commander.length} card${sections.commander.length === 1 ? "" : "s"}`}
+                title={t("stack.commanderLane")}
+                badge={t("stack.cardCount", { count: sections.commander.length })}
                 entries={sections.commander}
-                emptyLabel="No commander selected."
+                emptyLabel={t("stack.noCommander")}
                 onAddCard={onAddCard}
                 canAddCard={canAddCard}
                 onRemoveCard={onRemoveCard}
@@ -474,14 +480,14 @@ export function DeckStack({
               />
             )}
             <DeckStackSectionLane
-              title="Main Deck"
+              title={t("stack.mainDeckLane")}
               badge={
                 sideboardCount > 0
-                  ? `${mainDeckCount} main + ${sideboardCount} side`
-                  : `${mainDeckCount} cards`
+                  ? t("stack.mainSideBadge", { main: mainDeckCount, side: sideboardCount })
+                  : t("stack.cardCount", { count: mainDeckCount })
               }
               entries={sections.main}
-              emptyLabel="Main deck cards will appear here."
+              emptyLabel={t("stack.mainEmpty")}
               showTypeSections
               extraGroups={sideboardGroups}
               onAddCard={onAddCard}

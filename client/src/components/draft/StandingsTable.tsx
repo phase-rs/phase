@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { ScoreBadge } from "./ScoreBadge";
 
@@ -22,6 +24,7 @@ function formatGwp(entry: StandingEntry): string {
 
 /** Swiss tournament standings sorted by match wins (GWP tiebreaker), with current round pairings and live game scores. */
 export function StandingsTable() {
+  const { t } = useTranslation("draft");
   const standings = useMultiplayerDraftStore((s) => s.standings);
   const currentRound = useMultiplayerDraftStore((s) => s.currentRound);
   const localSeat = useMultiplayerDraftStore((s) => s.seatIndex);
@@ -41,15 +44,15 @@ export function StandingsTable() {
   return (
     <div className="rounded-[20px] border border-white/10 bg-black/18 p-4 shadow-[0_18px_54px_rgba(0,0,0,0.22)] backdrop-blur-md">
       <h3 className="text-lg font-medium text-white mb-3">
-        Standings — Round {currentRound + 1}
+        {t("standings.title", { round: currentRound + 1 })}
       </h3>
       <table className="w-full text-sm text-white/80">
         <thead>
           <tr className="border-b border-white/10 text-left text-white/50">
-            <th className="pb-2 pr-4">#</th>
-            <th className="pb-2 pr-4">Player</th>
-            <th className="pb-2 pr-4">Record</th>
-            <th className="pb-2 pr-4">GWP</th>
+            <th className="pb-2 pr-4">{t("standings.rank")}</th>
+            <th className="pb-2 pr-4">{t("standings.player")}</th>
+            <th className="pb-2 pr-4">{t("standings.record")}</th>
+            <th className="pb-2 pr-4">{t("standings.gwp")}</th>
           </tr>
         </thead>
         <tbody>
@@ -77,7 +80,7 @@ export function StandingsTable() {
       {pairings.length > 0 && (
         <div className="mt-4 border-t border-white/10 pt-3">
           <h4 className="text-sm font-medium text-white/60 mb-2">
-            Current Pairings
+            {t("standings.currentPairings")}
           </h4>
           {pairings.map((p) => (
             <div
@@ -91,7 +94,7 @@ export function StandingsTable() {
                   player={0}
                 />
               )}
-              <span className="text-white/30">vs</span>
+              <span className="text-white/30">{t("standings.versus")}</span>
               {p.score_a != null && p.score_b != null && (
                 <ScoreBadge
                   score={{ p0_wins: p.score_a, p1_wins: p.score_b, draws: 0 }}

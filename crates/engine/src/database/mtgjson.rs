@@ -58,6 +58,25 @@ pub struct AtomicCard {
     #[serde(default)]
     pub is_game_changer: bool,
     pub identifiers: AtomicIdentifiers,
+    /// Localized printings of this card from MTGJSON. Only display fields
+    /// (name/text/type) are captured — used to emit per-language card-data
+    /// sidecars for content i18n. The engine itself stays English-only.
+    #[serde(default)]
+    pub foreign_data: Vec<ForeignData>,
+}
+
+/// A localized printing of a card from MTGJSON's `foreignData` array. `language`
+/// is the full English language name (e.g. "German", "Portuguese (Brazil)").
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignData {
+    pub language: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(rename = "type", default)]
+    pub type_line: Option<String>,
 }
 
 /// An official WotC ruling attached to a card. MTGJSON mirrors these from Gatherer.

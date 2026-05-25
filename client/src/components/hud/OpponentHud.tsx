@@ -1,6 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
@@ -38,6 +39,7 @@ interface OpponentHudProps {
 }
 
 export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
+  const { t } = useTranslation("game");
   const [kickTarget, setKickTarget] = useState<PlayerId | null>(null);
   const playerId = usePerspectivePlayerId();
   const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
@@ -89,11 +91,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
       // draw. The badge would be redundant.
       if (effectiveFocused != null && controller === effectiveFocused) continue;
 
-      const t = attacker.attack_target;
+      const target = attacker.attack_target;
       const targetsMe =
-        (t.type === "Player" && t.data === playerId)
-        || ((t.type === "Planeswalker" || t.type === "Battle")
-          && objectsMap[t.data]?.controller === playerId);
+        (target.type === "Player" && target.data === playerId)
+        || ((target.type === "Planeswalker" || target.type === "Battle")
+          && objectsMap[target.data]?.controller === playerId);
       if (!targetsMe) continue;
 
       const list = map.get(controller) ?? [];
@@ -140,8 +142,8 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   }, [isHumanTargetSelection, isCopyRetargetForMe, waitingFor]);
   const validPlayerTargetIds = useMemo(
     () => currentLegalTargets
-      .filter((t): t is { Player: number } => "Player" in t)
-      .map((t) => t.Player),
+      .filter((tgt): tgt is { Player: number } => "Player" in tgt)
+      .map((tgt) => tgt.Player),
     [currentLegalTargets],
   );
   // Object targets grouped by their controller, so each `OpponentTab` can
@@ -151,12 +153,12 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const legalObjectTargetsByController = useMemo(() => {
     const map = new Map<PlayerId, ObjectId[]>();
     if (!objectsMapForTargets) return map;
-    for (const t of currentLegalTargets) {
-      if (!("Object" in t)) continue;
-      const obj = objectsMapForTargets[t.Object];
+    for (const tgt of currentLegalTargets) {
+      if (!("Object" in tgt)) continue;
+      const obj = objectsMapForTargets[tgt.Object];
       if (!obj) continue;
       const list = map.get(obj.controller) ?? [];
-      list.push(t.Object);
+      list.push(tgt.Object);
       map.set(obj.controller, list);
     }
     return map;
@@ -252,13 +254,13 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
               {opponentDesignations.activeDungeon ? (
                 <DungeonBadge dungeonName={opponentDesignations.activeDungeon} roomIndex={opponentDesignations.currentRoom} />
               ) : null}
-              {isOpponentPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
+              {isOpponentPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
               {opponentDesignations.ringLevel > 0 ? <CounterBadge kind="ring" value={opponentDesignations.ringLevel} /> : null}
               {opponentDesignations.energy > 0 ? <CounterBadge kind="energy" value={opponentDesignations.energy} /> : null}
               {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
               {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
-              {opponentCompanion ? <StatusBadge label="Companion" /> : null}
+              {opponentCompanion ? <StatusBadge label={t("badges.companion")} /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
             </>
           }
@@ -277,7 +279,15 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const targetLabel = kickTarget != null ? getOpponentDisplayName(kickTarget) : "";
 
   return (
-    <div className="flex items-center justify-center gap-2 px-2 py-1">
+    // Single-row opponent rail. Tabs flex to share the available width — they
+    // never wrap or scroll off-screen. Each tab is its own query container
+    // (`@container`), so its contents progressively disclose: board-composition
+    // stats appear only once a tab earns the width, then collapse back to
+    // avatar + name + life when the row is squeezed by additional opponents on
+    // a narrow (mobile) viewport. `max-w` on each tab caps its size so one or
+    // two opponents don't balloon on desktop. KickConfirmDialog is a fixed
+    // overlay, so its position in the flow is irrelevant.
+    <div className="flex w-full items-center justify-center gap-1.5 px-2 py-1">
       {allOpponents.map((opId) => (
         <OpponentTab
           key={opId}
@@ -299,6 +309,10 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           }
         />
       ))}
+      <FollowActiveToggle
+        enabled={followActiveOpponent}
+        onToggle={handleToggleFollowActiveOpponent}
+      />
       <KickConfirmDialog
         isOpen={kickTarget !== null}
         playerLabel={targetLabel}
@@ -307,10 +321,6 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           setKickTarget(null);
         }}
         onCancel={() => setKickTarget(null)}
-      />
-      <FollowActiveToggle
-        enabled={followActiveOpponent}
-        onToggle={handleToggleFollowActiveOpponent}
       />
     </div>
   );
@@ -323,10 +333,11 @@ function FollowActiveToggle({
   enabled: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useTranslation("game");
   const tooltipId = useId();
   const tooltip = enabled
-    ? "Following active opponent. Focus switches to the opponent whose turn it is."
-    : "Follow active opponent. Focus will switch to the opponent whose turn it is.";
+    ? t("opponentHud.followingActiveOpponent")
+    : t("opponentHud.followActiveOpponent");
 
   return (
     <button
@@ -407,6 +418,7 @@ interface OpponentTabProps {
 }
 
 function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, isTargeting, legalObjectTargetIds, showMana, incomingAttackerIds, onSelectFocus, onTargetPlayer, onKick }: OpponentTabProps) {
+  const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
@@ -489,7 +501,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const radCounters = player.player_counters?.Rad ?? 0;
   const isPhasedOut = player.status?.type === "PhasedOut";
 
-  const label = ally ? "Ally" : getOpponentDisplayName(playerId);
+  const label = ally ? t("opponentHud.ally") : getOpponentDisplayName(playerId);
 
   // Two-step click for player-targeting (Option B at the tab level):
   //   - Unfocused tab click → focus this opponent (navigate).
@@ -516,15 +528,15 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
             : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-slate-900/72";
 
   const ariaLabel = commitReady
-    ? `Target ${label}`
+    ? t("opponentHud.targetPlayer", { name: label })
     : isValidTarget
-      ? `View ${label}'s board (click again to target ${label})`
-      : `View ${label}'s board`;
+      ? t("opponentHud.viewBoardThenTarget", { name: label })
+      : t("opponentHud.viewBoard", { name: label });
   const titleTooltip = commitReady
-    ? `Click to target ${label}`
+    ? t("opponentHud.clickToTarget", { name: label })
     : isValidTarget
-      ? `Click to view ${label}'s board, then click again to target ${label}`
-      : `Click to view ${label}'s board`;
+      ? t("opponentHud.clickToViewThenTarget", { name: label })
+      : t("opponentHud.clickToViewBoard", { name: label });
   const onTabClick = commitReady ? onTargetPlayer : onSelectFocus;
 
   return (
@@ -541,7 +553,13 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       onMouseLeave={hoverEnabled ? scheduleClosePopover : undefined}
       onFocus={hoverEnabled ? openPopover : undefined}
       onBlur={hoverEnabled ? scheduleClosePopover : undefined}
-      className={`relative flex items-center gap-1.5 rounded-xl border px-2 py-1.5 backdrop-blur-xl transition-all duration-200 lg:gap-3 lg:rounded-[18px] lg:px-3 lg:py-2 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      // `@container`: each tab is its own query context so its descendants
+      // (avatar, name, stats) can size/reveal based on this tab's width — which
+      // is the row width divided by the opponent count. `flex-1 min-w-0` lets
+      // tabs shrink to share one row; `max-w` caps a tab so 1-2 opponents don't
+      // balloon. Chrome (padding/gap) is fixed because container queries can't
+      // target the container element itself, only its descendants.
+      className={`@container relative flex min-w-0 max-w-[14rem] flex-1 items-center gap-1.5 rounded-lg border px-1.5 py-1 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isTheirTurn && !shouldReduceMotion && !commitReady && (
         <motion.div
@@ -582,7 +600,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       {isUnderAttack && (
         <>
           <UnderAttackOverlay />
-          <span className="sr-only">{label} is under attack</span>
+          <span className="sr-only">{t("opponentHud.underAttack", { name: label })}</span>
         </>
       )}
       <OpponentAvatar
@@ -590,16 +608,16 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
         avatarUrl={avatarUrl}
         seatColor={seatColor}
       />
-      <div className="flex min-w-[4.5rem] flex-col items-start leading-none">
+      <div className="flex min-w-0 flex-1 flex-col items-start leading-none">
         <span
-          className="relative mb-1 flex w-full min-w-0 items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.18em]"
+          className="relative mb-0.5 flex w-full min-w-0 items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.1em] @min-[11rem]:mb-1 @min-[11rem]:text-[10px] @min-[11rem]:tracking-[0.18em]"
           style={{ color: seatColor }}
         >
           <span className="truncate">{label}</span>
         </span>
         <div className="flex items-center gap-1">
           {isTheirTurn && <span className="h-1.5 w-1.5 rounded-full bg-rose-400 animate-pulse" />}
-          <span className={`text-sm font-semibold ${isTheirTurn ? "text-rose-200" : ally ? "text-emerald-200" : isFocused ? "text-amber-100" : "text-slate-100"}`}>
+          <span className={`text-xs font-semibold @min-[10rem]:text-sm ${isTheirTurn ? "text-rose-200" : ally ? "text-emerald-200" : isFocused ? "text-amber-100" : "text-slate-100"}`}>
             {player.life}
           </span>
           {designations.isMonarch ? <MonarchBadge /> : null}
@@ -617,23 +635,32 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
         </div>
       </div>
 
-      <Stat label="Hand" value={handCount} color="text-slate-200" />
-      {counts.creatures > 0 && <Stat label="Creatures" value={counts.creatures} color="text-rose-200" />}
-      {counts.lands > 0 && <Stat label="Lands" value={counts.lands} color="text-emerald-200" />}
-      {counts.other > 0 && <Stat label="Other" value={counts.other} color="text-cyan-200" />}
+      {/* Progressive disclosure (container-query driven, keyed off this tab's
+          width): hand count reveals once the tab has a little room, the full
+          board-composition breakdown only when it's comfortably wide. When
+          squeezed (more opponents / narrow viewport) these collapse and the
+          player taps the tab to focus that opponent's full board. */}
+      <div className="hidden shrink-0 @min-[7rem]:flex">
+        <Stat label={t("opponentHud.statHand")} value={handCount} color="text-slate-200" />
+      </div>
+      <div className="hidden shrink-0 items-center gap-1.5 @min-[11rem]:flex">
+        {counts.creatures > 0 && <Stat label={t("opponentHud.statCreatures")} value={counts.creatures} color="text-rose-200" />}
+        {counts.lands > 0 && <Stat label={t("opponentHud.statLands")} value={counts.lands} color="text-emerald-200" />}
+        {counts.other > 0 && <Stat label={t("opponentHud.statOther")} value={counts.other} color="text-cyan-200" />}
+      </div>
 
       {player.companion != null && (
-        <StatusBadge label="Companion" tone={player.companion.used ? "neutral" : "amber"} />
+        <StatusBadge label={t("badges.companion")} tone={player.companion.used ? "neutral" : "amber"} />
       )}
 
       {showMana && <ManaPoolSummary playerId={playerId} />}
 
       {isEliminated && (
-        <span className="rounded-full bg-red-900/60 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-red-300">Out</span>
+        <span className="rounded-full bg-red-900/60 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-red-300">{t("opponentHud.out")}</span>
       )}
 
       {isPhasedOut && !isEliminated && (
-        <span className="rounded-full bg-indigo-900/60 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-indigo-200">Phased</span>
+        <span className="rounded-full bg-indigo-900/60 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-indigo-200">{t("opponentHud.phased")}</span>
       )}
 
       {onKick && !isEliminated && (
@@ -643,7 +670,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
         <span
           role="button"
           tabIndex={0}
-          aria-label={`Kick player ${playerId + 1}`}
+          aria-label={t("opponentHud.kickPlayer", { seat: playerId + 1 })}
           onClick={(e) => {
             e.stopPropagation();
             onKick();
@@ -656,7 +683,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
             }
           }}
           className="ml-1 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-red-900/40 text-[11px] font-bold text-red-300 ring-1 ring-red-500/30 transition hover:bg-red-700/60 hover:text-red-100"
-          title="Kick player (forfeit)"
+          title={t("opponentHud.kickPlayerTooltip")}
         >
           ×
         </span>
@@ -667,7 +694,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           defender doesn't lose track of incoming threats during targeting. */}
       {hasIncoming && (
         <span
-          aria-label={`${incomingAttackerIds.length} creature${incomingAttackerIds.length === 1 ? "" : "s"} attacking you`}
+          aria-label={t("opponentHud.incomingAttackers", { count: incomingAttackerIds.length })}
           className={`absolute -left-1.5 -top-1.5 z-10 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white shadow ring-2 ring-red-300 ${shouldReduceMotion ? "" : "animate-pulse"}`}
         >
           ⚔×{incomingAttackerIds.length}
@@ -715,7 +742,7 @@ function OpponentAvatar({
   ) : (
     <>
       <div
-        className="flex h-full w-full items-center justify-center text-sm font-bold text-white/90"
+        className="flex h-full w-full items-center justify-center text-[11px] font-bold text-white/90 @min-[11rem]:text-sm"
         style={{ backgroundColor: `${seatColor}55` }}
       >
         {label.charAt(0).toUpperCase()}
@@ -724,7 +751,10 @@ function OpponentAvatar({
     </>
   );
 
-  const tileClassName = "relative h-10 w-9 shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)]";
+  // Avatar scales with the tab's width (container query): compact on a squeezed
+  // mobile tab, full-size once the tab is comfortably wide. Smaller height here
+  // is what keeps the rail short enough to clear the cards above it on mobile.
+  const tileClassName = "relative h-8 w-7 shrink-0 overflow-hidden rounded-md border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)] @min-[11rem]:h-10 @min-[11rem]:w-9 @min-[11rem]:rounded-lg";
   const tileStyle: CSSProperties = {
     borderColor: `${seatColor}cc`,
     boxShadow: `0 0 0 1px ${seatColor}55, 0 8px 18px rgba(0,0,0,0.32), 0 0 14px ${seatColor}2e`,
@@ -748,10 +778,11 @@ function OpponentAvatar({
 }
 
 function ConnectionDotInline({ disconnected }: { disconnected: boolean }) {
+  const { t } = useTranslation("game");
   return (
     <span
       className={`inline-block h-2 w-2 rounded-full ring-1 ring-white/20 ${disconnected ? "bg-red-500 animate-pulse" : "bg-emerald-400"}`}
-      title={disconnected ? "Disconnected" : "Connected"}
+      title={disconnected ? t("opponentHud.disconnected") : t("opponentHud.connected")}
     />
   );
 }
@@ -801,8 +832,8 @@ function PortaledPopover({ anchorEl, children }: { anchorEl: HTMLElement; childr
 function Stat({ label, value, color }: { label: string; value: number; color: string }) {
   return (
     <div className="flex flex-col items-start leading-none">
-      <span className="mb-1 text-[9px] font-medium uppercase tracking-[0.16em] text-white/40">{label}</span>
-      <span className={`text-sm font-semibold tabular-nums ${color}`}>{value}</span>
+      <span className="mb-0.5 text-[8px] font-medium uppercase tracking-[0.12em] text-white/40 @min-[12rem]:mb-1 @min-[12rem]:text-[9px] @min-[12rem]:tracking-[0.16em]">{label}</span>
+      <span className={`text-xs font-semibold tabular-nums @min-[12rem]:text-sm ${color}`}>{value}</span>
     </div>
   );
 }

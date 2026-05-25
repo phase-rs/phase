@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { DeckEntry } from "../../services/deckParser";
 import type { UnsupportedCard } from "../../services/deckCompatibility";
 
@@ -52,6 +54,7 @@ export function MoveList({
   density = "compact",
   onOpenArtPicker,
 }: MoveListProps) {
+  const { t } = useTranslation("deck-builder");
   if (entries.length === 0 && !alwaysShow) return null;
   const count = totalCards(entries);
 
@@ -71,7 +74,7 @@ export function MoveList({
       )}
       {entries.length === 0 ? (
         <div className="rounded border border-dashed border-white/10 px-2 py-1.5 text-xs italic text-gray-500">
-          {emptyHint ?? "Empty"}
+          {emptyHint ?? t("moveList.empty")}
         </div>
       ) : (
         entries.map((entry) => (

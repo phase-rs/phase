@@ -1,4 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 import { scryfallLegalityKey, type ScryfallCard } from "../../services/scryfall";
 import { useLongPress } from "../../hooks/useLongPress";
 import type { BrowserLegalityFilter } from "./CardSearch";
@@ -71,9 +72,10 @@ function CardGridTile({
   onAddCard,
   onCardHover,
 }: CardGridTileProps) {
+  const { t } = useTranslation("deck-builder");
   const imageUrl = getArtCropUrl(card);
   const formatLabel = legalityFormat === "all"
-    ? "All"
+    ? t("grid.allFormats")
     : legalityFormat.charAt(0).toUpperCase() + legalityFormat.slice(1);
 
   // Touch model (mirrors MobileHandDrawer's DrawerCard): tap adds the card,
@@ -102,7 +104,7 @@ function CardGridTile({
       {...mouseHoverPreview(onCardHover, card.name)}
       {...handlers}
       disabled={!legal}
-      title={legal ? `Add ${card.name}` : `${card.name} - Not ${formatLabel} legal`}
+      title={legal ? t("grid.addCard", { name: card.name }) : t("grid.notLegal", { name: card.name, format: formatLabel })}
       className={`group relative cursor-pointer overflow-hidden rounded-lg transition-transform hover:scale-105 ${
         legal
           ? "ring-2 ring-transparent hover:ring-green-500"
@@ -125,7 +127,7 @@ function CardGridTile({
       {!legal && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/50">
           <span className="rounded bg-red-700 px-2 py-0.5 text-[10px] font-bold text-white">
-            Not {formatLabel}
+            {t("grid.notFormat", { format: formatLabel })}
           </span>
         </div>
       )}

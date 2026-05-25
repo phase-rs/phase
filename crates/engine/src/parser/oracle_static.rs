@@ -1414,6 +1414,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
+    // CR 604.3 + CR 604.3a + CR 105.2c + CR 613.1e: Self-scoped
+    // characteristic-defining color line ("~ is colorless.",
+    // "~ is white and blue."). CDAs function in all zones and define the
+    // source object's own color characteristic.
+    if let Some(def) = parse_self_subject_is_color_cda(&tp, &text) {
+        return Some(def);
+    }
+
     // --- CDA: "~'s power is equal to the number of card types among cards in all graveyards
     //     and its toughness is equal to that number plus 1" (Tarmogoyf) ---
     if let Some(def) = parse_cda_pt_equality(tp.lower, tp.original) {
@@ -10225,6 +10233,77 @@ fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
     parse_color_list(text)
 }
 
+/// CR 604.3 + CR 604.3a + CR 105.2c + CR 613.1e: Parse self-referential
+/// "[self subject] is [color expression]." lines into a color CDA.
+///
+/// This covers the class of card text that defines the source object's own
+/// color as a characteristic (Ghostfire-style), not global/class filters
+/// handled by `parse_all_subject_are_color`.
+fn parse_self_subject_is_color_cda(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (_, colors) = parse_self_subject_is_color_cda_line(tp.lower).ok()?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::SetColor { colors }])
+            .active_zones(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ])
+            .cda()
+            .description(description.to_string()),
+    )
+}
+
+fn parse_self_subject_is_color_cda_line(input: &str) -> OracleResult<'_, Vec<ManaColor>> {
+    let (after_subject, _) = parse_self_color_subject(input)?;
+    let (after_predicate, predicate_lower) = alt((
+        terminated(take_until::<_, _, OracleError<'_>>("."), tag(".")),
+        rest,
+    ))
+    .parse(after_subject)?;
+    eof::<_, OracleError<'_>>(after_predicate)?;
+    let Some(colors) = parse_color_predicate(predicate_lower) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            predicate_lower,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((after_predicate, colors))
+}
+
+fn parse_self_color_subject(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("~")),
+        value((), tag("this card")),
+        value((), tag("this spell")),
+        parse_self_ref_type_subject,
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" is ").parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn parse_self_ref_type_subject(input: &str) -> OracleResult<'_, ()> {
+    for phrase in SELF_REF_TYPE_PHRASES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
+            return Ok((rest, ()));
+        }
+    }
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
+}
+
 /// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
 /// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
@@ -18209,6 +18288,48 @@ mod tests {
             "expected a land-type modification, got {:?}",
             def.modifications
         );
+    }
+
+    #[test]
+    fn static_self_is_colorless_is_cda_all_zones() {
+        // CR 604.3 + CR 604.3a + CR 105.2c: Ghostfire-style self color CDA.
+        let def = parse_static_line("~ is colorless.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+        assert_eq!(
+            def.active_zones,
+            vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ]
+        );
+    }
+
+    #[test]
+    fn static_raw_cardname_is_colorless_is_not_contextless_self_cda() {
+        assert!(parse_static_line("Ghostfire is colorless.").is_none());
+    }
+
+    #[test]
+    fn static_self_is_multicolor_cda() {
+        let def = parse_static_line("~ is white and blue.").unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: vec![ManaColor::White, ManaColor::Blue]
+            }]
+        );
+        assert!(def.characteristic_defining);
     }
 
     // --- Group A: Chosen color/type creature pump ---

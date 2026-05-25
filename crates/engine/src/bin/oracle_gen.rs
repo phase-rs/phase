@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,93 @@ struct CardExportEntry {
 
 fn is_clean_signals(sig: &BracketSignals) -> bool {
     sig.is_clean()
+}
+
+/// A localized card face for the per-language content-i18n sidecars. Only display
+/// fields are carried (name/oracle text/type line); the engine never consumes
+/// these — they're overlaid at the frontend display layer. Fields are omitted
+/// when absent so the consumer falls back to English per-field.
+#[derive(Debug, Clone, Serialize, Default)]
+struct LocalizedFace {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oracle_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    type_line: Option<String>,
+}
+
+impl LocalizedFace {
+    fn is_empty(&self) -> bool {
+        self.name.is_none() && self.oracle_text.is_none() && self.type_line.is_none()
+    }
+}
+
+/// Map an MTGJSON `foreignData.language` (full English language name) to the
+/// supported UI locale code, or `None` for languages we don't ship.
+fn locale_code(language: &str) -> Option<&'static str> {
+    match language {
+        "Spanish" => Some("es"),
+        "French" => Some("fr"),
+        "German" => Some("de"),
+        "Italian" => Some("it"),
+        "Portuguese (Brazil)" => Some("pt"),
+        _ => None,
+    }
+}
+
+/// Collect a single-faced card's localized printings into the per-locale sidecar
+/// maps, keyed by the same lowercased name used for the English `face_index` so
+/// the frontend overlay is a direct lookup.
+///
+/// Single-faced only, by design. MTGJSON `foreignData` is *card-level*: a
+/// multi-face card exposes one combined `"A // B"` `name` and one combined
+/// `text`, with no reliable per-face split. Writing that combined name under a
+/// single face's key produces wrong data (e.g. "Emerita des Konflikts //
+/// Lightning Bolt" as the German name of Lightning Bolt), and — because a
+/// multi-face back face can share a key with a classic standalone card (see
+/// `insert_face`) — would clobber the canonical card the way `insert_face`
+/// specifically prevents for the English index. Restricting collection to
+/// single-faced cards keeps the sidecar consistent with `face_index`'s winners:
+/// every key holds either the correct single-faced localization or nothing (→
+/// English fallback), never a wrong value. Multi-face localization is deferred
+/// until per-face localized text can be sourced and integrated into
+/// `insert_face`'s single winner decision.
+fn collect_localized(
+    sidecars: &mut BTreeMap<&'static str, BTreeMap<String, LocalizedFace>>,
+    key: &str,
+    source: &AtomicCard,
+) {
+    for fd in &source.foreign_data {
+        let Some(code) = locale_code(&fd.language) else {
+            continue;
+        };
+        let localized = LocalizedFace {
+            name: fd.name.clone(),
+            oracle_text: fd.text.clone(),
+            type_line: fd.type_line.clone(),
+        };
+        if localized.is_empty() {
+            continue;
+        }
+        sidecars
+            .entry(code)
+            .or_default()
+            .entry(key.to_string())
+            .or_insert(localized);
+    }
+}
+
+/// Atomically write a localized sidecar to `<dir>/card-data.<code>.json` (tmp +
+/// rename, since Tilt's card-data resource may run this concurrently).
+fn write_sidecar(dir: &Path, code: &str, map: &BTreeMap<String, LocalizedFace>) {
+    let final_path = dir.join(format!("card-data.{code}.json"));
+    let tmp_path = dir.join(format!("card-data.{code}.json.tmp"));
+    let json = serde_json::to_string(map).expect("Failed to serialize localized sidecar");
+    std::fs::write(&tmp_path, json)
+        .unwrap_or_else(|e| panic!("Failed to write {}: {e}", tmp_path.display()));
+    std::fs::rename(&tmp_path, &final_path)
+        .unwrap_or_else(|e| panic!("Failed to promote {}: {e}", final_path.display()));
 }
 
 fn hidden_multiface_key(key: &str, entry: &CardExportEntry) -> Option<String> {
@@ -331,6 +418,7 @@ fn main() {
     let mut mtgjson_override: Option<PathBuf> = None;
     let mut names_out: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut sidecar_dir: Option<PathBuf> = None;
     let mut stats = false;
     let mut filter_names: Vec<String> = Vec::new();
     #[cfg(feature = "forge")]
@@ -362,6 +450,14 @@ fn main() {
                     process::exit(1);
                 }
                 output = Some(PathBuf::from(&args[i]));
+            }
+            "--sidecar-dir" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --sidecar-dir requires a path argument");
+                    process::exit(1);
+                }
+                sidecar_dir = Some(PathBuf::from(&args[i]));
             }
             "--stats" => {
                 stats = true;
@@ -488,6 +584,9 @@ fn main() {
     };
 
     let mut face_index: BTreeMap<String, CardExportEntry> = BTreeMap::new();
+    // Per-locale localized face data for content-i18n sidecars, keyed by the same
+    // lowercased face name as `face_index`.
+    let mut sidecars: BTreeMap<&'static str, BTreeMap<String, LocalizedFace>> = BTreeMap::new();
     let mut total_cards = 0u32;
     let mut cards_with_unimplemented = 0u32;
 
@@ -568,6 +667,10 @@ fn main() {
                     .cloned()
                     .unwrap_or_default();
                 let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
+                // Localized sidecars cover single-faced cards only — see
+                // `collect_localized`. Multi-face `foreignData` is a combined
+                // "A // B" name with no reliable per-face split, so these faces
+                // fall back to English at the display layer.
                 insert_face(
                     &mut face_index,
                     mtgjson_key.as_str(),
@@ -602,6 +705,7 @@ fn main() {
                 .cloned()
                 .unwrap_or_default();
             let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
+            collect_localized(&mut sidecars, &key, &faces[0]);
             insert_face(
                 &mut face_index,
                 mtgjson_key.as_str(),
@@ -638,6 +742,23 @@ fn main() {
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", out_path.display()));
     } else {
         println!("{json}");
+    }
+
+    // Emit per-locale content-i18n sidecars (card-data.<code>.json) into the
+    // sidecar dir, independent of whether the main export went to stdout or a file.
+    if let Some(ref dir) = sidecar_dir {
+        for (code, map) in &sidecars {
+            write_sidecar(dir, code, map);
+        }
+        eprintln!(
+            "Localized sidecars written: {} locales ({})",
+            sidecars.len(),
+            sidecars
+                .iter()
+                .map(|(c, m)| format!("{c}:{}", m.len()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
 
     if let Some(names_path) = names_out {

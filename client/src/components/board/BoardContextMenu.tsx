@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 interface BoardContextMenuProps {
   x: number;
@@ -17,6 +18,7 @@ export function BoardContextMenu({
   onToggleGameLog,
   onToggleDebugLog,
 }: BoardContextMenuProps) {
+  const { t } = useTranslation("game");
   const ref = useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = useState({ left: x, top: y });
 
@@ -60,21 +62,21 @@ export function BoardContextMenu({
       onContextMenu={(e) => e.preventDefault()}
     >
       <MenuItem
-        label="Change background…"
+        label={t("board.changeBackground")}
         onClick={() => {
           onChangeBackground();
           onClose();
         }}
       />
       <MenuItem
-        label="Game log"
+        label={t("board.gameLog")}
         onClick={() => {
           onToggleGameLog();
           onClose();
         }}
       />
       <MenuItem
-        label="Debug log"
+        label={t("board.debugLog")}
         shortcut="`"
         onClick={() => {
           onToggleDebugLog();

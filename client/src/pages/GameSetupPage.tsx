@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
@@ -44,6 +45,7 @@ const GROUP_DOT_TONE: Record<FormatGroup, string> = {
 // --- Component ---
 
 export function GameSetupPage() {
+  const { t } = useTranslation("game");
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -188,8 +190,8 @@ export function GameSetupPage() {
       <div className="menu-scene__haze" />
 
       <MenuShell
-        eyebrow="Match Setup"
-        title="Start a match."
+        eyebrow={t("gameSetup.eyebrow")}
+        title={t("gameSetup.title")}
         layout="stacked"
         aside={(() => {
           const meta = selectedFormat ? formatMetadata(selectedFormat) : null;
@@ -203,13 +205,13 @@ export function GameSetupPage() {
                 aria-expanded={formatPickerOpen}
                 aria-label={
                   meta
-                    ? `Format: ${meta.label} (${meta.group}). Tap to change.`
-                    : "Choose match format"
+                    ? t("gameSetup.formatChip.ariaLabel", { label: meta.label, group: meta.group })
+                    : t("gameSetup.formatChip.ariaLabelEmpty")
                 }
                 className="group flex min-h-[48px] items-center gap-3 rounded-[16px] bg-black/18 px-4 py-2.5 ring-1 ring-white/10 transition-colors hover:ring-white/20"
               >
                 <span className="text-[0.62rem] font-medium uppercase tracking-[0.22em] text-slate-500">
-                  Format
+                  {t("gameSetup.formatChip.kicker")}
                 </span>
                 <span className="flex items-center gap-2">
                   <span
@@ -217,7 +219,7 @@ export function GameSetupPage() {
                     aria-hidden="true"
                   />
                   <span className="text-base font-medium text-white">
-                    {meta?.label ?? "Choose format"}
+                    {meta?.label ?? t("gameSetup.formatChip.choosePlaceholder")}
                   </span>
                 </span>
                 <svg
@@ -272,8 +274,8 @@ export function GameSetupPage() {
                       type="button"
                       onClick={() => handleEditDeck(activeDeckName)}
                       className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-black/30 text-gray-300 transition-colors hover:bg-indigo-600 hover:text-white"
-                      title={`Edit ${activeDeckName}`}
-                      aria-label={`Edit ${activeDeckName}`}
+                      title={t("gameSetup.deckPreview.editDeck", { name: activeDeckName })}
+                      aria-label={t("gameSetup.deckPreview.editDeck", { name: activeDeckName })}
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
                         <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 2.474L6.226 11.16a2.25 2.25 0 0 1-.892.547l-2.115.705a.5.5 0 0 1-.632-.632l.705-2.115a2.25 2.25 0 0 1 .547-.892l7.174-7.346Z" />
@@ -293,7 +295,7 @@ export function GameSetupPage() {
                         <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
                       )}
                     </div>
-                    <span className="text-xs text-gray-300">{deckCardCount} cards</span>
+                    <span className="text-xs text-gray-300">{t("gameSetup.deckPreview.cardCount", { count: deckCardCount })}</span>
                   </div>
                   {selectedCompat && (
                     <div className="mt-2 flex flex-wrap gap-1">
@@ -303,9 +305,13 @@ export function GameSetupPage() {
                       {selectedCompat.unknown_cards.length > 0 && (
                         <span
                           className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
-                          title={`Unknown cards:\n${selectedCompat.unknown_cards.join("\n")}`}
+                          title={t("gameSetup.deckPreview.unknownCardsTitle", {
+                            cards: selectedCompat.unknown_cards.join("\n"),
+                          })}
                         >
-                          Unknown {selectedCompat.unknown_cards.length}
+                          {t("gameSetup.deckPreview.unknownBadge", {
+                            count: selectedCompat.unknown_cards.length,
+                          })}
                         </span>
                       )}
                     </div>
@@ -313,7 +319,7 @@ export function GameSetupPage() {
                   {deckBlockedForSelectedFormat && (
                     <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                       {selectedCompat.selected_format_reasons[0]
-                        ?? `Deck is not legal in ${selectedFormat}.`}
+                        ?? t("gameSetup.deckNotLegal", { format: selectedFormat })}
                     </div>
                   )}
                 </div>
@@ -322,7 +328,7 @@ export function GameSetupPage() {
                   <svg aria-hidden="true" viewBox="0 0 24 24" className="h-10 w-10 fill-current text-slate-600">
                     <path d="M7 3h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm1 3v9h7V6H8Zm-2 15h11v-2H6v2Z" />
                   </svg>
-                  <p className="mt-2 text-sm text-slate-500">Select a deck</p>
+                  <p className="mt-2 text-sm text-slate-500">{t("gameSetup.selectDeckPrompt")}</p>
                 </div>
               )}
 
@@ -333,7 +339,7 @@ export function GameSetupPage() {
               {formatConfig && (
                 <div className="flex flex-col gap-3">
                   <label className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400">Starting Life</span>
+                    <span className="text-xs text-slate-400">{t("gameSetup.config.startingLife")}</span>
                     <input
                       type="number"
                       value={formatConfig.starting_life}
@@ -347,7 +353,7 @@ export function GameSetupPage() {
                   {!formatConfig.team_based && formatConfig.max_players > 2 && (
                     <label className="flex flex-col gap-1">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-400">Players</span>
+                        <span className="text-xs text-slate-400">{t("gameSetup.config.players")}</span>
                         <span className="text-sm font-medium text-white">{playerCount}</span>
                       </div>
                       <input
@@ -396,7 +402,7 @@ export function GameSetupPage() {
                   </div>
 
                   <label className="flex flex-col gap-1">
-                    <span className="text-xs text-slate-400">Who Goes First</span>
+                    <span className="text-xs text-slate-400">{t("gameSetup.config.whoGoesFirst")}</span>
                     <div className="flex overflow-hidden rounded-lg border border-gray-700">
                       {(["random", "play", "draw"] as const).map((opt) => (
                         <button
@@ -409,7 +415,7 @@ export function GameSetupPage() {
                               : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
                           }`}
                         >
-                          {opt}
+                          {t(`gameSetup.config.firstPlayer.${opt}`)}
                         </button>
                       ))}
                     </div>
@@ -417,8 +423,9 @@ export function GameSetupPage() {
 
                   {formatConfig.commander_damage_threshold != null && (
                     <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                      Commander: 100-card singleton, commander damage at{" "}
-                      {formatConfig.commander_damage_threshold}
+                      {t("gameSetup.commanderNote", {
+                        threshold: formatConfig.commander_damage_threshold,
+                      })}
                     </div>
                   )}
                 </div>
@@ -443,7 +450,9 @@ export function GameSetupPage() {
 
               {noLegalAiDecks && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                  Add or import a deck legal in {formatConfig?.format ?? "this format"} for the AI to use.
+                  {formatConfig?.format
+                    ? t("gameSetup.noLegalAiDecks.withFormat", { format: formatConfig.format })
+                    : t("gameSetup.noLegalAiDecks.generic")}
                 </div>
               )}
 
@@ -461,7 +470,9 @@ export function GameSetupPage() {
                   className: "w-full",
                 })}
               >
-                Start Match{playerCount > 2 ? ` (${playerCount - 1} opp.)` : ""}
+                {playerCount > 2
+                  ? t("gameSetup.startMatchWithOpponents", { count: playerCount - 1 })
+                  : t("gameSetup.startMatch")}
               </button>
             </MenuPanel>
           </div>
@@ -470,9 +481,9 @@ export function GameSetupPage() {
 
       {formatPickerOpen && (
         <ModalPanelShell
-          eyebrow="Match Setup"
-          title="Choose a format"
-          subtitle="Pick the rules everyone at the table will play by."
+          eyebrow={t("gameSetup.eyebrow")}
+          title={t("gameSetup.formatPicker.title")}
+          subtitle={t("gameSetup.formatPicker.subtitle")}
           onClose={() => setFormatPickerOpen(false)}
           maxWidthClassName="max-w-3xl"
           bodyClassName="overflow-y-auto px-2 py-4 lg:px-6 lg:py-6"

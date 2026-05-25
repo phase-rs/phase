@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "./buttonStyles";
 import { STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta } from "../../constants/storage";
@@ -44,6 +45,7 @@ function resolveImportDeckName(
 }
 
 export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalProps) {
+  const { t } = useTranslation("menu");
   const [tab, setTab] = useState<ImportTab>("paste");
   const [pasteText, setPasteText] = useState("");
   const [deckName, setDeckName] = useState("");
@@ -113,15 +115,15 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
             transition={{ type: "spring", stiffness: 400, damping: 25 }}
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 className="text-center text-xl font-bold text-white">Import Deck</h2>
+            <h2 className="text-center text-xl font-bold text-white">{t("importDeck.title")}</h2>
 
             {/* Tabs */}
             <div className="flex">
               <button className={TAB_CLASS(tab === "paste")} onClick={() => setTab("paste")}>
-                Paste Text
+                {t("importDeck.tabPaste")}
               </button>
               <button className={TAB_CLASS(tab === "file")} onClick={() => setTab("file")}>
-                From File
+                {t("importDeck.tabFile")}
               </button>
             </div>
 
@@ -131,7 +133,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                   type="text"
                   value={deckName}
                   onChange={(e) => setDeckName(e.target.value)}
-                  placeholder="Deck name"
+                  placeholder={t("importDeck.deckNamePlaceholder")}
                   className="rounded-xl border border-white/25 bg-white/8 px-3 py-2 text-sm text-white placeholder-white/30 outline-none backdrop-blur-sm focus:border-amber-300/70"
                 />
                 <textarea
@@ -151,7 +153,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                     className: "w-full font-bold",
                   })}
                 >
-                  Import
+                  {t("importDeck.import")}
                 </button>
               </div>
             )}
@@ -159,7 +161,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
             {tab === "file" && (
               <div className="flex flex-col items-center gap-4 py-4">
                 <p className="text-sm text-white/50">
-                  Supports .dck, .dec, .txt, and MTGA format
+                  {t("importDeck.fileSupports")}
                 </p>
                 <button
                   onClick={() => fileInputRef.current?.click()}
@@ -169,7 +171,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                     className: "w-full font-bold",
                   })}
                 >
-                  Choose File
+                  {t("importDeck.chooseFile")}
                 </button>
                 <input
                   ref={fileInputRef}
@@ -185,7 +187,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
               onClick={resetAndClose}
               className="text-sm text-white/40 transition-colors hover:text-white/70"
             >
-              Cancel
+              {t("common:actions.cancel")}
             </button>
           </motion.div>
         </motion.div>

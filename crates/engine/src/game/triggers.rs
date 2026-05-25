@@ -420,20 +420,24 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
                 | StackEntryKind::KeywordAction { .. } => None,
             })
             .collect(),
-        // CR 114.4: Abilities of emblems function in the command zone.
-        // Non-emblem command-zone objects (commanders before casting, etc.)
-        // do NOT have their abilities function per CR 114.4, so this filter
-        // is the single authority — mirrored by `object_functions` in
-        // `functioning_abilities`.
+        // CR 114.4 + CR 113.6b: Abilities of emblems function in the command
+        // zone by default. Non-emblem command-zone objects contribute only
+        // triggers that explicitly opt in via `trigger_zones` (Eminence).
+        // `active_trigger_definitions` performs the per-definition filtering;
+        // this source scan only needs to include objects that might have at
+        // least one command-zone trigger.
         Zone::Command => state
             .command_zone
             .iter()
             .copied()
             .filter(|id| {
-                state
-                    .objects
-                    .get(id)
-                    .is_some_and(|o| o.is_emblem && !o.is_phased_out())
+                state.objects.get(id).is_some_and(|o| {
+                    !o.is_phased_out()
+                        && (o.is_emblem
+                            || o.trigger_definitions
+                                .iter_all()
+                                .any(super::functioning_abilities::trigger_opts_in_to_command_zone))
+                })
             })
             .collect(),
         Zone::Hand | Zone::Library => Vec::new(),
@@ -1062,14 +1066,11 @@ fn collect_pending_triggers(
         }
 
         // CR 113.6k + CR 114.4: Non-battlefield trigger zones are opt-in via
-        // `trigger_zones`. CR 114.4: abilities of emblems function in the
-        // command zone, so emblem-hosted triggers whose `trigger_zones`
-        // include `Zone::Command` are picked up here. Non-emblem command-
-        // zone objects (commanders pre-cast) are filtered out by
-        // `trigger_source_ids_for_zone(Zone::Command)` which applies the
-        // `is_emblem` gate. Synthetic battlefield-only keyword triggers
-        // (prowess / ward / firebending / exploit) deliberately do NOT run
-        // in this loop — emblems have no keywords.
+        // `trigger_zones`. Command-zone emblems function by default; non-emblem
+        // command-zone sources require a trigger-level `Zone::Command` opt-in
+        // (CR 113.6b), enforced by `active_trigger_definitions`.
+        // Synthetic battlefield-only keyword triggers (prowess / ward /
+        // firebending / exploit) deliberately do NOT run in this loop.
         for zone in [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command] {
             for obj_id in trigger_source_ids_for_zone(state, zone) {
                 let matched_triggers = {
@@ -8370,10 +8371,10 @@ pub mod tests {
     #[test]
     fn commander_in_command_zone_etb_trigger_does_not_fire() {
         // CR 114.4 regression: a non-emblem object in the command zone has no
-        // functioning abilities, so its ETB observer trigger must not fire
-        // when some other creature enters. `process_triggers` must reach
-        // through `active_trigger_definitions`, which drops command-zone
-        // non-emblems.
+        // functioning abilities by default, so its ETB observer trigger must
+        // not fire when some other creature enters. `process_triggers` must
+        // reach through `active_trigger_definitions`, which drops command-zone
+        // non-emblem triggers unless they opt in via `trigger_zones`.
         let mut state = setup();
         state.active_player = PlayerId(0);
 
@@ -8416,6 +8417,57 @@ pub mod tests {
             state.stack.len(),
             0,
             "A non-emblem command-zone object must not fire its ETB observer trigger"
+        );
+    }
+
+    #[test]
+    fn command_zone_non_emblem_trigger_with_command_opt_in_fires() {
+        // CR 113.6b + CR 114.4: Eminence-style triggers explicitly state they
+        // function from the command zone. A non-emblem command-zone object with
+        // `trigger_zones = [Command]` must therefore be scanned by
+        // `process_triggers`; otherwise parser-level `trigger_zones` fixes do
+        // not reach runtime.
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(0xC0FFEF),
+            PlayerId(0),
+            "Command Opt-In Observer".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_emblem = false;
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ))
+                    .destination(Zone::Battlefield)
+                    .trigger_zones(vec![Zone::Command]),
+            );
+        }
+
+        let events = vec![zone_changed_event(
+            ObjectId(0xBEEF),
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "A command-zone opt-in trigger on a non-emblem object must fire"
         );
     }
 

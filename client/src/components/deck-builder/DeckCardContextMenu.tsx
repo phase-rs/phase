@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 interface DeckCardContextMenuProps {
   x: number;
@@ -21,6 +22,7 @@ export function DeckCardContextMenu({
   onClearOverride,
   onClose,
 }: DeckCardContextMenuProps) {
+  const { t } = useTranslation("deck-builder");
   const ref = useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = useState({ left: x, top: y });
 
@@ -76,12 +78,12 @@ export function DeckCardContextMenu({
           }}
           className="flex w-full items-center px-3 py-2 text-left text-sm text-gray-200 transition-colors hover:bg-white/10"
         >
-          Choose Art…
+          {t("contextMenu.chooseArt")}
         </button>
       )}
       {!hasAlternates && !hasOverride && (
         <div className="px-3 py-2 text-sm text-slate-500 italic">
-          No alternate printings
+          {t("contextMenu.noAlternates")}
         </div>
       )}
       {hasOverride && (
@@ -94,7 +96,7 @@ export function DeckCardContextMenu({
           }}
           className="flex w-full items-center px-3 py-2 text-left text-sm text-gray-200 transition-colors hover:bg-white/10"
         >
-          Clear Art Override
+          {t("contextMenu.clearOverride")}
         </button>
       )}
     </div>

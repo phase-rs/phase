@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { isCommanderPreconDeck, useDecks, type DeckEntry } from "../../hooks/useDecks";
 import { preconExists, savePreconDeck } from "../../services/preconDecks";
@@ -38,6 +39,7 @@ function coverageTone(pct: number): string {
 }
 
 export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalProps) {
+  const { t } = useTranslation("menu");
   const decks = useDecks();
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>(ALL_TYPES);
@@ -92,9 +94,9 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
 
   const handlePick = (deck: DeckEntry) => {
     const suggested = `${deck.name} (${deck.code})`;
-    const chosen = prompt("Save preconstructed deck as:", suggested);
+    const chosen = prompt(t("precon.savePrompt"), suggested);
     if (!chosen) return;
-    if (preconExists(chosen) && !confirm(`"${chosen}" already exists. Overwrite?`)) return;
+    if (preconExists(chosen) && !confirm(t("precon.overwriteConfirm", { name: chosen }))) return;
     savePreconDeck(chosen, deck);
     onImported(chosen);
     onClose();
@@ -131,8 +133,8 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
     if (conflicts.length > 0) {
       const msg =
         conflicts.length === picks.length
-          ? `All ${picks.length} selected decks already exist. Overwrite?`
-          : `${conflicts.length} of ${picks.length} selected decks already exist. Overwrite the duplicates? (Cancel keeps existing copies and imports the rest.)`;
+          ? t("precon.overwriteAllConfirm", { count: picks.length })
+          : t("precon.overwriteSomeConfirm", { conflicts: conflicts.length, total: picks.length });
       overwrite = confirm(msg);
     }
 
@@ -156,7 +158,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
       // No toast system in this surface — a single alert keeps the user
       // informed without ambiguity. Fires AFTER onClose so the dialog tears
       // down first and the alert lands in the deck-list view.
-      alert(`Imported ${imported} deck${imported === 1 ? "" : "s"}; skipped ${skipped} existing.`);
+      alert(t("precon.importedSkipped", { count: imported, skipped }));
     }
   };
 
@@ -179,13 +181,13 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 id="precon-modal-title" className="text-xl font-semibold text-white">
-              Preconstructed Decks
+              {t("precon.title")}
             </h2>
             <p className="mt-1 text-xs text-slate-400">
-              Sourced from MTGJSON AllDeckFiles — every WotC-printed precon.
+              {t("precon.subtitle")}
               {decks && (
                 <span className="ml-1 text-slate-500">
-                  · {Object.values(decks).filter(isCommanderPreconDeck).length} total
+                  {t("precon.totalCount", { count: Object.values(decks).filter(isCommanderPreconDeck).length })}
                 </span>
               )}
             </p>
@@ -193,7 +195,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
           <button
             onClick={onClose}
             className="text-slate-400 transition hover:text-white"
-            aria-label="Close"
+            aria-label={t("common:actions.close")}
           >
             ✕
           </button>
@@ -204,7 +206,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search by name, set code, or type…"
+            placeholder={t("precon.searchPlaceholder")}
             className="flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-white/30 focus:outline-none"
             autoFocus
           />
@@ -213,10 +215,10 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
             onChange={(e) => setTypeFilter(e.target.value)}
             className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none"
           >
-            <option value={ALL_TYPES}>All ({totalMatches})</option>
-            {typeOptions.map(([t, n]) => (
-              <option key={t} value={t}>
-                {t} ({n})
+            <option value={ALL_TYPES}>{t("precon.allTypes", { count: totalMatches })}</option>
+            {typeOptions.map(([type, n]) => (
+              <option key={type} value={type}>
+                {type} ({n})
               </option>
             ))}
           </select>
@@ -225,9 +227,9 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
 
         <div className="flex-1 overflow-y-auto rounded-lg border border-white/5 bg-black/20">
           {!decks ? (
-            <div className="p-8 text-center text-sm text-slate-500">Loading deck catalog…</div>
+            <div className="p-8 text-center text-sm text-slate-500">{t("precon.loadingCatalog")}</div>
           ) : filtered.length === 0 ? (
-            <div className="p-8 text-center text-sm text-slate-500">No decks match.</div>
+            <div className="p-8 text-center text-sm text-slate-500">{t("precon.noMatch")}</div>
           ) : (
             <ul className="divide-y divide-white/5">
               {filtered.map(([id, deck]) => {
@@ -246,7 +248,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
                         checked={checked}
                         onChange={() => toggleSelected(id)}
                         className="h-4 w-4 cursor-pointer accent-indigo-400"
-                        aria-label={`Select ${deck.name}`}
+                        aria-label={t("precon.selectDeck", { name: deck.name })}
                       />
                     </label>
                     {/* Row body — single-import fast path. Multi-select users
@@ -268,8 +270,8 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
                           {deck.coveragePct}%
                         </span>
                         <span className="text-slate-600">
-                          {mainBoardCount(deck)} cards
-                          {deck.commander && deck.commander.length > 0 && " · cmdr"}
+                          {t("precon.cardCount", { count: mainBoardCount(deck) })}
+                          {deck.commander && deck.commander.length > 0 && t("precon.commanderSuffix")}
                         </span>
                       </span>
                     </button>
@@ -283,7 +285,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
         <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
           <span className="flex flex-wrap items-center gap-3">
             {decks && filtered.length === MAX_RESULTS && (
-              <span>{`Showing first ${MAX_RESULTS} — refine search to narrow.`}</span>
+              <span>{t("precon.showingFirst", { count: MAX_RESULTS })}</span>
             )}
             {/* Bulk-select helpers. Hidden until the catalog has loaded. */}
             {decks && filtered.length > 0 && (
@@ -298,7 +300,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
                 }
                 className="text-slate-400 underline-offset-2 hover:text-white hover:underline"
               >
-                Select all visible
+                {t("precon.selectAllVisible")}
               </button>
             )}
             {selectedIds.size > 0 && (
@@ -307,7 +309,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
                 onClick={clearSelection}
                 className="text-slate-400 underline-offset-2 hover:text-white hover:underline"
               >
-                Clear ({selectedIds.size})
+                {t("precon.clearSelection", { count: selectedIds.size })}
               </button>
             )}
           </span>
@@ -318,11 +320,11 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
                 onClick={handleImportSelected}
                 className={menuButtonClass({ tone: "indigo", size: "sm" })}
               >
-                Import {selectedIds.size} selected
+                {t("precon.importSelected", { count: selectedIds.size })}
               </button>
             )}
             <button onClick={onClose} className={menuButtonClass({ tone: "neutral", size: "sm" })}>
-              Close
+              {t("common:actions.close")}
             </button>
           </span>
         </div>

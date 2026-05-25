@@ -1,5 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 import { motion, useReducedMotion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -74,6 +75,7 @@ export function HudPlate({
   avatarUrl,
   playerId,
 }: HudPlateProps) {
+  const { t } = useTranslation("game");
   const Component = onClick ? "button" : "div";
   const shouldReduceMotion = useReducedMotion();
   const activeRing = active ? ` ${ACTIVE_RING_CLASSES[tone]} ring-offset-2 ring-offset-black/40` : "";
@@ -111,7 +113,7 @@ export function HudPlate({
       {underAttack && (
         <>
           <UnderAttackOverlay />
-          <span className="sr-only">{label} is under attack</span>
+          <span className="sr-only">{t("avatar.underAttack", { name: label })}</span>
         </>
       )}
       {isDebugHighlighted && (

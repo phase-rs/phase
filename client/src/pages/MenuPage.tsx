@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
+import type { GameState } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
 import { DiscordBadge } from "../components/chrome/DiscordBadge";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { LoadGameStateModal } from "../components/menu/LoadGameStateModal";
 import { MainMenuActionCard } from "../components/menu/MainMenuActionCard";
 import { MenuLogo } from "../components/menu/MenuLogo";
 import { MenuParticles } from "../components/menu/MenuParticles";
@@ -22,6 +25,8 @@ import {
   clearActiveGame,
   loadActiveGame,
   loadGame,
+  saveActiveGame,
+  saveGame,
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
@@ -47,8 +52,10 @@ const FORMAT_DISPLAY: { key: string; label: string }[] = [
 ];
 
 export function MenuPage() {
+  const { t } = useTranslation("menu");
   const navigate = useNavigate();
   const [activeGame, setActiveGame] = useState<ActiveGameMeta | null>(null);
+  const [loadModalOpen, setLoadModalOpen] = useState(false);
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
   const [formatCoverage, setFormatCoverage] = useState<[string, FormatCoverageSummary][]>([]);
@@ -157,6 +164,29 @@ export function MenuPage() {
     }
   }, [activeGame, navigate]);
 
+  // Load an externally-provided GameState (pasted JSON or an exported .zip)
+  // straight from the menu. We mirror the Resume path: persist the state under
+  // a fresh gameId, record AI-mode active-game meta, then navigate into the
+  // game route — GameProvider.setupLocal sees the saved state via loadGame and
+  // calls resumeGame (which awaits the card DB and rehydrates ability defs),
+  // so no engine work happens here. Non-human seats resolve to Medium
+  // difficulty (no per-seat aiSeats snapshot exists for a loaded state).
+  const handleLoadState = useCallback(
+    async (state: GameState) => {
+      const gameId = crypto.randomUUID();
+      await saveGame(gameId, state);
+      saveActiveGame({ id: gameId, mode: "ai", difficulty: "Medium" });
+      useGameStore.setState({ gameId });
+      // setupLocal derives player count from the restored state, but pass it
+      // explicitly for 3+ player games so the AI loop spawns every opponent
+      // seat (matches handleResumeGame's reasoning above).
+      const playerCount = state.players?.length ?? 0;
+      const playersParam = playerCount > 2 ? `&players=${playerCount}` : "";
+      navigate(`/game/${gameId}?mode=ai&difficulty=Medium${playersParam}`);
+    },
+    [navigate],
+  );
+
   const hasSavedGame = activeGame !== null;
   // Deck-requiring actions wait for the card DB warm. `error` un-gates so a
   // failed warm never traps the player — downstream init retries best-effort.
@@ -168,8 +198,8 @@ export function MenuPage() {
     if (hasSavedGame) {
       actions.push({
         key: "resume",
-        title: "Resume Game",
-        description: "Continue the last saved match from its current turn and board state.",
+        title: t("home.resume.title"),
+        description: t("home.resume.description"),
         accent: "ember" as const,
         onClick: handleResumeGame,
         icon: <ResumeIcon />,
@@ -179,8 +209,8 @@ export function MenuPage() {
     actions.push(
       {
         key: "setup",
-        title: hasSavedGame ? "New AI Match" : "Play vs AI",
-        description: "Play a solo match against an AI opponent — choose format, deck, archetype, and difficulty.",
+        title: hasSavedGame ? t("home.setup.titleSaved") : t("home.setup.title"),
+        description: t("home.setup.description"),
         accent: "arcane" as const,
         onClick: () => navigate("/setup"),
         icon: <SigilIcon />,
@@ -188,8 +218,8 @@ export function MenuPage() {
       },
       {
         key: "online",
-        title: "Play Online",
-        description: "Host a room, join by code, or reconnect to multiplayer.",
+        title: t("home.online.title"),
+        description: t("home.online.description"),
         accent: "jade" as const,
         onClick: () => navigate("/multiplayer"),
         icon: <CrownIcon />,
@@ -198,8 +228,8 @@ export function MenuPage() {
     );
     actions.push({
       key: "draft",
-      title: "Draft",
-      description: "Quick Draft against AI, plus experimental cube and pod draft options.",
+      title: t("home.draft.title"),
+      description: t("home.draft.description"),
       accent: "ember" as const,
       onClick: () => navigate("/draft"),
       icon: <DraftIcon />,
@@ -208,8 +238,8 @@ export function MenuPage() {
     actions.push(
       {
         key: "decks",
-        title: "Decks",
-        description: "Open saved decks, switch your active list, and edit builds.",
+        title: t("home.decks.title"),
+        description: t("home.decks.description"),
         accent: "stone" as const,
         onClick: () => navigate("/my-decks"),
         icon: <DeckIcon />,
@@ -217,7 +247,7 @@ export function MenuPage() {
       },
     );
     return actions;
-  }, [hasSavedGame, navigate, handleResumeGame, cardsPending]);
+  }, [hasSavedGame, navigate, handleResumeGame, cardsPending, t]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -255,11 +285,11 @@ export function MenuPage() {
             e.preventDefault();
             openExternal("https://github.com/sponsors/matthewevans");
           }}
-          aria-label="Sponsor"
+          aria-label={t("home.social.sponsor")}
           className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-2 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-pink-400/40 hover:text-pink-400 sm:px-3"
         >
           <SponsorIcon />
-          <span className="hidden sm:inline">Sponsor</span>
+          <span className="hidden sm:inline">{t("home.social.sponsor")}</span>
         </a>
         <a
           href="https://ko-fi.com/phasers"
@@ -303,7 +333,7 @@ export function MenuPage() {
               className="pointer-events-none absolute inset-0 -z-10 animate-ping rounded-full bg-amber-400/20 [animation-duration:2.4s]"
             />
             <BoltIcon />
-            <span>Try Preview</span>
+            <span>{t("home.preview.cta")}</span>
             <span className="transition-transform group-hover:translate-x-0.5">&rarr;</span>
             {/* Below the badge, not above — the default bottom-full placement
                 would cover the chrome cluster overhead. */}
@@ -311,8 +341,7 @@ export function MenuPage() {
               id={previewTooltipId}
               className="top-full bottom-auto! mt-2 mb-0!"
             >
-              Play the latest preview build — newest cards &amp; fixes land here
-              before each release.
+              {t("home.preview.tooltip")}
             </GameplayTooltip>
           </a>
         </div>
@@ -326,17 +355,17 @@ export function MenuPage() {
           {formatCoverage.length > 0 && (
             <button
               onClick={() => navigate("/coverage")}
-              title="Open the coverage dashboard"
-              aria-label="Open card coverage dashboard"
+              title={t("home.coverage.title")}
+              aria-label={t("home.coverage.ariaLabel")}
               className="group mt-6 flex cursor-pointer flex-col gap-2 rounded-xl border border-sky-400/30 bg-sky-500/[0.06] px-4 py-3 shadow-[0_0_0_1px_rgba(56,189,248,0.08)] transition-colors hover:border-sky-400/60 hover:bg-sky-500/[0.12] hover:shadow-[0_0_0_1px_rgba(56,189,248,0.22)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/70"
             >
               <div className="flex items-center justify-between gap-3">
                 <span className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-200">
                   <span aria-hidden>&#128269;</span>
-                  Card Coverage Dashboard
+                  {t("home.coverage.heading")}
                 </span>
                 <span className="text-[11px] font-medium text-sky-300 transition-transform group-hover:translate-x-0.5">
-                  View details &rarr;
+                  {t("home.coverage.viewDetails")} &rarr;
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-4">
@@ -371,20 +400,30 @@ export function MenuPage() {
               onClick={action.onClick}
               icon={action.icon}
               disabled={action.disabled}
-              statusLabel="Preparing cards…"
+              statusLabel={t("home.preparingCards")}
             />
           ))}
         </div>
 
+        <div className="mx-auto mt-4 flex justify-center">
+          <button
+            onClick={() => setLoadModalOpen(true)}
+            className="flex items-center gap-2 rounded-full border border-white/8 bg-black/20 px-4 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-white/20 hover:text-white"
+          >
+            <LoadIcon />
+            {t("home.load.title")}
+          </button>
+        </div>
+
         <div className="mx-auto mt-8 max-w-md rounded-lg border border-amber-500/20 bg-amber-950/20 px-4 py-2.5 text-center text-sm text-amber-200/70">
-          <span className="font-semibold text-amber-300/90">Early Alpha</span>
-          {" — expect broken cards and missing features."}
+          <span className="font-semibold text-amber-300/90">{t("home.alpha.label")}</span>
+          {t("home.alpha.message")}
         </div>
 
         {hasSavedGame && (
           <div className="mt-3 flex justify-center">
             <div className="rounded-full border border-white/8 bg-black/16 px-4 py-2 text-sm text-slate-500">
-              Saved match available
+              {t("home.savedMatchAvailable")}
             </div>
           </div>
         )}
@@ -397,7 +436,7 @@ export function MenuPage() {
               }}
               className="rounded-full border border-white/8 bg-black/20 px-5 py-1.5 text-xs font-medium text-slate-500 backdrop-blur-sm transition-colors hover:border-red-500/30 hover:text-red-400"
             >
-              Exit
+              {t("home.exit")}
             </button>
           </div>
         )}
@@ -407,6 +446,11 @@ export function MenuPage() {
         </p>
       </div>
 
+      <LoadGameStateModal
+        open={loadModalOpen}
+        onClose={() => setLoadModalOpen(false)}
+        onLoaded={handleLoadState}
+      />
     </div>
   );
 }
@@ -480,6 +524,14 @@ function DeckIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-7 w-7 fill-current">
       <path d="M7 3h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm1 3v9h7V6H8Zm-2 15h11v-2H6v2Z" />
+    </svg>
+  );
+}
+
+function LoadIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 fill-current">
+      <path d="M12 3a1 1 0 0 1 1 1v8.59l2.3-2.3a1 1 0 1 1 1.4 1.42l-4 4a1 1 0 0 1-1.4 0l-4-4a1 1 0 1 1 1.4-1.42l2.3 2.3V4a1 1 0 0 1 1-1ZM5 19a1 1 0 0 1 1-1h12a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1Z" />
     </svg>
   );
 }

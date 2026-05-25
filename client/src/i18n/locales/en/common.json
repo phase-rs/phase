@@ -1,0 +1,202 @@
+{
+  "actions": {
+    "cancel": "Cancel",
+    "save": "Save",
+    "close": "Close",
+    "closeNamed": "Close {{name}}"
+  },
+  "modal": {
+    "defaultEyebrow": "Workspace Tool"
+  },
+  "pausedBanner": {
+    "message": "Game paused — {{reason}}"
+  },
+  "fullscreen": {
+    "enter": "Enter fullscreen",
+    "exit": "Exit fullscreen"
+  },
+  "buildBadge": {
+    "downloading": "downloading… {{progress}}%",
+    "checking": "checking…",
+    "updating": "updating…",
+    "updatePending": "update pending after game",
+    "cards": "cards {{age}} ({{commit}})",
+    "cardDataTitle": "Card data generated {{date}} from {{commit}}",
+    "checkForUpdates": "Check for updates",
+    "updaterDebugInfo": "Updater debug info",
+    "updaterIssue": "Updater issue: {{error}}",
+    "updateIssue": "update issue",
+    "updated": "updated"
+  },
+  "gameMenu": {
+    "menu": "Game menu",
+    "sandboxTools": "Sandbox Tools",
+    "sandboxToolsTitle": "Sandbox Tools — set up any board state (`)",
+    "resume": "Resume",
+    "settings": "Settings",
+    "helpShortcuts": "Help & Shortcuts",
+    "showAiHand": "Show AI Hand",
+    "hideAiHand": "Hide AI Hand",
+    "concede": "Concede",
+    "backToDraft": "Back to Draft",
+    "mainMenu": "Main Menu",
+    "cards": "cards {{commit}}",
+    "cardDataTitle": "Card data: {{date}}"
+  },
+  "volume": {
+    "mute": "Mute",
+    "unmute": "Unmute",
+    "volume": "Volume"
+  },
+  "hostControl": {
+    "seatHost": "Host",
+    "seatPlayer": "Player",
+    "seatOpen": "Open",
+    "seatAi": "AI ({{difficulty}})",
+    "waiting": "Waiting…",
+    "seatLabel": "Seat {{id}}",
+    "addAi": "Add AI",
+    "remove": "Remove",
+    "human": "Human",
+    "kick": "Kick",
+    "replaceAi": "Replace AI",
+    "random": "Random",
+    "connecting": "Connecting…",
+    "cancelHosting": "Cancel hosting",
+    "kickConfirm": "Kick {{name}} from the room?",
+    "replaceConfirm": "Replace {{name}} with AI? This removes them from the room.",
+    "fallbackPlayerName": "Player {{number}}",
+    "seatsOccupied": "{{occupied}}/{{total}} seats occupied",
+    "startGame": "Start Game",
+    "startNow": "Start Now",
+    "fillWithAi": "Fill With AI"
+  },
+  "grantDebug": {
+    "heading": "Sandbox: Debug Permissions",
+    "description": "Grant other players the ability to submit debug actions. Their actions are logged publicly.",
+    "playerLabel": "Player {{number}}",
+    "revoke": "REVOKE",
+    "grant": "GRANT"
+  },
+  "help": {
+    "eyebrow": "Help",
+    "title": "Help & Shortcuts",
+    "subtitle": "Digital Magic flow for paper players: stops, priority, passing, and recovery tools.",
+    "closeHelp": "Close help",
+    "searchPlaceholder": "Search help or shortcuts",
+    "whatCanIDo": "What can I do now?",
+    "recoveryTitle": "Recovery Tools",
+    "recoveryDescription": "If a card misbehaves, export state first. The advanced debug panel is available when you need to inspect or adjust the game.",
+    "copyState": "Copy State",
+    "exportState": "Export State",
+    "openAdvancedDebug": "Open Advanced Debug",
+    "sections": {
+      "Flow": "Flow",
+      "Shortcuts": "Shortcuts",
+      "Recovery": "Recovery"
+    },
+    "status": {
+      "copied": "Copied game state to clipboard.",
+      "copyFailed": "Could not copy game state.",
+      "exported": "Exported {{filename}}.",
+      "exportFailed": "Could not export game state."
+    },
+    "prompt": {
+      "starting": "The game is starting or restoring state.",
+      "gameOver": "The game is over.",
+      "mulliganDecide": "Choose whether to keep this opening hand or take a mulligan.",
+      "mulliganWaitDecide": "Waiting for another player to decide their opening hand.",
+      "mulliganBottom": "Choose cards to put on the bottom after keeping a mulligan hand.",
+      "mulliganWaitBottom": "Waiting for another player to finish their mulligan.",
+      "openingHandBottom": "Choose a card to put on the bottom before normal mulligans begin.",
+      "openingHandWait": "Waiting for another player to resolve their opening hand.",
+      "waitOther": "Waiting for another player to act.",
+      "priorityStack": "You have priority with something on the stack. Resolve passes priority so the top item can resolve.",
+      "priorityAutoPass": "You have priority. The client may auto-pass quiet windows unless a stop or Full Control is on.",
+      "priorityActions": "You have priority. You can use available cards or pass to keep the turn moving.",
+      "priorityPass": "You have priority. Passing continues to the next step or player.",
+      "manaPayment": "Pay mana for the pending spell or ability. Press T to tap available lands.",
+      "targetSelection": "Choose the highlighted legal target or cancel if the prompt allows it.",
+      "declareAttackers": "Choose attackers, then confirm attackers. You can also attack with none.",
+      "declareBlockers": "Choose blockers and assign them to attackers, then confirm blockers.",
+      "chooseXValue": "Choose a value for X before continuing with the spell or ability.",
+      "payAmountChoice": "Choose how much of the requested resource to pay.",
+      "default": "The game is waiting for your choice. Follow the active prompt to continue."
+    },
+    "entries": {
+      "automaticPhaseSkips": {
+        "title": "Automatic phase skips",
+        "body": "Phase skips are automatic. Use stops or Full Control when you want paper-style priority windows."
+      },
+      "phaseStops": {
+        "title": "Phase stops",
+        "body": "A stop pauses before that step, similar to saying you may act before combat, before draw, or before the end step in paper."
+      },
+      "fullControl": {
+        "title": "Full Control",
+        "body": "Full Control keeps priority windows from being skipped, including spots where the digital client would normally keep the game moving."
+      },
+      "resolve": {
+        "title": "Resolve",
+        "body": "Resolve means you pass priority so the top spell or ability on the stack can resolve if everyone else also passes."
+      },
+      "passToEnd": {
+        "title": "Pass to End",
+        "body": "Pass to End keeps passing priority for the turn unless a choice, stop, or Full Control interrupts."
+      },
+      "manaPayment": {
+        "title": "Mana payment",
+        "body": "During mana payment, you can tap lands manually or press T to tap available lands."
+      },
+      "combatDeclarations": {
+        "title": "Combat declarations",
+        "body": "The game asks for attackers and blockers only during the declaration steps. Choose creatures, then confirm the declaration."
+      },
+      "openHelp": {
+        "title": "Open Help",
+        "body": "Open this help sheet."
+      },
+      "passPriority": {
+        "title": "Pass priority",
+        "body": "Pass priority or advance through the current priority prompt."
+      },
+      "undo": {
+        "title": "Undo",
+        "body": "Undo the last local action that did not reveal hidden information."
+      },
+      "cancel": {
+        "title": "Cancel",
+        "body": "Cancel the current selection, mana payment, target selection, or auto-pass when available."
+      },
+      "advancedDebugPanel": {
+        "title": "Advanced debug panel",
+        "body": "Open the advanced debug panel. Most players should start with Recovery Tools first."
+      },
+      "reportOrExportState": {
+        "title": "Report or export state",
+        "body": "If a card misbehaves, export the current game state so the exact board position can be reproduced."
+      },
+      "boardRightClickMenu": {
+        "title": "Board right-click menu",
+        "body": "On desktop, right-click empty board space for the game log, recovery/debug tools, and background settings."
+      }
+    },
+    "flowNudge": {
+      "message": "Phase skips are automatic. Use stops or Full Control when you want paper-style priority windows.",
+      "dismiss": "Dismiss",
+      "learnFlow": "Learn Flow"
+    },
+    "sandboxNudge": {
+      "message": "Set up any board state with <tools>Sandbox Tools</tools> — add cards and tokens, change life and counters, copy permanents, or jump phases. Open it anytime with the <key>`</key> key.",
+      "dismiss": "Dismiss",
+      "open": "Open Sandbox Tools"
+    }
+  },
+  "splash": {
+    "ready": "Ready",
+    "loading": "Loading..."
+  },
+  "turnBanner": {
+    "turn": "Turn {{number}}"
+  }
+}

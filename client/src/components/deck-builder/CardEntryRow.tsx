@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { DeckEntry } from "../../services/deckParser";
 import type { ParsedItem, UnsupportedCard } from "../../services/deckCompatibility";
@@ -80,6 +81,7 @@ export function CardEntryRow({
   density = "compact",
   onOpenArtPicker,
 }: CardEntryRowProps) {
+  const { t } = useTranslation("deck-builder");
   const comfortable = density === "comfortable";
   // Hover-reveal on compact (mouse only); always-visible + larger hit area on
   // comfortable so the controls are usable on touch (~36px on touch, shrinking
@@ -98,8 +100,8 @@ export function CardEntryRow({
   const moveLabel = section === "main" ? "→" : "←";
   const moveAriaLabel =
     section === "main"
-      ? `Move one ${entry.name} to sideboard`
-      : `Move one ${entry.name} to main deck`;
+      ? t("card.moveToSideboard", { name: entry.name })
+      : t("card.moveToMain", { name: entry.name });
 
   return (
     <div data-card-name={entry.name.toLowerCase()}>
@@ -126,9 +128,9 @@ export function CardEntryRow({
             <button
               onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
               className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-amber-500/80 text-[8px] font-bold leading-none text-black"
-              aria-label={`${unsupported.gaps.length} unsupported mechanic(s); expand details`}
+              aria-label={t("card.unsupportedExpand", { count: unsupported.gaps.length })}
               aria-expanded={expanded}
-              title={`${unsupported.gaps.length} unsupported mechanic(s) — click to expand`}
+              title={t("card.unsupportedTitle", { count: unsupported.gaps.length })}
             >
               !
             </button>
@@ -139,15 +141,15 @@ export function CardEntryRow({
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onOpenArtPicker(entry.name); }}
                 className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded-sm bg-sky-500/60 text-[9px] leading-none text-sky-100 hover:bg-sky-500/80"
-                aria-label={`Choose art for ${entry.name}`}
-                title="Alternate art available — tap to choose"
+                aria-label={t("card.chooseArtFor", { name: entry.name })}
+                title={t("card.alternateArtTap")}
               >
                 ✦
               </button>
             ) : (
               <span
                 className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-sky-500/60 text-[9px] leading-none text-sky-100"
-                title="Alternate art available — right-click to choose"
+                title={t("card.alternateArtRightClick")}
               >
                 ✦
               </span>
@@ -160,8 +162,8 @@ export function CardEntryRow({
               type="button"
               onClick={() => onSetAsCommander?.(entry.name)}
               className={`${controlVisibility} ml-1 ${controlSize} rounded text-purple-300 hover:bg-purple-900/40`}
-              aria-label={`Make ${entry.name} the commander`}
-              title="Make this my commander"
+              aria-label={t("card.makeCommander", { name: entry.name })}
+              title={t("card.makeCommanderTitle")}
             >
               ♛
             </button>
@@ -180,8 +182,8 @@ export function CardEntryRow({
               type="button"
               onClick={() => onRemove(entry.name, section)}
               className={`${controlVisibility} ml-1 ${controlSize} rounded text-red-400 hover:bg-red-900/40`}
-              aria-label={`Remove one ${entry.name}`}
-              title={`Remove one ${entry.name}`}
+              aria-label={t("card.removeOne", { name: entry.name })}
+              title={t("card.removeOne", { name: entry.name })}
             >
               -
             </button>

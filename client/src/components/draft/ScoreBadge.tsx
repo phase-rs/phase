@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { MatchScore } from "../../adapter/types";
 
 // ── Props ─────────────────────────────────────────────────────────────
@@ -19,13 +21,14 @@ interface ScoreBadgeProps {
  * to player names in the HUD and between-games screens.
  */
 export function ScoreBadge({ score, player, size = "sm" }: ScoreBadgeProps) {
+  const { t } = useTranslation("draft");
   const wins = player === 0 ? score.p0_wins : score.p1_wins;
   const winsNeeded = 2; // Bo3: first to 2
 
   const dotSize = size === "md" ? "h-2.5 w-2.5" : "h-2 w-2";
 
   return (
-    <div className="flex items-center gap-0.5" aria-label={`Score: ${wins} wins`}>
+    <div className="flex items-center gap-0.5" aria-label={t("scoreBadge.label", { count: wins })}>
       {Array.from({ length: winsNeeded }, (_, i) => (
         <span
           key={i}

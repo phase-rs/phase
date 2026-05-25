@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import type { ScryfallCard } from "../../services/scryfall";
 import { resolveOracleIdSync } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
@@ -58,6 +59,7 @@ export function useDeckBuilder({
   initialDeckName = null,
   searchFilters,
 }: UseDeckBuilderParams) {
+  const { t } = useTranslation("deck-builder");
   const [deck, setDeck] = useState<ParsedDeck>({ main: [], sideboard: [] });
   const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
   const [deckName, setDeckName] = useState("");
@@ -541,30 +543,28 @@ export function useDeckBuilder({
   if (isCommander) {
     const totalCards = deck.main.reduce((s, e) => s + e.count, 0) + commanders.length;
     if (totalCards > 0 && totalCards !== expectedDeckSize) {
-      warnings.push(`Deck has ${totalCards} cards (need exactly ${expectedDeckSize})`);
+      warnings.push(t("warnings.commanderCount", { count: totalCards, expected: expectedDeckSize }));
     }
     for (const name of getSingletonViolations(deck.main, cardDataCache)) {
-      warnings.push(`${name}: multiple copies (singleton format)`);
+      warnings.push(t("warnings.singleton", { name }));
     }
     for (const name of getColorIdentityViolations(deck.main, commanders, cardDataCache)) {
-      warnings.push(`${name}: outside commander color identity`);
+      warnings.push(t("warnings.colorIdentity", { name }));
     }
   } else {
     const mainTotal = deck.main.reduce((s, e) => s + e.count, 0);
     if (mainTotal > 0 && mainTotal < 60) {
-      warnings.push(`Deck has ${mainTotal} cards (minimum 60)`);
+      warnings.push(t("warnings.minimumCount", { count: mainTotal }));
     }
     for (const entry of deck.main) {
       if (entry.count > 4 && !BASIC_LAND_NAMES.has(entry.name) && !hasUnlimitedCopies(cardDataCache.get(entry.name)?.oracle_text)) {
-        warnings.push(`${entry.name}: ${entry.count} copies (max 4)`);
+        warnings.push(t("warnings.maxCopies", { name: entry.name, count: entry.count }));
       }
     }
   }
   // CR 702.139a: Warn if a companion card is also in the main deck (likely import error)
   if (deck.companion && deck.main.some((e) => e.name === deck.companion)) {
-    warnings.push(
-      `${deck.companion} is your companion but is also in the main deck — this violates its deckbuilding condition. Remove it from the main deck to use it as a companion.`,
-    );
+    warnings.push(t("warnings.companionInMain", { name: deck.companion }));
   }
 
   return {

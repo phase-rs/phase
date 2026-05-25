@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "../menu/buttonStyles";
 
@@ -24,6 +25,7 @@ export function BrokerOfflinePrompt({
   onCancel,
   serverAddress,
 }: BrokerOfflinePromptProps) {
+  const { t } = useTranslation("multiplayer");
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70" />
@@ -34,11 +36,10 @@ export function BrokerOfflinePrompt({
         className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md"
       >
         <h2 className="text-base font-semibold text-white">
-          Lobby server unreachable
+          {t("brokerOfflinePrompt.title")}
         </h2>
         <p className="mt-3 text-sm leading-6 text-slate-300">
-          Your game won&apos;t be publicly listed. You can still host over
-          P2P — just share the room code directly with your opponent.
+          {t("brokerOfflinePrompt.message")}
         </p>
         {serverAddress && (
           <p className="mt-2 font-mono text-[10px] text-slate-500 break-all">
@@ -51,14 +52,14 @@ export function BrokerOfflinePrompt({
             onClick={onCancel}
             className={menuButtonClass({ tone: "neutral", size: "sm" })}
           >
-            Cancel
+            {t("common:actions.cancel")}
           </button>
           <button
             type="button"
             onClick={onContinueWithoutLobby}
             className={menuButtonClass({ tone: "cyan", size: "sm" })}
           >
-            Continue without lobby
+            {t("brokerOfflinePrompt.continueWithoutLobby")}
           </button>
         </div>
       </motion.div>

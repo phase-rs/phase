@@ -556,6 +556,9 @@ pub(crate) enum TargetedImperativeAst {
     UntapAll {
         target: TargetFilter,
     },
+    Goad {
+        target: TargetFilter,
+    },
     GoadAll {
         target: TargetFilter,
     },

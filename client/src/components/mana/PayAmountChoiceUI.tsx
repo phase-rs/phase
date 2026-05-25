@@ -1,11 +1,13 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 
 export function PayAmountChoiceUI() {
+  const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -27,14 +29,14 @@ export function PayAmountChoiceUI() {
   }, [gameState, data]);
 
   const resourceLabel = useMemo(() => {
-    if (!data) return "amount";
+    if (!data) return "";
     switch (data.resource.type) {
       case "Energy":
-        return "energy";
+        return t("mana.resourceEnergy");
       case "ManaGeneric":
-        return "mana";
+        return t("mana.resourceMana");
     }
-  }, [data]);
+  }, [data, t]);
 
   const handleCommit = useCallback(() => {
     dispatch({ type: "SubmitPayAmount", data: { amount: value } });
@@ -53,7 +55,7 @@ export function PayAmountChoiceUI() {
       >
         <div className="min-w-[320px] max-w-[420px] rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
-            Choose amount to pay
+            {t("mana.chooseAmountTitle")}
             {sourceName && (
               <span className="ml-1 text-gray-400">&mdash; {sourceName}</span>
             )}
@@ -62,7 +64,7 @@ export function PayAmountChoiceUI() {
           <div className="mb-4 px-2">
             <label className="flex items-center gap-3 text-sm text-gray-200">
               <span className="shrink-0 font-mono text-base text-cyan-300">
-                X = {value}
+                {t("mana.xEquals", { value })}
               </span>
               <input
                 type="range"
@@ -71,10 +73,10 @@ export function PayAmountChoiceUI() {
                 value={value}
                 onChange={(e) => setValue(Number(e.target.value))}
                 className="h-2 w-full cursor-pointer appearance-none rounded-full bg-gray-700 accent-cyan-500"
-                aria-label="Choose amount to pay"
+                aria-label={t("mana.chooseAmountAria")}
               />
               <span className="shrink-0 text-xs text-gray-500">
-                max {max}
+                {t("mana.maxOnly", { max })}
               </span>
             </label>
           </div>
@@ -84,7 +86,7 @@ export function PayAmountChoiceUI() {
               onClick={handleCommit}
               className={gameButtonClass({ tone: "emerald", size: "md" })}
             >
-              Pay {value} {resourceLabel}
+              {t("mana.payAmount", { value, resource: resourceLabel })}
             </button>
           </div>
         </div>

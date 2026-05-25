@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { useGameDispatch } from "../../hooks/useGameDispatch";
 import { useGameStore } from "../../stores/gameStore";
 
@@ -9,6 +11,7 @@ import { useGameStore } from "../../stores/gameStore";
  * mirrors that by omitting the toggle for the host's row.
  */
 export function GrantDebugPermissionPanel() {
+  const { t } = useTranslation();
   const dispatch = useGameDispatch();
   const players = useGameStore((s) => s.gameState?.players);
   const debugPermitted = useGameStore((s) => s.gameState?.debug_permitted ?? []);
@@ -28,11 +31,10 @@ export function GrantDebugPermissionPanel() {
   return (
     <div className="mb-2 rounded border border-amber-500/30 bg-amber-500/5 px-2 py-2">
       <h4 className="mb-1 font-mono text-[10px] font-bold uppercase tracking-wider text-amber-300">
-        Sandbox: Debug Permissions
+        {t("grantDebug.heading")}
       </h4>
       <p className="mb-1.5 text-[10px] leading-3 text-amber-200/70">
-        Grant other players the ability to submit debug actions. Their actions
-        are logged publicly.
+        {t("grantDebug.description")}
       </p>
       <div className="flex flex-col gap-1">
         {opponents.map((p) => {
@@ -53,9 +55,9 @@ export function GrantDebugPermissionPanel() {
                   : "bg-gray-800 text-gray-400 hover:bg-gray-700")
               }
             >
-              <span>Player {p.id + 1}</span>
+              <span>{t("grantDebug.playerLabel", { number: p.id + 1 })}</span>
               <span className="font-mono text-[10px]">
-                {granted ? "REVOKE" : "GRANT"}
+                {granted ? t("grantDebug.revoke") : t("grantDebug.grant")}
               </span>
             </button>
           );
