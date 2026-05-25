@@ -27,7 +27,7 @@ use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_chosen_qualifier_subject, parse_continuous_modifications, parse_static_line_multi,
 };
-use super::super::oracle_target::{parse_target, parse_type_phrase};
+use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
     parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
@@ -634,7 +634,16 @@ pub(super) fn parse_subject_application(
         .parse(lower.as_str())
         .is_ok()
     {
-        let (filter, _) = parse_target(subject);
+        // CR 109.4 + CR 115.1 + CR 603.2: thread the parse context so that
+        // controller-suffix resolution inside `parse_target` (notably the
+        // "that player controls" relative reference) can see the enclosing
+        // trigger's `relative_player_scope` and emit
+        // `ControllerRef::TargetPlayer` for the attacked / damaged player
+        // instead of falling back to `You`. Without `ctx`, the subject-form
+        // path of "target creature that player controls becomes …" (Gornog,
+        // the Red Reaper) silently bound the target to the trigger
+        // controller's own creatures.
+        let (filter, _) = parse_target_with_ctx(subject, ctx);
         return subject_filter_application(filter, true);
     }
     if tag::<_, _, OracleError<'_>>("up to ")
