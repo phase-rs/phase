@@ -2131,18 +2131,25 @@ pub(super) fn match_becomes_blocked(
     }
 }
 
-/// DamageReceived: fires when the source creature is dealt damage.
-/// Uses DamageDealt event but checks the *target* (not source) against the trigger source.
+/// DamageReceived: fires when the trigger source (a creature or player) is dealt damage.
+/// Uses DamageDealt event but checks the *target* (not the damage source) against the trigger.
+///
+/// Two target patterns are supported:
+/// - Object target: "Whenever ~ is dealt damage" — `target == source_id`.
+/// - Player target: "Whenever you are dealt damage" / "Whenever a source an opponent controls
+///   deals damage to you" — `valid_target` scopes the player; `valid_source` (optional)
+///   scopes the damage source to opponent-controlled objects.
 pub(super) fn match_damage_received(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_id: ObjectId,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
     if let GameEvent::DamageDealt {
         target,
         is_combat,
         amount,
+        source_id: damage_source_id,
         ..
     } = event
     {
@@ -2160,15 +2167,19 @@ pub(super) fn match_damage_received(
         }
         match target {
             TargetRef::Object(target_id) => {
-                if trigger.valid_card.is_some() {
-                    // Would need valid_card_matches on the target — for now,
-                    // self-reference is the dominant pattern ("Whenever ~ is dealt damage")
-                    *target_id == source_id
-                } else {
-                    *target_id == source_id
-                }
+                // Object target: trigger source is the damaged permanent.
+                *target_id == source_id
             }
-            TargetRef::Player(_) => false,
+            TargetRef::Player(pid) => {
+                // Player target: check the damaged player matches valid_target
+                // (e.g., "you" → Controller) and optionally that the damage
+                // source matches valid_source (e.g., "a source an opponent
+                // controls" → Typed(Opponent)). CR 120.1 + CR 120.3.
+                if !valid_player_matches(trigger, state, *pid, source_id) {
+                    return false;
+                }
+                valid_source_matches(trigger, state, *damage_source_id, source_id)
+            }
         }
     } else {
         false
@@ -6091,6 +6102,81 @@ mod tests {
                 "amount={amount} GE 3"
             );
         }
+    }
+
+    /// CR 120.1: match_damage_received fires for player targets when valid_target=Controller
+    /// and the opponent's source matches valid_source.
+    #[test]
+    fn damage_received_player_target_with_opponent_source_filter() {
+        let mut state = setup();
+        // Trigger source = Farsight Mask (controller = P0)
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Farsight Mask".to_string(),
+            Zone::Battlefield,
+        );
+        // Opponent's source (P1 controls this creature)
+        let opp_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.valid_target = Some(TargetFilter::Controller); // "deals damage to you"
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        )); // "a source an opponent controls"
+
+        // Opponent's source (P1) deals damage to you (P0) — fires.
+        let event = GameEvent::DamageDealt {
+            source_id: opp_source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            match_damage_received(&event, &trigger, source, &state),
+            "must fire when opponent source deals damage to controller"
+        );
+
+        // Your own source (P0) deals damage to you (P0) — must NOT fire (source is not opponent).
+        let own_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "OwnCreature".to_string(),
+            Zone::Battlefield,
+        );
+        let event2 = GameEvent::DamageDealt {
+            source_id: own_source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_received(&event2, &trigger, source, &state),
+            "must not fire when own source deals damage"
+        );
+
+        // Opponent source deals damage to opponent (P1) — must NOT fire (wrong player).
+        let event3 = GameEvent::DamageDealt {
+            source_id: opp_source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_received(&event3, &trigger, source, &state),
+            "must not fire when opponent is damaged, not controller"
+        );
     }
 
     #[test]

@@ -7237,6 +7237,36 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::DamageReceived, def));
     }
 
+    // CR 120.1 + CR 120.3: "whenever a source an opponent controls deals damage to you" —
+    // player-targeted damage from an opponent's source. Sets valid_target = Controller
+    // (the player receiving damage is you) and valid_source = Typed(Opponent) (the damage
+    // source is opponent-controlled). match_damage_received checks both.
+    // Cards: Retaliator Griffin, Michiko Konda Truth Seeker, Farsight Mask.
+    if matches!(
+        lower,
+        "whenever a source an opponent controls deals damage to you"
+            | "when a source an opponent controls deals damage to you"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::DamageReceived;
+        def.valid_target = Some(TargetFilter::Controller);
+        def.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        return Some((TriggerMode::DamageReceived, def));
+    }
+
+    // CR 120.1: "whenever a source deals damage to you" — any source deals damage to you.
+    if matches!(
+        lower,
+        "whenever a source deals damage to you" | "when a source deals damage to you"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::DamageReceived;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::DamageReceived, def));
+    }
+
     None
 }
 
@@ -20141,5 +20171,35 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 120.1 + CR 120.3: "Whenever a source an opponent controls deals damage to you"
+    /// scopes the damaged player to Controller and the damage source to Opponent.
+    /// Cards: Retaliator Griffin, Michiko Konda Truth Seeker, Farsight Mask.
+    #[test]
+    fn trigger_source_opponent_controls_deals_damage_to_you() {
+        let def = parse_trigger_line(
+            "Whenever a source an opponent controls deals damage to you, you may put that many +1/+1 counters on ~.",
+            "Retaliator Griffin",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        // valid_source must be Typed with Opponent controller
+        let Some(TargetFilter::Typed(tf)) = &def.valid_source else {
+            panic!("expected opponent-scoped valid_source, got {:?}", def.valid_source);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+    }
+
+    /// CR 120.1: "Whenever a source deals damage to you" with no source controller filter.
+    #[test]
+    fn trigger_a_source_deals_damage_to_you_no_filter() {
+        let def = parse_trigger_line(
+            "Whenever a source deals damage to you, draw a card.",
+            "Farsight Mask",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.valid_source, None);
     }
 }
