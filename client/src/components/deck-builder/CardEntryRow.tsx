@@ -107,7 +107,6 @@ export function CardEntryRow({
     <div data-card-name={entry.name.toLowerCase()}>
       <div
         className="group flex items-center justify-between py-0.5 text-sm"
-        {...mouseHoverPreview(onCardHover, entry.name)}
         onContextMenu={(e) => {
           if (onChooseArt) {
             e.preventDefault();
@@ -121,6 +120,7 @@ export function CardEntryRow({
         <span
           className={`${unsupported ? "text-amber-200/80" : "text-gray-300"} ${onCardHover ? "cursor-pointer" : ""}`}
           onClick={() => onCardHover?.(entry.name)}
+          {...mouseHoverPreview(onCardHover, entry.name)}
         >
           <span className="mr-1 text-gray-500">{entry.count}x</span>
           {entry.name}
