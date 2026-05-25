@@ -5498,9 +5498,15 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, head_type) = alt((
         value(
             Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
-            (tag::<_, _, OracleError<'_>>("noncreature source"), opt(tag("s"))),
+            (
+                tag::<_, _, OracleError<'_>>("noncreature source"),
+                opt(tag("s")),
+            ),
         ),
-        value(None, (tag::<_, _, OracleError<'_>>("source"), opt(tag("s")))),
+        value(
+            None,
+            (tag::<_, _, OracleError<'_>>("source"), opt(tag("s"))),
+        ),
         value(Some(TypeFilter::Creature), tag("creature")),
         value(Some(TypeFilter::Artifact), tag("artifact")),
         value(Some(TypeFilter::Enchantment), tag("enchantment")),
