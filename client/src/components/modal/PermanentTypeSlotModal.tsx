@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { CoreType, GameAction, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -34,6 +36,7 @@ function SlotChoiceContent({
   availableSlots: CoreType[];
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
+  const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 
   if (!obj) return null;
@@ -42,9 +45,9 @@ function SlotChoiceContent({
 
   return (
     <DialogShell
-      eyebrow="Permanent Type"
-      title="Choose Type Slot"
-      subtitle={`${cardName} has multiple permanent types. Choose which type slot to use.`}
+      eyebrow={t("permanentTypeSlot.eyebrow")}
+      title={t("permanentTypeSlot.title")}
+      subtitle={t("permanentTypeSlot.subtitle", { name: cardName })}
     >
       <div className="px-3 pt-3 lg:px-5 lg:pt-4">
         <CardTextboxPreview cardName={cardName} />

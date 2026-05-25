@@ -93,6 +93,7 @@ fn scenario_blocks_lethal_attack_when_a_block_exists() {
             player: P0,
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
+            block_requirements: HashMap::new(),
         };
     }
 
@@ -210,6 +211,7 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
             player: P0,
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
+            block_requirements: HashMap::new(),
         };
     }
 

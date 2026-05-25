@@ -1,0 +1,210 @@
+{
+  "search": {
+    "title": "Szukaj",
+    "subtitle": "Dodaj karty do bieżącej listy.",
+    "reset": "Resetuj",
+    "textPlaceholder": "Szukaj kart...",
+    "allTypes": "Wszystkie typy",
+    "cmcMax": "Maks. CMC:",
+    "sets": "Dodatki",
+    "addSetPlaceholder": "Dodaj kod dodatku...",
+    "addSet": "Dodaj",
+    "removeSet": "Usuń {{name}}",
+    "emptyHint": "Dodaj filtr, aby rozpocząć przeglądanie",
+    "searching": "Wyszukiwanie...",
+    "searchFailed": "Wyszukiwanie nie powiodło się",
+    "results_one": "{{count}} wynik",
+    "results_other": "{{count}} wyników",
+    "browseFormat": {
+      "all": "Wszystkie karty"
+    }
+  },
+  "filters": {
+    "title": "Filtry",
+    "close": "Zamknij filtry",
+    "done": "Gotowe",
+    "search": "Szukaj"
+  },
+  "deck": {
+    "backToDeck": "Powrót do talii",
+    "listView": "Widok listy",
+    "stackView": "Widok stosu"
+  },
+  "tabs": {
+    "ariaLabel": "Powierzchnia kreatora talii",
+    "deck": "Talia",
+    "info": "Informacje"
+  },
+  "toolbar": {
+    "menu": "Menu",
+    "deckBuilder": "Kreator talii",
+    "untitledDeck": "Talia bez tytułu",
+    "deckName": "Nazwa talii",
+    "format": "Format",
+    "bracket": "Poziom",
+    "saved": "Zapisano ✓",
+    "clone": "Klonuj",
+    "cloneTitle": "Zapisz kopię pod nową nazwą",
+    "loadDeck": "Wczytaj talię...",
+    "nameToSave": "Nazwij talię, aby ją zapisać"
+  },
+  "unsaved": {
+    "title": "Niezapisane zmiany",
+    "dismiss": "Zamknij okno dialogowe",
+    "bodyLeaving": "Masz niezapisane zmiany w tej talii. Zapisać je przed wyjściem?",
+    "bodyLoading": "Masz niezapisane zmiany w tej talii. Zapisać je przed wczytaniem innej talii?",
+    "discard": "Odrzuć",
+    "saveAndContinue": "Zapisz i kontynuuj"
+  },
+  "card": {
+    "moveToSideboard": "Przenieś jedną kartę {{name}} do zaplecza",
+    "moveToMain": "Przenieś jedną kartę {{name}} do talii głównej",
+    "removeOne": "Usuń jedną kartę {{name}}",
+    "makeCommander": "Ustaw {{name}} jako dowódcę",
+    "makeCommanderTitle": "Ustaw jako mojego dowódcę",
+    "chooseArtFor": "Wybierz grafikę dla {{name}}",
+    "alternateArtTap": "Dostępna alternatywna grafika — dotknij, aby wybrać",
+    "alternateArtRightClick": "Dostępna alternatywna grafika — kliknij prawym przyciskiem, aby wybrać",
+    "unsupportedExpand_one": "{{count}} nieobsługiwana mechanika; rozwiń szczegóły",
+    "unsupportedExpand_other": "{{count}} nieobsługiwanych mechanik; rozwiń szczegóły",
+    "unsupportedTitle_one": "{{count}} nieobsługiwana mechanika — kliknij, aby rozwinąć",
+    "unsupportedTitle_other": "{{count}} nieobsługiwanych mechanik — kliknij, aby rozwinąć"
+  },
+  "grid": {
+    "allFormats": "Wszystkie",
+    "addCard": "Dodaj {{name}}",
+    "notLegal": "{{name}} - Niedozwolona w formacie {{format}}",
+    "notFormat": "Nie {{format}}"
+  },
+  "deckList": {
+    "currentList": "Bieżąca lista",
+    "import": "Importuj",
+    "importTitle": "Importuj talię z tekstu (format MTGA lub .dck)",
+    "export": "Eksportuj",
+    "exportTitle": "Eksportuj talię",
+    "mainTab": "Główna ({{count}})",
+    "sideboardTab": "Zaplecze ({{count}})",
+    "mainDeckHeading_one": "Talia główna ({{count}} karta)",
+    "mainDeckHeading_other": "Talia główna ({{count}} kart)",
+    "sideboardUnlimited": "Zaplecze ({{count}})",
+    "sideboardLimited": "Zaplecze ({{count}}/{{max}})",
+    "sideboardExceeds": "Zaplecze przekracza limit {{max}} kart",
+    "sideboardEmptyHint": "Najedź na kartę z talii głównej i kliknij →, aby ją tu przenieść.",
+    "group": {
+      "Creatures": "Stwory",
+      "Spells": "Czary",
+      "Lands": "Ziemie"
+    },
+    "importModalTitle": "Importuj talię",
+    "pastePlaceholder": "Wklej listę talii (format MTGA lub .dck)...",
+    "fromFile": "Z pliku",
+    "parse": "Przetwórz",
+    "exportModalTitle": "Eksportuj talię",
+    "saveToFile": "Zapisz do pliku",
+    "copied": "Skopiowano!",
+    "copy": "Kopiuj"
+  },
+  "moveList": {
+    "empty": "Pusto"
+  },
+  "stack": {
+    "deckView": "Widok talii",
+    "visualDeckStack": "Wizualny stos talii",
+    "mainBadge": "Główna {{count}}",
+    "sideboardBadge": "Zaplecze {{count}}",
+    "emptyHint": "Dodane karty pojawią się tutaj jako kaskadowy stos.",
+    "commanderBadge": "Dowódca",
+    "commanderLane": "Dowódca",
+    "mainDeckLane": "Talia główna",
+    "noCommander": "Nie wybrano dowódcy.",
+    "mainEmpty": "Karty talii głównej pojawią się tutaj.",
+    "cardCount_one": "{{count}} karta",
+    "cardCount_other": "{{count}} kart",
+    "mainSideBadge": "{{main}} główna + {{side}} zaplecze",
+    "groupCards_one": "{{count}} karta",
+    "groupCards_other": "{{count}} kart",
+    "group": {
+      "Creatures": "Stwory",
+      "Spells": "Czary",
+      "Lands": "Ziemie"
+    },
+    "sideboardGroup": "Zaplecze",
+    "addOne": "Dodaj jedną kartę {{name}}",
+    "copyLimit": "{{name}} osiągnęła limit kopii",
+    "removeOne": "Usuń jedną kartę {{name}}",
+    "removeCommander": "Usuń {{name}} jako dowódcę"
+  },
+  "printingPicker": {
+    "title": "Wybierz grafikę",
+    "noPrintings": "Brak alternatywnych wydań dla tej karty.",
+    "filterPlaceholder": "Filtruj według dodatku lub numeru kolekcjonerskiego…",
+    "filterAriaLabel": "Filtruj wydania",
+    "count_one": "{{count}} wydanie",
+    "count_other": "{{count}} wydań",
+    "countMatching_one": "{{count}} wydanie pasujące do „{{query}}”",
+    "countMatching_other": "{{count}} wydań pasujących do „{{query}}”",
+    "useDefault": "Użyj domyślnej",
+    "noMatches": "Żadne wydanie nie pasuje do filtra.",
+    "noImage": "Brak obrazu",
+    "showMore_one": "Pokaż więcej (pozostało {{count}})",
+    "showMore_other": "Pokaż więcej (pozostało {{count}})"
+  },
+  "stats": {
+    "formatLegality": "Dozwolenie w formacie",
+    "engineCoverage": "Obsługa silnika",
+    "unsupportedTitle": "Nieobsługiwane:\n{{list}}"
+  },
+  "commanderPanel": {
+    "heading": "Dowódca",
+    "noCommander": "Nie wybrano dowódcy",
+    "remove": "Usuń",
+    "identity": "Tożsamość:",
+    "setAsCommander": "Ustaw jako dowódcę:",
+    "cardCount": "{{count}}/{{expected}} kart",
+    "singletonViolations": "Naruszenia zasady singletona: {{cards}}",
+    "colorViolations": "Naruszenia tożsamości kolorów: {{cards}}"
+  },
+  "manaCurve": {
+    "title": "Krzywa many",
+    "colors": "Kolory"
+  },
+  "legality": {
+    "legal": "Dozwolona",
+    "banned": "Zakazana",
+    "restricted": "Ograniczona",
+    "notLegal": "Niedozwolona"
+  },
+  "contextMenu": {
+    "chooseArt": "Wybierz grafikę…",
+    "noAlternates": "Brak alternatywnych wydań",
+    "clearOverride": "Wyczyść nadpisanie grafiki"
+  },
+  "bracket": {
+    "unavailable": "Szacowanie poziomu nie jest dostępne w tej wersji.",
+    "addCommander": "Dodaj dowódcę, aby zobaczyć szacowany poziom.",
+    "estimated": "Szacowany: B{{tier}} {{label}}",
+    "manual": "Ręczny: B{{tier}} {{label}}",
+    "mismatch": " ⚠ niezgodność",
+    "hideBreakdown": "Ukryj szczegóły",
+    "showBreakdown": "Pokaż szczegóły",
+    "hideBreakdownButton": "▲ Ukryj szczegóły",
+    "showBreakdownButton": "▼ Pokaż szczegóły",
+    "forced": "(wymuszony B{{tier}})",
+    "dataVersion": "Dane: {{version}}",
+    "aboutBrackets": "O poziomach ↗",
+    "estimatedChip": "Szacowany: B{{tier}}",
+    "estimatedChipFull": "Szacowany poziom: B{{tier}} {{label}}"
+  },
+  "bracketPicker": {
+    "ariaLabel": "Poziom talii",
+    "unrated": "Bez oceny"
+  },
+  "warnings": {
+    "commanderCount": "Talia ma {{count}} kart (potrzeba dokładnie {{expected}})",
+    "singleton": "{{name}}: wiele kopii (format singleton)",
+    "colorIdentity": "{{name}}: poza tożsamością kolorów dowódcy",
+    "minimumCount": "Talia ma {{count}} kart (minimum 60)",
+    "maxCopies": "{{name}}: {{count}} kopii (maks. 4)",
+    "companionInMain": "{{name}} jest twoim towarzyszem, ale znajduje się też w talii głównej — to narusza jego warunek budowy talii. Usuń go z talii głównej, aby użyć go jako towarzysza."
+  }
+}

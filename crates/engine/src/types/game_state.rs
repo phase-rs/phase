@@ -1170,10 +1170,43 @@ pub struct OutsideGameCardUse {
     pub count: u32,
 }
 
+/// CR 400.11 + CR 406.3: A discriminated source for one outside-game selection.
+/// Sideboard entries (the wishboard pool) and face-up exile cards (the Karn /
+/// Coax wishboard return pool) are surfaced through one choice list so the
+/// caster picks across both pools in a single decision.
+///
+/// The size delta between the two variants (`Sideboard` carries a full
+/// `CardFace` so the UI can render the wishboard card without a sideboard
+/// lookup; `FaceUpExile` holds only an `ObjectId`) is intentional —
+/// `OutsideGameChoiceEntry` lists are short-lived (one entry per offered
+/// candidate while a single `WaitingFor::OutsideGameChoice` is active) and
+/// never collected by the million, so the asymmetry doesn't warrant boxing
+/// every CardFace through a heap indirection.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum OutsideGameChoiceSource {
+    /// CR 400.11a: A card in the player's sideboard.
+    Sideboard {
+        sideboard_index: usize,
+        card: crate::types::card::CardFace,
+    },
+    /// CR 406.3: A face-up card the player owns in the exile zone.
+    FaceUpExile { object_id: ObjectId },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutsideGameChoiceEntry {
-    pub sideboard_index: usize,
-    pub entry: DeckEntry,
+    pub source: OutsideGameChoiceSource,
+    /// Remaining copies eligible (sideboard: copies not yet brought in; exile: 1).
+    #[serde(default = "default_one_u32")]
+    pub count: u32,
+    /// Display name for UI; mirrors the underlying card / object's printed name.
+    pub name: String,
+}
+
+fn default_one_u32() -> u32 {
+    1
 }
 
 /// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.
@@ -1427,6 +1460,14 @@ pub enum WaitingFor {
         valid_blocker_ids: Vec<ObjectId>,
         #[serde(default)]
         valid_block_targets: HashMap<ObjectId, Vec<ObjectId>>,
+        /// CR 702.111b (Menace) + CR 509.1b: per-attacker minimum-blocker count
+        /// for attackers requiring more than one blocker. Lets the UI surface
+        /// "needs N blockers" feedback and guard confirmation; attackers with
+        /// the trivial requirement of 1 are omitted. Computed by
+        /// `combat::block_requirements_for_player` — the same authority that
+        /// enforces the requirement in `validate_blocks`.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        block_requirements: HashMap<ObjectId, u32>,
     },
     /// CR 502.3: During the untap step, the active player may choose not to
     /// untap permanents with "You may choose not to untap..." static abilities.
@@ -1609,6 +1650,7 @@ pub enum WaitingFor {
     /// current sideboard, represented by `DeckEntry`s rather than `GameObject`s.
     OutsideGameChoice {
         player: PlayerId,
+        source_id: ObjectId,
         choices: Vec<OutsideGameChoiceEntry>,
         count: usize,
         #[serde(default)]
@@ -2963,6 +3005,27 @@ impl WaitingFor {
                 WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
             )
     }
+
+    /// Look-at-top-N states whose legal selections cannot be captured by the
+    /// candidate enumerator (it lists only {empty, full-in-original-order,
+    /// singletons}), so the multiplayer legality gate would wrongly reject a
+    /// legal reordered or partial selection. For these, `apply()` is the real
+    /// validation boundary and validates the submitted selection structurally
+    /// (see handle_resolution_choice); the server bypasses its enumeration gate.
+    ///
+    /// - CR 701.22a / CR 701.25a: scry/surveil keep the chosen cards on top
+    ///   "in any order" — any duplicate-free subset, in any order, is legal.
+    /// - Dig (look at N, keep some): the handler enforces the keep_count /
+    ///   up_to constraint, uniqueness, and the selectable-cards filter, and
+    ///   preserves the chosen order for library-destined keeps.
+    pub fn accepts_freeform_card_selection(&self) -> bool {
+        matches!(
+            self,
+            WaitingFor::ScryChoice { .. }
+                | WaitingFor::SurveilChoice { .. }
+                | WaitingFor::DigChoice { .. }
+        )
+    }
 }
 
 /// What the frontend requests for auto-pass (no internal state).
@@ -3292,6 +3355,57 @@ pub enum StackEntryKind {
     /// additionally carries its own typed object ids (equipment_id, vehicle_id,
     /// mount_id, spacecraft_id) needed at resolution.
     KeywordAction { action: KeywordAction },
+}
+
+/// CR 608.2e: A clause-local snapshot of an equalization minimum/maximum,
+/// frozen when a `player_scope` link begins so every player in that clause's
+/// APNAP fan-out resolves its disposal count against the same pre-clause board.
+///
+/// Balance's three clauses ("sacrifice lands", "discard cards", "sacrifice
+/// creatures") each compute an independent extremum at a different time. The
+/// `player_scope` driver re-resolves the effect's `count` expression on every
+/// per-player iteration; without a snapshot, after APNAP player 0 sacrifices
+/// down to the minimum, player 1 would recompute a smaller minimum. The
+/// snapshot freezes only the cross-player aggregate (`ControlledByEachPlayer` /
+/// `HandSize { AllPlayers }`); the per-player `left` operand still re-resolves
+/// per iteration, which is correct.
+///
+/// Transient — never serialized. Captured before a `player_scope` link's
+/// fan-out and cleared when the link completes, so the next clause re-enters
+/// the driver with `None` and re-captures against the post-clause board.
+///
+/// # Single-cell invariant
+///
+/// This is stored as a single `Option<ClauseMinimumSnapshot>` on `GameState`
+/// (not a `Vec` stack). That is sound today because no inline-recursion path
+/// exists for the only effects Balance uses (`Effect::Sacrifice` and
+/// `Effect::Discard`): a player-scope clause's per-player iteration never
+/// re-enters the `player_scope` driver mid-fan-out, so an outer snapshot is
+/// never overwritten by an inner one within a single clause.
+///
+/// If a future feature inlines a nested ability-chain resolution during a
+/// Balance-style clause's fan-out — for example, a replacement effect on
+/// sacrifice that spawns another player-scope effect — the outer Balance
+/// snapshot would be silently corrupted by the inner capture. At that point
+/// this field MUST become a `Vec<ClauseMinimumSnapshot>` stack with
+/// push/pop bracketing each `player_scope` link entry/exit.
+#[derive(Debug, Clone, Default)]
+pub struct ClauseMinimumSnapshot {
+    /// Reduced cross-player aggregates keyed by the originating quantity
+    /// reference, so multiple distinct refs in one clause do not collide.
+    entries: Vec<(super::ability::QuantityRef, i32)>,
+}
+
+impl ClauseMinimumSnapshot {
+    /// Record a captured aggregate for a quantity reference.
+    pub fn insert(&mut self, qty: super::ability::QuantityRef, value: i32) {
+        self.entries.push((qty, value));
+    }
+
+    /// Look up the frozen aggregate for a quantity reference, if captured.
+    pub fn get(&self, qty: &super::ability::QuantityRef) -> Option<i32> {
+        self.entries.iter().find(|(k, _)| k == qty).map(|(_, v)| *v)
+    }
 }
 
 /// Display-safe public payment facts captured when a spell is finalized onto
@@ -4056,6 +4170,16 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub last_effect_counts_by_player: HashMap<PlayerId, i32>,
 
+    /// CR 608.2e: Clause-local equalization snapshot. Each `player_scope` link
+    /// (e.g. a Balance clause) captures its cross-player extremum here before
+    /// the APNAP fan-out begins and clears it when the link completes, so every
+    /// player in that clause resolves against the same pre-clause board. The
+    /// per-link lifecycle is deliberately narrower than `last_vote_ballots`'
+    /// per-chain reset — three Balance clauses are three links in one chain and
+    /// must each snapshot independently. Transient.
+    #[serde(skip)]
+    pub clause_minimum_snapshot: Option<ClauseMinimumSnapshot>,
+
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the most recent
     /// `Effect::ChangeZoneAll` resolution. Read by `QuantityRef::ExiledFromHandThisResolution`
     /// for "draws a card for each card exiled from their hand this way" patterns
@@ -4483,6 +4607,7 @@ impl GameState {
             last_effect_amount: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
+            clause_minimum_snapshot: None,
             exiled_from_hand_this_resolution: 0,
             monarch: None,
             city_blessing: HashSet::new(),
@@ -4775,6 +4900,55 @@ mod tests {
     }
 
     #[test]
+    fn accepts_freeform_card_selection_for_scry_surveil_and_dig() {
+        // CR 701.22a / CR 701.25a: scry and surveil keep-on-top are freeform.
+        assert!(WaitingFor::ScryChoice {
+            player: PlayerId(0),
+            cards: vec![],
+        }
+        .accepts_freeform_card_selection());
+        assert!(WaitingFor::SurveilChoice {
+            player: PlayerId(0),
+            cards: vec![],
+        }
+        .accepts_freeform_card_selection());
+        // Dig: legal selections (count-constrained / reordered) also can't be
+        // enumerated; apply() validates them structurally.
+        assert!(WaitingFor::DigChoice {
+            player: PlayerId(0),
+            library_owner: PlayerId(0),
+            cards: vec![],
+            keep_count: 1,
+            up_to: false,
+            selectable_cards: vec![],
+            kept_destination: None,
+            rest_destination: None,
+            source_id: None,
+        }
+        .accepts_freeform_card_selection());
+
+        // A sampling of other selection/decision states must NOT be freeform —
+        // they remain validated by candidate enumeration.
+        assert!(!WaitingFor::Priority {
+            player: PlayerId(0),
+        }
+        .accepts_freeform_card_selection());
+        assert!(!WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![],
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+        }
+        .accepts_freeform_card_selection());
+        assert!(!WaitingFor::ManifestDreadChoice {
+            player: PlayerId(0),
+            cards: vec![],
+        }
+        .accepts_freeform_card_selection());
+    }
+
+    #[test]
     fn default_starts_at_turn_zero() {
         let state = GameState::default();
         assert_eq!(state.turn_number, 0);
@@ -4931,6 +5105,7 @@ mod tests {
             player: PlayerId(0),
             valid_blocker_ids: vec![],
             valid_block_targets: HashMap::new(),
+            block_requirements: HashMap::new(),
         }));
         variants.push(Box::new(WaitingFor::GameOver {
             winner: Some(PlayerId(0)),

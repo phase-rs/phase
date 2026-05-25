@@ -6,12 +6,20 @@ import userEvent from "@testing-library/user-event";
 import { DeckBuilder } from "../DeckBuilder";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
 import { resolveCommander } from "../../../services/deckParser";
+import { useIsMobile } from "../../../hooks/useIsMobile";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../../../constants/storage";
 
 const cacheCardsMock = vi.fn();
 
 vi.mock("react-router", () => ({
   useNavigate: () => vi.fn(),
+}));
+
+// Default to desktop (matches jsdom's 1024px innerWidth); individual tests opt
+// into the mobile overlay path where the filter sheet becomes a focus-trapped
+// dialog.
+vi.mock("../../../hooks/useIsMobile", () => ({
+  useIsMobile: vi.fn(() => false),
 }));
 
 vi.mock("../../../hooks/useDeckCardData", () => ({
@@ -50,7 +58,26 @@ vi.mock("../DeckStack", () => ({
 }));
 
 vi.mock("../DeckList", () => ({
-  DeckList: () => <div>Deck List</div>,
+  DeckList: ({
+    deck,
+    onRemoveCard,
+  }: {
+    deck: { main: Array<{ name: string; count: number }>; commander?: string[] };
+    onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  }) => (
+    <div>
+      <div>Deck List</div>
+      {deck.commander?.map((name) => <div key={name}>{name}</div>)}
+      {deck.main.map((entry) => (
+        <div key={entry.name}>
+          <span>{entry.count} {entry.name}</span>
+          <button type="button" onClick={() => onRemoveCard(entry.name, "main")}>
+            remove-{entry.name}
+          </button>
+        </div>
+      ))}
+    </div>
+  ),
 }));
 
 vi.mock("../ManaCurve", () => ({
@@ -72,6 +99,7 @@ describe("DeckBuilder", () => {
     vi.mocked(loadPreconDeckMap).mockReset();
     vi.mocked(resolveCommander).mockReset();
     vi.mocked(resolveCommander).mockImplementation(async (deck) => deck);
+    vi.mocked(useIsMobile).mockReturnValue(false);
     localStorage.clear();
   });
 
@@ -167,7 +195,7 @@ describe("DeckBuilder", () => {
       />,
     );
 
-    const nameInput = await screen.findByPlaceholderText("Deck name...");
+    const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
     await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
     await user.clear(nameInput);
     await user.type(nameInput, "Renamed Deck");
@@ -178,6 +206,190 @@ describe("DeckBuilder", () => {
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull();
     });
     expect(localStorage.getItem(ACTIVE_DECK_KEY)).toBe("Renamed Deck");
+  });
+
+  it("warns about unsaved changes when leaving after an edit", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Dirty Deck",
+      JSON.stringify({
+        main: [{ name: "Forest", count: 10 }],
+        sideboard: [],
+        format: "Standard",
+      }),
+    );
+
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        initialDeckName="Dirty Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+    await waitFor(() => expect(nameInput).toHaveValue("Dirty Deck"));
+
+    // A freshly loaded deck is clean — no confirmation owed yet. Make an edit.
+    await user.click(screen.getByRole("button", { name: "remove-Forest" }));
+
+    // Leaving now must prompt to save.
+    await user.click(screen.getByRole("button", { name: /Menu/ }));
+    expect(await screen.findByRole("button", { name: "Discard" })).toBeInTheDocument();
+
+    // Cancel keeps you in the editor.
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
+  });
+
+  it("toggles between Deck and Info surfaces via the tab bar", async () => {
+    const user = userEvent.setup();
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    // Deck-first: the builder opens on the Deck surface.
+    const deckTab = screen.getByRole("tab", { name: /deck/i });
+    const infoTab = screen.getByRole("tab", { name: /info/i });
+    expect(deckTab).toHaveAttribute("aria-selected", "true");
+
+    await user.click(infoTab);
+    expect(infoTab).toHaveAttribute("aria-selected", "true");
+    expect(deckTab).toHaveAttribute("aria-selected", "false");
+
+    await user.click(deckTab);
+    expect(deckTab).toHaveAttribute("aria-selected", "true");
+    expect(infoTab).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("navigates the surface tabs with the arrow keys (APG tablist)", async () => {
+    const user = userEvent.setup();
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    const deckTab = screen.getByRole("tab", { name: /deck/i });
+    const infoTab = screen.getByRole("tab", { name: /info/i });
+
+    // Roving tabindex: only the selected tab is in the tab sequence.
+    expect(deckTab).toHaveAttribute("tabindex", "0");
+    expect(infoTab).toHaveAttribute("tabindex", "-1");
+
+    deckTab.focus();
+    await user.keyboard("{ArrowRight}");
+    // Automatic activation: arrow moves both selection and focus.
+    expect(infoTab).toHaveAttribute("aria-selected", "true");
+    expect(infoTab).toHaveFocus();
+    expect(infoTab).toHaveAttribute("tabindex", "0");
+
+    await user.keyboard("{ArrowRight}");
+    // Wraps back to the first tab.
+    expect(deckTab).toHaveAttribute("aria-selected", "true");
+    expect(deckTab).toHaveFocus();
+  });
+
+  it("traps focus in the mobile filter sheet and restores it on close", async () => {
+    vi.mocked(useIsMobile).mockReturnValue(true);
+    const user = userEvent.setup();
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    const searchTrigger = screen.getByRole("button", { name: "Search" });
+    await user.click(searchTrigger);
+
+    // Opening the sheet exposes it as a modal dialog and moves focus inside it.
+    const dialog = screen.getByRole("dialog", { name: "Filters" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+
+    // The trap keeps Tab within the dialog — with the keydown listener removed,
+    // Tab would escape to a control behind the overlay. This is the assertion
+    // that actually discriminates "trap present" from "trap absent".
+    await user.tab();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    // Closing returns focus to the control that opened it.
+    await user.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog", { name: "Filters" })).not.toBeInTheDocument();
+    expect(searchTrigger).toHaveFocus();
+  });
+
+  it("opens and closes the mobile filter sheet", async () => {
+    const user = userEvent.setup();
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    // The overlay backdrop only renders while the sheet is open. The trigger is
+    // the "Search" button in the main canvas header.
+    expect(screen.queryByRole("button", { name: "Close filters" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    expect(screen.getByRole("button", { name: "Close filters" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close filters" }));
+    expect(screen.queryByRole("button", { name: "Close filters" })).not.toBeInTheDocument();
+  });
+
+  it("clones a deck into a new copy without deleting the original", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "My Deck",
+      JSON.stringify({
+        main: [{ name: "Lightning Bolt", count: 4 }],
+        sideboard: [],
+        format: "Standard",
+      }),
+    );
+
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        initialDeckName="My Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+    await waitFor(() => expect(nameInput).toHaveValue("My Deck"));
+
+    await user.click(screen.getByRole("button", { name: "Clone" }));
+
+    // Clone creates a new copy and leaves the original intact (unlike rename).
+    await waitFor(() => {
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "My Deck")).not.toBeNull();
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "My Deck copy")).not.toBeNull();
+    });
+    expect(nameInput).toHaveValue("My Deck copy");
   });
 
   it("does not reactively auto-resolve a commander mid-edit", async () => {
@@ -251,6 +463,11 @@ describe("DeckBuilder", () => {
 
     expect(await screen.findByText("99 Island")).toBeInTheDocument();
     expect(screen.getByText("Zimone, Mystery Unraveler")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show Browser" })).toBeInTheDocument();
+    // Loading a deck foregrounds the Deck surface (replaces the old
+    // "Show Browser"/"Expand Deck View" toggle assertion).
+    expect(screen.getByRole("tab", { name: /deck/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 });

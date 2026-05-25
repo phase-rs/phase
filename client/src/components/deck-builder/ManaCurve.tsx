@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 interface ManaCurveProps {
   /** CMC values for each card in the deck (one entry per card copy). */
   cmcValues: number[];
@@ -19,6 +21,7 @@ const COLOR_MAP: Record<string, { bg: string; label: string }> = {
 };
 
 export function ManaCurve({ cmcValues, colorValues }: ManaCurveProps) {
+  const { t } = useTranslation("deck-builder");
   // Count cards at each CMC bucket (0 through 6+)
   const buckets = new Array(7).fill(0) as number[];
   for (const cmc of cmcValues) {
@@ -44,7 +47,7 @@ export function ManaCurve({ cmcValues, colorValues }: ManaCurveProps) {
       {/* Mana Curve */}
       <div>
         <h4 className="mb-1 text-xs font-semibold uppercase text-gray-500">
-          Mana Curve
+          {t("manaCurve.title")}
         </h4>
         <div className="flex items-end gap-2" style={{ height: CHART_HEIGHT }}>
           {buckets.map((count, i) => {
@@ -81,7 +84,7 @@ export function ManaCurve({ cmcValues, colorValues }: ManaCurveProps) {
       {totalColors > 0 && (
         <div>
           <h4 className="mb-1 text-xs font-semibold uppercase text-gray-500">
-            Colors
+            {t("manaCurve.colors")}
           </h4>
           <div className="flex h-3 overflow-hidden rounded">
             {Object.entries(COLOR_MAP).map(([color, { bg }]) => {

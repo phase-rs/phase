@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -11,6 +12,7 @@ interface CompactStripProps {
 }
 
 export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps) {
+  const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
 
@@ -58,7 +60,7 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
       <div className="flex flex-col items-start">
         <div className="flex items-center gap-1">
           {isTheirTurn && <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse" />}
-          <span className={`text-xs ${isTheirTurn ? "text-red-300 font-semibold" : "text-gray-400"}`}>Opp {playerId + 1}</span>
+          <span className={`text-xs ${isTheirTurn ? "text-red-300 font-semibold" : "text-gray-400"}`}>{t("player.opponent", { seat: playerId + 1 })}</span>
         </div>
         <span className={`text-lg font-bold tabular-nums ${lifeColor}`}>
           {player.life}
@@ -66,26 +68,26 @@ export function CompactStrip({ playerId, onClick, isActive }: CompactStripProps)
       </div>
 
       {/* Hand count */}
-      <div className="flex flex-col items-center" title="Cards in hand">
-        <span className="text-[10px] text-gray-500">Hand</span>
+      <div className="flex flex-col items-center" title={t("player.cardsInHand")}>
+        <span className="text-[10px] text-gray-500">{t("player.hand")}</span>
         <span className="text-sm font-medium text-gray-300">{handCount}</span>
       </div>
 
       {/* Permanent counts */}
       {counts.creatures > 0 && (
-        <PermanentCount label="Crt" count={counts.creatures} color="text-red-400" />
+        <PermanentCount label={t("player.creaturesAbbr")} count={counts.creatures} color="text-red-400" />
       )}
       {counts.lands > 0 && (
-        <PermanentCount label="Lnd" count={counts.lands} color="text-green-400" />
+        <PermanentCount label={t("player.landsAbbr")} count={counts.lands} color="text-green-400" />
       )}
       {counts.other > 0 && (
-        <PermanentCount label="Oth" count={counts.other} color="text-blue-400" />
+        <PermanentCount label={t("player.otherAbbr")} count={counts.other} color="text-blue-400" />
       )}
 
       {/* Eliminated badge */}
       {isEliminated && (
         <span className="ml-1 rounded bg-red-900/60 px-1.5 py-0.5 text-[10px] font-bold text-red-300">
-          OUT
+          {t("player.out")}
         </span>
       )}
     </button>

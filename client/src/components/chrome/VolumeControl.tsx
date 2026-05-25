@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { audioManager } from "../../audio/AudioManager.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -33,6 +34,7 @@ interface VolumeControlProps {
 }
 
 export function VolumeControl({ variant }: VolumeControlProps) {
+  const { t } = useTranslation();
   const masterVolume = usePreferencesStore((s) => s.masterVolume);
   const masterMuted = usePreferencesStore((s) => s.masterMuted);
   const setMasterVolume = usePreferencesStore((s) => s.setMasterVolume);
@@ -125,8 +127,8 @@ export function VolumeControl({ variant }: VolumeControlProps) {
         <button
           onClick={handleToggleMute}
           className="flex h-9 w-9 shrink-0 items-center justify-center text-gray-400 transition-colors hover:text-gray-200"
-          aria-label={masterMuted ? "Unmute" : "Mute"}
-          title={masterMuted ? "Unmute" : "Mute"}
+          aria-label={masterMuted ? t("volume.unmute") : t("volume.mute")}
+          title={masterMuted ? t("volume.unmute") : t("volume.mute")}
         >
           <Icon className="h-5 w-5" />
         </button>
@@ -141,7 +143,7 @@ export function VolumeControl({ variant }: VolumeControlProps) {
             value={sliderValue}
             onChange={handleVolumeChange}
             className="w-20 accent-cyan-500"
-            aria-label="Volume"
+            aria-label={t("volume.volume")}
             tabIndex={expanded ? 0 : -1}
           />
           <span className="w-8 text-right text-[10px] text-gray-400">{sliderLabel}</span>
@@ -165,8 +167,8 @@ export function VolumeControl({ variant }: VolumeControlProps) {
       <button
         onClick={handleToggleMute}
         className="flex min-h-11 min-w-11 shrink-0 items-center justify-center text-white/46 transition-colors hover:text-white/72"
-        aria-label={masterMuted ? "Unmute" : "Mute"}
-        title={masterMuted ? "Unmute" : "Mute"}
+        aria-label={masterMuted ? t("volume.unmute") : t("volume.mute")}
+        title={masterMuted ? t("volume.unmute") : t("volume.mute")}
       >
         <Icon />
       </button>
@@ -182,7 +184,7 @@ export function VolumeControl({ variant }: VolumeControlProps) {
           value={sliderValue}
           onChange={handleVolumeChange}
           className="w-24 accent-cyan-500"
-          aria-label="Volume"
+          aria-label={t("volume.volume")}
           tabIndex={expanded ? 0 : -1}
         />
       </div>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { Trans, useTranslation } from "react-i18next";
 
 interface DisconnectChoiceDialogProps {
   isOpen: boolean;
@@ -39,6 +40,7 @@ export function DisconnectChoiceDialog({
   onContinueWithout,
   onDismiss,
 }: DisconnectChoiceDialogProps) {
+  const { t } = useTranslation("game");
   const [secondsRemaining, setSecondsRemaining] = useState(
     Math.ceil(gracePeriodMs / 1000),
   );
@@ -79,10 +81,15 @@ export function DisconnectChoiceDialog({
             transition={{ type: "spring", stiffness: 300, damping: 25 }}
           >
             <h2 className="mb-2 text-xl font-bold text-white">
-              {playerLabel} disconnected
+              {t("disconnectDialog.title", { name: playerLabel })}
             </h2>
             <p className="mb-6 text-sm text-gray-400">
-              Reconnecting… <span className="font-mono text-amber-300">{secondsRemaining}s</span> remaining
+              <Trans
+                t={t}
+                i18nKey="disconnectDialog.reconnecting"
+                values={{ seconds: secondsRemaining }}
+                components={{ seconds: <span className="font-mono text-amber-300" /> }}
+              />
             </p>
             <div className="flex justify-center gap-3">
               <button
@@ -92,7 +99,7 @@ export function DisconnectChoiceDialog({
                 }}
                 className="rounded-lg bg-gray-700 px-5 py-2 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
               >
-                Pause and wait
+                {t("disconnectDialog.pauseAndWait")}
               </button>
               <button
                 onClick={() => {
@@ -101,7 +108,7 @@ export function DisconnectChoiceDialog({
                 }}
                 className="rounded-lg bg-red-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-red-500"
               >
-                Continue without them
+                {t("disconnectDialog.continueWithout")}
               </button>
             </div>
           </motion.div>

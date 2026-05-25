@@ -234,6 +234,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::OutsideGameChoice {
         player,
+        source_id,
         reveal,
         up_to,
         destination,
@@ -243,6 +244,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::OutsideGameChoice {
                 player,
+                source_id,
                 choices: Vec::new(),
                 count: 0,
                 reveal,
@@ -456,6 +458,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.static_definitions.clear();
         obj.casting_permissions.clear();
         obj.printed_ref = None;
+        obj.base_printed_ref = None;
         obj.token_image_ref = None;
         obj.source_related_token_ids.clear();
         obj.foretold = false;
