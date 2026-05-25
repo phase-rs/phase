@@ -906,6 +906,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
         | Some(
             AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::EventOutcomeWon
             | AbilityCondition::WhenYouDo
             | AbilityCondition::CastFromZone { .. }
             | AbilityCondition::CastDuringPhase { .. }
@@ -3740,6 +3741,12 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag
         }
+        AbilityCondition::EventOutcomeWon => state
+            .current_trigger_event
+            .as_ref()
+            .map_or(ability.context.optional_effect_performed, |event| {
+                event_outcome_was_won_by_controller(event, ability.controller)
+            }),
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
         // the resolution" of the parent. For a cost-payment parent
@@ -4074,6 +4081,23 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&ability.source_id)
             .is_some_and(|obj| !obj.has_keyword(keyword)),
+    }
+}
+
+fn event_outcome_was_won_by_controller(event: &GameEvent, controller: PlayerId) -> bool {
+    match event {
+        GameEvent::Clash {
+            controller: clash_controller,
+            opponent,
+            result,
+            ..
+        } => match result {
+            crate::types::events::ClashResult::Won => *clash_controller == controller,
+            crate::types::events::ClashResult::Lost => *opponent == controller,
+            crate::types::events::ClashResult::Tied => false,
+        },
+        GameEvent::CoinFlipped { player_id, won } => *player_id == controller && *won,
+        _ => false,
     }
 }
 
@@ -9993,6 +10017,47 @@ mod tests {
         let cond = AbilityCondition::additional_cost_paid_any();
         assert!(!evaluate_condition(&cond, &state, &ability));
         ability.context.additional_cost_paid = true;
+        assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
+    /// CR 701.30d + CR 608.2c: "if you won" on a triggered clash ability reads
+    /// the triggering clash result for the ability controller, not the unrelated
+    /// `IfYouDo` flag used by optional costs in the same effect chain.
+    #[test]
+    fn event_outcome_won_reads_clash_result_for_ability_controller() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.context.optional_effect_performed = false;
+        let cond = AbilityCondition::EventOutcomeWon;
+
+        state.current_trigger_event = Some(GameEvent::Clash {
+            controller: PlayerId(1),
+            opponent: PlayerId(0),
+            controller_mana_value: Some(1),
+            opponent_mana_value: Some(3),
+            result: crate::types::events::ClashResult::Lost,
+        });
+        assert!(evaluate_condition(&cond, &state, &ability));
+
+        state.current_trigger_event = Some(GameEvent::Clash {
+            controller: PlayerId(1),
+            opponent: PlayerId(0),
+            controller_mana_value: Some(3),
+            opponent_mana_value: Some(1),
+            result: crate::types::events::ClashResult::Won,
+        });
+        assert!(!evaluate_condition(&cond, &state, &ability));
+
+        state.current_trigger_event = None;
+        ability.context.optional_effect_performed = true;
         assert!(evaluate_condition(&cond, &state, &ability));
     }
 

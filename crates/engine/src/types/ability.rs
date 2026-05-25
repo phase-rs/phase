@@ -8683,6 +8683,11 @@ pub enum AbilityCondition {
     AdditionalCostPaidInstead,
     /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
     IfYouDo,
+    /// CR 608.2c: "If you won" — sub_ability executes only if this ability's
+    /// controller won the triggering event, such as a clash or coin flip. Falls
+    /// back to `optional_effect_performed` for in-chain clash continuations
+    /// whose parent effect records the result directly.
+    EventOutcomeWon,
     /// CR 603.12: "When you do" — reflexive trigger that fires based on whether the
     /// parent's trigger event actually occurred. For a non-cost parent (e.g. a
     /// `BecomeCopy` reflexive or a copy/exile replacement sub-ability) the "do"
