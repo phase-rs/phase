@@ -176,8 +176,8 @@ fn matching_batched_trigger_events(
                 check_trigger_condition(state, condition, controller, Some(obj_id), Some(candidate))
             })
         })
-        .map(|candidate| {
-            contextual_batched_trigger_event(state, candidate, trig_def, obj_id, controller)
+        .filter_map(|candidate| {
+            contextual_batched_trigger_event(state, candidate, trig_def, obj_id)
         })
         .collect()
 }
@@ -187,51 +187,46 @@ fn contextual_batched_trigger_event(
     event: &GameEvent,
     trig_def: &TriggerDefinition,
     obj_id: ObjectId,
-    controller: PlayerId,
-) -> GameEvent {
+) -> Option<GameEvent> {
     let GameEvent::AttackersDeclared {
-        attacker_ids,
-        defending_player,
-        attacks,
+        defending_player, ..
     } = event
     else {
-        return event.clone();
+        return Some(event.clone());
     };
-    if !matches!(trig_def.mode, TriggerMode::YouAttack | TriggerMode::Attacks) {
-        return event.clone();
-    }
 
-    let filter_ctx = FilterContext::from_source_with_controller(obj_id, controller);
-    let matching_attackers: Vec<_> = attacker_ids
+    let matching_attacks = match trig_def.mode {
+        TriggerMode::Attacks => {
+            super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
+                .into_iter()
+                .flat_map(|event| match event {
+                    GameEvent::AttackersDeclared { attacks, .. } => attacks,
+                    _ => Vec::new(),
+                })
+                .collect()
+        }
+        TriggerMode::YouAttack => {
+            super::trigger_matchers::matching_you_attack_pairs(event, trig_def, obj_id, state)
+        }
+        _ => return Some(event.clone()),
+    };
+
+    let matching_attackers: Vec<_> = matching_attacks
         .iter()
-        .copied()
-        .filter(|id| {
-            trig_def
-                .valid_card
-                .as_ref()
-                .is_none_or(|filter| matches_target_filter(state, *id, filter, &filter_ctx))
-        })
+        .map(|(attacker_id, _)| *attacker_id)
         .collect();
-
     if matching_attackers.is_empty() {
-        return event.clone();
+        return None;
     }
-
-    let matching_set: HashSet<_> = matching_attackers.iter().copied().collect();
-    let matching_attacks: Vec<_> = attacks
-        .iter()
-        .copied()
-        .filter(|(attacker_id, _)| matching_set.contains(attacker_id))
-        .collect();
 
     // CR 603.2c + CR 608.2c: batched "one or more ... attack" triggers fire
     // once, but later "that many" text refers to the members of that matching
     // event subset, not every attacker in the declaration.
-    GameEvent::AttackersDeclared {
+    Some(GameEvent::AttackersDeclared {
         attacker_ids: matching_attackers,
         defending_player: *defending_player,
         attacks: matching_attacks,
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11707,6 +11702,119 @@ pub mod tests {
                 assert_eq!(*count, 2, "two power-4+ attackers set the search cap");
                 assert!(*up_to, "The Earth King's search is up to that many");
                 assert_eq!(cards.len(), 3, "all three basic lands remain legal choices");
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batched_attack_context_filters_attacked_target_type() {
+        use crate::game::combat::AttackTarget;
+
+        fn add_basic_land(state: &mut GameState, name: &str) {
+            let id = create_object(
+                state,
+                CardId(state.next_object_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Basic);
+        }
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let source = make_creature(&mut state, PlayerId(0), "Attack Trigger Source", 4, 4);
+        let mut trigger =
+            TriggerDefinition::new(TriggerMode::YouAttack).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                        FilterProp::HasSupertype {
+                            value: crate::types::card_type::Supertype::Basic,
+                        },
+                    ])),
+                    count: QuantityExpr::up_to(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                },
+            ));
+        trigger.batched = true;
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }],
+        )));
+        trigger.attack_target_filter = Some(AttackTargetFilter::Player);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let attacks_player = make_creature(&mut state, PlayerId(0), "Attacks Player", 4, 4);
+        let attacks_planeswalker =
+            make_creature(&mut state, PlayerId(0), "Attacks Planeswalker", 5, 5);
+        let small_attacks_player =
+            make_creature(&mut state, PlayerId(0), "Small Attacks Player", 3, 3);
+        let planeswalker = create_object(
+            &mut state,
+            CardId(9000),
+            PlayerId(1),
+            "Target Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&planeswalker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Planeswalker);
+        add_basic_land(&mut state, "Plains");
+        add_basic_land(&mut state, "Island");
+        add_basic_land(&mut state, "Forest");
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacks_player, attacks_planeswalker, small_attacks_player],
+                defending_player: PlayerId(1),
+                attacks: vec![
+                    (attacks_player, AttackTarget::Player(PlayerId(1))),
+                    (
+                        attacks_planeswalker,
+                        AttackTarget::Planeswalker(planeswalker),
+                    ),
+                    (small_attacks_player, AttackTarget::Player(PlayerId(1))),
+                ],
+            }],
+        );
+
+        assert_eq!(state.stack.len(), 1, "filtered attack trigger should fire");
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { count, .. } => {
+                assert_eq!(
+                    *count, 1,
+                    "only the power-4+ creature attacking a player contributes to that-many"
+                );
             }
             other => panic!("expected SearchChoice, got {other:?}"),
         }
