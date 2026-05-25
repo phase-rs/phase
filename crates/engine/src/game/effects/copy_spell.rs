@@ -231,6 +231,14 @@ pub(crate) fn copy_count_with_replacements(
     use crate::types::ability::QuantityModification;
     use crate::types::replacements::ReplacementEvent;
 
+    // CR 614.6: "If you would copy a spell *one or more times*" — the
+    // replacement's precondition. When the effect would make zero copies (e.g. a
+    // "copy for each X" with X = 0) there is no copy event to replace, so the
+    // bonus must not apply.
+    if base == 0 {
+        return 0;
+    }
+
     // CR 707.10: Twinning Staff only modifies copying a *spell*, not an ability.
     match copy_source_entry(state, ability) {
         Some(entry) if matches!(entry.kind, StackEntryKind::Spell { .. }) => {}
@@ -1322,6 +1330,37 @@ mod tests {
         assert_eq!(copy_count_with_replacements(&state, &copy, 1), 2);
     }
 
+    /// CR 614.6: "If you would copy a spell *one or more times*" — when the base
+    /// copy count is zero (e.g. a "copy for each X" with X = 0) there is no copy
+    /// event, so Twinning Staff must NOT manufacture one.
+    #[test]
+    fn copy_count_with_replacements_does_not_apply_to_zero_copies() {
+        let mut state = GameState::new_two_player(42);
+        push_twinning_staff(&mut state, ObjectId(50), PlayerId(0));
+
+        let spell = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Divination",
+            spell,
+            CastingVariant::Normal,
+        );
+
+        let copy = copy_top_ability(PlayerId(0));
+        assert_eq!(copy_count_with_replacements(&state, &copy, 0), 0);
+    }
+
     /// CR 707.10: "If YOU would copy" — only the copying player's Twinning Staff
     /// applies. An opponent's Staff must not modify the count.
     #[test]
@@ -1377,7 +1416,7 @@ mod tests {
     /// CR 707.10 + CR 614.6: Regression — copying a *targeted* spell with
     /// Twinning Staff must make exactly TWO copies, not a runaway. Each copy
     /// pauses on `CopyRetarget` and the drain driver resumes the next iteration;
-    /// without the `copy_count_finalized` guard, every resumed iteration
+    /// without the `copy_count_status` guard, every resumed iteration
     /// re-applied the +1 bonus and the loop exploded into dozens of copies (the
     /// in-game "stuck in a loop" report).
     #[test]
@@ -1438,7 +1477,7 @@ mod tests {
             guard += 1;
             assert!(
                 guard < 12,
-                "runaway copy loop: the copy_count_finalized guard failed to stop re-expansion"
+                "runaway copy loop: the copy_count_status guard failed to stop re-expansion"
             );
             state.waiting_for = WaitingFor::Priority { player };
             state.priority_player = player;
