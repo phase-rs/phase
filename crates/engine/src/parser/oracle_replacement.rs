@@ -404,10 +404,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // copies a copy-a-spell effect produces, modeled as a `CopySpell`
     // replacement carrying a `QuantityModification` — the same shape as the
     // token / counter doubling family above.
-    if nom_primitives::scan_contains(&lower, "would copy a spell") {
-        if let Some(def) = parse_copy_count_replacement(&lower, &text) {
-            return Some(def);
-        }
+    if let Ok((_, def)) = parse_copy_count_replacement(&lower, &text) {
+    return Some(def);
     }
 
     // --- Counter addition replacement: "if one or more ... counters would be put on..." ---
@@ -3640,8 +3638,11 @@ pub(super) fn has_except_first_draw_in_draw_step_clause(lower: &str) -> bool {
 /// `ProposedEvent` pipeline, so this replacement is queried directly rather than
 /// proposed. The additional copies always permit new targets (standard wording
 /// for this class), satisfied by each copy's existing retarget step.
-fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+fn parse_copy_count_replacement(lower: &str, original_text: &str) -> IResult<&str, ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
+
+    // Require the "would copy a spell" prefix so dispatch happens inside nom
+    let (lower, _) = tag("would copy a spell")(lower)?;
 
     // Require the "plus [N] additional time(s)" tail so this only matches the
     // count-increasing class, not an unrelated one-shot "copy a spell" effect.
@@ -3659,11 +3660,12 @@ fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<Repl
     })
     .map(|(n, _)| n)?;
 
-    Some(
+    Ok((
+        lower,
         ReplacementDefinition::new(ReplacementEvent::CopySpell)
             .quantity_modification(QuantityModification::Plus { value: additional })
             .description(original_text.to_string()),
-    )
+    ))
 }
 
 /// CR 614.1a: Parse token creation replacement effects.
