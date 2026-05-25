@@ -612,7 +612,7 @@ pub(crate) fn count_trigger_subjects_in_batch(
     Some(count as u32)
 }
 
-/// Subject `ObjectId`s carried by a single `GameEvent` for trigger filter
+/// CR 603.2c: Subject `ObjectId`s carried by a single `GameEvent` for trigger filter
 /// matching. Grows by event family as new "one or more <FILTER> <verb>"
 /// patterns land. Variants without an object subject return an empty iterator.
 fn trigger_event_subject_ids(event: &GameEvent) -> Box<dyn Iterator<Item = ObjectId> + '_> {
@@ -621,6 +621,17 @@ fn trigger_event_subject_ids(event: &GameEvent) -> Box<dyn Iterator<Item = Objec
         GameEvent::ZoneChanged { object_id, .. } => Box::new(std::iter::once(*object_id)),
         GameEvent::Discarded { object_id, .. } => Box::new(std::iter::once(*object_id)),
         GameEvent::SpellCast { object_id, .. } => Box::new(std::iter::once(*object_id)),
+        GameEvent::TokenCreated { object_id, .. } => Box::new(std::iter::once(*object_id)),
+        GameEvent::CreatureDestroyed { object_id } => Box::new(std::iter::once(*object_id)),
+        GameEvent::PermanentSacrificed { object_id, .. } => Box::new(std::iter::once(*object_id)),
+        GameEvent::PermanentTapped { object_id, .. } => Box::new(std::iter::once(*object_id)),
+        GameEvent::PermanentUntapped { object_id } => Box::new(std::iter::once(*object_id)),
+        // CR 120.3: Damage dealt to an object yields the damaged object as
+        // subject. Damage dealt to a player has no object subject.
+        GameEvent::DamageDealt { target, .. } => match target {
+            crate::types::ability::TargetRef::Object(id) => Box::new(std::iter::once(*id)),
+            crate::types::ability::TargetRef::Player(_) => Box::new(std::iter::empty()),
+        },
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
@@ -633,12 +644,10 @@ fn trigger_event_subject_ids(event: &GameEvent) -> Box<dyn Iterator<Item = Objec
         | GameEvent::TappedForMana { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. }
-        | GameEvent::PermanentTapped { .. }
         | GameEvent::PlayerLost { .. }
         | GameEvent::MulliganStarted
         | GameEvent::CardsDrawn { .. }
         | GameEvent::CardDrawn { .. }
-        | GameEvent::PermanentUntapped { .. }
         | GameEvent::PermanentPhasedOut { .. }
         | GameEvent::PermanentPhasedIn { .. }
         | GameEvent::PlayerPhasedOut { .. }
@@ -648,15 +657,11 @@ fn trigger_event_subject_ids(event: &GameEvent) -> Box<dyn Iterator<Item = Objec
         | GameEvent::StackResolved { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::GameOver { .. }
-        | GameEvent::DamageDealt { .. }
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::CounterAdded { .. }
         | GameEvent::CounterRemoved { .. }
-        | GameEvent::TokenCreated { .. }
         | GameEvent::ObjectConjured { .. }
-        | GameEvent::CreatureDestroyed { .. }
-        | GameEvent::PermanentSacrificed { .. }
         | GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
         | GameEvent::BlockersDeclared { .. }

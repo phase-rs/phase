@@ -1222,7 +1222,7 @@ fn resolve_ref(
         //   5. `0` — undefined.
         QuantityRef::EventContextAmount => state
             .current_trigger_match_count
-            .map(|n| n as i32)
+            .map(u32_to_i32_saturating)
             .or_else(|| {
                 state
                     .current_trigger_event

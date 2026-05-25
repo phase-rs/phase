@@ -3668,6 +3668,7 @@ fn apply_action(
             let previous_trigger_event = state.current_trigger_event.clone();
             let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_event = pending_event;
+            state.current_trigger_match_count = state.pending_optional_trigger_match_count.take();
             effects::drain_pending_continuation(state, &mut events);
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_match_count = previous_trigger_match_count;
