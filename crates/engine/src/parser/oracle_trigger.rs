@@ -3907,6 +3907,9 @@ pub(crate) fn parse_trigger_condition(
 fn execute_references_target_player(effect: &crate::types::ability::Effect) -> bool {
     fn filter_references(filter: &TargetFilter) -> bool {
         match filter {
+            // CR 115.1: Bare `Player` target means the effect explicitly
+            // targets a player (e.g. "target player mills ...").
+            TargetFilter::Player => true,
             TargetFilter::Typed(TypedFilter { controller, .. }) => {
                 matches!(controller, Some(ControllerRef::TargetPlayer))
             }
@@ -9894,6 +9897,84 @@ mod tests {
             "Goblin Guide",
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
+    }
+
+    /// CR 107.1 + CR 701.17a: Attack triggers can use the shared fractional
+    /// quantity parser to mill the targeted player's library.
+    #[test]
+    fn trigger_attacks_target_player_mills_half_their_library_rounded_up() {
+        use crate::types::ability::{RoundingMode, ZoneRef};
+
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, target player mills half their library, rounded up.",
+            "Fleet Swallower",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        match execute.effect.as_ref() {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(*target, TargetFilter::Player);
+                assert_eq!(*destination, Zone::Graveyard);
+                assert_eq!(
+                    *count,
+                    QuantityExpr::DivideRounded {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::TargetZoneCardCount {
+                                zone: ZoneRef::Library,
+                            },
+                        }),
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                    },
+                );
+            }
+            other => panic!("Expected Mill, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1 + CR 701.17a: Sibling coverage — "rounded down" variant
+    /// exercises the same fractional quantity parser with the opposite rounding
+    /// mode, ensuring both arms of the `RoundingMode` axis are verified.
+    #[test]
+    fn trigger_attacks_target_player_mills_half_their_library_rounded_down() {
+        use crate::types::ability::{RoundingMode, ZoneRef};
+
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, target player mills half their library, rounded down.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        match execute.effect.as_ref() {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(*target, TargetFilter::Player);
+                assert_eq!(*destination, Zone::Graveyard);
+                assert_eq!(
+                    *count,
+                    QuantityExpr::DivideRounded {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::TargetZoneCardCount {
+                                zone: ZoneRef::Library,
+                            },
+                        }),
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                    },
+                );
+            }
+            other => panic!("Expected Mill, got {other:?}"),
+        }
     }
 
     #[test]
