@@ -58,7 +58,7 @@ export function LoadGameStateModal({ open, onClose, onLoaded }: LoadGameStateMod
     try {
       handleParsed(await readImportFile(file));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to read file");
+      setError(err instanceof Error ? err.message : t("loadGameState.readFailed"));
     }
   };
 

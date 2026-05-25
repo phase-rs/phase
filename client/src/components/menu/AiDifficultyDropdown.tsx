@@ -1,10 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import {
-  AI_DIFFICULTIES,
-  getAiDifficultyLabel,
-  type AIDifficulty,
-} from "../../constants/ai";
+import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 
 interface AiDifficultyDropdownProps {
   difficulty: AIDifficulty;
@@ -29,7 +25,9 @@ export function AiDifficultyDropdown({
       </label>
       <select
         id={`ai-difficulty-${compact ? "compact" : "full"}`}
-        aria-label={t("aiDifficulty.ariaLabel", { difficulty: getAiDifficultyLabel(difficulty) })}
+        aria-label={t("aiDifficulty.ariaLabel", {
+          difficulty: t(`aiDifficulty.levels.${difficulty}`),
+        })}
         value={difficulty}
         onClick={(event) => event.stopPropagation()}
         onChange={(event) => onChange(event.target.value as AIDifficulty)}
@@ -41,7 +39,7 @@ export function AiDifficultyDropdown({
       >
         {AI_DIFFICULTIES.map((item) => (
           <option key={item.id} value={item.id} className="bg-[#0a0f1b] text-slate-100">
-            {item.label}
+            {t(`aiDifficulty.levels.${item.id}`)}
           </option>
         ))}
       </select>

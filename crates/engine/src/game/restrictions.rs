@@ -1389,7 +1389,12 @@ pub(crate) fn is_sorcery_speed_window(
 }
 
 fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> bool {
-    state.active_player == state.priority_player
+    // CR 723: compare the active player against the semantic priority *seat*, not
+    // `priority_player` (the authorized submitter). Under turn-control these
+    // diverge, so the raw field would never equal `active_player` during a
+    // controlled turn and wrongly close this window. Behavior is identical
+    // without turn-control, where the seat and submitter are the same player.
+    super::turn_control::priority_seat(state) == state.active_player
         && matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
 }
 

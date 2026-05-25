@@ -19,7 +19,7 @@ import type {
   DraftPlayerView,
   SeatPublicView,
 } from "../adapter/draft-adapter";
-import type { DeckCardCount, MatchScore } from "../adapter/types";
+import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
 
 // ── Protocol Version ───────────────────────────────────────────────────
 
@@ -30,8 +30,57 @@ import type { DeckCardCount, MatchScore } from "../adapter/types";
  *   1 — initial P2P draft tournament protocol
  *   2 — add timer sync, match start, round advance messages (Phase 57)
  *   3 — add Bo3 sideboard and game-level result messages (Phase 58)
+ *   4 — add deck-carrying tournament match launch descriptors
  */
-export const DRAFT_PROTOCOL_VERSION = 3 as const;
+export const DRAFT_PROTOCOL_VERSION = 4 as const;
+
+export interface DraftDeckPayload {
+  main_deck: string[];
+  sideboard: string[];
+  commander: string[];
+}
+
+export interface DraftMatchDeckPayload {
+  player: DraftDeckPayload;
+  opponent: DraftDeckPayload;
+  ai_decks: DraftDeckPayload[];
+}
+
+export type DraftMatchLaunch =
+  | {
+      type: "HumanHost";
+      matchId: string;
+      matchRoomCode: string;
+      round: number;
+      localSeat: number;
+      opponentSeat: number;
+      opponentName: string;
+      matchHostPeerId: string;
+      deckPayload: DraftMatchDeckPayload;
+      matchConfig: MatchConfig;
+    }
+  | {
+      type: "HumanGuest";
+      matchId: string;
+      matchRoomCode: string;
+      round: number;
+      localSeat: number;
+      opponentSeat: number;
+      opponentName: string;
+      matchHostPeerId: string;
+      localDeck: DraftDeckPayload;
+      matchConfig: MatchConfig;
+    }
+  | {
+      type: "Bot";
+      matchId: string;
+      round: number;
+      localSeat: number;
+      botSeat: number;
+      botName: string;
+      deckPayload: DraftMatchDeckPayload;
+      matchConfig: MatchConfig;
+    };
 
 // ── Message Types ──────────────────────────────────────────────────────
 
@@ -150,14 +199,7 @@ export type DraftP2PMessage =
   | {
       /** Host → Guest: instructs player to start their match for this round. */
       type: "draft_match_start";
-      matchId: string;
-      round: number;
-      opponentSeat: number;
-      opponentName: string;
-      /** PeerJS peer ID of the player who hosts the game match (lower seat# hosts). */
-      matchHostPeerId: string;
-      /** Whether this recipient is the match host (lower seat# hosts). */
-      isMatchHost: boolean;
+      launch: DraftMatchLaunch;
     }
   // ── Bo3 (Traditional Draft) Messages ────────────────────────��────────
   | {

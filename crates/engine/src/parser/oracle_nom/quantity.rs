@@ -4468,6 +4468,26 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    #[test]
+    fn test_parse_half_your_library_rounded_up() {
+        let (rest, q) = parse_quantity("half your library, rounded up").unwrap();
+        assert_eq!(
+            q,
+            QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        scope: CountScope::Controller,
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Up,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
     /// Legacy Oracle text for life-loss cards used "his or her life" before
     /// the 2014 "their" reword. Resolves to the same `TargetLifeTotal` ref.
     #[test]
