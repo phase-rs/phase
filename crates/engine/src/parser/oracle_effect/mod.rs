@@ -2265,16 +2265,14 @@ fn parse_event_context_ref_with_ctx<'a>(
     ctx: &ParseContext,
 ) -> Option<(TargetFilter, &'a str)> {
     let (target, rest) = parse_event_context_ref(text)?;
-    let target = if matches!(
-        (&target, ctx.relative_player_scope.as_ref()),
-        (
-            TargetFilter::TriggeringPlayer,
-            Some(ControllerRef::ScopedPlayer)
-        )
-    ) {
-        TargetFilter::ScopedPlayer
-    } else {
-        target
+    let target = match (&target, ctx.relative_player_scope.as_ref()) {
+        (TargetFilter::TriggeringPlayer, Some(ControllerRef::ScopedPlayer)) => {
+            TargetFilter::ScopedPlayer
+        }
+        (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
+            TargetFilter::ParentTargetController
+        }
+        _ => target,
     };
     Some((target, rest))
 }
