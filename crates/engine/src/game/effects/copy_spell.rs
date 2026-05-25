@@ -1373,4 +1373,87 @@ mod tests {
         let copy = copy_top_ability(PlayerId(0));
         assert_eq!(copy_count_with_replacements(&state, &copy, 1), 1);
     }
+
+    /// CR 707.10 + CR 614.6: Regression — copying a *targeted* spell with
+    /// Twinning Staff must make exactly TWO copies, not a runaway. Each copy
+    /// pauses on `CopyRetarget` and the drain driver resumes the next iteration;
+    /// without the `copy_count_finalized` guard, every resumed iteration
+    /// re-applied the +1 bonus and the loop exploded into dozens of copies (the
+    /// in-game "stuck in a loop" report).
+    #[test]
+    fn twinning_staff_targeted_copy_does_not_runaway() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        push_twinning_staff(&mut state, ObjectId(50), PlayerId(0));
+
+        // A creature for the copied spell to target.
+        let mut bear = GameObject::new(
+            ObjectId(60),
+            CardId(5),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        bear.card_types.core_types.push(CoreType::Creature);
+        state.objects.insert(ObjectId(60), bear);
+
+        // A targeted instant on the stack (Lightning Bolt-style), controlled by P0.
+        let spell = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(ObjectId(60))],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt",
+            spell,
+            CastingVariant::Normal,
+        );
+
+        // Resolve a "copy target spell, you may choose new targets" effect.
+        let copy = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+            },
+            vec![],
+            ObjectId(70),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        let _ = crate::game::effects::resolve_ability_chain(&mut state, &copy, &mut events, 0);
+
+        // Drive each per-copy retarget pause to completion (keep current targets).
+        let mut guard = 0;
+        while let WaitingFor::CopyRetarget { player, .. } = state.waiting_for.clone() {
+            guard += 1;
+            assert!(
+                guard < 12,
+                "runaway copy loop: the copy_count_finalized guard failed to stop re-expansion"
+            );
+            state.waiting_for = WaitingFor::Priority { player };
+            state.priority_player = player;
+            crate::game::effects::drain_pending_continuation(&mut state, &mut events);
+        }
+
+        // Exactly two spell copies (base 1 + Twinning Staff's additional 1).
+        let copies = state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.zone == Zone::Stack)
+            .count();
+        assert_eq!(
+            copies, 2,
+            "Twinning Staff must make exactly one extra copy (2 total), got {copies}"
+        );
+    }
 }
