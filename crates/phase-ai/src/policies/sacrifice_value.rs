@@ -123,6 +123,7 @@ mod tests {
             waiting_for: WaitingFor::SacrificeForCost {
                 player: PlayerId(0),
                 count: 1,
+                min_count: 1,
                 permanents: vec![creature, token],
                 pending_cast: dummy_pending(),
             },
