@@ -2287,17 +2287,63 @@ fn apply_all_cost_modifiers(
     object_id: ObjectId,
     mana_cost: &mut ManaCost,
 ) {
+    apply_all_cost_modifiers_inner(state, player, object_id, None, false, mana_cost);
+}
+
+fn apply_selected_target_cost_modifiers(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    ability: &ResolvedAbility,
+    mana_cost: &mut ManaCost,
+) {
+    apply_all_cost_modifiers_inner(state, player, object_id, Some(ability), true, mana_cost);
+}
+
+fn apply_all_cost_modifiers_inner(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    selected_ability: Option<&ResolvedAbility>,
+    target_sensitive_only: bool,
+    mana_cost: &mut ManaCost,
+) {
     // CR 117.7 + CR 601.2f: Self-spell statics ("This spell costs {N} less ...").
-    apply_self_spell_cost_modifiers(state, player, object_id, mana_cost);
+    apply_self_spell_cost_modifiers_inner(
+        state,
+        player,
+        object_id,
+        selected_ability,
+        target_sensitive_only,
+        mana_cost,
+    );
     // CR 601.2f: Battlefield-based cost modifications (ReduceCost/RaiseCost statics).
-    apply_battlefield_cost_modifiers(state, player, object_id, mana_cost);
+    apply_battlefield_cost_modifiers_inner(
+        state,
+        player,
+        object_id,
+        selected_ability,
+        target_sensitive_only,
+        mana_cost,
+    );
     // CR 702.41a: Affinity — reduce cost by {1} per matching permanent controlled.
-    apply_affinity_reduction(state, player, object_id, mana_cost);
+    if !target_sensitive_only {
+        apply_affinity_reduction(state, player, object_id, mana_cost);
+    }
     // CR 601.2f: One-shot pending cost reductions ("the next spell costs {N} less").
-    apply_pending_spell_cost_reductions(state, player, object_id, mana_cost);
+    if !target_sensitive_only {
+        apply_pending_spell_cost_reductions(state, player, object_id, mana_cost);
+    }
     // CR 601.2f: Cost-floor statics (Trinisphere class) — LAST, after every
     // additive/subtractive modifier so the floor sees the final mana component.
-    apply_cost_floor(state, player, object_id, mana_cost);
+    apply_cost_floor_inner(
+        state,
+        player,
+        object_id,
+        selected_ability,
+        target_sensitive_only,
+        mana_cost,
+    );
 }
 
 /// CR 601.2f + CR 118.9d: Apply the full cost-modifier stack (commander tax,
@@ -2356,6 +2402,8 @@ pub(super) fn recompute_pending_cast_cost(
     apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
 }
 
+/// CR 601.2c + CR 601.2f: After targets are chosen, apply cost adjustments
+/// whose filters depend on the selected targets, then re-apply the cost floor.
 pub(super) fn apply_selected_target_cost_adjustments(
     state: &GameState,
     player: PlayerId,
@@ -2383,21 +2431,7 @@ pub(super) fn apply_selected_target_cost_adjustments(
     };
 
     let mut target_adjusted_cost = cost.clone();
-    apply_self_spell_cost_modifiers_with_selected_targets(
-        state,
-        player,
-        object_id,
-        ability,
-        &mut target_adjusted_cost,
-    );
-    apply_battlefield_cost_modifiers_with_selected_targets(
-        state,
-        player,
-        object_id,
-        ability,
-        &mut target_adjusted_cost,
-    );
-    apply_cost_floor_with_selected_targets(
+    apply_selected_target_cost_modifiers(
         state,
         player,
         object_id,
@@ -2407,6 +2441,8 @@ pub(super) fn apply_selected_target_cost_adjustments(
     target_adjusted_cost
 }
 
+/// CR 107.3a + CR 601.2b + CR 601.2f: Recompute an in-flight X spell's locked
+/// total after the chosen X value is known.
 pub(super) fn recompute_pending_spell_cost_with_chosen_x(
     state: &GameState,
     player: PlayerId,
@@ -2435,6 +2471,7 @@ pub(super) fn recompute_pending_spell_cost_with_chosen_x(
 /// covering the card's current zone (Hand for normal casting, Stack for the cost-
 /// determination step). Handles cards like Tolarian Terror where the cost reduction is
 /// inherent to the spell and must apply before the spell resolves.
+#[cfg(test)]
 fn apply_self_spell_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
@@ -2444,7 +2481,8 @@ fn apply_self_spell_cost_modifiers(
     apply_self_spell_cost_modifiers_inner(state, caster, spell_id, None, false, mana_cost);
 }
 
-pub(super) fn apply_self_spell_cost_modifiers_with_selected_targets(
+#[cfg(test)]
+fn apply_self_spell_cost_modifiers_with_selected_targets(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
@@ -2694,6 +2732,7 @@ fn spell_matches_cost_filter_with_selected_targets(
 /// Player scope is checked via the `affected` filter on the StaticDefinition (You = source's
 /// controller casts, Opponent = source's opponent casts, no controller = all players).
 /// Spell type is checked via the `spell_filter` field in the StaticMode variant.
+#[cfg(test)]
 fn apply_battlefield_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
@@ -2703,7 +2742,8 @@ fn apply_battlefield_cost_modifiers(
     apply_battlefield_cost_modifiers_inner(state, caster, spell_id, None, false, mana_cost);
 }
 
-pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
+#[cfg(test)]
+fn apply_battlefield_cost_modifiers_with_selected_targets(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
@@ -2847,6 +2887,7 @@ fn apply_battlefield_cost_modifiers_inner(
 /// is below the floor, generic mana is added to bring the total to the floor —
 /// colored requirements are never modified, per the Trinisphere reminder text
 /// "Additional mana ... may be paid with any color of mana or colorless mana."
+#[cfg(test)]
 fn apply_cost_floor(
     state: &GameState,
     caster: PlayerId,
@@ -2854,16 +2895,6 @@ fn apply_cost_floor(
     mana_cost: &mut ManaCost,
 ) {
     apply_cost_floor_inner(state, caster, spell_id, None, false, mana_cost);
-}
-
-pub(super) fn apply_cost_floor_with_selected_targets(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
-    ability: &ResolvedAbility,
-    mana_cost: &mut ManaCost,
-) {
-    apply_cost_floor_inner(state, caster, spell_id, Some(ability), true, mana_cost);
 }
 
 fn apply_cost_floor_inner(

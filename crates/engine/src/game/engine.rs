@@ -2415,6 +2415,8 @@ fn apply_action(
             }
             let player = *player;
             let convoke_mode = *convoke_mode;
+            // CR 107.3a + CR 601.2b: The caster announces X before the total
+            // cost is locked, so persist the value before recomputing payment.
             let (object_id, pending_snapshot) = {
                 let pending = state.pending_cast.as_mut().ok_or_else(|| {
                     EngineError::InvalidAction("No pending cast awaiting X".to_string())

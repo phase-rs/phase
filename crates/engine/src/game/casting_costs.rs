@@ -1,5 +1,11 @@
 use std::collections::HashSet;
 
+/// Extra bounded headroom for dynamic X affordability search when cost reducers
+/// can apply after the symbolic X value is concretized. This is an engine UI
+/// bound, not an MTG rule: it prevents an unbounded search while still covering
+/// far beyond any practical generated-mana/cost-reduction state.
+const DYNAMIC_X_SEARCH_EXTRA_HEADROOM: u32 = 1024;
+
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AdditionalCost, BeholdCostAction, CastTimingPermission,
     CostPaidObjectSnapshot, Effect, KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility,
@@ -1453,51 +1459,12 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         ));
     }
 
-    // CR 207.2c + CR 601.2f: Strive per-target cost increase.
-    // Targets are chosen in CR 601.2c; costs are determined in CR 601.2f.
-    // Add strive_cost * (num_targets - 1) to the total casting cost.
-    let strive_adjusted_cost;
-    let cost = if let Some(strive_cost) = state
-        .objects
-        .get(&object_id)
-        .and_then(|obj| obj.strive_cost.clone())
-    {
-        let target_count = super::ability_utils::flatten_targets_in_chain(&ability).len();
-        if target_count > 1 {
-            strive_adjusted_cost = (1..target_count).fold(cost.clone(), |acc, _| {
-                super::restrictions::add_mana_cost(&acc, &strive_cost)
-            });
-            &strive_adjusted_cost
-        } else {
-            cost
-        }
-    } else {
-        cost
-    };
-
-    let mut target_adjusted_cost = cost.clone();
-    super::casting::apply_self_spell_cost_modifiers_with_selected_targets(
+    let target_adjusted_cost = super::casting::apply_selected_target_cost_adjustments(
         state,
         player,
         object_id,
         &ability,
-        &mut target_adjusted_cost,
-    );
-    super::casting::apply_battlefield_cost_modifiers_with_selected_targets(
-        state,
-        player,
-        object_id,
-        &ability,
-        &mut target_adjusted_cost,
-    );
-    // CR 601.2f: Cost-floor statics (Trinisphere) apply last, after all
-    // additive/subtractive modifiers including target-dependent ones.
-    super::casting::apply_cost_floor_with_selected_targets(
-        state,
-        player,
-        object_id,
-        &ability,
-        &mut target_adjusted_cost,
+        cost.clone(),
     );
     let cost = &target_adjusted_cost;
 
@@ -3911,7 +3878,11 @@ pub(super) fn max_x_value_excluding(
                 )
             };
 
-            let hard_cap = pool.saturating_add(capacity).saturating_add(1024);
+            // CR 107.3a + CR 601.2f: X must be chosen before payment, so test
+            // concrete candidate totals after all applicable cost modifiers.
+            let hard_cap = pool
+                .saturating_add(capacity)
+                .saturating_add(DYNAMIC_X_SEARCH_EXTRA_HEADROOM);
             let mut low = 0u32;
             let mut high = 1u32;
             while high <= hard_cap && affordable(high) {
