@@ -109,6 +109,7 @@ import {
   useMultiplayerStore,
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
+import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
@@ -2057,6 +2058,7 @@ function GameOverScreen({
   const source = searchParams.get("source");
   const draftId = searchParams.get("draftId");
   const isDraft = source === "draft" && !!draftId;
+  const isDraftPodMatch = mode === "draft-match";
   const gameId = useGameStore((s) => s.gameId);
 
   const [resultRecorded, setResultRecorded] = useState(false);
@@ -2071,6 +2073,17 @@ function GameOverScreen({
       if (meta?.phase === "complete") setRunOver(true);
     });
   }, [isDraft, gameId, isDraw, isVictory, resultRecorded]);
+
+  useEffect(() => {
+    if (!isDraftPodMatch || resultRecorded) return;
+    void useMultiplayerDraftStore
+      .getState()
+      .reportActiveMatchGameResult(winner)
+      .then(() => setResultRecorded(true))
+      .catch((err) => {
+        console.error("[GameOverScreen] failed to report draft pod match result:", err);
+      });
+  }, [isDraftPodMatch, resultRecorded, winner]);
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();
@@ -2174,6 +2187,19 @@ function GameOverScreen({
                 {runOver
                   ? t("gamePage.gameOver.backToDraft")
                   : t("gamePage.gameOver.continueRun")}
+              </button>
+            ) : isDraftPodMatch ? (
+              <button
+                disabled={!resultRecorded}
+                onClick={() => navigate("/draft-pod")}
+                className={gameButtonClass({
+                  tone: isVictory ? "amber" : "slate",
+                  size: "lg",
+                  disabled: !resultRecorded,
+                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                })}
+              >
+                {t("gamePage.gameOver.backToDraft")}
               </button>
             ) : isOnlineMode ? (
               <button

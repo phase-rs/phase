@@ -234,8 +234,6 @@ export function DeckBuilder({
         onLoad={requestLoad}
         format={format}
         onFormatChange={onFormatChange}
-        bracket={bracket}
-        onBracketChange={setBracket}
       />
 
       <DeckBuilderTabBar
@@ -430,6 +428,7 @@ export function DeckBuilder({
                 isCommanderEligible={isCommanderEligible}
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
+                onCardHover={onCardHover}
               />
             )}
             <StatsPanel
@@ -439,6 +438,7 @@ export function DeckBuilder({
               isCommander={isCommander}
               estimate={estimate}
               manualBracket={bracket}
+              onBracketChange={setBracket}
               auditEmptyReason={auditEmptyReason}
               onCardClick={handleScrollToCard}
             />

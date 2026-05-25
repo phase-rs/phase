@@ -1,11 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  searchScryfall,
-  buildScryfallQuery,
-  scryfallLegalityKey,
-  type ScryfallCard,
-} from "../../services/scryfall";
+import { scryfallLegalityKey, type ScryfallCard } from "../../services/scryfall";
+import { searchCards } from "../../services/engineRuntime";
 import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { useSetList } from "../../hooks/useSetList";
@@ -122,28 +118,23 @@ export function CardSearch({
         return;
       }
 
-      const query = buildScryfallQuery({
-        text: searchText || undefined,
-        colors: colors.length > 0 ? colors : undefined,
-        type: type || undefined,
-        cmcMax: cmc,
-        sets,
-        format: browseFormat === "all" ? undefined : scryfallLegalityKey(browseFormat),
-      });
-
-      if (!query) {
-        onResults([], 0);
-        setResultCount(null);
-        return;
-      }
-
+      // AbortController is the staleness guard: a newer search aborts this one
+      // so its results never overwrite the latest. The search itself runs
+      // locally through the engine (no network, no signal to pass).
       const controller = new AbortController();
       abortRef.current = controller;
       setLoading(true);
       setError(null);
 
       try {
-        const { cards, total } = await searchScryfall(query, controller.signal);
+        const { cards, total } = await searchCards({
+          text: searchText || undefined,
+          colors: colors.length > 0 ? colors : undefined,
+          type: type || undefined,
+          cmcMax: cmc,
+          sets,
+          legalFormat: browseFormat === "all" ? undefined : scryfallLegalityKey(browseFormat),
+        });
         if (!controller.signal.aborted) {
           onResults(cards, total);
           setResultCount(total);

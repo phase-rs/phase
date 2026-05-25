@@ -37,7 +37,12 @@ import {
 } from "../stores/gameStore";
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
-import { assignRandomAvatars, fetchAvatarArtUrl } from "../services/playerAvatars";
+import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
+import {
+  assignRandomAvatars,
+  avatarCardNameForName,
+  fetchAvatarArtUrl,
+} from "../services/playerAvatars";
 
 /** Build per-seat AI controller bindings for a game about to start. Reads
  *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
@@ -106,6 +111,44 @@ function setupCommanderAvatars(
   );
 
   for (const [playerId, cardName] of commanderNames) {
+    fetchAvatarArtUrl(cardName).then((url) => {
+      if (!url || avatarGeneration !== generation) return;
+      const next = new Map(useMultiplayerStore.getState().playerAvatars);
+      next.set(playerId, url);
+      useMultiplayerStore.setState({ playerAvatars: next });
+    });
+  }
+}
+
+function setupDraftMatchAvatars(seed: string) {
+  const generation = ++avatarGeneration;
+  const matchPairing = useMultiplayerDraftStore.getState().matchPairing;
+  const randomAvatars = assignRandomAvatars(2, seed);
+  const names = new Map<number, string>();
+
+  const localPlayerId = matchPairing?.type === "HumanGuest" ? 1 : 0;
+  const opponentPlayerId = localPlayerId === 0 ? 1 : 0;
+  let opponentName = randomAvatars[1]?.name ?? "Opponent";
+  if (matchPairing) {
+    opponentName = matchPairing.type === "Bot"
+      ? matchPairing.botName
+      : matchPairing.opponentName;
+  }
+  names.set(localPlayerId, "You");
+  names.set(opponentPlayerId, opponentName);
+
+  useMultiplayerStore.setState({
+    activePlayerId: localPlayerId,
+    playerNames: names,
+    playerAvatars: new Map(),
+  });
+
+  const avatarCards = new Map<number, string | undefined>([
+    [localPlayerId, randomAvatars[localPlayerId]?.cardName ?? randomAvatars[0]?.cardName],
+    [opponentPlayerId, avatarCardNameForName(opponentName) ?? randomAvatars[opponentPlayerId]?.cardName],
+  ]);
+  for (const [playerId, cardName] of avatarCards) {
+    if (!cardName) continue;
     fetchAvatarArtUrl(cardName).then((url) => {
       if (!url || avatarGeneration !== generation) return;
       const next = new Map(useMultiplayerStore.getState().playerAvatars);
@@ -408,6 +451,8 @@ export function GameProvider({
     if (!isOnline && !isP2P) {
       if (mode === "ai") {
         setupRandomAvatars(playerCount ?? 2, gameId);
+      } else if (mode === "draft-match") {
+        setupDraftMatchAvatars(gameId);
       } else {
         useMultiplayerStore.setState({ playerNames: new Map(), playerAvatars: new Map() });
       }
