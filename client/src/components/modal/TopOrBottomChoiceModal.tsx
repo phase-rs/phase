@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { GameAction, GameState, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceModal } from "./ChoiceModal.tsx";
 
@@ -24,19 +25,20 @@ export function TopOrBottomChoiceModalContent({
   objects,
   dispatch,
 }: TopOrBottomChoiceModalProps) {
+  const { t } = useTranslation("game");
   const objectId =
     waitingFor.type === "TopOrBottomChoice"
       ? waitingFor.data.object_id
       : waitingFor.data.card;
-  const cardName = objects?.[objectId]?.name ?? "Card";
+  const cardName = objects?.[objectId]?.name ?? t("topOrBottom.cardFallback");
 
   return (
     <ChoiceModal
-      title={`Put ${cardName} on top or bottom of library`}
+      title={t("topOrBottom.title", { name: cardName })}
       previewCardName={cardName}
       options={[
-        { id: "top", label: "Top of library" },
-        { id: "bottom", label: "Bottom of library" },
+        { id: "top", label: t("topOrBottom.top") },
+        { id: "bottom", label: t("topOrBottom.bottom") },
       ]}
       onChoose={(id) => {
         dispatch({ type: "ChooseTopOrBottom", data: { top: id === "top" } });
