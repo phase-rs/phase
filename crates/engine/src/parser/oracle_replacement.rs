@@ -3645,14 +3645,16 @@ fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<Repl
 
     // Require the "plus [N] additional time(s)" tail so this only matches the
     // count-increasing class, not an unrelated one-shot "copy a spell" effect.
+    // Composed from modular combinators along three independent axes — count
+    // (`an` => 1, else a number), the fixed `additional` token, and the
+    // singular/plural `time(s)` noun — rather than enumerating full-phrase tags,
+    // so "plus an additional time" and "plus N additional times" both parse.
     let additional = nom_on_lower(lower, lower, |i| {
         let (i, _) = take_until::<_, _, OracleError<'_>>("plus ").parse(i)?;
         let (i, _) = tag("plus ").parse(i)?;
-        let (i, n) = alt((
-            value(1u32, tag("an additional time")),
-            terminated(nom_primitives::parse_number, tag(" additional time")),
-        ))
-        .parse(i)?;
+        let (i, n) = alt((value(1u32, tag("an")), nom_primitives::parse_number)).parse(i)?;
+        let (i, _) = tag(" additional ").parse(i)?;
+        let (i, _) = alt((tag("times"), tag("time"))).parse(i)?;
         Ok((i, n))
     })
     .map(|(n, _)| n)?;
@@ -9651,6 +9653,29 @@ mod snapshot_tests {
         assert_eq!(
             def.quantity_modification,
             Some(QuantityModification::Plus { value: 1 })
+        );
+    }
+
+    /// The "additional time(s)" tail is composed from modular combinators, so a
+    /// numbered, pluralized variant ("plus 2 additional times") parses to the
+    /// corresponding `Plus { value }` — sibling coverage beyond the single
+    /// Twinning Staff wording.
+    #[test]
+    fn copy_count_replacement_parses_plural_numbered_variant() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::replacements::ReplacementEvent;
+
+        let def = super::parse_replacement_line(
+            "If you would copy a spell one or more times, instead copy it that many times \
+             plus 2 additional times.",
+            "Hypothetical Double Staff",
+        )
+        .expect("plural numbered copy-count replacement must parse");
+
+        assert_eq!(def.event, ReplacementEvent::CopySpell);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 2 })
         );
     }
 }
