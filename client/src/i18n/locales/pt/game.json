@@ -8,6 +8,8 @@
   "preview": {
     "holdCtrlBack": "Segure Ctrl para a face traseira",
     "holdCtrlFront": "Segure Ctrl para a face dianteira",
+    "holdCtrlFlip": "Segure Ctrl para virar",
+    "flip": "Virar",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",
@@ -307,7 +309,9 @@
     "statHand": "Mão",
     "statCreatures": "Criaturas",
     "statLands": "Terrenos",
-    "statOther": "Outros"
+    "statOther": "Outros",
+    "compactHud": "HUD de oponente compacto. Reduz cada oponente a uma única linha fina (nome + vida); toque em um oponente para focar todo o campo de batalha dele.",
+    "expandHud": "Expandir HUD de oponente. Mostra a mão e o detalhamento do campo de batalha de cada oponente."
   },
   "combat": {
     "attackAll": "Atacar Todos",
@@ -380,7 +384,9 @@
     "nounTarget": "alvo",
     "confirmTap": "Confirmar Virar ({{selected}}/{{count}})",
     "keepCurrentTargets": "Manter Alvos Atuais",
-    "skip": "Pular"
+    "skip": "Pular",
+    "chooseNewTarget": "Escolha o novo alvo da mágica",
+    "chooseNewTargetForSpell": "Escolha um novo alvo para {{spell}}"
   },
   "log": {
     "title": "Registro do Jogo",
@@ -752,6 +758,7 @@
       "title": "Escolher Portador do Anel",
       "subtitle": "Escolha uma criatura que você controla"
     },
+    "reorderHint": "Arraste para reordenar · a primeira carta é comprada primeiro",
     "scry": {
       "title": "Vidência",
       "subtitle_one": "Olhe a {{count}} carta do topo de seu grimório",
@@ -1246,6 +1253,9 @@
     "proliferateSubtitle": "Escolha qualquer número de permanentes e jogadores com marcadores. Cada alvo escolhido recebe mais um marcador de cada tipo já presente.",
     "chooseObjectsTitle": "Escolher Permanentes",
     "chooseObjectsSubtitle": "Escolha qualquer número de permanentes. Você paga um custo por cada um escolhido.",
+    "selectAll": "Todos",
+    "selectNone": "Nenhum",
+    "selectMine": "Meu lado",
     "confirm": "Confirmar"
   },
   "replacement": {
@@ -1259,7 +1269,8 @@
     "scopeSingle": "Escolha um novo alvo para a mágica",
     "scopeMulti": "Escolha novos alvos para a mágica",
     "subtitle": "{{scope}}. Atual: {{current}}",
-    "confirm": "Confirmar"
+    "confirm": "Confirmar",
+    "badgeNewTarget": "Novo alvo"
   },
   "separatePiles": {
     "chooserName": "Jogador {{number}}",
@@ -1320,5 +1331,27 @@
     "subtitleLabel": "Escolha um rótulo para {{name}}",
     "subtitleVoteRemaining": "Dê um voto ({{count}} restantes)",
     "subtitleVote": "Dê seu voto"
+  },
+  "advance": {
+    "resolve": "Resolver",
+    "passPriority": "Passar prioridade",
+    "toPhase": "Para {{phase}}"
+  },
+  "outsideGame": {
+    "fromExile": "Do exílio",
+    "fromSideboard": "Do sideboard"
+  },
+  "phaseName": {
+    "Upkeep": "Manutenção",
+    "Draw": "Compra",
+    "PreCombatMain": "Fase principal 1",
+    "BeginCombat": "Início do combate",
+    "DeclareAttackers": "Declarar atacantes",
+    "DeclareBlockers": "Declarar bloqueadores",
+    "CombatDamage": "Dano de combate",
+    "EndCombat": "Fim do combate",
+    "PostCombatMain": "Fase principal 2",
+    "End": "Etapa final",
+    "Cleanup": "Limpeza"
   }
 }

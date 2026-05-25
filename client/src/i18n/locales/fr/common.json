@@ -198,5 +198,11 @@
   },
   "turnBanner": {
     "turn": "Tour {{number}}"
+  },
+  "chrome": {
+    "back": "Retour",
+    "settings": "Paramètres",
+    "languageSettings": "Langue ({{lang}}) — ouvrir les paramètres",
+    "languageTitle": "Langue : {{lang}}"
   }
 }

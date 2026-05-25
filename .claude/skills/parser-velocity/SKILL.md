@@ -200,7 +200,7 @@ Re-invoke the skill. Phase 0's `: > /tmp/velocity-flipped.txt` clears any stale 
 
 - **Not a replacement for `unlock-set`.** Cluster-level infrastructure (new typed primitives, CR-grounded mechanics, runtime work) still goes through `unlock-set`.
 - **Not skipping gates.** All the same gates still run — just once per session.
-- **Not an agent workflow.** No `engine-implementer` spawning — that re-introduces the heavyweight per-cluster review overhead this skill exists to escape.
+- **Not the heavy implementation workflow.** Do not invoke `$engine-implementer` here — that re-introduces the heavyweight per-cluster review overhead this skill exists to escape.
 - **Not a persisted queue.** `/tmp/velocity-flipped.txt` is session-scoped, resets at gate, has no meaning across sessions.
 - **Not time-boxed.** Sprints run as long as you want.
 

@@ -23,6 +23,7 @@ import type { SeatPublicView } from "../../adapter/draft-adapter";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { useDraftPodStore } from "../../stores/draftPodStore";
+import { BotIndicator } from "./BotIndicator";
 
 // ── Seat Card ─────────────────────────────────────────────────────────
 
@@ -50,6 +51,7 @@ function SeatCard({
       ? t("lobby.botSeat")
       : t("lobby.waitingSeat")
     : seat.display_name;
+  const botLabel = t("lobby.botSeat");
 
   const borderColor = isLocalSeat
     ? "border-emerald-400/40"
@@ -96,6 +98,7 @@ function SeatCard({
         >
           {seatLabel}
         </span>
+        {seat.is_bot && <BotIndicator label={botLabel} />}
       </div>
 
       {/* Role badge */}

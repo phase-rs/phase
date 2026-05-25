@@ -5,7 +5,7 @@ use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, StackEntry,
+    ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, RetargetScope, StackEntry,
     StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
@@ -333,7 +333,12 @@ fn pass_priority_once_with_pipeline(
     state.pending_activations.clear();
 
     let stack_was_empty = state.stack.is_empty();
-    let wf = priority::handle_priority_pass(state, events);
+    // CR 117.4 + CR 723.5/723.8: pass the *seat* that holds priority, not
+    // `priority_player` — under turn-control the latter is the authorized
+    // submitter (the controller), which would mis-count consecutive passes and
+    // soft-lock the game.
+    let current_seat = turn_control::priority_seat(state);
+    let wf = priority::handle_priority_pass(current_seat, state, events);
     sync_waiting_for(state, &wf);
 
     // CR 608.2 + CR 117.4: Drain any pending continuation queued during the
@@ -3855,7 +3860,9 @@ fn apply_action(
                 state.waiting_for.clone()
             }
         }
-        // CR 115.7: Retarget a spell or ability on the stack.
+        // CR 115.7: Retarget a spell or ability on the stack via the dialog
+        // path — the multi-target (`All`-scope) UI submits every new target at
+        // once.
         (
             WaitingFor::RetargetChoice {
                 player,
@@ -3864,43 +3871,36 @@ fn apply_action(
                 ..
             },
             GameAction::RetargetSpell { new_targets },
-        ) => {
-            let p = *player;
-            let idx = *stack_entry_index;
-
-            // CR 115.7d: Validate each submitted target is in the legal set.
-            for t in &new_targets {
-                if !legal_new_targets.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Retarget: chosen target not in legal alternatives".to_string(),
-                    ));
-                }
-            }
-
-            // Update targets on the stack entry.
-            if idx < state.stack.len() {
-                if let Some(ability) = state.stack[idx].ability_mut() {
-                    ability.targets = new_targets.clone();
-                }
-            } else {
-                return Err(EngineError::InvalidAction(
-                    "Invalid stack entry index for retargeting".to_string(),
-                ));
-            }
-
-            events.push(GameEvent::EffectResolved {
-                kind: crate::types::ability::EffectKind::ChangeTargets,
-                source_id: state
-                    .stack
-                    .get(idx)
-                    .map(|e| e.source_id)
-                    .unwrap_or(ObjectId(0)),
-            });
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            effects::drain_pending_continuation(state, &mut events);
-            state.waiting_for.clone()
-        }
+        ) => apply_retarget(
+            state,
+            &mut events,
+            *player,
+            *stack_entry_index,
+            legal_new_targets,
+            new_targets,
+        )?,
+        // CR 115.7: Retarget a single-target spell via a board click. The
+        // universal `ChooseTarget` action — already consumed by every other
+        // targeting state — drives single-target retargets (Bolt Bend,
+        // Redirect, Misdirection) so the player picks the new target directly
+        // on the battlefield instead of through a dialog.
+        (
+            WaitingFor::RetargetChoice {
+                player,
+                stack_entry_index,
+                scope: RetargetScope::Single,
+                legal_new_targets,
+                ..
+            },
+            GameAction::ChooseTarget { target: Some(t) },
+        ) => apply_retarget(
+            state,
+            &mut events,
+            *player,
+            *stack_entry_index,
+            legal_new_targets,
+            vec![t],
+        )?,
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",
@@ -3952,6 +3952,51 @@ fn apply_action(
         waiting_for,
         log_entries: vec![],
     })
+}
+
+/// CR 115.7d: Apply a validated retarget to the stack entry, then hand priority
+/// back to the retargeting player. Single authority for both retarget entry
+/// points — the board-click (`ChooseTarget`) and dialog (`RetargetSpell`) paths
+/// — so target validation and stack mutation can never drift apart.
+fn apply_retarget(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    player: PlayerId,
+    stack_entry_index: usize,
+    legal_new_targets: &[TargetRef],
+    new_targets: Vec<TargetRef>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 115.7d: Every submitted target must be in the legal set.
+    for t in &new_targets {
+        if !legal_new_targets.contains(t) {
+            return Err(EngineError::InvalidAction(
+                "Retarget: chosen target not in legal alternatives".to_string(),
+            ));
+        }
+    }
+
+    if stack_entry_index < state.stack.len() {
+        if let Some(ability) = state.stack[stack_entry_index].ability_mut() {
+            ability.targets = new_targets;
+        }
+    } else {
+        return Err(EngineError::InvalidAction(
+            "Invalid stack entry index for retargeting".to_string(),
+        ));
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::ChangeTargets,
+        source_id: state
+            .stack
+            .get(stack_entry_index)
+            .map(|e| e.source_id)
+            .unwrap_or(ObjectId(0)),
+    });
+    state.waiting_for = WaitingFor::Priority { player };
+    state.priority_player = player;
+    effects::drain_pending_continuation(state, events);
+    Ok(state.waiting_for.clone())
 }
 
 /// Run state-based actions, exile returns, delayed triggers, and trigger processing

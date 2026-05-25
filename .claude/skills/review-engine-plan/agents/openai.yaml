@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Engine Plan"
+  short_description: "Audit engine implementation plans"
+  default_prompt: "Use $review-engine-plan to review this engine implementation plan."

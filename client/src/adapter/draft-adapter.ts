@@ -299,9 +299,9 @@ export class DraftAdapter {
     );
   }
 
-  async replaceSeatWithBot(seat: number): Promise<DraftPlayerView> {
+  async replaceSeatWithBot(seat: number, name?: string): Promise<DraftPlayerView> {
     return this.applyActionAndGetHostView(
-      JSON.stringify({ type: "ReplaceSeatWithBot", data: { seat } }),
+      JSON.stringify({ type: "ReplaceSeatWithBot", data: { seat, name } }),
     );
   }
 }

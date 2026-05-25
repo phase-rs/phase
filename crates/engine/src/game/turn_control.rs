@@ -11,6 +11,20 @@ pub fn turn_decision_maker(state: &GameState) -> PlayerId {
         .unwrap_or(state.active_player)
 }
 
+/// CR 117 + CR 723: The player who currently *holds* priority — the semantic
+/// seat — as opposed to `state.priority_player`, which is the authorized
+/// submitter. Under a turn-control effect (CR 723, e.g. Mindslaver) these
+/// differ: `priority_player` collapses onto the controller for every seat the
+/// controller submits for, so any rules check that means "who holds priority"
+/// must use this, not the raw field. Sourced from `waiting_for`, falling back to
+/// `priority_player` for states that carry no single acting player.
+pub fn priority_seat(state: &GameState) -> PlayerId {
+    state
+        .waiting_for
+        .acting_player()
+        .unwrap_or(state.priority_player)
+}
+
 pub fn authorized_submitter_for_player(state: &GameState, semantic_player: PlayerId) -> PlayerId {
     if semantic_player == state.active_player {
         turn_decision_maker(state)

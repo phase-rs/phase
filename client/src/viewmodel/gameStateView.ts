@@ -56,6 +56,13 @@ export function getWaitingForObjectChoiceIds(
       const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
       return (slot?.legal_alternatives ?? []).flatMap((t) => "Object" in t ? [t.Object] : []);
     }
+    case "RetargetChoice":
+      // CR 115.7: Single-target retargets (Bolt Bend, Redirect) are resolved by
+      // a board click; multi-target (`All`-scope) retargets keep the dialog.
+      if (waitingFor.data.scope.type !== "Single") return [];
+      return waitingFor.data.legal_new_targets.flatMap((target) =>
+        "Object" in target ? [target.Object] : [],
+      );
     case "ExploreChoice":
       return waitingFor.data.choosable;
     case "PairChoice":

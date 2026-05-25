@@ -200,6 +200,105 @@ mod tests {
     }
 
     #[test]
+    fn test_scry_keeps_reordered_subset_on_top_and_bottoms_rest() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+        // Library top-to-bottom: [obj0, obj1, obj2, obj3, obj4].
+        let library: Vec<ObjectId> = state.players[0].library.iter().copied().collect();
+        let (obj0, obj1, obj2, obj3, obj4) =
+            (library[0], library[1], library[2], library[3], library[4]);
+
+        // Scry 3 over the top three cards.
+        let ability = make_scry_ability(3);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let waiting = state.waiting_for.clone();
+        assert!(matches!(waiting, WaitingFor::ScryChoice { .. }));
+
+        // CR 701.22a: keep obj2 then obj0 on top (reordered partial subset of the
+        // looked-at {obj0, obj1, obj2}); obj1 goes to the bottom in any order.
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![obj2, obj0],
+            },
+            &mut events,
+        )
+        .unwrap();
+
+        let library_after: Vec<ObjectId> = state.players[0].library.iter().copied().collect();
+        // Kept-on-top in submitted order, untouched cards beneath, bottomed card last.
+        assert_eq!(library_after, vec![obj2, obj0, obj3, obj4, obj1]);
+    }
+
+    #[test]
+    fn test_scry_rejects_foreign_card_and_duplicate() {
+        use crate::game::engine::EngineError;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+        let library: Vec<ObjectId> = state.players[0].library.iter().copied().collect();
+        let obj0 = library[0];
+        let foreign = ObjectId(9999);
+
+        let ability = make_scry_ability(2);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let waiting = state.waiting_for.clone();
+
+        // CR 701.22a: a selection containing a card that was not looked at is rejected.
+        let mut events = Vec::new();
+        let result = handle_resolution_choice(
+            &mut state,
+            waiting.clone(),
+            GameAction::SelectCards {
+                cards: vec![obj0, foreign],
+            },
+            &mut events,
+        );
+        assert!(matches!(result, Err(EngineError::InvalidAction(_))));
+
+        // CR 701.22a: a selection containing a duplicate is rejected.
+        let mut events = Vec::new();
+        let result = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![obj0, obj0],
+            },
+            &mut events,
+        );
+        assert!(matches!(result, Err(EngineError::InvalidAction(_))));
+
+        // The library must be untouched by the rejected actions.
+        let library_after: Vec<ObjectId> = state.players[0].library.iter().copied().collect();
+        assert_eq!(library_after, library);
+    }
+
+    #[test]
     fn scry_replacement_to_draw_delivers_through_resolver() {
         let mut state = GameState::new_two_player(42);
         for i in 0..3 {
