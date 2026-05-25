@@ -210,6 +210,52 @@ fn copy_controller(ability: &ResolvedAbility) -> PlayerId {
         .unwrap_or(ability.controller)
 }
 
+/// CR 707.10 + CR 614.1a: Apply active "copy an additional time" replacement
+/// effects (Twinning Staff) to the number of copies a `CopySpell` effect would
+/// create. `base` is the count the effect would otherwise produce (its
+/// `repeat_for` value, or 1); the return value is the modified count.
+///
+/// Copies are produced by the generic `repeat_for` loop, not the
+/// `ProposedEvent` replacement pipeline, so the count modification is applied
+/// here at the copy-count site. Only copies of a *spell* are affected — copying
+/// an activated/triggered ability (Gogo) is not "copying a spell" (CR 707.10).
+/// Each `CopySpell` replacement controlled by the copy's controller folds its
+/// `QuantityModification` into the count; purely additive `Plus` modifications
+/// (the only shape in the current card pool) are order-independent, so no
+/// CR 616.1 ordering choice is required.
+pub(crate) fn copy_count_with_replacements(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    base: usize,
+) -> usize {
+    use crate::types::ability::QuantityModification;
+    use crate::types::replacements::ReplacementEvent;
+
+    // CR 707.10: Twinning Staff only modifies copying a *spell*, not an ability.
+    match copy_source_entry(state, ability) {
+        Some(entry) if matches!(entry.kind, StackEntryKind::Spell { .. }) => {}
+        _ => return base,
+    }
+
+    // CR 707.10 / CR 614.1a: "if you would copy" — only the copy controller's
+    // copy-additional replacements apply.
+    let controller = copy_controller(ability);
+    let mut count = base as u32;
+    for (_idx, obj, def) in crate::game::functioning_abilities::active_replacements(state) {
+        if def.event != ReplacementEvent::CopySpell || obj.controller != controller {
+            continue;
+        }
+        count = match def.quantity_modification {
+            Some(QuantityModification::Double) => count.saturating_mul(2),
+            Some(QuantityModification::Plus { value }) => count.saturating_add(value),
+            Some(QuantityModification::Minus { value }) => count.saturating_sub(value),
+            // `Prevent` / unspecified is not a copy-count increase — leave as-is.
+            Some(QuantityModification::Prevent) | None => count,
+        };
+    }
+    count as usize
+}
+
 fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<StackEntry> {
     let target_id = ability.targets.iter().find_map(|target| match target {
         TargetRef::Object(id) => Some(*id),
@@ -1212,5 +1258,119 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    /// Put a Twinning Staff–style permanent (a `CopySpell` replacement with
+    /// `Plus { value: 1 }`) onto the battlefield under `controller`.
+    fn push_twinning_staff(state: &mut GameState, obj_id: ObjectId, controller: PlayerId) {
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut obj = GameObject::new(
+            obj_id,
+            CardId(900),
+            controller,
+            "Twinning Staff".to_string(),
+            Zone::Battlefield,
+        );
+        obj.controller = controller;
+        obj.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::CopySpell)
+            .quantity_modification(QuantityModification::Plus { value: 1 })]
+        .into();
+        state.objects.insert(obj_id, obj);
+    }
+
+    /// Build a `CopySpell` ability (no targets → copies top of stack) for `controller`.
+    fn copy_top_ability(controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+            },
+            vec![],
+            ObjectId(800),
+            controller,
+        )
+    }
+
+    /// CR 707.10 + CR 614.1a: Twinning Staff turns a single spell copy into two.
+    #[test]
+    fn copy_count_with_replacements_adds_one_for_twinning_staff() {
+        let mut state = GameState::new_two_player(42);
+        push_twinning_staff(&mut state, ObjectId(50), PlayerId(0));
+
+        let spell = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Divination",
+            spell,
+            CastingVariant::Normal,
+        );
+
+        let copy = copy_top_ability(PlayerId(0));
+        assert_eq!(copy_count_with_replacements(&state, &copy, 1), 2);
+    }
+
+    /// CR 707.10: "If YOU would copy" — only the copying player's Twinning Staff
+    /// applies. An opponent's Staff must not modify the count.
+    #[test]
+    fn copy_count_with_replacements_ignores_opponents_staff() {
+        let mut state = GameState::new_two_player(42);
+        push_twinning_staff(&mut state, ObjectId(50), PlayerId(1));
+
+        let spell = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Divination",
+            spell,
+            CastingVariant::Normal,
+        );
+
+        let copy = copy_top_ability(PlayerId(0));
+        assert_eq!(copy_count_with_replacements(&state, &copy, 1), 1);
+    }
+
+    /// CR 707.10: Copying an *ability* (not a spell) is unaffected by Twinning
+    /// Staff. With only a triggered ability on the stack, the count is unchanged.
+    #[test]
+    fn copy_count_with_replacements_excludes_ability_copies() {
+        let mut state = GameState::new_two_player(42);
+        push_twinning_staff(&mut state, ObjectId(50), PlayerId(0));
+
+        let trigger = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(11),
+            PlayerId(0),
+        );
+        push_trigger(&mut state, ObjectId(11), CardId(2), PlayerId(0), trigger);
+
+        let copy = copy_top_ability(PlayerId(0));
+        assert_eq!(copy_count_with_replacements(&state, &copy, 1), 1);
     }
 }
