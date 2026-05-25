@@ -752,6 +752,7 @@
       "title": "Elegir Portador del Anillo",
       "subtitle": "Elige una criatura que controles"
     },
+    "reorderHint": "Arrastra para reordenar · la primera carta se roba antes",
     "scry": {
       "title": "Adivinar",
       "subtitle_one": "Mira la {{count}} carta superior de tu biblioteca",

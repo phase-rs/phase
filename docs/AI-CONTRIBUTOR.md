@@ -10,11 +10,11 @@ If you are the LLM executing this: read top to bottom and follow every step. Do 
 
 ## 0. Quality Floor — self-confirm before touching code
 
-Before Step 1, confirm the following. **Model** and **Thinking level** are advisory — proceed even if your runtime is below them, but report your actual configuration accurately so the maintainer's automation can triage the resulting PR. **Subagent support** and **Autonomy** are hard requirements: without them, abort.
+Before Step 1, confirm the following. **Model** and **Thinking level** are advisory — proceed even if your runtime is below them, but report your actual configuration accurately so the maintainer's automation can triage the resulting PR. **Tool support** and **Autonomy** are hard requirements: without them, abort.
 
 - **Model (advisory):** Best results come from Claude Opus 4.7+ or Codex 5.4+. Weaker models produce less idiomatic code and may silently skip verification steps; the maintainer prefers a flagged PR from a weaker model to no PR at all. Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-7`, `Model: claude-sonnet-4-6`, `Model: codex-5.4`). Do not editorialize this line — upstream automation parses it.
 - **Thinking (advisory):** Medium or higher. On Claude Code this is the default for Opus; on Codex CLI pass `--reasoning medium` or higher. Report on a `Thinking:` line in the PR body.
-- **Subagent / tool support (required):** You can spawn subagents (Claude Code: Agent tool; Codex: equivalent), use `WebFetch`, run shell commands, and invoke skills. Without these, you cannot run `engine-implementer` and must abort.
+- **Tool support (required):** You can invoke skills, use `WebFetch`, run shell commands, and use an independent reviewer or fresh context when requested. Without these, you cannot run `$engine-implementer` and must abort.
 - **Autonomy (required):** You will not pause for human input during the run. Every decision fork defaults to the architecturally idiomatic path as defined by `CLAUDE.md`, `AGENTS.md`, and the skills under `.claude/skills/`.
 
 ---
@@ -60,7 +60,7 @@ Record the chosen card name. It will appear in the branch name, commit message, 
 
 ---
 
-## 4. Implement with `engine-implementer`
+## 4. Implement with `$engine-implementer`
 
 Create a branch (with a collision guard so re-runs on the same fork don't fail):
 
@@ -75,25 +75,25 @@ done
 git checkout -b "$slug"
 ```
 
-Then invoke the `engine-implementer` agent (Claude Code: use the Agent tool with `subagent_type: engine-implementer`; Codex: see [Appendix A](#appendix-a--codex-cli-equivalents)) with this prompt, substituting `<NAME>`:
+Then invoke the `$engine-implementer` skill with this prompt, substituting `<NAME>`:
 
 > Implement full engine support for the card "<NAME>". Follow `CLAUDE.md` and `AGENTS.md` design principles without exception: build for the class not the card, nom combinators on first pass, CR annotations verified against `docs/MagicCompRules.txt` (and for each cited rule, also read its adjacent rules in the same section — cite the *authorizing* rule for the effect, not just the *layering* rule), idiomatic Rust, engine owns all logic, frontend is display-only. Reuse existing building blocks before writing new ones. Do not ask for clarification — on any ambiguity, take the architecturally idiomatic path. If scope expands beyond a single effect (e.g. the card requires new infrastructure, a new keyword, a new replacement pipeline), proceed anyway and explicitly note the scope expansion in your final report under a heading "Scope Expansion".
 
-`engine-implementer`'s published contract is: plan (via `engine-planner` sub-agent) → implement → run `/review-impl`. Do **not** spawn a second reviewer on top — *if it actually ran the review.* Validate that next.
+`$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → verify → review the implementation with `$review-impl` until clean → commit. Validate that next.
 
 ---
 
 ## 5. Validate the review actually happened and was addressed
 
-> This is the most important step. `engine-implementer` frequently claims to have run `/review-impl` without actually doing so, or runs it and acknowledges findings without fixing them. The outside caller (you, the LLM reading this) must verify.
+> This is the most important step. `$engine-implementer` must actually run `$review-impl` and address findings before committing. The outside caller (you, the LLM reading this) must verify.
 
 Apply **all three** checks:
 
-1. **Review section exists with concrete findings.** The agent's final report must contain an explicit `/review-impl` section enumerating findings with file:line references. Generic phrasing like "review passed" or "no issues found" with no enumerated items counts as *missing*, not clean.
+1. **Review section exists with concrete findings.** The final report must contain an explicit `$review-impl` section enumerating findings with file:line references, or a clear clean-review result that states an implementation review ran against the full diff.
 2. **Findings were addressed with code.** For every finding classified as a defect, gap, or missing case, there must be a corresponding change in `git diff HEAD~ HEAD` (or the working tree if not yet committed). An acknowledgement without a diff is a failure.
-3. **Clean-review cross-check (fresh context).** If the report claims zero findings, **spawn a new subagent** for an independent pass — do NOT re-message the still-running `engine-implementer`, and do NOT call `/review-impl` from the same context. Claude Code: invoke the `Agent` tool with `subagent_type: feature-dev:code-reviewer` (or `code-quality-reviewer`); Codex: open a fresh sandbox session. Hand it ONLY the unified diff (`git diff HEAD~ HEAD`), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. No prior conversation. The subagent must explicitly check: (a) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.split_once`, etc.); (b) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (c) **pattern coverage** — does this work for ≥10 cards or just one? (d) **logic placement** — engine vs frontend per `CLAUDE.md`; (e) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (f) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect. If the cross-check produces findings, the original review was incomplete — feed them back and loop.
+3. **Clean-review cross-check (fresh context).** If the report claims zero findings, run an independent pass when your environment supports it; otherwise note the limitation in the PR body. Hand the reviewer ONLY the unified diff (`git diff HEAD~ HEAD`), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. No prior conversation. The reviewer must explicitly check: (a) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.split_once`, etc.); (b) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (c) **pattern coverage** — does this work for ≥10 cards or just one? (d) **logic placement** — engine vs frontend per `CLAUDE.md`; (e) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (f) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect. If the cross-check produces findings, feed them back into `$engine-implementer` and loop.
 
-**If any check fails:** send a follow-up message to the still-running `engine-implementer` agent (Claude Code: `SendMessage` by agent name) instructing it to actually execute `/review-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, abort the run and record the gap in the PR body under a "Validation Failures" heading so the maintainer can triage.
+**If any check fails:** rerun `$engine-implementer` or continue the same skill workflow with explicit instructions to execute `$review-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, abort the run and record the gap in the PR body under a "Validation Failures" heading so the maintainer can triage.
 
 ---
 
@@ -196,15 +196,15 @@ Print the PR URL. Print a one-line status: `success`, `partial`, or `aborted`. E
 
 ---
 
-## Appendix A — Codex CLI equivalents
+## Appendix A — Skill equivalents
 
-Codex CLI does not support Claude-specific subagent invocation or skill names (`engine-implementer`, `/review-impl`, `commit-push-pr`). Substitute as follows:
+Use skills when the runtime supports them:
 
-- **Invoking `engine-implementer`:** read `.claude/agents/engine-implementer.md` and follow its pipeline manually — first run the planning phase (read `.claude/agents/engine-planner.md`, produce a plan with its six mandatory architectural sections), then implement, then run the review step from `.claude/commands/review-impl.md`.
-- **Invoking `/review-impl`:** open `.claude/commands/review-impl.md` and execute its checklist against the uncommitted diff.
+- **Invoking `$engine-implementer`:** load `.claude/skills/engine-implementer/SKILL.md` and follow its full plan → review → implement → verify → review → commit pipeline.
+- **Invoking `$review-impl`:** load `.claude/skills/review-impl/SKILL.md` and execute its checklist against the uncommitted diff or commit diff.
 - **Invoking `commit-push-pr`:** run the raw `git` + `gh` sequence shown in Step 7.
 
-Every other step (quality floor, track selection, clone, card pick, validation, verify, report) is tool-agnostic and applies to Codex identically.
+Every other step (quality floor, track selection, clone, card pick, validation, verify, report) is tool-agnostic.
 
 ---
 
@@ -240,7 +240,7 @@ Requirements: Best results with Claude Opus 4.7+ or Codex 5.4+ at medium+
 thinking, but proceed even if your runtime is below that — just report your
 actual model on a single canonical "Model:" line in the PR body (e.g.
 "Model: claude-sonnet-4-6"). Do NOT editorialize that line. Hard requirements:
-you can spawn subagents, run shell commands, and you will not pause for input.
+you can invoke skills, run shell commands, and you will not pause for input.
 
 Steps:
 1. gh repo fork phase-rs/phase --clone --remote && cd phase
@@ -249,17 +249,17 @@ Steps:
    and pick a card with supported==false and small gap_count.
 3. git checkout -b card/<slug>  (if the branch already exists locally or on
    origin, append "-2", "-3", etc. — see Step 4 in docs/AI-CONTRIBUTOR.md).
-4. Invoke the engine-implementer agent to implement the card. Tell it: follow
-   CLAUDE.md and AGENTS.md without exception, nom combinators on first pass,
-   CR annotations verified against docs/MagicCompRules.txt (and cite the
+4. Invoke the $engine-implementer skill to implement the card. Tell it: follow
+   CLAUDE.md and AGENTS.md without exception, plan with engine-planner, review
+   the plan with $review-engine-plan until clean, use nom combinators on first
+   pass, verify CR annotations against docs/MagicCompRules.txt (and cite the
    authorizing rule, not just the layering rule), do not ask for clarification,
-   take the idiomatic path, proceed even if scope expands.
-5. Validate engine-implementer actually ran /review-impl AND addressed every
+   take the idiomatic path, proceed even if scope expands, review the
+   implementation with $review-impl until clean, then commit.
+5. Validate $engine-implementer actually ran $review-impl AND addressed every
    finding with code changes. If not, send it a follow-up to do so (max 2
-   retries). If the review claims zero findings, spawn a NEW subagent (Claude
-   Code: Agent tool with subagent_type feature-dev:code-reviewer or
-   code-quality-reviewer) and hand it only the diff + CLAUDE.md — do not
-   re-review from inside the same context.
+   retries). If the review claims zero findings, use an independent reviewer
+   or fresh context when available and hand it only the diff + CLAUDE.md.
 6. Skip local verification (I don't have a Rust toolchain).
 7. git push to my fork and open a PR with title "Add <Card Name>" (or
    "Partial: <Card Name>" only if validation or CI failures were unresolved).

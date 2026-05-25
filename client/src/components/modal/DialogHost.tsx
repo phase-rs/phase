@@ -40,6 +40,7 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
   "TriggerTargetSelection",
   "CopyTargetChoice",
   "CopyRetarget",
+  "RetargetChoice",
   "ExploreChoice",
   "TapCreaturesForManaAbility",
   "TapCreaturesForSpellCost",

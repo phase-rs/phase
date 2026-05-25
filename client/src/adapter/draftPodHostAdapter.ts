@@ -14,6 +14,7 @@ import type { DraftPlayerView, PairingView, PodPolicy, SeatPublicView, Tournamen
 import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
+import type { DraftMatchLaunch } from "../network/draftProtocol";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
 import { loadDraftHostSession } from "../services/draftPersistence";
 
@@ -48,6 +49,7 @@ export type DraftPodHostEvent =
   | { type: "seatDisconnected"; seatIndex: number }
   | { type: "seatKicked"; seatIndex: number; reason: string }
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
+  | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
   | { type: "roundAdvanced"; newRound: number }
   | { type: "timerExpired" }
@@ -264,6 +266,10 @@ export class DraftPodHostAdapter {
       case "pairingsGenerated":
         this.setStatus("matchInProgress");
         this.emit({ type: "pairingsGenerated", round: event.round, pairings: event.pairings });
+        break;
+      case "matchStart":
+        this.setStatus("matchInProgress");
+        this.emit({ type: "matchStart", launch: event.launch });
         break;
       case "matchResultReceived":
         this.emit({ type: "matchResultReceived", matchId: event.matchId, winnerSeat: event.winnerSeat });

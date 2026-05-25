@@ -59,6 +59,11 @@ export type SpellPaymentMode = "auto" | "manual";
  *  User-chosen so a player can keep the stack off whichever side of the
  *  battlefield they care about — e.g. dock left to free the right action rail. */
 export type StackDockSide = "left" | "right";
+/** Opponent HUD density in the multi-opponent rail. "comfortable" = the full
+ *  two-row tab (name + life over the board-composition breakdown); "compact" =
+ *  a single thin row (small avatar + name + life) that trades the breakdown for
+ *  vertical real-estate. Player-toggleable from the rail. */
+export type OpponentHudDensity = "comfortable" | "compact";
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
@@ -124,6 +129,7 @@ function buildDefaultPreferences(): PreferencesState {
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
     stackDockSide: "right",
+    opponentHudDensity: "comfortable",
     aiSeats: [defaultAiSeat()],
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
@@ -178,6 +184,8 @@ interface PreferencesState {
   battlefieldPeekOnHover: boolean;
   /** Screen edge the stack panel docks to and collapses toward. */
   stackDockSide: StackDockSide;
+  /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
+  opponentHudDensity: OpponentHudDensity;
   aiSeats: AiSeatPref[];
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
@@ -198,6 +206,7 @@ interface PreferencesActions {
   setHudLayout: (layout: HudLayout) => void;
   setFollowActiveOpponent: (enabled: boolean) => void;
   setStackDockSide: (side: StackDockSide) => void;
+  setOpponentHudDensity: (density: OpponentHudDensity) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
@@ -293,6 +302,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setHudLayout: (layout) => set({ hudLayout: layout }),
       setFollowActiveOpponent: (enabled) => set({ followActiveOpponent: enabled }),
       setStackDockSide: (side) => set({ stackDockSide: side }),
+      setOpponentHudDensity: (density) => set({ opponentHudDensity: density }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
@@ -417,7 +427,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 10,
+      version: 11,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -542,6 +552,12 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
 
         if (version < 10) {
           migrated = { ...migrated, stackDockSide: "right" };
+        }
+
+        // v10 → v11: Add opponentHudDensity; legacy stores default to the
+        // comfortable two-row rail (the prior fixed behavior).
+        if (version < 11) {
+          migrated = { ...migrated, opponentHudDensity: "comfortable" };
         }
 
         return migrated;

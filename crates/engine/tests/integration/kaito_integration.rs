@@ -548,9 +548,11 @@ fn kaito_surveil_and_draw() {
     // Resolve the ability fully
     for _ in 0..30 {
         match &runner.state().waiting_for {
-            WaitingFor::SurveilChoice { .. } => {
-                // Put all cards on top (select none to go to bottom)
-                let _ = runner.act(GameAction::SelectCards { cards: vec![] });
+            WaitingFor::SurveilChoice { cards, .. } => {
+                // CR 701.25a: the payload is the keep-on-top set — pass every
+                // looked-at card to keep them all on top (none milled).
+                let keep = cards.clone();
+                let _ = runner.act(GameAction::SelectCards { cards: keep });
             }
             WaitingFor::Priority { .. } => {
                 let _ = runner.act(GameAction::PassPriority);

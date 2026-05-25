@@ -752,6 +752,7 @@
       "title": "Scegli il Portatore dell'Anello",
       "subtitle": "Scegli una creatura che controlli"
     },
+    "reorderHint": "Trascina per riordinare · la prima carta è pescata per prima",
     "scry": {
       "title": "Profetizzare",
       "subtitle_one": "Guarda la prima {{count}} carta del tuo grimorio",

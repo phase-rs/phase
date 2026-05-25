@@ -4,6 +4,8 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::keywords::Keyword;
+use crate::types::ObjectId;
 
 /// CR 115.7: Change the target(s) of a spell or ability on the stack.
 ///
@@ -70,13 +72,22 @@ pub fn resolve(
     };
     let current_targets = stack_ability.targets.clone();
 
-    // CR 115.7: Enumerate legal new targets by extracting the target filter from
-    // the stack entry's effect and re-evaluating against the current game state.
-    let legal_new_targets = extract_target_filter(&stack_ability.effect)
+    // CR 115.7: Enumerate legal new targets by re-evaluating the stack entry's
+    // own targeting restriction against the current game state.
+    //
+    // CR 303.4a: An Aura spell's target is defined by its enchant *ability*, not
+    // by its effect's target field — the synthesized spell ability carries a
+    // placeholder effect with no targetable filter (`target_filter()` is `None`).
+    // Enumerate Aura hosts from the source's `Keyword::Enchant(filter)` instead,
+    // mirroring the Aura branch of `casting::spell_has_legal_targets`. Non-Aura
+    // spells/abilities fall back to the effect's declared target filter.
+    let retarget_filter = aura_enchant_filter(state, stack_ability.source_id)
+        .or_else(|| extract_target_filter(&stack_ability.effect).cloned());
+    let legal_new_targets = retarget_filter
         .map(|filter| {
             find_legal_targets(
                 state,
-                filter,
+                &filter,
                 stack_ability.controller,
                 stack_ability.source_id,
             )
@@ -98,4 +109,308 @@ pub fn resolve(
 /// Used to compute legal alternative targets for retargeting (CR 115.7).
 fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     effect.target_filter()
+}
+
+/// CR 303.4a: An Aura spell's legal targets are defined by its enchant ability —
+/// modeled here as the source object's `Keyword::Enchant(filter)` — not by its
+/// (placeholder) spell effect. Returns that filter when `source_id` is an Aura,
+/// so retargeting an Aura spell (CR 115.7) enumerates the permanents it could
+/// legally enchant. Mirrors the Aura branch of `casting::spell_has_legal_targets`.
+fn aura_enchant_filter(state: &GameState, source_id: ObjectId) -> Option<TargetFilter> {
+    let obj = state.objects.get(&source_id)?;
+    if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
+        return None;
+    }
+    obj.keywords.iter().find_map(|k| match k {
+        Keyword::Enchant(filter) => Some(filter.clone()),
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::TypedFilter;
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::{CastingVariant, RetargetScope, StackEntry, StackEntryKind};
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// CR 303.4a + CR 115.7: Retargeting an Aura spell must enumerate every
+    /// permanent the Aura could legally enchant (via its `Keyword::Enchant`
+    /// filter), not just keep the original host. Regression test for Bolt Bend
+    /// vs. an Aura on the stack: before the fix, the Aura's placeholder spell
+    /// effect (`Unimplemented`, whose `target_filter()` is `None`) collapsed the
+    /// legal set to the current target, so the player could never pick a new host.
+    #[test]
+    fn retarget_aura_spell_enumerates_other_enchantable_hosts() {
+        let mut state = GameState::new_two_player(42);
+
+        // Two enchantable creatures on the battlefield: the current host and an
+        // alternative the player should be able to redirect the Aura onto.
+        let host_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        let host_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear B".into(),
+            Zone::Battlefield,
+        );
+        for id in [host_a, host_b] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        // An Aura spell on the stack, currently targeting host_a, carrying the
+        // placeholder spell ability the cast path synthesizes for Auras (its
+        // effect has no target filter; targeting is via the Enchant keyword).
+        let aura_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Test Aura".into(),
+            Zone::Stack,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types = vec![CoreType::Enchantment];
+            aura.card_types.subtypes = vec!["Aura".to_string()];
+            aura.keywords = vec![Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            ))];
+        }
+        let aura_spell_ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![TargetRef::Object(host_a)],
+            aura_id,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: aura_id,
+            source_id: aura_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(3),
+                ability: Some(aura_spell_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // Bolt Bend: ChangeTargets targeting the Aura spell, no forced target.
+        let bolt_bend = ResolvedAbility::new(
+            Effect::ChangeTargets {
+                target: TargetFilter::Any,
+                scope: RetargetScope::Single,
+                forced_to: None,
+            },
+            vec![TargetRef::Object(aura_id)],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &bolt_bend, &mut events).unwrap();
+
+        let WaitingFor::RetargetChoice {
+            current_targets,
+            legal_new_targets,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("expected RetargetChoice, got {:?}", state.waiting_for);
+        };
+        assert_eq!(current_targets, &vec![TargetRef::Object(host_a)]);
+        // Discriminating assertion: the alternative host is offered, so the
+        // player can actually redirect the Aura. Pre-fix this list was [host_a].
+        assert!(
+            legal_new_targets.contains(&TargetRef::Object(host_b)),
+            "expected alternative enchantable host in legal targets, got {legal_new_targets:?}"
+        );
+        assert!(legal_new_targets.contains(&TargetRef::Object(host_a)));
+    }
+
+    /// CR 608.2b + CR 115.7 + CR 303.4a: End-to-end regression for Bolt Bend
+    /// retargeting an Aura spell, driving the real `stack::resolve_top` pipeline.
+    /// Guards two stacked bugs:
+    ///   1. `Effect::ChangeTargets` was absent from `Effect::target_filter()`, so
+    ///      resolution-time re-validation (CR 608.2b) fell to the battlefield-only
+    ///      default and dropped the stack-spell target → Bolt Bend always fizzled
+    ///      before its effect ran (no `RetargetChoice`).
+    ///   2. Once it stopped fizzling, the Aura's hosts had to be enumerated via
+    ///      its `Keyword::Enchant` filter (CR 303.4a), not its placeholder effect.
+    ///
+    /// Pre-fix, `resolve_top` left `waiting_for == Priority` with Bolt Bend in the
+    /// graveyard and the Aura untouched. Post-fix it pauses on `RetargetChoice`
+    /// offering every other enchantable creature.
+    #[test]
+    fn bolt_bend_retargets_aura_spell_via_resolve_top() {
+        use crate::types::ability::{FilterProp, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+
+        // Current host + an alternative host on the battlefield.
+        let host_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        let host_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear B".into(),
+            Zone::Battlefield,
+        );
+        for id in [host_a, host_b] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        // Aura spell on the stack, targeting host_a, with the placeholder spell
+        // ability the cast path synthesizes for Auras.
+        let aura_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Test Aura".into(),
+            Zone::Stack,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types = vec![CoreType::Enchantment];
+            aura.card_types.subtypes = vec!["Aura".to_string()];
+            aura.keywords = vec![Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            ))];
+        }
+        let aura_spell_ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![TargetRef::Object(host_a)],
+            aura_id,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: aura_id,
+            source_id: aura_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(3),
+                ability: Some(aura_spell_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // Bolt Bend on top of the stack, targeting the Aura spell, with its real
+        // filter: (StackSpell & HasSingleTarget) | (StackAbility & HasSingleTarget).
+        let single = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::HasSingleTarget],
+        });
+        let bb_filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackSpell, single.clone()],
+                },
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackAbility { controller: None }, single],
+                },
+            ],
+        };
+        let bolt_bend = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Bolt Bend".into(),
+            Zone::Stack,
+        );
+        let bb_ability = ResolvedAbility::new(
+            Effect::ChangeTargets {
+                target: bb_filter,
+                scope: RetargetScope::Single,
+                forced_to: None,
+            },
+            vec![TargetRef::Object(aura_id)],
+            bolt_bend,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: bolt_bend,
+            source_id: bolt_bend,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(4),
+                ability: Some(bb_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        // Bolt Bend must NOT fizzle: it pauses on RetargetChoice (the aura spell
+        // stays on the stack awaiting the new host), rather than going to the
+        // graveyard with waiting_for == Priority.
+        let WaitingFor::RetargetChoice {
+            current_targets,
+            legal_new_targets,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "expected RetargetChoice (Bolt Bend fizzled instead), got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(current_targets, &vec![TargetRef::Object(host_a)]);
+        assert!(
+            legal_new_targets.contains(&TargetRef::Object(host_b)),
+            "alternative enchantable host must be offered, got {legal_new_targets:?}"
+        );
+        assert!(state.stack.iter().any(|e| e.id == aura_id));
+
+        // CR 115.7: A single-target retarget resolves through the universal
+        // `ChooseTarget` board-click action — the player picks the new host
+        // directly on the battlefield rather than through the dialog. The Aura
+        // spell's target must update to the chosen host and priority resumes.
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(host_b)),
+            },
+        )
+        .expect("board-click retarget should succeed");
+
+        let aura_targets = state
+            .stack
+            .iter()
+            .find(|e| e.id == aura_id)
+            .and_then(|e| e.ability())
+            .map(|a| a.targets.clone())
+            .expect("aura spell still on stack with targets");
+        assert_eq!(
+            aura_targets,
+            vec![TargetRef::Object(host_b)],
+            "ChooseTarget board-click must retarget the Aura to the chosen host"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
 }

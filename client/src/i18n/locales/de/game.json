@@ -752,6 +752,7 @@
       "title": "Ringträger wählen",
       "subtitle": "Wähle eine Kreatur, die du kontrollierst"
     },
+    "reorderHint": "Zum Umsortieren ziehen · die oberste Karte wird zuerst gezogen",
     "scry": {
       "title": "Hellsicht",
       "subtitle_one": "Sieh dir die oberste {{count}} Karte deiner Bibliothek an",
