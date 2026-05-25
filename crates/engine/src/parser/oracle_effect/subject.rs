@@ -27,7 +27,7 @@ use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_chosen_qualifier_subject, parse_continuous_modifications, parse_static_line_multi,
 };
-use super::super::oracle_target::{parse_target, parse_type_phrase};
+use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
     parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
@@ -626,7 +626,7 @@ pub(super) fn parse_subject_application(
         .parse(lower.as_str())
         .is_ok()
     {
-        let (filter, _) = parse_target(&subject["another ".len()..]);
+        let (filter, _) = parse_target_with_ctx(&subject["another ".len()..], ctx);
         let filter = add_another_property(filter);
         return subject_filter_application(filter, true);
     }
@@ -634,7 +634,16 @@ pub(super) fn parse_subject_application(
         .parse(lower.as_str())
         .is_ok()
     {
-        let (filter, _) = parse_target(subject);
+        // CR 109.4 + CR 115.1 + CR 603.2: thread the parse context so that
+        // controller-suffix resolution inside `parse_target` (notably the
+        // "that player controls" relative reference) can see the enclosing
+        // trigger's `relative_player_scope` and emit
+        // `ControllerRef::TargetPlayer` for the attacked / damaged player
+        // instead of falling back to `You`. Without `ctx`, the subject-form
+        // path of "target creature that player controls becomes …" (Gornog,
+        // the Red Reaper) silently bound the target to the trigger
+        // controller's own creatures.
+        let (filter, _) = parse_target_with_ctx(subject, ctx);
         return subject_filter_application(filter, true);
     }
     if tag::<_, _, OracleError<'_>>("up to ")
@@ -643,7 +652,7 @@ pub(super) fn parse_subject_application(
     {
         let (target_text, multi_target) = super::strip_optional_target_prefix(subject);
         if multi_target.is_some() {
-            let (filter, _) = parse_target(target_text);
+            let (filter, _) = parse_target_with_ctx(target_text, ctx);
             let mut application = subject_filter_application(filter, true)?;
             application.multi_target = multi_target;
             return Some(application);
@@ -661,7 +670,7 @@ pub(super) fn parse_subject_application(
             .parse(after_prefix)
             .is_ok()
         {
-            let (filter, _) = parse_target(target_text);
+            let (filter, _) = parse_target_with_ctx(target_text, ctx);
             let mut application = subject_filter_application(filter, true)?;
             application.multi_target = Some(MultiTargetSpec::unlimited(0));
             return Some(application);
@@ -683,7 +692,7 @@ pub(super) fn parse_subject_application(
             {
                 let consumed = lower.len() - after_prefix.len();
                 let target_text = &subject[consumed..];
-                let (filter, _) = parse_target(target_text);
+                let (filter, _) = parse_target_with_ctx(target_text, ctx);
                 let mut application = subject_filter_application(filter, true)?;
                 application.multi_target = Some(MultiTargetSpec::fixed(min, max));
                 return Some(application);
@@ -3278,6 +3287,49 @@ mod tests {
             app.affected
         );
         assert_eq!(app.multi_target, Some(MultiTargetSpec::unlimited(0)),);
+    }
+
+    #[test]
+    fn parse_subject_another_target_honors_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let result =
+            parse_subject_application("another target creature that player controls", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert!(
+            matches!(app.affected, TargetFilter::Typed(ref t)
+                if t.type_filters.contains(&TypeFilter::Creature)
+                && t.controller == Some(ControllerRef::TargetPlayer)
+                && t.properties.iter().any(|prop| matches!(prop, FilterProp::Another))),
+            "should parse another creature controlled by target player, got {:?}",
+            app.affected
+        );
+    }
+
+    #[test]
+    fn parse_subject_up_to_one_target_honors_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let result =
+            parse_subject_application("up to one target creature that player controls", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert!(
+            matches!(app.affected, TargetFilter::Typed(ref t)
+                if t.type_filters.contains(&TypeFilter::Creature)
+                && t.controller == Some(ControllerRef::TargetPlayer)),
+            "should parse creature controlled by target player, got {:?}",
+            app.affected
+        );
+        assert_eq!(
+            app.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
     }
 
     #[test]

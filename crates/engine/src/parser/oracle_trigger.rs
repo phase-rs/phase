@@ -462,14 +462,18 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
 }
 
 /// CR 109.4 + CR 115.1 + CR 506.2: Detect a trigger condition that introduces
-/// a player target — currently the "you/an opponent/a player attack(s) a player"
-/// family. When this returns true, follow-on possessive references inside the
-/// effect ("that player controls/owns") refer to that introduced player and the
-/// parser pushes a relative-player scope so they emit `ControllerRef::TargetPlayer`.
+/// a player target — currently the "[subject] attack(s) a player" family
+/// (CR 506.2 / CR 508.1a) and the "[subject] deals [combat] damage to a player"
+/// family (CR 120.3). When this returns true, follow-on possessive references
+/// inside the effect ("that player controls/owns") refer to that introduced
+/// player and the parser pushes a relative-player scope so they emit
+/// `ControllerRef::TargetPlayer`.
 ///
-/// Built from composable nom alternatives so adding new condition shapes
-/// (combat-damage-to-a-player, "deals damage to a player", etc.) is a one-line
-/// change to the inner `alt()`.
+/// Built from composable nom alternatives so adding new condition shapes is a
+/// one-line change to the inner `alt()`. The attack/damage scans both accept
+/// any subject prefix (verb-phrase only), so relative-clause subjects like
+/// "one or more Warriors you control" and "a creature you control" match
+/// without needing an explicit-actor variant per subject shape.
 fn condition_introduces_target_player(cond_lower: &str) -> bool {
     use nom::bytes::complete::tag;
     use nom::combinator::value;
@@ -521,6 +525,21 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
                 {
                     return true;
                 }
+            }
+        }
+        // CR 506.2 + CR 508.1a: "[anything] attack[s] a player" — same subject
+        // permissiveness as the damage scan below. Covers cases where the
+        // actor is wrapped in a relative clause that the explicit actor branch
+        // above cannot match, e.g. "one or more Warriors you control attack a
+        // player" (Gornog, the Red Reaper) or "a creature you control attacks
+        // a player". The verb phrase alone is unambiguous in trigger-condition
+        // text — "attack" never appears as a noun before "a player" here.
+        if let Ok((after_verb, ())) = parse_attack_verb(remaining) {
+            if tag::<_, _, OracleError<'_>>("a player")
+                .parse(after_verb)
+                .is_ok()
+            {
+                return true;
             }
         }
         // CR 120.3: "[anything] deals [combat] damage to a player" — introduces
@@ -19884,6 +19903,38 @@ mod tests {
                 other => panic!("expected Typed filter, got {other:?}"),
             },
             other => panic!("expected Tap effect, got {other:?}"),
+        }
+    }
+
+    /// CR 109.4 + CR 115.1 + CR 506.2: Gornog's "Whenever one or more Warriors
+    /// you control attack a player, target creature that player controls
+    /// becomes a Coward" introduces the attacked player through a relative-
+    /// clause subject ("Warriors you control") rather than a bare actor. The
+    /// effect's "that player controls" must still resolve to
+    /// `ControllerRef::TargetPlayer` so the UI offers the attacked player's
+    /// creatures, not the trigger controller's. Regression test for #1054 — the
+    /// subject-permissive scan in `condition_introduces_target_player` is the
+    /// fix site.
+    #[test]
+    fn gornog_one_or_more_warriors_attack_uses_target_player_controller() {
+        use crate::types::ability::Effect;
+
+        let def = parse_trigger_line(
+            "Whenever one or more Warriors you control attack a player, target creature that player controls becomes a Coward.",
+            "Gornog, the Red Reaper",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::GenericEffect { target, .. } => match target {
+                Some(TargetFilter::Typed(t)) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::TargetPlayer),
+                    "GenericEffect target should reference the attacked player",
+                ),
+                other => panic!("expected Some(Typed) target filter, got {other:?}"),
+            },
+            other => panic!("expected GenericEffect, got {other:?}"),
         }
     }
 
