@@ -529,10 +529,22 @@ fn kaito_surveil_and_draw() {
         .hand
         .len();
 
-    // Activate 0 loyalty ability (Surveil 2, then draw for each opponent who lost life)
+    // Activate 0 loyalty ability (Surveil 2, then draw for each opponent who lost life).
+    // Resolve by effect shape instead of hardcoded index; this test runner object
+    // can carry pre-existing abilities from card data.
+    let surveil_ability_index = {
+        let state = runner.state();
+        let kaito = state.objects.get(&kaito_id).unwrap();
+        kaito
+            .abilities
+            .iter()
+            .position(|ability| matches!(*ability.effect, Effect::Surveil { .. }))
+            .expect("Kaito should have a surveil loyalty ability")
+    };
+
     let result = runner.act(GameAction::ActivateAbility {
         source_id: kaito_id,
-        ability_index: 1, // Second ability = surveil+draw
+        ability_index: surveil_ability_index,
     });
     assert!(
         result.is_ok(),
