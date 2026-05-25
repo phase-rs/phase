@@ -5,8 +5,9 @@ import { useTranslation } from "react-i18next";
 import { ConnectionDot } from "../multiplayer/ConnectionDot.tsx";
 import { FullscreenButton } from "./FullscreenButton.tsx";
 import { VolumeControl } from "./VolumeControl.tsx";
-import { clearGame } from "../../stores/gameStore.ts";
+import { clearGame, useGameStore } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
+import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 
 interface GameMenuProps {
@@ -44,6 +45,7 @@ export function GameMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const cardDataMeta = useCardDataMeta();
   const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
+  const isDraftPodMatch = searchParams.get("mode") === "draft-match";
 
   useEffect(() => {
     if (!open) return;
@@ -151,6 +153,21 @@ export function GameMenu({
                   clearGame(gameId);
                   navigate("/draft/quick?resume=1");
                 });
+              } else if (isDraftPodMatch) {
+                const adapter = useGameStore.getState().adapter as {
+                  sendConcede?: () => void | Promise<void>;
+                } | null;
+                void adapter?.sendConcede?.();
+                void useMultiplayerDraftStore
+                  .getState()
+                  .reportActiveMatchConcession()
+                  .then(() => {
+                    clearGame(gameId);
+                    navigate("/draft-pod");
+                  })
+                  .catch((err) => {
+                    console.error("[GameMenu] failed to report draft pod concession:", err);
+                  });
               } else {
                 clearGame(gameId);
                 navigate("/");
@@ -158,7 +175,7 @@ export function GameMenu({
             }}
           />
           <MenuButton
-            label={isDraft ? t("gameMenu.backToDraft") : t("gameMenu.mainMenu")}
+            label={isDraft || isDraftPodMatch ? t("gameMenu.backToDraft") : t("gameMenu.mainMenu")}
             onClick={() => {
               setOpen(false);
               if (isDraft) {
@@ -166,6 +183,8 @@ export function GameMenu({
                   clearGame(gameId);
                   navigate("/draft/quick?resume=1");
                 });
+              } else if (isDraftPodMatch) {
+                navigate("/draft-pod");
               } else {
                 navigate("/");
               }

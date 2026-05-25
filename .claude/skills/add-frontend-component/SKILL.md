@@ -9,6 +9,7 @@ description: Use when adding or modifying frontend UI components — interactive
 > 1. **The frontend is a display layer, not a logic layer.** It renders engine-provided state and dispatches user actions — nothing more. It must never compute, derive, filter, or re-interpret game data. If a component needs a value the engine doesn't expose, the fix is to add it to the engine's output — not to calculate it client-side. Any "smart" frontend code is a bug.
 > 2. **CR-correctness is non-negotiable.** The frontend must never contradict the Comprehensive Rules. If it displays information (legal targets, valid choices, game state), that information must come directly from the engine, which is the CR-validated source of truth. Never approximate engine logic in TypeScript.
 > 3. **Build reusable component patterns.** New overlays and modals should follow existing patterns (CardChoiceModal, ModeChoiceModal). Extract shared behavior into composable components rather than duplicating across one-off implementations.
+> 4. **All frontend-authored text is internationalized.** Every user-facing string the frontend authors (titles, labels, buttons, tooltips, placeholders, log templates, status messages) MUST go through `t()` via `react-i18next` — never a hardcoded literal in JSX. The boundary rule: *a string gets `t()` if and only if the frontend authored it.* Engine/card-database pass-through (card names, Oracle text, interpolated enum strings like phase/mana/counter type) stays **raw** — it is localized by a separate MTGJSON content pipeline, not `t()`. See `client/src/i18n/README.md` (the authority) before adding any string.
 
 The React/TypeScript frontend communicates with the Rust engine through a transport-agnostic adapter layer. Game state flows from engine → adapter → Zustand stores → React components. Player actions flow in reverse via `dispatch()`. This skill covers wiring new UI components into this pipeline.
 
@@ -151,11 +152,14 @@ Used by: Scry, Dig, Surveil, Reveal, Search, DiscardToHandSize.
 
 ```tsx
 // client/src/components/modal/YourOverlay.tsx
+import { useTranslation } from "react-i18next";
+
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
 
 export function YourOverlay({ data }: { data: YourChoiceData }) {
+  const { t } = useTranslation("game"); // namespace = source directory, not subject
   const objects = useGameStore((s) => s.gameState?.objects ?? {});
   const inspectObject = useUiStore((s) => s.inspectObject);
   const dispatch = useGameDispatch();
@@ -172,7 +176,9 @@ export function YourOverlay({ data }: { data: YourChoiceData }) {
         className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       >
         {/* Card display + selection UI */}
-        <button onClick={handleConfirm} disabled={!isValid}>Confirm</button>
+        <button onClick={handleConfirm} disabled={!isValid}>
+          {t("yourOverlay.confirm")}
+        </button>
       </motion.div>
     </AnimatePresence>
   );
@@ -209,6 +215,23 @@ For non-overlay components (new zone display, counter indicators, status badges)
 - Subscribe to `useGameStore` for data
 - No dispatch needed if read-only
 
+### Phase 2.5 — Internationalize User-Facing Text
+
+Every string the component authors must be a translation key, not a literal. Do this **as you write the component**, not as a cleanup pass.
+
+- [ ] **Pick the namespace by source directory.** A component's namespace is where it lives, not what it's about: `components/draft/*` → `"draft"`, `components/lobby/*` → `"multiplayer"`, in-game overlays (`components/modal/`, `board/`, `combat/`, etc.) → `"game"`. `common` is the implicit default ns (shared buttons like Cancel/Confirm may already live there — reuse before adding).
+  ```tsx
+  const { t } = useTranslation("game"); // opt into a ns; common is always available
+  ```
+- [ ] **Add the key to `client/src/i18n/locales/en/<ns>.json` first.** English is the typing oracle — referencing a key that doesn't exist in `en/` fails type-check. Other locales fall back to English automatically; you do **not** edit `es/fr/de/it/pt` (machine-translated separately).
+  - Key shape: nested dot paths, `camelCase` leaves, `<componentOrFeature>.<element>` (e.g. `"yourOverlay.confirm"`, `"yourOverlay.title"`).
+- [ ] **Plurals via CLDR, not string math.** Use `key_one` / `key_other` + `t(key, { count })`. Never `count === 1 ? "item" : "items"`.
+- [ ] **Interpolate engine data raw into a translated template.** The template is chrome (translate it); the values are engine data (leave raw): `t("yourOverlay.summary", { counterType, count })`.
+- [ ] **Leave engine/card pass-through untouched.** Card names, Oracle/reminder text, and enum strings (phase, mana type, counter type) are **not** wrapped — they are localized by the content pipeline (`hooks/useEngineCardData.ts`), not `t()`. When in doubt, apply the boundary rule: did the frontend author this sentence, or is it engine data flowing through?
+- [ ] **Never call `i18n.changeLanguage` directly.** The preferences store owns the active language: `usePreferencesStore.getState().setLanguage(lng)`.
+
+See `client/src/i18n/README.md` for the full convention set.
+
 ### Phase 3 — GamePage Routing
 
 - [ ] **`client/src/pages/GamePage.tsx` — conditional render**
@@ -234,7 +257,7 @@ If your overlay is a card choice type, integrate into the existing `CardChoiceMo
 ### Phase 5 — Game Log (if applicable)
 
 - [ ] **`client/src/viewmodel/logFormatting.ts`** — Event formatting
-  Add a case for your `GameEvent` type to produce a human-readable log string.
+  Add a case for your `GameEvent` type to produce a human-readable log string. **Translate the template, interpolate engine data raw** — `t("log.yourEvent", { objectId, amount })` where the sentence is chrome and the IDs/amounts are engine data. The log type label is frontend-authored (translate it); the card/object it refers to is not.
 
 - [ ] **`client/src/components/log/LogEntry.tsx`** — Custom rendering (if needed)
   Most events use the default text format. Only add custom rendering for events that need icons, card references, or special formatting.
@@ -288,6 +311,9 @@ If your overlay is a card choice type, integrate into the existing `CardChoiceMo
 | Adding client-side visibility logic | Diverges from server-filtered state, multiplayer security hole | Trust the filtered state from the adapter |
 | Modifying `gameStore` directly | Bypasses animation pipeline and persistence | Always go through `dispatch()` |
 | Not using `AnimatePresence` | Overlay appears/disappears instantly | Wrap in `AnimatePresence` with enter/exit transitions |
+| Hardcoded user-facing string in JSX | Untranslatable; breaks 6-locale support | Route frontend-authored text through `t()` (Phase 2.5) |
+| Wrapping card/Oracle/enum text in `t()` | Double-localizes engine data; key never resolves | Leave engine pass-through raw; only `t()` frontend-authored text |
+| Hand-rolled `count === 1 ? "x" : "xs"` pluralization | Wrong for non-English CLDR rules | `key_one`/`key_other` + `t(key, { count })` |
 
 ---
 
@@ -310,6 +336,8 @@ test -f client/src/pages/GamePage.tsx && \
 test -f client/src/game/dispatch.ts && \
 test -f client/src/animation/eventNormalizer.ts && \
 test -f client/src/components/modal/CardChoiceModal.tsx && \
+test -f client/src/i18n/README.md && \
+test -d client/src/i18n/locales/en && \
 rg -q "type WaitingFor" client/src/adapter/types.ts && \
 rg -q "type GameAction" client/src/adapter/types.ts && \
 rg -q "type GameEvent" client/src/adapter/types.ts && \

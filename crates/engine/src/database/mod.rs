@@ -5,10 +5,12 @@ pub mod forge;
 pub mod legality;
 pub mod mtgjson;
 pub mod oracle_loader;
+pub mod search;
 pub mod synthesis;
 
 pub use bracket_lists::{BracketLists, BracketSignals};
 pub use card_db::CardDatabase;
+pub use search::{CardSearchQuery, CardSearchResult, CardSearchResults};
 
 /// Single authority for "is this card runnable by the engine right now?"
 ///

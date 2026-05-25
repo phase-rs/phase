@@ -4,7 +4,7 @@
     "subtitle": "Regola gameplay, grafica, audio e impostazioni predefinite del multigiocatore."
   },
   "tabs": {
-    "gameplay": "Gameplay",
+    "gameplay": "Giocabilità",
     "visual": "Grafica",
     "combat": "Ritmo",
     "audio": "Audio",
@@ -13,7 +13,7 @@
     "experimental": "Sperimentale"
   },
   "gameplay": {
-    "title": "Gameplay",
+    "title": "Giocabilità",
     "language": "Lingua",
     "cardSize": "Dimensione carte",
     "logDefault": "Registro predefinito",
@@ -32,6 +32,15 @@
       "random": "Casuale",
       "customUrl": "URL personalizzato",
       "none": "Nessuno"
+    },
+    "cardSizeOptions": {
+      "small": "Piccolo",
+      "medium": "Medio",
+      "large": "Grande"
+    },
+    "logDefaultOptions": {
+      "open": "Aperto",
+      "closed": "Chiuso"
     }
   },
   "visual": {
@@ -45,7 +54,12 @@
     "clearArtOverrides_one": "Cancella tutte le sostituzioni di illustrazione ({{count}})",
     "clearArtOverrides_other": "Cancella tutte le sostituzioni di illustrazione ({{count}})",
     "clearArtOverridesConfirm_one": "Cancellare tutte le {{count}} sostituzione di illustrazione?",
-    "clearArtOverridesConfirm_other": "Cancellare tutte le {{count}} sostituzioni di illustrazione?"
+    "clearArtOverridesConfirm_other": "Cancellare tutte le {{count}} sostituzioni di illustrazione?",
+    "vfxQualityOptions": {
+      "full": "Completa",
+      "reduced": "Ridotta",
+      "minimal": "Minima"
+    }
   },
   "audio": {
     "title": "Audio",
@@ -106,7 +120,17 @@
     "slowest": "Più lento",
     "resetSliderLabel": "Reimposta {{label}} al valore predefinito",
     "atDefault": "Al valore predefinito",
-    "resetToDefault": "Reimposta al valore predefinito"
+    "resetToDefault": "Reimposta al valore predefinito",
+    "labels": {
+      "effects": "Ritmo degli effetti",
+      "combat": "Ritmo del combattimento",
+      "banners": "Ritmo degli striscioni"
+    },
+    "descriptions": {
+      "effects": "Lancio di magie, cambi di zona, morti, cambi di punti vita, segnalini, TAP/STAP.",
+      "combat": "Tempistica del danno da combattimento: per quanto tempo bloccanti e attaccanti rimangono prima che il danno venga risolto.",
+      "banners": "Visualizzazione dello striscione di inizio turno."
+    }
   },
   "artChain": {
     "emptyState": "In uso l'illustrazione predefinita di Scryfall. Aggiungi regole qui sotto per personalizzare.",

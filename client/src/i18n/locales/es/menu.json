@@ -4,7 +4,14 @@
   },
   "aiDifficulty": {
     "label": "Dificultad de la IA",
-    "ariaLabel": "Dificultad de la IA: {{difficulty}}"
+    "ariaLabel": "Dificultad de la IA: {{difficulty}}",
+    "levels": {
+      "VeryEasy": "Muy fácil",
+      "Easy": "Fácil",
+      "Medium": "Media",
+      "Hard": "Difícil",
+      "VeryHard": "Muy difícil"
+    }
   },
   "bracketFilter": {
     "label": "Filtro de nivel"
@@ -205,7 +212,8 @@
     "browseAll": "Explorar todos",
     "loadMore": "Cargar más",
     "selectedDeck": "Mazo seleccionado",
-    "chooseDeckToContinue": "Elige un mazo para continuar"
+    "chooseDeckToContinue": "Elige un mazo para continuar",
+    "filterAll": "Todos"
   },
   "subscriptions": {
     "emptyTitle": "Sin suscripciones a feeds",
@@ -213,5 +221,13 @@
     "feedMeta_one": "· {{count}} mazo · Actualizado el {{date}}",
     "feedMeta_other": "· {{count}} mazos · Actualizado el {{date}}",
     "error": "Error: {{error}}"
+  },
+  "myDecksPage": {
+    "eyebrow": "Mazos",
+    "title": "Mazos.",
+    "description": "Abre una lista guardada, importa una nueva o continúa en el editor de mazos."
+  },
+  "loadGameState": {
+    "readFailed": "Error al leer el archivo"
   }
 }

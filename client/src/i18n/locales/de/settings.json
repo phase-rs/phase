@@ -32,6 +32,15 @@
       "random": "Zufällig",
       "customUrl": "Eigene URL",
       "none": "Keiner"
+    },
+    "cardSizeOptions": {
+      "small": "Klein",
+      "medium": "Mittel",
+      "large": "Groß"
+    },
+    "logDefaultOptions": {
+      "open": "Offen",
+      "closed": "Geschlossen"
     }
   },
   "visual": {
@@ -45,7 +54,12 @@
     "clearArtOverrides_one": "Alle Artwork-Überschreibungen aufheben ({{count}})",
     "clearArtOverrides_other": "Alle Artwork-Überschreibungen aufheben ({{count}})",
     "clearArtOverridesConfirm_one": "Alle {{count}} Artwork-Überschreibung aufheben?",
-    "clearArtOverridesConfirm_other": "Alle {{count}} Artwork-Überschreibungen aufheben?"
+    "clearArtOverridesConfirm_other": "Alle {{count}} Artwork-Überschreibungen aufheben?",
+    "vfxQualityOptions": {
+      "full": "Voll",
+      "reduced": "Reduziert",
+      "minimal": "Minimal"
+    }
   },
   "audio": {
     "title": "Audio",
@@ -106,7 +120,17 @@
     "slowest": "Am langsamsten",
     "resetSliderLabel": "{{label}} auf Standard zurücksetzen",
     "atDefault": "Auf Standard",
-    "resetToDefault": "Auf Standard zurücksetzen"
+    "resetToDefault": "Auf Standard zurücksetzen",
+    "labels": {
+      "effects": "Effekt-Tempo",
+      "combat": "Kampf-Tempo",
+      "banners": "Banner-Tempo"
+    },
+    "descriptions": {
+      "effects": "Zaubersprüche, Zonenwechsel, Tode, Lebenspunkteänderungen, Marken, Tappen/Enttappen.",
+      "combat": "Zeitpunkt des Kampfschadens — wie lange Blocker und Angreifer verweilen, bevor der Schaden abgehandelt wird.",
+      "banners": "Anzeige des Banners zu Zugbeginn."
+    }
   },
   "artChain": {
     "emptyState": "Standard-Scryfall-Artwork wird verwendet. Füge unten Regeln hinzu, um anzupassen.",
