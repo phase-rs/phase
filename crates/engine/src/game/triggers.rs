@@ -4219,6 +4219,74 @@ pub mod tests {
         );
     }
 
+    /// CR 702.100b: A creature "evolves" only after its evolve ability
+    /// resolves and actually puts one or more +1/+1 counters on it. This is
+    /// distinct from the CR 702.100a ETB trigger event that starts the evolve
+    /// ability.
+    #[test]
+    fn test_evolved_trigger_fires_after_evolve_counter_is_added() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let evolver = make_evolve_creature(&mut state, PlayerId(0), "Evolve 2/2", 2, 2);
+        let entrant = make_creature(&mut state, PlayerId(0), "Bigger 3/3", 3, 3);
+
+        let draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let evolved_trigger = TriggerDefinition::new(TriggerMode::Evolved)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(draw)
+            .description("Whenever this creature evolves, draw a card.".to_string());
+        state
+            .objects
+            .get_mut(&evolver)
+            .unwrap()
+            .trigger_definitions
+            .push(evolved_trigger.clone());
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&evolver)
+                .unwrap()
+                .base_trigger_definitions,
+        )
+        .push(evolved_trigger);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                entrant,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        assert_eq!(state.stack.len(), 1, "only the evolve ETB trigger fires");
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::Evolved { object_id } if *object_id == evolver
+            )),
+            "evolve resolution must emit the CR 702.100b evolved event"
+        );
+
+        process_triggers(&mut state, &events);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "the separate 'whenever this evolves' trigger must now fire"
+        );
+    }
+
     /// CR 702.100a: a creature whose power AND toughness are both not greater
     /// (smaller, or equal) does NOT trigger Evolve — the intervening-if uses
     /// strict greater-than, not greater-or-equal.
