@@ -1243,6 +1243,12 @@
     "no": "No",
     "dontAskAgain": "Don't ask again this game"
   },
+  "topOrBottom": {
+    "cardFallback": "Card",
+    "title": "Put {{name}} on top or bottom of library",
+    "top": "Top of library",
+    "bottom": "Bottom of library"
+  },
   "permanentTypeSlot": {
     "eyebrow": "Permanent Type",
     "title": "Choose Type Slot",

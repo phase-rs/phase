@@ -9465,12 +9465,18 @@ pub enum ReplacementCondition {
     /// step, AND the player has not yet drawn a card during this step
     /// (`cards_drawn_this_step == 0`); otherwise `true` (apply replacement).
     ExceptFirstDrawInDrawStep,
-    /// CR 614.1d: "if you control a [filter]" — replacement applies only while
-    /// the controller has at least one permanent matching `filter` on the
-    /// battlefield. Positive form of `UnlessControlsMatching`. Used by
-    /// Worship ("if you control a creature, damage that would reduce your
-    /// life total to less than 1 reduces it to 1 instead").
-    IfControlsMatching { filter: TargetFilter },
+    /// CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
+    /// while the controller has at least `minimum` permanents matching `filter` on
+    /// the battlefield. `minimum = 1` covers the singular "if you control a [type]"
+    /// form (used by Worship); higher values cover "if you control N or more [type]"
+    /// forms (used by creature lands such as Lair of the Hydra, Hall of Storm Giants).
+    /// The filter MUST have `ControllerRef::You` pre-set by the parser.
+    /// Positive form of `UnlessControlsMatching` / `UnlessControlsCountMatching`.
+    IfControlsMatching {
+        #[serde(default = "default_one")]
+        minimum: u32,
+        filter: TargetFilter,
+    },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
