@@ -12,6 +12,7 @@
 
 import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
 import { P2PDraftGuest, type DraftGuestEvent } from "./p2p-draft-guest";
+import type { DraftMatchLaunch } from "../network/draftProtocol";
 import { joinRoom, type JoinResult } from "../network/connection";
 import { loadDraftGuestSession } from "../services/draftPersistence";
 
@@ -48,7 +49,7 @@ export type DraftPodGuestEvent =
     }
   | { type: "matchResult"; matchId: string; winnerSeat: number | null }
   | { type: "timerSync"; remainingMs: number }
-  | { type: "matchStart"; matchId: string; round: number; opponentSeat: number; opponentName: string; matchHostPeerId: string; isMatchHost: boolean }
+  | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
   | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
@@ -232,12 +233,7 @@ export class DraftPodGuestAdapter {
         this.setStatus("matchInProgress");
         this.emit({
           type: "matchStart",
-          matchId: event.matchId,
-          round: event.round,
-          opponentSeat: event.opponentSeat,
-          opponentName: event.opponentName,
-          matchHostPeerId: event.matchHostPeerId,
-          isMatchHost: event.isMatchHost,
+          launch: event.launch,
         });
         break;
       case "kicked":

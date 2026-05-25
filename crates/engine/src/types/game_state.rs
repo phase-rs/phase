@@ -3005,6 +3005,27 @@ impl WaitingFor {
                 WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
             )
     }
+
+    /// Look-at-top-N states whose legal selections cannot be captured by the
+    /// candidate enumerator (it lists only {empty, full-in-original-order,
+    /// singletons}), so the multiplayer legality gate would wrongly reject a
+    /// legal reordered or partial selection. For these, `apply()` is the real
+    /// validation boundary and validates the submitted selection structurally
+    /// (see handle_resolution_choice); the server bypasses its enumeration gate.
+    ///
+    /// - CR 701.22a / CR 701.25a: scry/surveil keep the chosen cards on top
+    ///   "in any order" — any duplicate-free subset, in any order, is legal.
+    /// - Dig (look at N, keep some): the handler enforces the keep_count /
+    ///   up_to constraint, uniqueness, and the selectable-cards filter, and
+    ///   preserves the chosen order for library-destined keeps.
+    pub fn accepts_freeform_card_selection(&self) -> bool {
+        matches!(
+            self,
+            WaitingFor::ScryChoice { .. }
+                | WaitingFor::SurveilChoice { .. }
+                | WaitingFor::DigChoice { .. }
+        )
+    }
 }
 
 /// What the frontend requests for auto-pass (no internal state).
@@ -4876,6 +4897,55 @@ mod tests {
     fn default_creates_two_player_game() {
         let state = GameState::default();
         assert_eq!(state.players.len(), 2);
+    }
+
+    #[test]
+    fn accepts_freeform_card_selection_for_scry_surveil_and_dig() {
+        // CR 701.22a / CR 701.25a: scry and surveil keep-on-top are freeform.
+        assert!(WaitingFor::ScryChoice {
+            player: PlayerId(0),
+            cards: vec![],
+        }
+        .accepts_freeform_card_selection());
+        assert!(WaitingFor::SurveilChoice {
+            player: PlayerId(0),
+            cards: vec![],
+        }
+        .accepts_freeform_card_selection());
+        // Dig: legal selections (count-constrained / reordered) also can't be
+        // enumerated; apply() validates them structurally.
+        assert!(WaitingFor::DigChoice {
+            player: PlayerId(0),
+            library_owner: PlayerId(0),
+            cards: vec![],
+            keep_count: 1,
+            up_to: false,
+            selectable_cards: vec![],
+            kept_destination: None,
+            rest_destination: None,
+            source_id: None,
+        }
+        .accepts_freeform_card_selection());
+
+        // A sampling of other selection/decision states must NOT be freeform —
+        // they remain validated by candidate enumeration.
+        assert!(!WaitingFor::Priority {
+            player: PlayerId(0),
+        }
+        .accepts_freeform_card_selection());
+        assert!(!WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![],
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+        }
+        .accepts_freeform_card_selection());
+        assert!(!WaitingFor::ManifestDreadChoice {
+            player: PlayerId(0),
+            cards: vec![],
+        }
+        .accepts_freeform_card_selection());
     }
 
     #[test]

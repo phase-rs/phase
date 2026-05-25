@@ -752,6 +752,7 @@
       "title": "Choisir le porteur de l'Anneau",
       "subtitle": "Choisissez une créature que vous contrôlez"
     },
+    "reorderHint": "Glissez pour réorganiser · la première carte est piochée en premier",
     "scry": {
       "title": "Cartomancie",
       "subtitle_one": "Regardez la {{count}} carte du dessus de votre bibliothèque",

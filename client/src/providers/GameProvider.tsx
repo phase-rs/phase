@@ -282,7 +282,7 @@ function scheduleStoreReset(reset: () => void): void {
 
 export interface GameProviderProps {
   gameId: string;
-  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join";
+  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match";
   difficulty?: string;
   joinCode?: string;
   formatConfig?: FormatConfig;
@@ -438,6 +438,19 @@ export function GameProvider({
     // per-session cleanup that `dispose()` performs.
     let p2pAdapter: P2PHostAdapter | P2PGuestAdapter | null = null;
     let controller: ReturnType<typeof createGameLoopController> | null = null;
+
+    if (mode === "draft-match") {
+      const existing = useGameStore.getState();
+      if (existing.gameId !== gameId || !existing.adapter || !existing.gameState) {
+        onNoDeckRef.current?.();
+        return;
+      }
+      onReadyRef.current?.();
+      audioManager.setContext("battlefield");
+      return () => {
+        audioManager.setContext("menu");
+      };
+    }
 
     if (isP2P) {
       const parsedDeck = loadActiveDeck();

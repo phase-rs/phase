@@ -43,9 +43,15 @@ export function PlayerHud() {
     const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
     return (slot?.legal_alternatives ?? []).some((t) => "Player" in t && t.Player === playerId);
   })();
+  // CR 115.7: A single-target retarget (Bolt Bend on a spell aimed at a player)
+  // can redirect to this player — same board-click path as normal targeting.
+  const retargetChoiceHasMe = waitingFor?.type === "RetargetChoice"
+    && waitingFor.data.player === playerId
+    && waitingFor.data.scope.type === "Single"
+    && waitingFor.data.legal_new_targets.some((t) => "Player" in t && t.Player === playerId);
   const isValidTarget = (isHumanTargetSelection && (waitingFor.data.selection?.current_legal_targets ?? []).some(
     (target) => "Player" in target && target.Player === playerId,
-  )) || copyRetargetCurrentSlotHasMe;
+  )) || copyRetargetCurrentSlotHasMe || retargetChoiceHasMe;
 
   const handleTargetClick = useCallback(() => {
     if (isValidTarget) {

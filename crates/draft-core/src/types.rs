@@ -321,6 +321,12 @@ pub enum DraftError {
     ValidationFailed { errors: Vec<LimitedDeckError> },
     #[error("pairing not found: {match_id}")]
     PairingNotFound { match_id: String },
+    #[error("{format:?} requires {required} seats, got {actual}")]
+    UnsupportedTournamentSize {
+        format: TournamentFormat,
+        required: u8,
+        actual: u8,
+    },
     #[error("draft source has {available} cards, but {required} cards are required")]
     InsufficientCards { available: usize, required: usize },
 }
