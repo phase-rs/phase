@@ -2852,7 +2852,7 @@ pub(super) fn parse_utility_imperative_ast(
             consumed += after_each_lower.len() - after.len();
         }
         let target_text = &rest[consumed..];
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         let rem_lower = rem.trim_start().to_ascii_lowercase();
         // The trailing duration ("until end of turn") is stripped upstream by
         // `strip_trailing_duration`; in that case `rem` is empty. Accept either
@@ -2862,7 +2862,11 @@ pub(super) fn parse_utility_imperative_ast(
             .parse(rem_lower.as_str())
             .map(|(rest, _)| rest)
             .unwrap_or(rem_lower.as_str());
-        if rem_after_duration.is_empty() || rem_after_duration.starts_with('.') {
+        let mut terminal = alt((
+            value((), eof),
+            value((), all_consuming(tag::<_, _, OracleError<'_>>("."))),
+        ));
+        if terminal.parse(rem_after_duration).is_ok() {
             return Some(UtilityImperativeAst::SwitchPT { target });
         }
     }
