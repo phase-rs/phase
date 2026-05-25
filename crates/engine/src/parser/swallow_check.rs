@@ -1215,10 +1215,14 @@ fn detect_dynamic_qty(
     });
 }
 
-/// CR 608.2e: True when every "for each " occurrence in the classified text is
-/// the "for each opponent who doesn't / does not" decline-iteration phrase and
-/// no other dynamic-quantity marker is present. Such text's iteration is
-/// carried by a `player_scope` node, not a `QuantityExpr`.
+/// CR 608.2e + CR 608.2c + CR 101.3: True when every "for each " occurrence in
+/// the classified text is the "for each opponent who doesn't / does not /
+/// can't / cannot" decline-iteration phrase and no other dynamic-quantity
+/// marker is present. Such text's iteration is carried by a `player_scope`
+/// node, not a `QuantityExpr`. Covers both the optional-decline shape
+/// (Braids-class, CR 118.12 optional-cost branch) and the mandatory-impossible
+/// shape (Refurbished-Familiar-class, CR 101.3 + CR 118.12 mandatory-cost
+/// branch).
 fn cleaned_for_each_is_only_decline_iteration(cleaned: &str) -> bool {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("for each ") {
@@ -1231,6 +1235,8 @@ fn cleaned_for_each_is_only_decline_iteration(cleaned: &str) -> bool {
             let rest = &cleaned[idx..];
             rest.starts_with("for each opponent who doesn't") // allow-noncombinator: swallow detector marker scan on classified text
                 || rest.starts_with("for each opponent who does not") // allow-noncombinator: swallow detector marker scan on classified text
+                || rest.starts_with("for each opponent who can't") // allow-noncombinator: swallow detector marker scan on classified text
+                || rest.starts_with("for each opponent who cannot") // allow-noncombinator: swallow detector marker scan on classified text
         });
     if !all_for_each_are_decline {
         return false;
