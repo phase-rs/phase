@@ -3485,29 +3485,23 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     }
     // CR 115.1 / CR 115.1d: Only effects that use the word "target" require stack-time target
     // selection. `TargetFilter::Any` is a sentinel value meaning "broadcast to all
-    // matching permanents at resolution time" — it is never a declared target.
-    // `Pump { target: Any }` arises in two ways: (a) as a mass debuff/pump where
-    // the Oracle text reads "creatures get -N/-M" (no "target" keyword), and (b) as
-    // an unthreaded subject sentinel produced by `try_parse_pump` before the calling
-    // parser threads the real subject (SelfRef, ParentTarget, etc.). In both cases
-    // no player-chosen target is required. Generating a slot for `Any` causes a
-    // spurious WaitingFor::TriggerTargetSelection entry that players and the AI
-    // cannot resolve, producing a hard freeze (issue #824 class).
+    // matching permanents at resolution time" — it is never a declared target on any
+    // effect. The one exception is `DealDamage`, which uses `TargetFilter::Any` to
+    // represent the "any target" wording in damage-dealing spells and abilities (e.g.
+    // "deals 3 damage to any target"), where the player does choose a single target
+    // from the combined pool of creatures, planeswalkers, and players.
     //
-    // The same applies to `GenericEffect { target: Some(Any) }` — produced by
-    // `build_layer_effect_until` for mass continuous modifications ("each creature
-    // gets -2/-2 until end of turn"). The runtime's `register_transient_effect`
-    // correctly handles the broadcast path when `ability.targets` is empty.
-    if matches!(
-        effect,
-        Effect::Pump {
-            target: TargetFilter::Any,
-            ..
-        } | Effect::GenericEffect {
-            target: Some(TargetFilter::Any),
-            ..
-        }
-    ) {
+    // For all other effects, `TargetFilter::Any` arises in two ways: (a) as a mass
+    // broadcast where the Oracle text contains no "target" keyword (e.g. "creatures
+    // get -N/-M until end of turn"), or (b) as an unthreaded subject sentinel produced
+    // by a sub-parser before the calling parser threads the real subject (SelfRef,
+    // ParentTarget, etc.). In both cases no player-chosen target is required.
+    // Generating a slot for `Any` causes a spurious WaitingFor::TriggerTargetSelection
+    // entry that players and the AI cannot resolve, producing a hard freeze (issue #824
+    // class).
+    if effect.target_filter() == Some(&TargetFilter::Any)
+        && !matches!(effect, Effect::DealDamage { .. })
+    {
         return None;
     }
     effect.target_filter().filter(|t| !t.is_context_ref())
