@@ -40,6 +40,7 @@ pub fn build_resolved_from_def_with_targets(
 ) -> ResolvedAbility {
     let mut resolved =
         ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
+    resolved.context.ability_tag = def.ability_tag;
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
     }

@@ -20,7 +20,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // .destination(Battlefield); valid_card filtering and the power/toughness
         // intervening-if (CR 603.4) are handled downstream by
         // zone_change_clause_matches / check_trigger_condition respectively.
-        TriggerMode::ChangesZone | TriggerMode::Evolved => match_changes_zone,
+        TriggerMode::ChangesZone | TriggerMode::Evolve => match_changes_zone,
+        TriggerMode::Evolved => match_evolved,
         TriggerMode::ChangesZoneAll => match_changes_zone_all,
         TriggerMode::DamageDone
         | TriggerMode::DamageDoneOnce
@@ -361,6 +362,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Exerted,
         // TriggerMode::Crewed — moved to real matcher below
         // TriggerMode::Saddled — moved to real matcher below
+        // TriggerMode::Evolve — moved to real matcher below
         // TriggerMode::Evolved — moved to real matcher below
         TriggerMode::Enlisted,
         TriggerMode::Adapt,
@@ -406,7 +408,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // .destination(Battlefield); valid_card filtering and the power/toughness
     // intervening-if (CR 603.4) are handled downstream by
     // zone_change_clause_matches / check_trigger_condition respectively.
-    r.insert(TriggerMode::Evolved, match_changes_zone);
+    r.insert(TriggerMode::Evolve, match_changes_zone);
+    // CR 702.100b: "Whenever [a creature] evolves" fires only when the
+    // evolve ability's resolution actually put one or more +1/+1 counters on it.
+    r.insert(TriggerMode::Evolved, match_evolved);
 
     // CR 702.122d: Crew trigger matchers
     r.insert(TriggerMode::Crewed, match_vehicle_crewed);
@@ -1168,6 +1173,19 @@ pub(super) fn match_counter_added(
             }
         }
         true
+    } else {
+        false
+    }
+}
+
+pub(super) fn match_evolved(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::Evolved { object_id } = event {
+        valid_card_matches(trigger, state, *object_id, source_id)
     } else {
         false
     }

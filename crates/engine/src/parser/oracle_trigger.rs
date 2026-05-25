@@ -3579,12 +3579,23 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("create "),
         parse_event_word("create"),
     ));
+    let simple_event_verbs = alt((
+        // CR 702.100b + CR 701.44b: SimpleEvent verbs that may appear in
+        // compound triggers (e.g. "~ evolves or dies").
+        parse_event_word("evolves"),
+        parse_event_phrase("evolve "),
+        parse_event_word("explores"),
+        parse_event_phrase("explore "),
+        parse_event_word("exploits"),
+        parse_event_word("mutates"),
+        parse_event_word("transforms"),
+    ));
     let player_actions = alt((
         passive_player_actions,
         sacrifice_discard_actions,
         play_cast_create_actions,
     ));
-    alt((combat_or_zone, player_actions)).parse(input)
+    alt((combat_or_zone, player_actions, simple_event_verbs)).parse(input)
 }
 
 fn parse_bare_shared_event_verb(input: &str) -> OracleResult<'_, ()> {
@@ -5016,6 +5027,9 @@ fn try_parse_event(
         Exploits,
         /// CR 701.44b: A permanent "explores" after the explore process completes.
         Explores,
+        /// CR 702.100b: A creature "evolves" when +1/+1 counters are put on it
+        /// as a result of its evolve ability resolving.
+        Evolves,
         Transforms,
         Stations,
         SaddlesOrCrews,
@@ -5082,6 +5096,9 @@ fn try_parse_event(
             // CR 701.44b: "explores" / "explore" — explore trigger
             value(SimpleEvent::Explores, tag("explores")),
             value(SimpleEvent::Explores, tag("explore")),
+            // CR 702.100b: "evolves" / "evolve" — evolve trigger
+            value(SimpleEvent::Evolves, tag("evolves")),
+            value(SimpleEvent::Evolves, tag("evolve")),
             // CR 712.14: "transforms" / "transforms into"
             value(SimpleEvent::Transforms, tag("transforms")),
             // CR 702.184a: "stations ~" — actor-side Station trigger.
@@ -5168,6 +5185,15 @@ fn try_parse_event(
                 }
                 // CR 701.44b: "explores" fires after the explore process completes.
                 def.mode = TriggerMode::Explored;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Evolves => {
+                if !remaining.trim().is_empty() {
+                    return None;
+                }
+                // CR 702.100b: "evolves" fires when +1/+1 counters are put on
+                // the creature as a result of its evolve ability resolving.
+                def.mode = TriggerMode::Evolved;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Transforms => {
@@ -10178,8 +10204,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trigger_evolves_self() {
+        let def = parse_trigger_line(
+            "Whenever ~ evolves, put a +1/+1 counter on each other creature you control with a +1/+1 counter on it.",
+            "Renegade Krasis",
+        );
+        assert_eq!(def.mode, TriggerMode::Evolved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+    #[test]
+    fn trigger_evolves_creature_you_control() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control evolves, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Evolved);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)
+            ))
+        );
+    }
+    #[test]
+    fn trigger_evolve_plural() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control evolve, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Evolved);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)
+            ))
+        );
+    }
     // --- Subject decomposition tests ---
-
     #[test]
     fn trigger_another_creature_you_control_enters() {
         let def = parse_trigger_line(
