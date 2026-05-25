@@ -316,10 +316,10 @@ function latestFetchMessageIds(
 
 /** Emit triage/triage-delta.jsonl — the triage items from the latest fetch
  *  window only. This is the slice a reviewer reads each cycle; it never grows
- *  with the archive. Surfaces ORPHANS: items the heuristic tagged
- *  `append_to_existing` (or `needs_human_review`) but with no `github_issue` —
- *  a contradiction meaning an unfiled report, which is the failure mode behind
- *  silently-missed bugs. */
+ *  with the archive. Every non-`skip` delta item is one the LLM operator must
+ *  resolve this cycle — file a GH issue, link/dup it to an existing one, or
+ *  mark it handled. The script does NOT pre-judge duplication; the operator is
+ *  the sole arbiter of checking a report against existing issues. */
 async function writeTriageDelta(items: TriageItem[]): Promise<void> {
   const messages = readJsonl<RawDiscordMessage>(MESSAGES_PATH);
   const state = await loadSyncState();
@@ -327,14 +327,7 @@ async function writeTriageDelta(items: TriageItem[]): Promise<void> {
   const delta = items.filter((it) => deltaIds.has(it.message_id));
   await writeJsonl(TRIAGE_DELTA_PATH, delta);
 
-  const orphans = delta.filter(
-    (it) =>
-      it.github_issue === undefined &&
-      (it.classification === "primary_report" ||
-        it.classification === "additional_report") &&
-      it.proposed_action !== "skip" &&
-      it.proposed_action !== "skip_existing_closed",
-  );
+  const toResolve = delta.filter((it) => it.proposed_action !== "skip");
   const byAction = new Map<string, number>();
   for (const it of delta) {
     byAction.set(it.proposed_action, (byAction.get(it.proposed_action) ?? 0) + 1);
@@ -345,8 +338,8 @@ async function writeTriageDelta(items: TriageItem[]): Promise<void> {
   for (const action of [...byAction.keys()].sort()) {
     console.log(`    ${action}: ${byAction.get(action)}`);
   }
-  console.log(`  Unfiled reports in delta (REVIEW THESE — incl. orphans): ${orphans.length}`);
-  for (const o of orphans) {
+  console.log(`  Reports to resolve this cycle (REVIEW THESE): ${toResolve.length}`);
+  for (const o of toResolve) {
     console.log(`    - ${o.thread_name}  [${o.classification} / ${o.proposed_action}]`);
   }
 }
@@ -453,8 +446,7 @@ async function cmdTriage(): Promise<void> {
   }
 
   console.log(`Triaging ${reports.length} report items...`);
-  let items = await triageReports(reports);
-  items = applyGithubDedupe(items, await loadGithubIssueIndex());
+  const items = await triageReports(reports);
 
   await mkdir("triage", { recursive: true });
   await writeJsonl(TRIAGE_ITEMS_PATH, items);
@@ -507,121 +499,6 @@ async function cmdDelta(): Promise<void> {
   await mkdir("triage", { recursive: true });
   console.log(`Computing fetch-window delta from ${items.length} triage items...`);
   await writeTriageDelta(items);
-}
-
-interface GithubIssueIndexItem {
-  number: number;
-  title: string;
-  state: "OPEN" | "CLOSED";
-  body: string;
-  url: string;
-  closedAt: string | null;
-}
-
-async function loadGithubIssueIndex(): Promise<GithubIssueIndexItem[]> {
-  const ghResult = Bun.spawnSync([
-    "gh",
-    "issue",
-    "list",
-    "--repo",
-    "phase-rs/phase",
-    "--state",
-    "all",
-    "--limit",
-    "1000",
-    "--json",
-    "number,title,state,body,url,closedAt",
-  ]);
-
-  if (ghResult.exitCode !== 0) {
-    console.error("Warning: failed to fetch GitHub issue index for dedupe.");
-    return [];
-  }
-
-  const issues = JSON.parse(ghResult.stdout.toString()) as GithubIssueIndexItem[];
-  if (issues.length === 1000) {
-    console.error("Warning: GitHub issue dedupe index hit the 1000 issue limit.");
-  }
-  return issues;
-}
-
-function applyGithubDedupe(
-  items: TriageItem[],
-  issues: GithubIssueIndexItem[],
-): TriageItem[] {
-  if (issues.length === 0) return items;
-
-  const searchableIssues = issues.map((issue) => ({
-    issue,
-    text: `${issue.title}\n${issue.body}\n${issue.url}`,
-  }));
-
-  let matchedOpen = 0;
-  let matchedClosed = 0;
-
-  const deduped = items.map((item) => {
-    if (
-      item.proposed_action !== "create_issue" &&
-      item.proposed_action !== "append_to_existing" &&
-      item.proposed_action !== "needs_human_review"
-    ) {
-      return item;
-    }
-
-    const markers: Array<{
-      kind: NonNullable<TriageItem["github_issue"]>["match_kind"];
-      value: string;
-    }> = [
-      { kind: "report_id", value: item.report_id },
-      { kind: "source_url", value: item.source_url },
-      { kind: "discord_message", value: `${item.thread_id}/${item.message_id}` },
-    ];
-
-    const matches = searchableIssues
-      .flatMap(({ issue, text }) => {
-        const marker = markers.find(
-          (candidate) => candidate.value !== "" && text.includes(candidate.value),
-        );
-        return marker === undefined ? [] : [{ issue, marker }];
-      })
-      .sort((a, b) => {
-        if (a.issue.state !== b.issue.state) return a.issue.state === "OPEN" ? -1 : 1;
-        return a.issue.number - b.issue.number;
-      });
-    const match = matches[0];
-
-    if (match === undefined) return item;
-
-    const github_issue: NonNullable<TriageItem["github_issue"]> = {
-      number: match.issue.number,
-      title: match.issue.title,
-      state: match.issue.state,
-      url: match.issue.url,
-      closed_at: match.issue.closedAt,
-      match_kind: match.marker.kind,
-    };
-
-    if (match.issue.state === "OPEN") {
-      matchedOpen++;
-      return {
-        ...item,
-        proposed_action: "append_to_existing" as const,
-        github_issue,
-      };
-    }
-
-    matchedClosed++;
-    return {
-      ...item,
-      proposed_action: "skip_existing_closed" as const,
-      github_issue,
-    };
-  });
-
-  console.log(`  GitHub dedupe: matched open issues: ${matchedOpen}`);
-  console.log(`  GitHub dedupe: matched closed issues: ${matchedClosed}`);
-
-  return deduped;
 }
 
 // ---------------------------------------------------------------------------
@@ -739,8 +616,8 @@ function buildIssueTitle(item: TriageItem): string {
 
 function buildIssueBody(item: TriageItem): string {
   const relevantCards = selectRelevantOracleCards(item);
-  // The Discord source URL anchor is REQUIRED — applyGithubDedupe matches on it
-  // so subsequent triage runs recognize this issue and do not re-create it.
+  // Keep the Discord source URL anchor in the body — it is the stable handle the
+  // LLM operator greps for when checking whether a report was already filed.
   const lines = [
     `Reported in Discord: ${item.source_url}`,
     ``,
@@ -798,21 +675,14 @@ function createGithubIssue(item: TriageItem): CreatedIssue {
   return { number: Number(match[1]), url };
 }
 
-// Phase 1 of publish: resolve the GitHub issue (create or link to existing).
-// Always succeeds-or-throws *before* any Discord side-effects, so the caller
-// can persist the GH record before risking the Discord call.
+// Phase 1 of publish: create the GitHub issue. Always succeeds-or-throws
+// *before* any Discord side-effects, so the caller can persist the GH record
+// before risking the Discord call. The operator has already decided this thread
+// has no existing issue (the script does not dedup against GitHub).
 function resolveIssue(
   item: TriageItem,
-  mode: "created" | "reconciled",
   dryRun: boolean,
 ): { number: number; url: string } {
-  if (mode === "reconciled") {
-    const gh = item.github_issue;
-    if (gh === undefined) {
-      throw new Error(`reconcile mode requires github_issue on item ${item.report_id}`);
-    }
-    return { number: gh.number, url: gh.url };
-  }
   if (dryRun) {
     console.log(`    [dry-run] would: gh issue create --title "${buildIssueTitle(item)}"`);
     return { number: 0, url: "https://github.com/phase-rs/phase/issues/DRY" };
@@ -1098,7 +968,7 @@ async function cmdPublish(): Promise<void> {
     // Phase 1: GH issue first. If this throws we recorded no state — safe to retry.
     let issue: { number: number; url: string };
     try {
-      issue = resolveIssue(item, "created", dryRun);
+      issue = resolveIssue(item, dryRun);
     } catch (err) {
       console.error(`    failed (issue resolve): ${(err as Error).message}`);
       failed++;
@@ -1315,8 +1185,8 @@ Commands:
             latest fetch window (messages with fetched_at > prev_fetch_at).
             Review the delta — never the full archive — each cycle.
   delta     Re-emit triage/triage-delta.jsonl from existing triage-items.jsonl
-            without re-classifying. Flags orphans (append_to_existing /
-            needs_human_review with no github_issue = unfiled report).
+            without re-classifying. Lists every non-skip item the operator must
+            resolve this cycle (file / dup-link / mark-handled).
   pending   List unpublished threads (local-state diff of cursors vs
             published_threads), newest-activity-first. NO judgment applied —
             the operator (an LLM in chat) reads candidates and decides.

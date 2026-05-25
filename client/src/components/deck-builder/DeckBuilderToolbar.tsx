@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { GameFormat } from "../../adapter/types";
 import type { CommanderBracket } from "../../types/bracket";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
@@ -45,6 +47,7 @@ export function DeckBuilderToolbar({
   bracket,
   onBracketChange,
 }: DeckBuilderToolbarProps) {
+  const { t } = useTranslation("deck-builder");
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-white/8 bg-black/18 px-3 py-2 backdrop-blur-md lg:px-4">
       <div className="flex min-w-0 flex-1 items-center gap-3 lg:flex-none">
@@ -53,11 +56,11 @@ export function DeckBuilderToolbar({
           onClick={onBack}
           className="shrink-0 text-sm text-slate-400 hover:text-white"
         >
-          &larr; Menu
+          &larr; {t("toolbar.menu")}
         </button>
         <div className="min-w-0 flex-1">
           <div className="text-[0.62rem] uppercase tracking-[0.22em] text-slate-500 lg:text-[0.68rem]">
-            Deck Builder
+            {t("toolbar.deckBuilder")}
           </div>
           {/* The title IS the name field — no separate read-only label + input.
               A trailing pencil signals it's tap-to-edit. */}
@@ -69,8 +72,8 @@ export function DeckBuilderToolbar({
                 onDeckNameChange(e.target.value);
                 if (justSaved) onClearJustSaved();
               }}
-              placeholder="Untitled Deck"
-              aria-label="Deck name"
+              placeholder={t("toolbar.untitledDeck")}
+              aria-label={t("toolbar.deckName")}
               className="w-full min-w-0 truncate rounded-md border border-transparent bg-transparent py-0.5 pl-1 pr-6 text-sm font-medium text-white placeholder-slate-500 hover:border-white/10 focus:border-white/20 focus:bg-black/18 focus:outline-none"
             />
             <PencilIcon className="pointer-events-none absolute right-1.5 h-3.5 w-3.5 text-slate-500 transition-colors group-focus-within/name:text-slate-300" />
@@ -84,7 +87,7 @@ export function DeckBuilderToolbar({
         <select
           value={format}
           onChange={(e) => onFormatChange(e.target.value as GameFormat)}
-          aria-label="Format"
+          aria-label={t("toolbar.format")}
           className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:outline-none lg:hidden"
         >
           {FORMAT_REGISTRY.map(({ format: value, label }) => (
@@ -99,7 +102,7 @@ export function DeckBuilderToolbar({
         {format === "Commander" && (
           <div className="flex items-center gap-2">
             <span className="shrink-0 text-[0.62rem] uppercase tracking-[0.22em] text-slate-500 lg:text-[0.68rem]">
-              Bracket
+              {t("toolbar.bracket")}
             </span>
             <BracketPicker value={bracket} onChange={onBracketChange} />
           </div>
@@ -117,16 +120,16 @@ export function DeckBuilderToolbar({
               : "shrink-0 rounded-xl border border-white/10 bg-white/10 px-3 py-1.5 text-sm text-white hover:bg-white/14 disabled:opacity-40"
           }
         >
-          {justSaved ? "Saved ✓" : "Save"}
+          {justSaved ? t("toolbar.saved") : t("common:actions.save")}
         </button>
         <button
           type="button"
           onClick={onClone}
           disabled={!canClone}
-          title="Save a copy under a new name"
+          title={t("toolbar.cloneTitle")}
           className="shrink-0 rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6 disabled:opacity-40"
         >
-          Clone
+          {t("toolbar.clone")}
         </button>
         {savedDecks.length > 0 && (
           <select
@@ -134,7 +137,7 @@ export function DeckBuilderToolbar({
             value=""
             className="max-w-[8rem] shrink-0 rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:outline-none sm:max-w-none"
           >
-            <option value="">Load deck...</option>
+            <option value="">{t("toolbar.loadDeck")}</option>
             {savedDecks.map((name) => (
               <option key={name} value={name}>
                 {name}

@@ -1,4 +1,6 @@
 import { createContext, useEffect, useRef, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
@@ -175,6 +177,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck): DeckListPayload {
 }
 
 async function buildLocalAiDeckList(
+  t: TFunction,
   deck: ParsedDeck,
   playerCount: number,
   formatConfig?: FormatConfig,
@@ -186,7 +189,11 @@ async function buildLocalAiDeckList(
     selectedMatchType,
   });
   if (catalog.candidates.length === 0) {
-    throw new Error(`No legal AI decks are available for ${formatConfig?.format ?? "the selected format"}.`);
+    throw new Error(
+      formatConfig?.format
+        ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
+        : t("gameProvider.noLegalAiDecks.generic"),
+    );
   }
 
   const opponentCount = Math.max(1, playerCount - 1);
@@ -235,7 +242,7 @@ let pendingStoreReset: ReturnType<typeof setTimeout> | null = null;
  * `new Notification()` outside a ServiceWorker (Safari, some mobile).
  * Shared by the WS and P2P host-side join paths.
  */
-function notifyOpponentJoined(opponentName?: string): void {
+function notifyOpponentJoined(t: TFunction, opponentName?: string): void {
   if (
     typeof Notification === "undefined"
     || Notification.permission !== "granted"
@@ -246,9 +253,9 @@ function notifyOpponentJoined(opponentName?: string): void {
   }
   try {
     const body = opponentName
-      ? `${opponentName} joined your game. Come back and play!`
-      : "Your opponent has joined the game. Come back and play!";
-    const n = new Notification("Opponent joined", { body });
+      ? t("gameProvider.notification.opponentJoinedNamed", { name: opponentName })
+      : t("gameProvider.notification.opponentJoined");
+    const n = new Notification(t("gameProvider.notification.title"), { body });
     n.onclick = () => {
       window.focus();
       n.close();
@@ -324,6 +331,8 @@ export function GameProvider({
   onResumeReset,
   children,
 }: GameProviderProps) {
+  const { t } = useTranslation("game");
+
   // Sync the persistent phaseStops preference into engine-owned state so the
   // engine remains the single authority for auto-pass / empty-blocker decisions.
   usePhaseStopsSync();
@@ -336,12 +345,17 @@ export function GameProvider({
   const onCardDataMissingRef = useRef(onCardDataMissing);
   const onNoDeckRef = useRef(onNoDeck);
   const onResumeResetRef = useRef(onResumeReset);
+  // `t` is referenced inside the game-setup effect. Keep it in a ref (like the
+  // callback props above) so the effect dep array stays free of it — a language
+  // switch must not re-run the heavy initGame/resumeGame pipeline.
+  const tRef = useRef(t);
   onWsEventRef.current = onWsEvent;
   onP2PEventRef.current = onP2PEvent;
   onReadyRef.current = onReady;
   onCardDataMissingRef.current = onCardDataMissing;
   onNoDeckRef.current = onNoDeck;
   onResumeResetRef.current = onResumeReset;
+  tRef.current = t;
 
   useEffect(() => {
     if (mode !== "ai") return;
@@ -456,7 +470,7 @@ export function GameProvider({
             processRemoteUpdate(event.state, event.events, event.legalResult);
           }
           if (event.type === "guestConnected") {
-            notifyOpponentJoined();
+            notifyOpponentJoined(tRef.current);
           }
           onP2PEventRef.current?.(event);
         });
@@ -807,7 +821,7 @@ export function GameProvider({
             }
           }
           if (event.type === "opponentJoined") {
-            notifyOpponentJoined(event.opponentName);
+            notifyOpponentJoined(tRef.current, event.opponentName);
           }
           if (event.type === "passwordRequired") {
             // Server rejected the join because the room is password-protected
@@ -817,7 +831,7 @@ export function GameProvider({
             // We deliberately avoid putting the password in the URL: that
             // would land it in browser history and in outbound Referer
             // headers to any image CDN / Scryfall / analytics request.
-            const entered = window.prompt("This room requires a password:");
+            const entered = window.prompt(tRef.current("gameProvider.passwordPrompt"));
             if (entered && joinCode) {
               window.sessionStorage.setItem(
                 `phase-join-password:${joinCode}`,
@@ -836,7 +850,7 @@ export function GameProvider({
           }
           if (event.type === "error" || event.type === "reconnectFailed") {
             useMultiplayerStore.getState().setConnectionStatus("disconnected");
-            useMultiplayerStore.getState().showToast("Connection failed. Retry or change server in Settings.");
+            useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
           }
           if (event.type === "reconnecting") {
             useMultiplayerStore.getState().setConnectionStatus("connecting");
@@ -848,7 +862,7 @@ export function GameProvider({
           }
           if (event.type === "playerEliminated" && event.becameSpectator) {
             useMultiplayerStore.getState().setIsSpectator(true);
-            useMultiplayerStore.getState().showToast("You have been eliminated. Now spectating.");
+            useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.eliminatedSpectating"));
           }
           onWsEventRef.current?.(event);
         });
@@ -876,7 +890,7 @@ export function GameProvider({
             if (msg.includes("Deck not legal")) {
               onWsEventRef.current?.({ type: "deckRejected", reason: msg });
             } else {
-              useMultiplayerStore.getState().showToast("Connection failed. Retry or change server in Settings.");
+              useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
             }
           });
         }
@@ -934,8 +948,10 @@ export function GameProvider({
           console.warn("Failed to resume saved game, starting fresh:", err);
           const wasAutoUpdate = consumeRecentAutoUpdateMarker();
           const reason = wasAutoUpdate
-            ? "The app was updated and your saved game is incompatible with the new version."
-            : `Could not restore saved game: ${err instanceof Error ? err.message : String(err)}`;
+            ? tRef.current("gameProvider.resumeReset.appUpdated")
+            : tRef.current("gameProvider.resumeReset.restoreFailed", {
+                error: err instanceof Error ? err.message : String(err),
+              });
           onResumeResetRef.current?.(reason);
           clearGame(gameId);
           const parsedDeck = loadActiveDeck();
@@ -946,6 +962,7 @@ export function GameProvider({
           let deckList: DeckListPayload;
           try {
             deckList = await buildLocalAiDeckList(
+              tRef.current,
               parsedDeck,
               playerCount ?? 2,
               formatConfig,
@@ -1043,6 +1060,7 @@ export function GameProvider({
       let deckList: DeckListPayload;
       try {
         deckList = await buildLocalAiDeckList(
+          tRef.current,
           parsedDeck,
           playerCount ?? 2,
           formatConfig,

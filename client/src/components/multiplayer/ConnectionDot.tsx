@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 
@@ -8,17 +9,12 @@ const STATUS_COLORS = {
   disconnected: "#ef4444", // red-500
 } as const;
 
-const STATUS_LABELS = {
-  connected: "Connected",
-  connecting: "Connecting...",
-  disconnected: "Disconnected",
-} as const;
-
 export function ConnectionDot() {
+  const { t } = useTranslation("multiplayer");
   const connectionStatus = useMultiplayerStore((s) => s.connectionStatus);
   const latencyMs = useMultiplayerStore((s) => s.latencyMs);
   const color = STATUS_COLORS[connectionStatus];
-  const label = STATUS_LABELS[connectionStatus];
+  const label = t(`connectionDot.${connectionStatus}`);
 
   const latencyLabel =
     connectionStatus === "connected" && latencyMs != null

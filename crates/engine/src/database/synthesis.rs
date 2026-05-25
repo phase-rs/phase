@@ -9224,6 +9224,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_id: None,
                 scryfall_oracle_id: None,
             },
+            foreign_data: Vec::new(),
         };
 
         let face = build_oracle_face(&mtgjson, None);

@@ -7511,6 +7511,7 @@ fn is_keyword_line(lower: &str) -> bool {
         "prowess",
         "protection from ",
         "ward",
+        "firebending ",
         "changeling",
         "partner",
         "shroud",
@@ -9254,6 +9255,13 @@ mod tests {
             normalize_for_matching("when this battle enters", ""),
             "when ~ enters"
         );
+    }
+
+    #[test]
+    fn test_audit_treats_firebending_as_keyword_line() {
+        assert!(is_keyword_line(
+            "firebending x, where x is this creature's power."
+        ));
     }
 
     #[test]

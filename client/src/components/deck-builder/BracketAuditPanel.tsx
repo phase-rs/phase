@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   BRACKET_AXES,
@@ -30,20 +31,21 @@ const AXIS_LABEL: Record<BracketAxis, string> = {
 };
 
 export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyReason }: Props) {
+  const { t } = useTranslation("deck-builder");
   const [expanded, setExpanded] = useState(false);
 
   if (emptyReason === "not-commander") return null;
   if (emptyReason === "unsupported") {
     return (
       <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs text-slate-400">
-        Bracket estimation isn&apos;t available in this build.
+        {t("bracket.unavailable")}
       </div>
     );
   }
   if (emptyReason === "no-commander" || !estimate) {
     return (
       <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs text-slate-400">
-        Add a commander to see your bracket estimate.
+        {t("bracket.addCommander")}
       </div>
     );
   }
@@ -58,7 +60,7 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
         <span
           className={`rounded-full border px-2.5 py-1 text-xs font-medium ${BRACKET_TIER_CHIP_CLASS[estimate.tier]}`}
         >
-          Estimated: B{tierNum} {tierLabel}
+          {t("bracket.estimated", { tier: tierNum, label: tierLabel })}
         </span>
         {manualBracket !== null && (
           <span
@@ -68,18 +70,18 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
                 : "rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-xs font-medium text-slate-400"
             }
           >
-            Manual: B{manualBracket} {BRACKET_LABEL[manualBracket]}
-            {mismatch && " ⚠ mismatch"}
+            {t("bracket.manual", { tier: manualBracket, label: BRACKET_LABEL[manualBracket] })}
+            {mismatch && t("bracket.mismatch")}
           </span>
         )}
         <button
           type="button"
           aria-expanded={expanded}
-          aria-label={expanded ? "Hide breakdown" : "Show breakdown"}
+          aria-label={expanded ? t("bracket.hideBreakdown") : t("bracket.showBreakdown")}
           onClick={() => setExpanded((v) => !v)}
           className="ml-auto inline-flex min-h-[44px] items-center rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-xs font-medium text-slate-400 hover:bg-white/6 sm:min-h-0 sm:py-1"
         >
-          {expanded ? "▲ Hide breakdown" : "▼ Show breakdown"}
+          {expanded ? t("bracket.hideBreakdownButton") : t("bracket.showBreakdownButton")}
         </button>
       </div>
 
@@ -113,7 +115,7 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
                   ))}
                   {violation && (
                     <span className="ml-2 text-amber-300">
-                      (forced B{BRACKET_TIER_NUMERIC[violation.forced_floor]})
+                      {t("bracket.forced", { tier: BRACKET_TIER_NUMERIC[violation.forced_floor] })}
                     </span>
                   )}
                 </dd>
@@ -121,14 +123,14 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
             );
           })}
           <div className="border-t border-white/5 pt-2 text-[10px] text-slate-500">
-            Data: {estimate.data_version} ·{" "}
+            {t("bracket.dataVersion", { version: estimate.data_version })} ·{" "}
             <a
               href="https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta"
               target="_blank"
               rel="noreferrer"
               className="underline-offset-2 hover:underline"
             >
-              About brackets ↗
+              {t("bracket.aboutBrackets")}
             </a>
           </div>
         </dl>

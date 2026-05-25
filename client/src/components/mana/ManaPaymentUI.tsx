@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type {
   ManaType,
@@ -24,6 +25,7 @@ function hasAmbiguousCost(shards: string[]): boolean {
 }
 
 export function ManaPaymentUI() {
+  const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -217,7 +219,7 @@ export function ManaPaymentUI() {
       >
         <div className="rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
-            Pay Mana Cost
+            {t("mana.payMana")}
             {cardName && (
               <span className="ml-1 text-gray-400">
                 &mdash; {cardName}
@@ -237,10 +239,10 @@ export function ManaPaymentUI() {
               {convokeMode && (
                 <p className="mb-3 text-center text-xs font-medium text-cyan-300">
                   {convokeMode === "Convoke"
-                    ? "Tap creatures to help pay."
+                    ? t("mana.convokeHint")
                     : convokeMode === "Improvise"
-                      ? "Tap artifacts to help pay."
-                      : "Tap creatures or artifacts to help pay."}
+                      ? t("mana.improviseHint")
+                      : t("mana.convokeOrImproviseHint")}
                 </p>
               )}
 
@@ -273,7 +275,7 @@ export function ManaPaymentUI() {
                         {payLife ? (
                           <>
                             <span aria-label="heart">&#x2764;</span>
-                            <span>2 life</span>
+                            <span>{t("mana.lifeAmount")}</span>
                           </>
                         ) : (
                           <ManaSymbol shard={manaAbbrev} size="sm" />
@@ -283,7 +285,7 @@ export function ManaPaymentUI() {
                   })}
                   {lifeCost > 0 && (
                     <span className="text-xs text-red-400">
-                      ({lifeCost} life)
+                      {t("mana.lifeCostSummary", { count: lifeCost })}
                     </span>
                   )}
                 </div>
@@ -360,19 +362,19 @@ export function ManaPaymentUI() {
 
           {!costShards && (
             <p className="mb-3 text-center text-xs text-gray-400">
-              Payment is still pending. Tap permanents or cancel this action.
+              {t("mana.paymentPending")}
             </p>
           )}
 
           {/* Current mana pool */}
           <div className="mb-3 flex items-center justify-center gap-2">
-            <span className="text-xs text-gray-500">Pool:</span>
+            <span className="text-xs text-gray-500">{t("mana.poolLabel")}</span>
             {manaPoolSummary.length > 0 ? (
               manaPoolSummary.map(({ color, amount }) => (
                 <ManaBadge key={color} color={color} amount={amount} />
               ))
             ) : (
-              <span className="text-xs text-gray-600">Empty</span>
+              <span className="text-xs text-gray-600">{t("mana.poolEmpty")}</span>
             )}
           </div>
 
@@ -382,13 +384,13 @@ export function ManaPaymentUI() {
               onClick={handlePay}
               className={gameButtonClass({ tone: "emerald", size: "md" })}
             >
-              Pay
+              {t("mana.pay")}
             </button>
             <button
               onClick={handleCancel}
               className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
             >
-              Cancel
+              {t("common:actions.cancel")}
             </button>
           </div>
         </div>

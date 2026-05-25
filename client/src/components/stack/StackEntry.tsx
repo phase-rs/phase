@@ -1,6 +1,8 @@
 import type { CSSProperties } from "react";
 
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
@@ -40,6 +42,7 @@ interface StackEntryProps {
 }
 
 export function StackEntry({ entry, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
+  const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -79,10 +82,10 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   // Activated abilities don't carry a pre-resolved source name (different
   // engine path); they keep the bare "Activated" label.
   const abilityLabel = details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
-    ? "Activated"
+    ? t("stack.activated")
     : isTriggered && triggerSourceName
-      ? `Triggered — From ${triggerSourceName}`
-      : "Triggered");
+      ? t("stack.triggeredFrom", { source: triggerSourceName })
+      : t("stack.triggered"));
   const triggerDescription =
     details?.ability_description
       ? renderDescription(details.ability_description, sourceName)
@@ -90,12 +93,12 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
         : undefined;
   const targetLabels = details?.targets?.map((target) => target.label) ?? [];
-  const paidLabels = details?.paid?.map(formatPaidFact) ?? [];
+  const paidLabels = details?.paid?.map((fact) => formatPaidFact(fact, t)) ?? [];
   const contextLabels = details?.trigger_context?.map((context) => context.label) ?? [];
-  const controllerLabel = entry.controller === playerId ? "You" : "Opp";
+  const controllerLabel = entry.controller === playerId ? t("stack.controllerYou") : t("stack.controllerOpp");
   const seatColor = useSeatColor(entry.controller);
   const controllerInitial =
-    entry.controller === playerId ? "Y" : `P${entry.controller}`;
+    entry.controller === playerId ? t("stack.controllerInitialYou") : t("stack.controllerInitialOpp", { seat: entry.controller });
 
   // Targeting: check if this stack entry is a valid target for the current selection
   const isHumanTargetSelection =
@@ -185,11 +188,11 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       {/* Badge: "Casting..." for pending spells, "Next" for top of stack */}
       {isPending ? (
         <span className="absolute -right-1 -top-2 animate-pulse rounded-full bg-cyan-500 px-2 py-0.5 text-[10px] font-bold text-black shadow-md">
-          Casting…
+          {t("stack.casting")}
         </span>
       ) : isTop && (
         <span className="absolute -right-1 -top-2 rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-bold text-black shadow-md">
-          Next
+          {t("stack.next")}
         </span>
       )}
 
@@ -197,7 +200,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       {!isSpell && (
         <div
           className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm"
-          title={stackEntryTitle(abilityLabel, triggerDescription, targetLabels, paidLabels, contextLabels)}
+          title={stackEntryTitle(abilityLabel, triggerDescription, targetLabels, paidLabels, contextLabels, t)}
         >
           <div className="truncate pr-8 text-[9px] font-semibold text-purple-300">{abilityLabel}</div>
           {triggerDescription && (
@@ -214,7 +217,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             <span
               key={`target-${label}`}
               className="max-w-full rounded bg-cyan-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-cyan-100 shadow"
-              title={`Targeting ${label}`}
+              title={t("stack.targetingLabel", { label })}
             >
               → {label}
             </span>
@@ -255,22 +258,22 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   );
 }
 
-function formatPaidFact(fact: StackPaidFactView): string {
+function formatPaidFact(fact: StackPaidFactView, t: TFunction<"game">): string {
   switch (fact.type) {
     case "XValue":
-      return `X=${fact.data.value}`;
+      return t("stack.paidXValue", { value: fact.data.value });
     case "ManaSpent":
-      return `${fact.data.amount} mana`;
+      return t("stack.paidManaSpent", { amount: fact.data.amount });
     case "ColorsSpent":
-      return `${fact.data.distinct} colors`;
+      return t("stack.paidColorsSpent", { count: fact.data.distinct });
     case "Kicked":
-      return fact.data.count > 1 ? `kicked ×${fact.data.count}` : "kicked";
+      return fact.data.count > 1 ? t("stack.paidKickedTimes", { count: fact.data.count }) : t("stack.paidKicked");
     case "AdditionalCostPaid":
-      return "extra cost";
+      return t("stack.paidAdditionalCost");
     case "CastVariant":
       return fact.data.variant;
     case "Convoked":
-      return `convoked ×${fact.data.count}`;
+      return t("stack.paidConvoked", { count: fact.data.count });
     default:
       return "";
   }
@@ -282,11 +285,12 @@ function stackEntryTitle(
   targets: string[],
   paid: string[],
   context: string[],
+  t: TFunction<"game">,
 ): string {
   return [
     description ? `${label}: ${description}` : label,
-    targets.length > 0 ? `Targets: ${targets.join(", ")}` : "",
-    paid.length > 0 ? `Paid: ${paid.join(", ")}` : "",
-    context.length > 0 ? `Context: ${context.join(", ")}` : "",
+    targets.length > 0 ? t("stack.titleTargets", { targets: targets.join(", ") }) : "",
+    paid.length > 0 ? t("stack.titlePaid", { paid: paid.join(", ") }) : "",
+    context.length > 0 ? t("stack.titleContext", { context: context.join(", ") }) : "",
   ].filter(Boolean).join("\n");
 }

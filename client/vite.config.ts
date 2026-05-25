@@ -81,6 +81,12 @@ function dataFileDefines(): Record<string, string> {
     // tagged release → true (shown).
     __IS_RELEASE_BUILD__: JSON.stringify(process.env.RELEASE_BUILD === "true"),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
+    // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
+    // Dev/Tauri serve from public/; deploy may override with a hashed R2 template.
+    // A missing sidecar (404) degrades gracefully to English (see ensureCardLocale).
+    __CARD_DATA_LOCALE_URL_TEMPLATE__: JSON.stringify(
+      process.env.CARD_DATA_LOCALE_URL_TEMPLATE || "/card-data.{lng}.json",
+    ),
   };
   for (const filename of manifest) {
     // "card-names.json" → "__CARD_NAMES_URL__"

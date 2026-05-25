@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import {
   searchScryfall,
   buildScryfallQuery,
@@ -36,14 +37,6 @@ const CARD_TYPES = [
   "Planeswalker",
 ];
 
-const BROWSER_FORMATS: { value: BrowserLegalityFilter; label: string }[] = [
-  { value: "all", label: "All cards" },
-  ...FORMAT_REGISTRY.map(({ format, label }) => ({
-    value: format as BrowserLegalityFilter,
-    label,
-  })),
-];
-
 export type BrowserLegalityFilter = "all" | GameFormat;
 
 export interface CardSearchFilters {
@@ -70,6 +63,17 @@ export function CardSearch({
   onFiltersChange,
   onReset,
 }: CardSearchProps) {
+  const { t } = useTranslation("deck-builder");
+  const browserFormats = useMemo<{ value: BrowserLegalityFilter; label: string }[]>(
+    () => [
+      { value: "all", label: t("search.browseFormat.all") },
+      ...FORMAT_REGISTRY.map(({ format, label }) => ({
+        value: format as BrowserLegalityFilter,
+        label,
+      })),
+    ],
+    [t],
+  );
   const setList = useSetList();
   const availableSets = useMemo(() => {
     if (!setList) return [];
@@ -146,7 +150,7 @@ export function CardSearch({
         }
       } catch (err) {
         if (!controller.signal.aborted) {
-          setError(err instanceof Error ? err.message : "Search failed");
+          setError(err instanceof Error ? err.message : t("search.searchFailed"));
           onResults([], 0);
           setResultCount(null);
         }
@@ -156,7 +160,7 @@ export function CardSearch({
         }
       }
     },
-    [onResults],
+    [onResults, t],
   );
 
   const scheduleSearch = useCallback(
@@ -271,15 +275,15 @@ export function CardSearch({
     <div className="flex flex-col gap-3 p-3">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Search</div>
-          <div className="mt-1 text-sm text-slate-300">Add cards to the current list.</div>
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("search.title")}</div>
+          <div className="mt-1 text-sm text-slate-300">{t("search.subtitle")}</div>
         </div>
         <button
           type="button"
           onClick={onReset}
           className="rounded-full border border-white/10 bg-white/6 px-2.5 py-1 text-[0.68rem] uppercase tracking-[0.16em] text-slate-300 hover:bg-white/10 hover:text-white"
         >
-          Reset
+          {t("search.reset")}
         </button>
       </div>
 
@@ -287,7 +291,7 @@ export function CardSearch({
         type="text"
         value={filters.text}
         onChange={(e) => handleTextChange(e.target.value)}
-        placeholder="Search cards..."
+        placeholder={t("search.textPlaceholder")}
         className="w-full rounded-[16px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
       />
 
@@ -311,16 +315,16 @@ export function CardSearch({
         onChange={(e) => handleTypeChange(e.target.value)}
         className="rounded-[16px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:border-white/20 focus:outline-none"
       >
-        <option value="">All types</option>
-        {CARD_TYPES.map((t) => (
-          <option key={t} value={t}>
-            {t}
+        <option value="">{t("search.allTypes")}</option>
+        {CARD_TYPES.map((cardType) => (
+          <option key={cardType} value={cardType}>
+            {cardType}
           </option>
         ))}
       </select>
 
       <div className="flex items-center gap-2">
-        <label className="text-xs text-gray-400">CMC max:</label>
+        <label className="text-xs text-gray-400">{t("search.cmcMax")}</label>
         <input
           type="number"
           min={0}
@@ -336,7 +340,7 @@ export function CardSearch({
         onChange={(e) => handleBrowseFormatChange(e.target.value as BrowserLegalityFilter)}
         className="rounded-[16px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:border-white/20 focus:outline-none"
       >
-        {BROWSER_FORMATS.map(({ value, label }) => (
+        {browserFormats.map(({ value, label }) => (
           <option key={value} value={value}>
             {label}
           </option>
@@ -344,7 +348,7 @@ export function CardSearch({
       </select>
 
       <div className="space-y-2">
-        <label className="text-xs text-gray-400">Sets</label>
+        <label className="text-xs text-gray-400">{t("search.sets")}</label>
         <div className="flex gap-2">
           <input
             type="text"
@@ -357,7 +361,7 @@ export function CardSearch({
               }
             }}
             list="deck-builder-set-list"
-            placeholder="Add set code..."
+            placeholder={t("search.addSetPlaceholder")}
             className="min-w-0 flex-1 rounded-[16px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
           />
           <button
@@ -366,7 +370,7 @@ export function CardSearch({
             disabled={!setInput.trim()}
             className="rounded-[16px] border border-white/10 bg-white/10 px-3 py-2 text-xs font-medium text-white hover:bg-white/14 disabled:opacity-40"
           >
-            Add
+            {t("search.addSet")}
           </button>
         </div>
         <datalist id="deck-builder-set-list">
@@ -386,7 +390,7 @@ export function CardSearch({
                   type="button"
                   onClick={() => handleRemoveSet(setCode)}
                   className="rounded-full border border-white/10 bg-white/10 px-2.5 py-1 text-xs text-slate-200 hover:bg-white/14"
-                  title={`Remove ${setName}`}
+                  title={t("search.removeSet", { name: setName })}
                 >
                   {setCode} x
                 </button>
@@ -397,9 +401,9 @@ export function CardSearch({
       </div>
 
       <div className="text-xs text-gray-400">
-        {!loading && resultCount === null && !error && !hasSearchCriteria(filters) && "Add a filter to start browsing"}
-        {loading && "Searching..."}
-        {!loading && resultCount !== null && `${resultCount} results`}
+        {!loading && resultCount === null && !error && !hasSearchCriteria(filters) && t("search.emptyHint")}
+        {loading && t("search.searching")}
+        {!loading && resultCount !== null && t("search.results", { count: resultCount })}
         {error && <span className="text-red-400">{error}</span>}
       </div>
     </div>

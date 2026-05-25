@@ -1,5 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -9,6 +11,7 @@ import type { GameObject } from "../../adapter/types.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 
 export function TargetingOverlay() {
+  const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -48,6 +51,7 @@ export function TargetingOverlay() {
     activeSlot,
     targetSlots,
     selection,
+    t,
   });
 
   const triggerDescription = waitingFor?.type === "TriggerTargetSelection" && waitingFor.data.description
@@ -105,23 +109,25 @@ export function TargetingOverlay() {
           )}
             <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
             {isCopyTargetChoice
-              ? "Choose a permanent to copy"
+              ? t("targeting.choosePermanentToCopy")
               : isCopyRetarget
                 ? (() => {
                     const slots = waitingFor.data.target_slots;
                     const hasCurrent = slots.every((slot) => slot.current != null);
                     return slots.length > 1
-                      ? `${hasCurrent ? "Retarget" : "Choose target for"} copy: slot ${Math.min(currentTargetSlot + 1, slots.length)} of ${slots.length}`
-                      : hasCurrent ? "Choose new target for copy" : "Choose target for copy";
+                      ? (hasCurrent
+                          ? t("targeting.retargetCopySlot", { current: Math.min(currentTargetSlot + 1, slots.length), total: slots.length })
+                          : t("targeting.chooseTargetForCopySlot", { current: Math.min(currentTargetSlot + 1, slots.length), total: slots.length }))
+                      : hasCurrent ? t("targeting.chooseNewTargetForCopy") : t("targeting.chooseTargetForCopy");
                   })()
               : isExploreChoice
-                ? "Choose which creature explores next"
+                ? t("targeting.chooseCreatureToExplore")
               : isTapCreatureChoice
-                ? `Tap ${waitingFor.data.count} untapped creature${waitingFor.data.count > 1 ? "s" : ""}`
+                ? t("targeting.tapUntappedCreatures", { count: waitingFor.data.count })
               : inferredPrompt ?? (
                 targetSlots.length > 1
-                  ? `Choose target ${Math.min(currentTargetSlot + 1, targetSlots.length)} of ${targetSlots.length}`
-                  : "Choose a target"
+                  ? t("targeting.chooseTargetOf", { current: Math.min(currentTargetSlot + 1, targetSlots.length), total: targetSlots.length })
+                  : t("targeting.chooseTarget")
               )}
             </div>
           {enginePrompt && (
@@ -139,7 +145,7 @@ export function TargetingOverlay() {
               onClick={handleCancel}
               className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
             >
-              Cancel
+              {t("common:actions.cancel")}
             </button>
           )}
           {isTapCreatureChoice && (
@@ -148,7 +154,7 @@ export function TargetingOverlay() {
               disabled={selectedCardIds.length !== waitingFor.data.count}
               className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-400"
             >
-              Confirm Tap ({selectedCardIds.length}/{waitingFor.data.count})
+              {t("targeting.confirmTap", { selected: selectedCardIds.length, count: waitingFor.data.count })}
             </button>
           )}
           {canKeepCurrentTargets && (
@@ -160,7 +166,7 @@ export function TargetingOverlay() {
               }
               className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600"
             >
-              Keep Current Targets
+              {t("targeting.keepCurrentTargets")}
             </button>
           )}
           {isOptionalCurrentSlot && (
@@ -168,7 +174,7 @@ export function TargetingOverlay() {
               onClick={handleSkip}
               className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-amber-600"
             >
-              Skip
+              {t("targeting.skip")}
             </button>
           )}
         </div>
@@ -190,6 +196,7 @@ type TargetingPromptParams = {
   activeSlot: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean } | undefined;
   targetSlots: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean }[];
   selection: { current_slot: number } | null;
+  t: TFunction<"game">;
 };
 
 function buildInferredTargetPrompt({
@@ -198,6 +205,7 @@ function buildInferredTargetPrompt({
   activeSlot,
   targetSlots,
   selection,
+  t,
 }: TargetingPromptParams): string | null {
   if (!waitingFor) return null;
   if (waitingFor.type !== "TargetSelection" && waitingFor.type !== "TriggerTargetSelection") return null;
@@ -205,48 +213,48 @@ function buildInferredTargetPrompt({
 
   if (!activeSlot) return null;
   if (activeSlot.legal_targets.length === 0) {
-    return "No legal targets available";
+    return t("targeting.noLegalTargets");
   }
 
-  const targetNouns = inferTargetNoun(activeSlot.legal_targets, objects);
-  const targetWord = targetNouns ? targetNouns : "target";
-  const maybePrefix = selection && targetSlots.length === 1 && activeSlot.optional ? "up to one" : "a";
+  const targetWord = inferTargetNoun(activeSlot.legal_targets, objects, t);
+  const useUpToOne = selection && targetSlots.length === 1 && activeSlot.optional;
 
   if (waitingFor.type === "TriggerTargetSelection") {
-    return `${maybePrefix} ${targetWord}`;
+    return useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
   }
 
   if (targetSlots.length <= 1) {
-    return `${maybePrefix} ${targetWord}`;
+    return useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
   }
 
-  return `Choose target ${Math.min(selection.current_slot + 1, targetSlots.length)} of ${targetSlots.length}`;
+  return t("targeting.chooseTargetOf", { current: Math.min(selection.current_slot + 1, targetSlots.length), total: targetSlots.length });
 }
 
 function inferTargetNoun(
   targets: { Object?: number; Player?: number }[],
-  objects?: Record<number, GameObject>,
-): string | null {
+  objects: Record<number, GameObject> | undefined,
+  t: TFunction<"game">,
+): string {
   const allPlayers = targets.every((target) => "Player" in target);
-  if (allPlayers) return "player";
+  if (allPlayers) return t("targeting.nounPlayer");
 
   const objectTargets = targets.flatMap((target) =>
     typeof target.Object === "number" ? [objects?.[target.Object]].filter(Boolean) : [],
   ) as GameObject[];
   if (objectTargets.length !== targets.filter((target) => typeof target.Object === "number").length) {
-    return "target";
+    return t("targeting.nounTarget");
   }
-  if (objectTargets.length === 0) return "target";
+  if (objectTargets.length === 0) return t("targeting.nounTarget");
   if (objectTargets.every((obj) => !obj.card_types.core_types.includes("Land"))) {
-    return "nonland permanent";
+    return t("targeting.nounNonlandPermanent");
   }
   if (objectTargets.every((obj) => obj.card_types.core_types.includes("Creature"))) {
-    return "creature";
+    return t("targeting.nounCreature");
   }
   if (objectTargets.every((obj) =>
     obj.card_types.core_types.includes("Planeswalker"),
   )) {
-    return "planeswalker";
+    return t("targeting.nounPlaneswalker");
   }
-  return "target permanent";
+  return t("targeting.nounTargetPermanent");
 }

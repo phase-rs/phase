@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { detectAndParseDeck, exportDeck, resolveCommander } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
@@ -85,6 +86,7 @@ export function DeckList({
   isCommanderEligible,
   onOpenArtPicker,
 }: DeckListProps) {
+  const { t } = useTranslation("deck-builder");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
@@ -127,21 +129,21 @@ export function DeckList({
         return { sideboardTitle: "", sideboardWarning: undefined, hideSideboard: true };
       case "Unlimited":
         return {
-          sideboardTitle: `Sideboard (${sideTotal})`,
+          sideboardTitle: t("deckList.sideboardUnlimited", { count: sideTotal }),
           sideboardWarning: undefined,
           hideSideboard: false,
         };
       case "Limited": {
         const max = sideboardPolicy.data;
         return {
-          sideboardTitle: `Sideboard (${sideTotal}/${max})`,
+          sideboardTitle: t("deckList.sideboardLimited", { count: sideTotal, max }),
           sideboardWarning:
-            sideTotal > max ? `Sideboard exceeds ${max}-card limit` : undefined,
+            sideTotal > max ? t("deckList.sideboardExceeds", { max }) : undefined,
           hideSideboard: false,
         };
       }
     }
-  }, [sideboardPolicy, sideTotal]);
+  }, [sideboardPolicy, sideTotal, t]);
 
   useEffect(() => {
     if (hideSideboard && viewMode === "sideboard") setViewMode("main");
@@ -195,23 +197,23 @@ export function DeckList({
     <div className="flex flex-col">
       <div className="mb-2 flex items-center justify-between gap-2 border-b border-white/8 pb-2">
         <div className="min-w-0">
-          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Current List</div>
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("deckList.currentList")}</div>
         </div>
         <div className="flex shrink-0 gap-1">
           <button
             onClick={() => setShowPasteModal(true)}
             className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6"
-            title="Import deck from text (MTGA or .dck format)"
+            title={t("deckList.importTitle")}
           >
-            Import
+            {t("deckList.import")}
           </button>
           <button
             onClick={() => setShowExportModal(true)}
             disabled={mainTotal === 0}
             className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6 disabled:opacity-40"
-            title="Export deck"
+            title={t("deckList.exportTitle")}
           >
-            Export
+            {t("deckList.export")}
           </button>
           <input
             ref={fileInputRef}
@@ -237,7 +239,7 @@ export function DeckList({
                 : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
             }
           >
-            Main ({mainTotal})
+            {t("deckList.mainTab", { count: mainTotal })}
           </button>
           <button
             onClick={() => setViewMode("sideboard")}
@@ -247,12 +249,12 @@ export function DeckList({
                 : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
             }
           >
-            Sideboard ({sideTotal})
+            {t("deckList.sideboardTab", { count: sideTotal })}
           </button>
         </div>
       ) : (
         <h3 className="mb-2 text-sm font-bold text-white">
-          Main Deck ({mainTotal} cards)
+          {t("deckList.mainDeckHeading", { count: mainTotal })}
         </h3>
       )}
 
@@ -270,7 +272,7 @@ export function DeckList({
           ? (["Creatures", "Spells", "Lands"] as const).map((group) => (
               <MoveList
                 key={group}
-                title={group}
+                title={t(`deckList.group.${group}`)}
                 entries={mainGroups[group]}
                 section="main"
                 onRemove={onRemoveCard}
@@ -294,7 +296,7 @@ export function DeckList({
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
                 alwaysShow
-                emptyHint="Hover a main-deck card and click → to move it here."
+                emptyHint={t("deckList.sideboardEmptyHint")}
                 warning={sideboardWarning}
                 onChooseArt={onChooseArt}
                 density="comfortable"
@@ -311,11 +313,11 @@ export function DeckList({
             onClick={() => setShowPasteModal(false)}
           />
           <div className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md">
-            <h3 className="mb-3 text-sm font-bold text-white">Import Deck</h3>
+            <h3 className="mb-3 text-sm font-bold text-white">{t("deckList.importModalTitle")}</h3>
             <textarea
               value={pasteText}
               onChange={(e) => setPasteText(e.target.value)}
-              placeholder="Paste deck list (MTGA or .dck format)..."
+              placeholder={t("deckList.pastePlaceholder")}
               rows={10}
               className="mb-3 w-full rounded-[16px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
               autoFocus
@@ -325,7 +327,7 @@ export function DeckList({
                 onClick={() => fileInputRef.current?.click()}
                 className="rounded-xl border border-white/8 bg-black/18 px-3 py-1.5 text-xs text-gray-300 hover:bg-white/6"
               >
-                From File
+                {t("deckList.fromFile")}
               </button>
               <div className="flex gap-2">
                 <button
@@ -335,14 +337,14 @@ export function DeckList({
                   }}
                   className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
                 >
-                  Cancel
+                  {t("common:actions.cancel")}
                 </button>
                 <button
                   onClick={handlePasteImport}
                   disabled={!pasteText.trim()}
                   className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-40"
                 >
-                  Parse
+                  {t("deckList.parse")}
                 </button>
               </div>
             </div>
@@ -362,7 +364,7 @@ export function DeckList({
           />
           <div className="relative z-10 w-full max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white">Export Deck</h3>
+              <h3 className="text-sm font-bold text-white">{t("deckList.exportModalTitle")}</h3>
               <div className="flex rounded bg-gray-800 p-0.5 text-xs">
                 <button
                   onClick={() => { setExportFormat("dck"); setCopied(false); }}
@@ -391,7 +393,7 @@ export function DeckList({
                 onClick={handleSaveToFile}
                 className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
               >
-                Save to File
+                {t("deckList.saveToFile")}
               </button>
               <div className="flex gap-2">
                 <button
@@ -401,13 +403,13 @@ export function DeckList({
                   }}
                   className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
                 >
-                  Close
+                  {t("common:actions.close")}
                 </button>
                 <button
                   onClick={handleCopyToClipboard}
                   className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
                 >
-                  {copied ? "Copied!" : "Copy"}
+                  {copied ? t("deckList.copied") : t("deckList.copy")}
                 </button>
               </div>
             </div>

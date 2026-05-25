@@ -553,6 +553,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // correct `affected` filter inherited from the subject.
                     let have_base_pt_continuation =
                         starts_have_base_power_toughness(remainder_trimmed);
+                    let continuous_modifier_conjunct =
+                        starts_you_control_subject_predicate(&before_lower)
+                            && alt((
+                                tag::<_, _, OracleError<'_>>("gain "),
+                                tag("gains "),
+                                tag("have "),
+                                tag("has "),
+                            ))
+                            .parse(remainder_trimmed)
+                            .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -562,7 +572,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || choice_partition_remainder
                         || compound_subject_each
                         || inside_otherwise_body
-                        || have_base_pt_continuation;
+                        || have_base_pt_continuation
+                        || continuous_modifier_conjunct;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -633,6 +644,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         let after_then = &trimmed["then ".len()..];
         let after_then_lower = &trimmed_lower["then ".len()..];
         if starts_clause_text_or_conjugated(after_then)
+            || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
@@ -782,6 +794,31 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
     let rest = &lower[first_word.len()..];
     let deconjugated = format!("{base}{rest}");
     starts_clause_text_lower(&deconjugated)
+}
+
+fn starts_you_control_subject_predicate(s: &str) -> bool {
+    let Ok((after_subject, subject)) =
+        take_until::<_, _, OracleError<'_>>(" you control ").parse(s)
+    else {
+        return false;
+    };
+    if subject.trim().is_empty() {
+        return false;
+    }
+    let Ok((predicate, _)) = tag::<_, _, OracleError<'_>>(" you control ").parse(after_subject)
+    else {
+        return false;
+    };
+    alt((
+        tag::<_, _, OracleError<'_>>("get "),
+        tag("gets "),
+        tag("gain "),
+        tag("gains "),
+        tag("have "),
+        tag("has "),
+    ))
+    .parse(predicate)
+    .is_ok()
 }
 
 /// Inner implementation operating on pre-lowercased input.
@@ -3362,6 +3399,30 @@ mod tests {
     fn comma_then_clause_still_splits() {
         let chunks = clause_texts("draw a card, then discard a card");
         assert_eq!(chunks, vec!["draw a card", "discard a card"]);
+    }
+
+    #[test]
+    fn comma_then_you_control_subject_predicate_splits() {
+        let chunks = clause_texts(
+            "create a 2/2 colorless Robot artifact creature token, then creatures you control get +1/+0 and gain haste until end of turn",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "create a 2/2 colorless Robot artifact creature token",
+                "creatures you control get +1/+0 and gain haste until end of turn",
+            ]
+        );
+    }
+
+    #[test]
+    fn static_modifier_conjunct_does_not_split() {
+        let chunks =
+            clause_texts("creatures you control get +1/+0 and gain haste until end of turn");
+        assert_eq!(
+            chunks,
+            vec!["creatures you control get +1/+0 and gain haste until end of turn"]
+        );
     }
 
     #[test]

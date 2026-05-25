@@ -49,6 +49,41 @@ export async function getCardFaceData(cardName: string) {
   return engine.get_card_face_data(cardName);
 }
 
+/** A localized card face from a per-language content-i18n sidecar. Fields are
+ *  optional — absent fields fall back to the engine's English text. Mirrors the
+ *  `LocalizedFace` struct emitted by `oracle-gen --sidecar-dir`. */
+export interface LocalizedFace {
+  name?: string;
+  oracle_text?: string;
+  type_line?: string;
+}
+
+const cardLocalePromises = new Map<string, Promise<Map<string, LocalizedFace>>>();
+
+/**
+ * Lazily fetch the per-locale card-content sidecar (`card-data.<lng>.json`) once,
+ * into a Map keyed by lowercased canonical card name (the same key the engine's
+ * `face_index` uses). English needs no sidecar. A missing sidecar (e.g. 404 for a
+ * locale not yet published) resolves to an empty map so callers fall back to
+ * English per-field — content localization is best-effort display data, never a
+ * hard dependency.
+ */
+export async function ensureCardLocale(lang: string): Promise<Map<string, LocalizedFace>> {
+  if (lang === "en") return new Map();
+  let promise = cardLocalePromises.get(lang);
+  if (!promise) {
+    promise = (async () => {
+      const url = __CARD_DATA_LOCALE_URL_TEMPLATE__.replace("{lng}", lang);
+      const resp = await fetch(url);
+      if (!resp.ok) return new Map<string, LocalizedFace>();
+      const obj = (await resp.json()) as Record<string, LocalizedFace>;
+      return new Map(Object.entries(obj));
+    })().catch(() => new Map<string, LocalizedFace>());
+    cardLocalePromises.set(lang, promise);
+  }
+  return promise;
+}
+
 export async function getCardParseDetails(cardName: string) {
   await ensureCardDatabase();
   const engine = await loadEngineModule();

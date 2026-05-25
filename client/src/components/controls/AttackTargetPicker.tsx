@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { Trans, useTranslation } from "react-i18next";
 
 import type { AttackTarget, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
@@ -31,6 +32,7 @@ export function AttackTargetPicker({
   onConfirm,
   onCancel,
 }: AttackTargetPickerProps) {
+  const { t } = useTranslation("game");
   const [mode, setMode] = useState<"all" | "split">("all");
   const [peeked, setPeeked] = useState(false);
   const [perCreatureTargets, setPerCreatureTargets] = useState<Map<ObjectId, AttackTarget>>(
@@ -56,10 +58,10 @@ export function AttackTargetPicker({
 
   function getTargetLabel(target: AttackTarget): string {
     if (target.type === "Player") {
-      return getPlayerLabel(target.data, myId, teamBased);
+      return getPlayerLabel(t, target.data, myId, teamBased);
     }
     const obj = gameState?.objects[target.data];
-    return obj?.name ?? `Planeswalker #${target.data}`;
+    return obj?.name ?? t("attackTargetPicker.planeswalkerFallback", { id: target.data });
   }
 
   function getTargetSeatColor(target: AttackTarget): string | undefined {
@@ -118,7 +120,7 @@ export function AttackTargetPicker({
       >
         <div className="relative w-[420px] max-h-[80vh] overflow-y-auto rounded-xl border border-gray-600 bg-gray-900/95 px-8 py-5 shadow-2xl backdrop-blur-sm">
           <h3 className="mb-4 text-center text-lg font-bold text-gray-100">
-            Choose Attack Target
+            {t("attackTargetPicker.heading")}
           </h3>
 
           {/* Mode toggle */}
@@ -130,7 +132,7 @@ export function AttackTargetPicker({
                 size: "sm",
               })}
             >
-              Attack All
+              {t("attackTargetPicker.attackAll")}
             </button>
             <button
               onClick={() => setMode("split")}
@@ -139,7 +141,7 @@ export function AttackTargetPicker({
                 size: "sm",
               })}
             >
-              Split Attacks
+              {t("attackTargetPicker.splitAttacks")}
             </button>
           </div>
 
@@ -154,7 +156,15 @@ export function AttackTargetPicker({
                     onClick={() => handleAttackAll(target)}
                     className={gameButtonClass({ tone: "red", size: "md" })}
                   >
-                    Attack <span className="mx-1 font-bold" style={color ? { color } : undefined}>{getTargetLabel(target)}</span> with {selectedAttackers.length} {selectedAttackers.length === 1 ? "creature" : "creatures"}
+                    <Trans
+                      t={t}
+                      i18nKey="attackTargetPicker.attackWith"
+                      count={selectedAttackers.length}
+                      values={{ label: getTargetLabel(target), count: selectedAttackers.length }}
+                      components={{
+                        name: <span className="mx-1 font-bold" style={color ? { color } : undefined} />,
+                      }}
+                    />
                   </button>
                 );
               })}
@@ -172,7 +182,14 @@ export function AttackTargetPicker({
                       onClick={() => assignAllCreatures(target)}
                       className={gameButtonClass({ tone: "slate", size: "xs" })}
                     >
-                      All → <span className="ml-1 font-bold" style={color ? { color } : undefined}>{getTargetLabel(target)}</span>
+                      <Trans
+                        t={t}
+                        i18nKey="attackTargetPicker.allTo"
+                        values={{ label: getTargetLabel(target) }}
+                        components={{
+                          name: <span className="ml-1 font-bold" style={color ? { color } : undefined} />,
+                        }}
+                      />
                     </button>
                   );
                 })}
@@ -186,7 +203,7 @@ export function AttackTargetPicker({
                   return (
                     <div key={creatureId} className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-white/5">
                       <span className="min-w-0 flex-1 truncate text-sm text-gray-200" {...hoverProps(creatureId)}>
-                        {obj?.name ?? `Creature #${creatureId}`}
+                        {obj?.name ?? t("attackTargetPicker.creatureFallback", { id: creatureId })}
                       </span>
                       <TargetDropdown
                         targets={sortedTargets}
@@ -204,7 +221,7 @@ export function AttackTargetPicker({
                 onClick={handleSplitConfirm}
                 className={gameButtonClass({ tone: "emerald", size: "md" })}
               >
-                Confirm Split Attacks
+                {t("attackTargetPicker.confirmSplitAttacks")}
               </button>
             </div>
           )}
@@ -213,7 +230,7 @@ export function AttackTargetPicker({
             onClick={onCancel}
             className={`mt-3 w-full ${gameButtonClass({ tone: "slate", size: "sm" })}`}
           >
-            Cancel
+            {t("common:actions.cancel")}
           </button>
           <PeekTab onClick={() => setPeeked(true)} />
         </div>
@@ -229,12 +246,13 @@ function attackTargetKey(target: AttackTarget): string {
 }
 
 function RestoreTab({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslation("game");
   return (
     <motion.button
       type="button"
       onClick={onClick}
-      aria-label="Restore dialog"
-      title="Restore attack target dialog"
+      aria-label={t("attackTargetPicker.restoreDialog")}
+      title={t("attackTargetPicker.restoreDialogTitle")}
       initial={{ opacity: 0, scale: 0.9 }}
       animate={{
         opacity: 1,
@@ -359,8 +377,13 @@ function TargetDropdown({ targets, currentTarget, getLabel, getColor, onChange }
   );
 }
 
-function getPlayerLabel(playerId: PlayerId, myId: PlayerId, teamBased: boolean): string {
-  if (playerId === myId) return "You";
-  if (teamBased && Math.floor(playerId / 2) === Math.floor(myId / 2)) return "Ally";
+function getPlayerLabel(
+  t: ReturnType<typeof useTranslation>["t"],
+  playerId: PlayerId,
+  myId: PlayerId,
+  teamBased: boolean,
+): string {
+  if (playerId === myId) return t("attackTargetPicker.you");
+  if (teamBased && Math.floor(playerId / 2) === Math.floor(myId / 2)) return t("attackTargetPicker.ally");
   return getPlayerDisplayName(playerId, myId);
 }

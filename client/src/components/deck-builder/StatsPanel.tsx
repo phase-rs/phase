@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { DeckCompatibilityResult } from "../../services/deckCompatibility";
 import { scryfallLegalityKey } from "../../services/scryfall";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
@@ -53,6 +55,7 @@ export function StatsPanel({
   auditEmptyReason,
   onCardClick,
 }: StatsPanelProps) {
+  const { t } = useTranslation("deck-builder");
   const coverage = compatibility?.coverage;
   const showLegality = Boolean(
     compatibility?.format_legality
@@ -78,7 +81,7 @@ export function StatsPanel({
         <div className="space-y-3 rounded-[18px] border border-white/8 bg-black/18 p-3">
           {compatibility?.format_legality && (
             <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">Format Legality</div>
+              <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">{t("stats.formatLegality")}</div>
               <div className="flex flex-wrap gap-1">
                 {formatLegalityBadges(compatibility.format_legality).map((fmt) => {
                   const status = compatibility.format_legality?.[fmt.key] ?? "not_legal";
@@ -97,7 +100,7 @@ export function StatsPanel({
           )}
           {coverage && coverage.unsupported_cards.length > 0 && (
             <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">Engine Coverage</div>
+              <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">{t("stats.engineCoverage")}</div>
               <div className="flex items-center gap-2">
                 <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-700">
                   <div
@@ -107,7 +110,9 @@ export function StatsPanel({
                 </div>
                 <span
                   className="shrink-0 text-[10px] text-gray-400"
-                  title={`Unsupported:\n${coverage.unsupported_cards.map((c) => `${c.name}: ${c.gaps.join(", ")}`).join("\n")}`}
+                  title={t("stats.unsupportedTitle", {
+                    list: coverage.unsupported_cards.map((c) => `${c.name}: ${c.gaps.join(", ")}`).join("\n"),
+                  })}
                 >
                   {coverage.supported_unique}/{coverage.total_unique}
                 </span>

@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 
 import type { GameAction, GameObject } from "../../adapter/types.ts";
@@ -101,6 +102,7 @@ function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
 }
 
 export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride }: PermanentCardProps) {
+  const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
@@ -592,7 +594,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           {isUnderAttack && (
             <div
               className="absolute left-1 top-1 z-20 flex items-center gap-0.5 rounded bg-red-700/85 px-1 py-0.5 text-[10px] font-bold text-white shadow"
-              title={`Attacked by ${incomingAttackerCount} creature${incomingAttackerCount === 1 ? "" : "s"}`}
+              title={t("permanent.underAttack", { count: incomingAttackerCount })}
             >
               <span aria-hidden>⚔</span>
               {incomingAttackerCount > 1 && <span>×{incomingAttackerCount}</span>}
@@ -633,7 +635,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         <div
           className={`pointer-events-none absolute ${isUnderAttack ? "left-1 top-7" : "left-1 top-1"} z-40 rounded bg-lime-300 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-black ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
         >
-          Target
+          {t("permanent.target")}
         </div>
       )}
 
@@ -646,9 +648,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       {isCopy && !isValidTarget && (
         <div
           className={`pointer-events-none absolute left-1 ${isUnderAttack ? "top-7" : "top-1"} z-20 rounded bg-indigo-600/90 px-1 py-0.5 text-[9px] font-black uppercase leading-none tracking-wide text-white ring-1 ring-black/60 shadow-[0_1px_4px_rgba(0,0,0,0.6)]`}
-          title="Token copy of a real card"
+          title={t("permanent.copyTooltip")}
         >
-          Copy
+          {t("permanent.copy")}
         </div>
       )}
 

@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   AI_DIFFICULTIES,
   getAiDifficultyLabel,
@@ -19,14 +21,15 @@ export function AiDifficultyDropdown({
   className,
   compact = false,
 }: AiDifficultyDropdownProps) {
+  const { t } = useTranslation("menu");
   return (
     <div className={`relative ${className ?? ""}`}>
       <label className="sr-only" htmlFor={`ai-difficulty-${compact ? "compact" : "full"}`}>
-        AI difficulty
+        {t("aiDifficulty.label")}
       </label>
       <select
         id={`ai-difficulty-${compact ? "compact" : "full"}`}
-        aria-label={`AI difficulty: ${getAiDifficultyLabel(difficulty)}`}
+        aria-label={t("aiDifficulty.ariaLabel", { difficulty: getAiDifficultyLabel(difficulty) })}
         value={difficulty}
         onClick={(event) => event.stopPropagation()}
         onChange={(event) => onChange(event.target.value as AIDifficulty)}

@@ -5994,6 +5994,11 @@ fn try_parse_verb_and_target<'a>(
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
         return Some((TargetedImperativeAst::Untap { target }, rem));
     }
+    if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("goad ")).parse(i)) {
+        let (target_text, _) = strip_optional_target_prefix(rest);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
+        return Some((TargetedImperativeAst::Goad { target }, rem));
+    }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("sacrifice ")).parse(i)) {
         if let Some((count, target, rem)) = imperative::parse_all_sacrifice(rest, ctx) {
             return Some((
@@ -6240,12 +6245,13 @@ fn try_parse_verb_and_target<'a>(
     // Return: determine destination separately, use parse_target remainder for compound detection
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("return ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (trailing_target_text, trailing_dest) = strip_return_destination_ext(rest);
+        let (trailing_target_text, trailing_dest, trailing_dest_remainder) =
+            strip_return_destination_ext_with_remainder(rest);
         let (leading_target_text, leading_dest) = strip_leading_return_destination_ext(rest);
-        let (target_text, dest) = if leading_dest.is_some() {
-            (leading_target_text, leading_dest)
+        let (target_text, dest, dest_remainder) = if leading_dest.is_some() {
+            (leading_target_text, leading_dest, "")
         } else {
-            (trailing_target_text, trailing_dest)
+            (trailing_target_text, trailing_dest, trailing_dest_remainder)
         };
         let (is_mass, target_text) = if let Some((_, stripped)) =
             nom_on_lower(target_text, &target_text.to_ascii_lowercase(), |i| {
@@ -6255,7 +6261,10 @@ fn try_parse_verb_and_target<'a>(
         } else {
             (false, target_text)
         };
-        let (target, rem) = parse_target_with_ctx(target_text, ctx);
+        let (target, mut rem) = parse_target_with_ctx(target_text, ctx);
+        if rem.is_empty() {
+            rem = dest_remainder;
+        }
         let origin = infer_origin_zone(rest_lower);
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
@@ -6471,6 +6480,27 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                 if sub_clause.multi_target.is_none() {
                     sub_clause.multi_target = up_to_spec;
                 }
+            }
+        }
+    }
+
+    // CR 608.2c: Verb carry-forward for mass-object continuations.
+    // "untap it and all Samurai you control" splits into sub-text
+    // "all Samurai you control"; prepend the primary verb so the existing
+    // mass parser sees "untap all Samurai you control".
+    if matches!(sub_clause.effect, Effect::Unimplemented { .. })
+        && alt((
+            tag::<_, _, OracleError<'_>>("all "),
+            tag::<_, _, OracleError<'_>>("each "),
+        ))
+        .parse(sub_lower.as_str())
+        .is_ok()
+    {
+        if let Some(verb) = extract_effect_verb(&primary_effect) {
+            let reparsed_text = format!("{verb} {sub_text}");
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
+            if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
+                sub_clause = reparsed;
             }
         }
     }
@@ -10548,6 +10578,117 @@ fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
     }
 }
 
+fn parse_that_type_mana_count(text: &str) -> Option<QuantityExpr> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (input, _) = tag("add ").parse(input)?;
+        let (input, count) = nom_quantity::parse_quantity(input)?;
+        let (input, _) = tag(" mana of that type").parse(input)?;
+        let (input, _) = opt(tag(" instead")).parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        eof(input)?;
+        Ok((input, count))
+    })
+    .map(|(count, _)| count)
+}
+
+fn mana_production_with_count(
+    produced: &ManaProduction,
+    count: QuantityExpr,
+) -> Option<ManaProduction> {
+    match produced {
+        ManaProduction::Colorless { .. } => Some(ManaProduction::Colorless { count }),
+        ManaProduction::AnyOneColor {
+            color_options,
+            contribution,
+            ..
+        } => Some(ManaProduction::AnyOneColor {
+            count,
+            color_options: color_options.clone(),
+            contribution: *contribution,
+        }),
+        ManaProduction::AnyCombination { color_options, .. } => {
+            Some(ManaProduction::AnyCombination {
+                count,
+                color_options: color_options.clone(),
+            })
+        }
+        ManaProduction::ChosenColor {
+            contribution,
+            fixed_alternative,
+            ..
+        } => Some(ManaProduction::ChosenColor {
+            count,
+            contribution: *contribution,
+            fixed_alternative: *fixed_alternative,
+        }),
+        ManaProduction::OpponentLandColors { .. } => {
+            Some(ManaProduction::OpponentLandColors { count })
+        }
+        ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
+            Some(ManaProduction::AnyTypeProduceableBy {
+                count,
+                land_filter: land_filter.clone(),
+            })
+        }
+        ManaProduction::AnyInCommandersColorIdentity { contribution, .. } => {
+            Some(ManaProduction::AnyInCommandersColorIdentity {
+                count,
+                contribution: *contribution,
+            })
+        }
+        ManaProduction::Fixed { .. }
+        | ManaProduction::Mixed { .. }
+        | ManaProduction::ChoiceAmongExiledColors { .. }
+        | ManaProduction::ChoiceAmongCombinations { .. }
+        | ManaProduction::DistinctColorsAmongPermanents { .. }
+        | ManaProduction::TriggerEventManaType => None,
+    }
+}
+
+fn rewrite_that_type_mana_instead(def: &mut AbilityDefinition) {
+    let replacement = match (&*def.effect, def.sub_ability.as_deref()) {
+        (
+            Effect::Mana {
+                produced,
+                restrictions,
+                grants,
+                expiry,
+                target,
+            },
+            Some(sub),
+        ) => match sub.effect.as_ref() {
+            Effect::Unimplemented {
+                name,
+                description: Some(description),
+            } if name == "add" => parse_that_type_mana_count(description).and_then(|count| {
+                Some(Effect::Mana {
+                    produced: mana_production_with_count(produced, count)?,
+                    restrictions: restrictions.clone(),
+                    grants: grants.clone(),
+                    expiry: *expiry,
+                    target: target.clone(),
+                })
+            }),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    if let Some(effect) = replacement {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            *sub.effect = effect;
+        }
+    }
+
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_that_type_mana_instead(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_that_type_mana_instead(else_branch);
+    }
+}
+
 fn wire_optional_cast_decline_fallback(def: &mut AbilityDefinition) {
     if def.optional
         && matches!(
@@ -13161,6 +13302,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     collapse_ephemeral_color_choice_mana(&mut result);
+    rewrite_that_type_mana_instead(&mut result);
 
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
     // parent zone-change to Battlefield when the chained sub-ability is an
@@ -14656,7 +14798,9 @@ fn parse_each_of_up_to_damage_target<'a>(
 /// UpTo(ObjectCount), min_count: 0 }` by `parse_one_or_more_sacrifice` — not a
 /// `MultiTargetSpec`. Routing it through this list would strip the quantifier
 /// and collapse the count to a fixed 1 (issue #458).
-const MULTI_TARGET_VERBS: &[&str] = &["exile", "tap", "untap", "return", "destroy", "choose"];
+const MULTI_TARGET_VERBS: &[&str] = &[
+    "exile", "tap", "untap", "goad", "return", "destroy", "choose",
+];
 
 /// CR 115.1d: Strip numeric word prefix before "target" from effect text.
 /// "two target creatures" → (2, "target creatures")
@@ -14774,6 +14918,13 @@ struct ReturnDestination {
 
 /// Detect "return ... to <zone>" destination phrase, including "transformed" flag.
 fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>) {
+    let (target, dest, _) = strip_return_destination_ext_with_remainder(text);
+    (target, dest)
+}
+
+fn strip_return_destination_ext_with_remainder(
+    text: &str,
+) -> (&str, Option<ReturnDestination>, &str) {
     let lower = text.to_lowercase();
     // Ordered longest-first to avoid partial matches.
     // "transformed" variants must come before their non-transformed counterparts.
@@ -14952,6 +15103,7 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
     for (phrase, zone, transformed, under_your_control, enter_tapped) in patterns {
         if let Some(pos) = lower.rfind(phrase) {
             let after_destination = &lower[pos + phrase.len()..];
+            let original_after_destination = &text[pos + phrase.len()..];
             return (
                 text[..pos].trim(),
                 Some(ReturnDestination {
@@ -14961,10 +15113,11 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
                     enter_tapped: *enter_tapped,
                     enter_with_counters: parse_with_counters_suffix(after_destination),
                 }),
+                original_after_destination,
             );
         }
     }
-    (text, None)
+    (text, None, "")
 }
 
 /// Detect "return to <zone> <target>" destination phrases.
@@ -17541,6 +17694,33 @@ mod tests {
                 );
             }
             other => panic!("expected Destroy, got {:?}", other),
+        }
+    }
+
+    /// CR 608.2c: Verb carry-forward for mass-object continuations.
+    /// Godo, Bandit Warlord: "untap it and all Samurai you control" must parse
+    /// the second conjunct as UntapAll rather than dropping the bare noun phrase.
+    #[test]
+    fn compound_verb_carry_forward_all_prefix() {
+        let clause = parse_effect_clause(
+            "untap it and all Samurai you control",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(clause.effect, Effect::Untap { .. }),
+            "primary clause must be Untap, got {:?}",
+            clause.effect
+        );
+        let sub = clause
+            .sub_ability
+            .expect("must have sub_ability for mass continuation");
+        match sub.effect.as_ref() {
+            Effect::UntapAll { target } => {
+                let tf = typed_leg(target).expect("mass untap target should be typed");
+                assert!(has_type(tf, TypeFilter::Subtype("Samurai".to_string())));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("sub-clause must be UntapAll, got {:?}", other),
         }
     }
 
@@ -20808,6 +20988,16 @@ mod tests {
     }
 
     #[test]
+    fn strip_return_destination_preserves_compound_remainder() {
+        let (target, dest, remainder) = strip_return_destination_ext_with_remainder(
+            "target permanent to its owner's hand and put a +1/+1 counter on this creature",
+        );
+        assert_eq!(target, "target permanent");
+        assert_eq!(dest.unwrap().zone, Zone::Hand);
+        assert_eq!(remainder, " and put a +1/+1 counter on this creature");
+    }
+
+    #[test]
     fn strip_return_destination_your_hand() {
         let (target, dest) = strip_return_destination_ext("~ to your hand");
         assert_eq!(target, "~");
@@ -23113,6 +23303,62 @@ mod tests {
     }
 
     #[test]
+    fn compound_return_to_hand_and_put_counter_preserves_subability() {
+        let def = parse_effect_chain(
+            "return another target permanent you control to its owner's hand and put a +1/+1 counter on this creature",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Bounce { .. }),
+            "primary should be Bounce, got {:?}",
+            def.effect
+        );
+        let sub = def.sub_ability.expect("should have counter sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }
+            ),
+            "sub should be PutCounter on SelfRef, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn compound_goad_and_put_counter_preserves_subability() {
+        let def = parse_effect_chain(
+            "goad up to one target creature you don't control and put a +1/+1 counter on this creature",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Goad { .. }),
+            "primary should be Goad, got {:?}",
+            def.effect
+        );
+        assert!(
+            def.multi_target.is_some(),
+            "up to one targeting should be preserved"
+        );
+        let sub = def.sub_ability.expect("should have counter sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }
+            ),
+            "sub should be PutCounter on SelfRef, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
     fn compound_tap_and_put_counter_ignores_trigger_subject_context() {
         let clause = parse_effect_clause(
             "tap target creature an opponent controls and put a stun counter on it",
@@ -23578,6 +23824,52 @@ mod tests {
             Effect::Mana { produced: ManaProduction::AnyOneColor { count: QuantityExpr::Fixed { value: 1 }, ref color_options, contribution: ManaContribution::Base, .. }, .. }
             if color_options == &vec![ManaColor::White, ManaColor::Blue, ManaColor::Black, ManaColor::Red, ManaColor::Green]
         ));
+    }
+
+    #[test]
+    fn effect_add_mana_of_that_type_instead_reuses_parent_production() {
+        let def = parse_effect_chain(
+            "Add one mana of any type that a land you control could produce. If ~ has a +1/+1 counter on it, add three mana of that type instead.",
+            AbilityKind::Activated,
+        );
+        match def.effect.as_ref() {
+            Effect::Mana {
+                produced:
+                    ManaProduction::AnyTypeProduceableBy {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        land_filter,
+                    },
+                ..
+            } => {
+                let tf = typed_leg(land_filter).expect("land filter should be typed");
+                assert!(has_type(tf, TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected base AnyTypeProduceableBy mana, got {other:?}"),
+        }
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("conditional instead mana should be chained");
+        assert!(matches!(
+            sub.condition,
+            Some(AbilityCondition::ConditionInstead { .. })
+        ));
+        match sub.effect.as_ref() {
+            Effect::Mana {
+                produced:
+                    ManaProduction::AnyTypeProduceableBy {
+                        count: QuantityExpr::Fixed { value: 3 },
+                        land_filter,
+                    },
+                ..
+            } => {
+                let tf = typed_leg(land_filter).expect("land filter should be typed");
+                assert!(has_type(tf, TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected replacement AnyTypeProduceableBy mana, got {other:?}"),
+        }
     }
 
     #[test]
@@ -25344,6 +25636,18 @@ mod tests {
             ),
             "Expected PhaseOut with Controller target, got {:?}",
             e
+        );
+    }
+
+    #[test]
+    fn subject_prefixed_intransitive_keyword_actions_strip_to_imperatives() {
+        assert!(
+            matches!(parse_effect("you investigate"), Effect::Investigate),
+            "you investigate should strip the subject and parse as Investigate"
+        );
+        assert!(
+            matches!(parse_effect("you proliferate"), Effect::Proliferate),
+            "you proliferate should strip the subject and parse as Proliferate"
         );
     }
 

@@ -347,7 +347,20 @@ pub(super) fn handle_assign_combat_damage(
         }
     }
 
-    if trample.is_some() {
+    // CR 702.19b: lethal-to-all-blockers is a *precondition for assigning excess
+    // to the player/planeswalker/battle* — not an unconditional constraint on a
+    // trampling attacker. "The attacking creature's controller need not assign
+    // lethal damage to all those blocking creatures but in that case can't assign
+    // any damage to the player or planeswalker it's attacking." When no excess is
+    // assigned (trample_damage == 0 && controller_damage == 0), the controller may
+    // divide damage freely among blockers (CR 510.1c), so the per-blocker lethal
+    // minimum does not apply. Gating on actual excess is also what keeps states
+    // legal where the attacker's power is less than the summed lethal of all its
+    // blockers (e.g. 11 power vs six 2-toughness blockers = 12 lethal): assigning
+    // lethal to every blocker is impossible, but assigning all 11 among them with
+    // no trample-through is perfectly legal — and without this gate that attacker
+    // would have NO legal damage assignment, deadlocking combat.
+    if trample.is_some() && (trample_damage > 0 || controller_damage > 0) {
         for slot in blockers {
             let assigned = assignments
                 .iter()
@@ -681,6 +694,128 @@ mod tests {
         assert_eq!(state.objects[&pw].loyalty, Some(2));
         assert_eq!(state.players[1].life, 20);
         assert_eq!(state.objects[&blocker].damage_marked, 0);
+    }
+
+    /// CR 702.19b regression: a trample attacker whose power is less than the
+    /// summed lethal of all its blockers can legally assign all its damage among
+    /// the blockers with zero trample-through. Reproduces the reported deadlock:
+    /// an 11-power Lotleth Troll blocked by six 2-toughness Soldiers (12 lethal
+    /// total). Pre-fix, the validator demanded lethal to every blocker whenever
+    /// the attacker merely *had* trample, rejecting every possible assignment and
+    /// leaving the combat-damage step with no legal action.
+    #[test]
+    fn trample_attacker_below_total_lethal_can_split_among_blockers() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lotleth Troll", 11, 1);
+        let blockers: Vec<ObjectId> = (0..6)
+            .map(|_| create_creature(&mut state, PlayerId(1), "Soldier", 1, 2))
+            .collect();
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            blocker_assignments: std::iter::once((attacker, blockers.clone())).collect(),
+            blocker_to_attacker: blockers.iter().map(|&b| (b, vec![attacker])).collect(),
+            ..Default::default()
+        });
+        if let Some(combat) = &mut state.combat {
+            combat.attackers[0].blocked = true;
+        }
+
+        let damage_slots: Vec<DamageSlot> = blockers
+            .iter()
+            .map(|&b| DamageSlot {
+                blocker_id: b,
+                lethal_minimum: 2,
+            })
+            .collect();
+        // Lethal to five blockers (10), remainder (1) to the sixth, none to player.
+        let assignments: Vec<(ObjectId, u32)> = blockers
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| (b, if i < 5 { 2 } else { 1 }))
+            .collect();
+
+        let mut events = Vec::new();
+        let result = handle_assign_combat_damage(
+            &mut state,
+            PlayerId(0),
+            attacker,
+            11,
+            &damage_slots,
+            &[CombatDamageAssignmentMode::Normal],
+            Some(TrampleKind::Standard),
+            PlayerId(1),
+            &AttackTarget::Player(PlayerId(1)),
+            None,
+            None,
+            CombatDamageAssignmentMode::Normal,
+            &assignments,
+            0,
+            0,
+            &mut events,
+        );
+
+        assert!(
+            result.is_ok(),
+            "trample attacker below total blocker lethal must have a legal \
+             all-to-blockers assignment (CR 702.19b), got: {:?}",
+            result
+        );
+        // No excess reached the defending player (trample_damage was 0).
+        assert_eq!(state.players[1].life, 20);
+        // The 1-damage remainder actually resolved onto the sixth blocker —
+        // proving the assignment was applied, not silently dropped. It survives
+        // (1 < toughness 2) while the five lethally-damaged blockers are removed
+        // by SBAs (CR 704.5g), so it's the one observable post-resolution.
+        assert_eq!(state.objects[&blockers[5]].damage_marked, 1);
+    }
+
+    /// CR 702.19b guard: the lethal-to-all precondition still bites when excess
+    /// *is* assigned to the player. Assigning trample-through while a blocker is
+    /// under its lethal minimum must be rejected.
+    #[test]
+    fn trample_through_with_under_lethal_blocker_is_rejected() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 5, 5);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            blocker_assignments: std::iter::once((attacker, vec![blocker])).collect(),
+            blocker_to_attacker: std::iter::once((blocker, vec![attacker])).collect(),
+            ..Default::default()
+        });
+        if let Some(combat) = &mut state.combat {
+            combat.attackers[0].blocked = true;
+        }
+
+        let mut events = Vec::new();
+        let result = handle_assign_combat_damage(
+            &mut state,
+            PlayerId(0),
+            attacker,
+            5,
+            &[DamageSlot {
+                blocker_id: blocker,
+                lethal_minimum: 2,
+            }],
+            &[CombatDamageAssignmentMode::Normal],
+            Some(TrampleKind::Standard),
+            PlayerId(1),
+            &AttackTarget::Player(PlayerId(1)),
+            None,
+            None,
+            CombatDamageAssignmentMode::Normal,
+            // Only 1 to the blocker (under lethal 2), 4 tramples to player — illegal.
+            &[(blocker, 1)],
+            4,
+            0,
+            &mut events,
+        );
+
+        assert!(
+            result.is_err(),
+            "trample-through while a blocker is under its lethal minimum must be \
+             rejected (CR 702.19b)"
+        );
     }
 
     /// Install a Norn's-Annex-style attack-tax static on a fresh battlefield

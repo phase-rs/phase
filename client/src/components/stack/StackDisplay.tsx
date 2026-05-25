@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { StackEntry } from "./StackEntry.tsx";
 import {
@@ -8,6 +9,7 @@ import {
 } from "../../utils/stackPressure.ts";
 import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay, WaitingFor } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 
@@ -69,6 +71,7 @@ function getViewportSize() {
 }
 
 export function StackDisplay() {
+  const { t } = useTranslation("game");
   const stack = useGameStore((s) => s.gameState?.stack ?? EMPTY_STACK);
   const waitingFor = useGameStore((s) => s.waitingFor);
   // Engine-authored stack grouping rides on the same state snapshot that
@@ -86,6 +89,12 @@ export function StackDisplay() {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [viewport, setViewport] = useState(getViewportSize);
   const [hoveredStackEntryId, setHoveredStackEntryId] = useState<ObjectId | null>(null);
+  // User-chosen dock edge. Lives in preferences (not local state) because this
+  // component unmounts whenever the stack empties — local state would reset the
+  // choice on every resolution.
+  const stackDockSide = usePreferencesStore((s) => s.stackDockSide);
+  const setStackDockSide = usePreferencesStore((s) => s.setStackDockSide);
+  const dockedLeft = stackDockSide === "left";
 
   useEffect(() => {
     function handleResize() {
@@ -163,6 +172,17 @@ export function StackDisplay() {
   const panelWidth = pileWidth + panelPaddingX * 2;
   const panelHeight = pileHeight + panelPaddingY * 2 + PANEL_HEADER_HEIGHT;
   const collapsedOffset = Math.max(0, panelWidth - collapsedPeekPx);
+  // Collapse slides the panel out toward its docked edge: right dock → positive
+  // x (off the right), left dock → negative x (off the left).
+  const collapsedX = dockedLeft ? -collapsedOffset : collapsedOffset;
+  // Anchor to the docked edge. Only the right side reserves room for the right
+  // action rail (`--game-right-rail-offset`); the left edge has no such rail.
+  const panelAnchorStyle: CSSProperties = dockedLeft
+    ? { top: topPosition, left: `calc(env(safe-area-inset-left) + ${rightOffsetPx}px)` }
+    : {
+        top: topPosition,
+        right: `calc(env(safe-area-inset-right) + ${rightOffsetPx}px + var(--game-right-rail-offset, 0px))`,
+      };
 
   const entryStyles = displayStack.map((_, index) => ({
     position: "absolute" as const,
@@ -175,18 +195,20 @@ export function StackDisplay() {
     <AnimatePresence>
       <motion.div
         key="stack-container"
-        initial={{ opacity: 0, x: 60 }}
+        initial={{ opacity: 0, x: dockedLeft ? -60 : 60 }}
         animate={{ opacity: 1, x: 0 }}
-        exit={{ opacity: 0, x: 60 }}
+        exit={{ opacity: 0, x: dockedLeft ? -60 : 60 }}
         transition={{ type: "spring", stiffness: 300, damping: 30 }}
-        className="fixed top-1/2 z-[35] -translate-y-1/2"
-        style={{
-          top: topPosition,
-          right: `calc(env(safe-area-inset-right) + ${rightOffsetPx}px + var(--game-right-rail-offset, 0px))`,
-        }}
+        // `pointer-events-none`: the outer box keeps its full panel width even
+        // when the inner panel is transform-collapsed offscreen, so a
+        // transparent region would otherwise hover over (and swallow clicks
+        // meant for) battlefield objects. Click-through here; the real
+        // interactive surfaces below opt back in with `pointer-events-auto`.
+        className="pointer-events-none fixed top-1/2 z-[35] -translate-y-1/2"
+        style={panelAnchorStyle}
       >
         <motion.div
-          animate={{ x: isCollapsed ? collapsedOffset : 0 }}
+          animate={{ x: isCollapsed ? collapsedX : 0 }}
           transition={{ type: "spring", stiffness: 340, damping: 34 }}
           className="relative"
           style={{ width: panelWidth, height: panelHeight }}
@@ -195,10 +217,12 @@ export function StackDisplay() {
             <button
               type="button"
               onClick={() => setIsCollapsed(false)}
-              className="absolute left-0 top-1/2 z-20 flex h-20 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-l-xl rounded-r-md border border-white/10 bg-gray-950/95 text-gray-300 shadow-[0_18px_36px_rgba(0,0,0,0.45)] transition-colors hover:bg-gray-900 hover:text-white"
-              aria-label="Expand stack panel"
+              className={`pointer-events-auto absolute top-1/2 z-20 flex h-20 w-7 -translate-y-1/2 items-center justify-center border border-white/10 bg-gray-950/95 text-gray-300 shadow-[0_18px_36px_rgba(0,0,0,0.45)] transition-colors hover:bg-gray-900 hover:text-white ${dockedLeft ? "right-0 translate-x-1/2 rounded-l-md rounded-r-xl" : "left-0 -translate-x-1/2 rounded-l-xl rounded-r-md"}`}
+              aria-label={t("stack.expandPanel")}
             >
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
+              {/* Chevron points back toward the board (the direction the panel
+                  expands): ◀ for a right dock, ▶ (rotated) for a left dock. */}
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`h-5 w-5 ${dockedLeft ? "rotate-180" : ""}`}>
                 <path
                   fillRule="evenodd"
                   d="M12.78 4.22a.75.75 0 0 1 0 1.06L8.06 10l4.72 4.72a.75.75 0 1 1-1.06 1.06l-5.25-5.25a.75.75 0 0 1 0-1.06l5.25-5.25a.75.75 0 0 1 1.06 0Z"
@@ -208,30 +232,44 @@ export function StackDisplay() {
             </button>
           )}
 
-          <div className="relative h-full overflow-hidden rounded-2xl border border-white/10 bg-gray-950/88 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-md">
+          <div className="pointer-events-auto relative h-full overflow-hidden rounded-2xl border border-white/10 bg-gray-950/88 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-md">
             <div className="flex h-9 items-center justify-between border-b border-white/10 px-3">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-400">
-                  Stack
+                  {t("stack.title")}
                 </span>
                 <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-200">
                   {stack.length}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={() => setIsCollapsed(true)}
-                className="rounded-md p-1 text-gray-400 transition-colors hover:bg-white/8 hover:text-white"
-                aria-label="Collapse stack panel"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
-                  <path
-                    fillRule="evenodd"
-                    d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
-                    clipRule="evenodd"
-                  />
-                </svg>
-              </button>
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => setStackDockSide(dockedLeft ? "right" : "left")}
+                  className="rounded-md p-1 text-gray-400 transition-colors hover:bg-white/8 hover:text-white"
+                  aria-label={t(dockedLeft ? "stack.dockRight" : "stack.dockLeft")}
+                  title={t(dockedLeft ? "stack.dockRight" : "stack.dockLeft")}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-9L21 3m0 0-4.5 4.5M21 3H7.5" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCollapsed(true)}
+                  className="rounded-md p-1 text-gray-400 transition-colors hover:bg-white/8 hover:text-white"
+                  aria-label={t("stack.collapsePanel")}
+                >
+                  {/* Points toward the docked edge — the direction it collapses. */}
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`h-4 w-4 ${dockedLeft ? "rotate-180" : ""}`}>
+                    <path
+                      fillRule="evenodd"
+                      d="M7.22 4.22a.75.75 0 0 1 1.06 0l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06L11.94 10 7.22 5.28a.75.75 0 0 1 0-1.06Z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </button>
+              </div>
             </div>
 
             <div

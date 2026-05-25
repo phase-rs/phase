@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 
@@ -10,6 +12,7 @@ const EMPTY_SEATS: Array<{ seat_index: number; display_name: string; is_bot: boo
  * Renders nothing when the local player is not the host.
  */
 export function HostControls() {
+  const { t } = useTranslation("draft");
   const role = useMultiplayerDraftStore((s) => s.role);
   const phase = useMultiplayerDraftStore((s) => s.phase);
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
@@ -52,7 +55,7 @@ export function HostControls() {
   return (
     <div className="fixed bottom-4 right-4 z-50 flex min-w-[180px] flex-col gap-2 rounded-[18px] border border-white/10 bg-black/18 p-3 shadow-[0_18px_54px_rgba(0,0,0,0.22)] backdrop-blur-md">
       <div className="text-[0.68rem] uppercase tracking-[0.18em] text-white/40">
-        Host Controls
+        {t("hostControls.title")}
       </div>
 
       {/* Pause/Resume — available during drafting */}
@@ -64,7 +67,7 @@ export function HostControls() {
             size: "sm",
           })}
         >
-          {paused ? "Resume Draft" : "Pause Draft"}
+          {paused ? t("hostControls.resumeDraft") : t("hostControls.pauseDraft")}
         </button>
       )}
 
@@ -74,14 +77,14 @@ export function HostControls() {
           onClick={advanceRound}
           className={menuButtonClass({ tone: "blue", size: "sm" })}
         >
-          Start Next Round
+          {t("hostControls.startNextRound")}
         </button>
       )}
 
       {/* Override match result — Casual mode, during matches */}
       {showOverride && (
         <div className="flex flex-col gap-1">
-          <div className="text-xs text-white/40">Override Result</div>
+          <div className="text-xs text-white/40">{t("hostControls.overrideResult")}</div>
           {pairings
             .filter((p) => p.status !== "Complete")
             .map((p) => (
@@ -90,7 +93,7 @@ export function HostControls() {
                 className="flex items-center gap-1 text-xs"
               >
                 <span className="text-white/60 truncate">
-                  {p.name_a} v {p.name_b}
+                  {t("hostControls.versusPair", { a: p.name_a, b: p.name_b })}
                 </span>
                 <button
                   onClick={() => overrideMatchResult(p.match_id, p.seat_a)}
@@ -112,14 +115,14 @@ export function HostControls() {
       {/* Kick + Replace with Bot — D-08 */}
       {showKickReplace && (
         <div className="flex flex-col gap-1">
-          <div className="text-xs text-white/40">Kick + Replace</div>
+          <div className="text-xs text-white/40">{t("hostControls.kickReplace")}</div>
           {humanSeats.map((s) => (
             <button
               key={s.seat_index}
               onClick={() => replaceSeatWithBot(s.seat_index)}
               className="text-left px-2 py-1 text-xs text-red-400/70 hover:text-red-300 hover:bg-white/5 rounded transition-colors"
             >
-              Replace {s.display_name} with Bot
+              {t("hostControls.replaceWithBot", { name: s.display_name })}
             </button>
           ))}
         </div>
