@@ -40,7 +40,11 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
 
   const [sets, setSets] = useState<Array<{ code: string; name: string; icon?: string; releasedAt: string }>>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // `null` = no error. `{ detail }` carries a technical message; `detail`
+  // undefined means "use the generic translated fallback". Translation happens
+  // at render so the load effect never closes over `t` (avoids re-fetch on
+  // language change).
+  const [error, setError] = useState<{ detail?: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +75,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
         setSets(entries);
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load sets");
+          setError({ detail: err instanceof Error ? err.message : undefined });
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -123,7 +127,9 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
         </h3>
 
         {error && (
-          <div className="py-4 text-center text-sm text-red-300">{error}</div>
+          <div className="py-4 text-center text-sm text-red-300">
+            {error.detail ?? t("setSelector.loadFailed")}
+          </div>
         )}
 
         {!loading && !error && sets.length === 0 && (

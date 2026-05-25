@@ -20,6 +20,40 @@ function formatGwp(entry: StandingEntry): string {
   return `${(computeGwp(entry) * 100).toFixed(0)}%`;
 }
 
+function podiumRowClass(rank: number): string {
+  switch (rank) {
+    case 0:
+      return "bg-amber-400/[0.08] text-amber-50";
+    case 1:
+      return "bg-slate-200/[0.07] text-slate-50";
+    case 2:
+      return "bg-orange-400/[0.07] text-orange-50";
+    default:
+      return "";
+  }
+}
+
+function podiumBadgeClass(rank: number): string {
+  const base =
+    "inline-flex h-6 min-w-6 items-center justify-center rounded-full border px-1.5 text-xs font-semibold tabular-nums";
+  switch (rank) {
+    case 0:
+      return `${base} border-amber-300/40 bg-amber-300/18 text-amber-100`;
+    case 1:
+      return `${base} border-slate-200/40 bg-slate-200/14 text-slate-100`;
+    case 2:
+      return `${base} border-orange-300/40 bg-orange-300/16 text-orange-100`;
+    default:
+      return `${base} border-white/10 bg-white/[0.04] text-white/45`;
+  }
+}
+
+function localPlayerRowClass(isLocal: boolean): string {
+  return isLocal
+    ? "bg-emerald-400/[0.08] [box-shadow:inset_3px_0_0_rgba(52,211,153,0.75)]"
+    : "";
+}
+
 // ── Component ───────────────────────────────────────────────────────────
 
 /** Swiss tournament standings sorted by match wins (GWP tiebreaker), with current round pairings and live game scores. */
@@ -59,11 +93,16 @@ export function StandingsTable() {
           {sorted.map((entry, i) => (
             <tr
               key={entry.seat_index}
-              className={
-                entry.seat_index === localSeat ? "text-emerald-300" : ""
-              }
+              className={[
+                podiumRowClass(i),
+                localPlayerRowClass(entry.seat_index === localSeat),
+              ]
+                .filter(Boolean)
+                .join(" ")}
             >
-              <td className="py-1 pr-4 text-white/40">{i + 1}</td>
+              <td className="py-1 pr-4">
+                <span className={podiumBadgeClass(i)}>{i + 1}</span>
+              </td>
               <td className="py-1 pr-4">{entry.display_name}</td>
               <td className="py-1 pr-4 tabular-nums">
                 {entry.match_wins}-{entry.match_losses}

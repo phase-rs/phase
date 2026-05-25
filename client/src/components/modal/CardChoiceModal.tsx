@@ -1069,7 +1069,9 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
           const selectedCount = Math.min(selectedCounts.get(key) ?? 0, entry.count);
           const isSelected = selectedCount > 0;
           const sourceLabel =
-            entry.source.type === "FaceUpExile" ? "From exile" : "From sideboard";
+            entry.source.type === "FaceUpExile"
+              ? t("outsideGame.fromExile")
+              : t("outsideGame.fromSideboard");
           return (
             <button
               key={key}

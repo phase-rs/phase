@@ -4,7 +4,7 @@
     "subtitle": "Réglez le gameplay, les visuels, l'audio et les valeurs par défaut du multijoueur."
   },
   "tabs": {
-    "gameplay": "Gameplay",
+    "gameplay": "Jouabilité",
     "visual": "Visuel",
     "combat": "Rythme",
     "audio": "Audio",
@@ -13,7 +13,7 @@
     "experimental": "Expérimental"
   },
   "gameplay": {
-    "title": "Gameplay",
+    "title": "Jouabilité",
     "language": "Langue",
     "cardSize": "Taille des cartes",
     "logDefault": "Journal par défaut",
@@ -32,6 +32,15 @@
       "random": "Aléatoire",
       "customUrl": "URL personnalisée",
       "none": "Aucun"
+    },
+    "cardSizeOptions": {
+      "small": "Petit",
+      "medium": "Moyen",
+      "large": "Grand"
+    },
+    "logDefaultOptions": {
+      "open": "Ouvert",
+      "closed": "Fermé"
     }
   },
   "visual": {
@@ -45,7 +54,12 @@
     "clearArtOverrides_one": "Effacer tous les remplacements d'illustration ({{count}})",
     "clearArtOverrides_other": "Effacer tous les remplacements d'illustration ({{count}})",
     "clearArtOverridesConfirm_one": "Effacer les {{count}} remplacement d'illustration ?",
-    "clearArtOverridesConfirm_other": "Effacer les {{count}} remplacements d'illustration ?"
+    "clearArtOverridesConfirm_other": "Effacer les {{count}} remplacements d'illustration ?",
+    "vfxQualityOptions": {
+      "full": "Complète",
+      "reduced": "Réduite",
+      "minimal": "Minimale"
+    }
   },
   "audio": {
     "title": "Audio",
@@ -106,7 +120,17 @@
     "slowest": "Le plus lent",
     "resetSliderLabel": "Réinitialiser {{label}} par défaut",
     "atDefault": "Valeur par défaut",
-    "resetToDefault": "Réinitialiser par défaut"
+    "resetToDefault": "Réinitialiser par défaut",
+    "labels": {
+      "effects": "Rythme des effets",
+      "combat": "Rythme du combat",
+      "banners": "Rythme des bannières"
+    },
+    "descriptions": {
+      "effects": "Lancements de sorts, changements de zone, morts, changements de points de vie, marqueurs, engagement/dégagement.",
+      "combat": "Minutage des blessures de combat : combien de temps les bloqueurs et les attaquants restent avant que les blessures soient infligées.",
+      "banners": "Affichage de la bannière de début de tour."
+    }
   },
   "artChain": {
     "emptyState": "Utilisation de l'illustration Scryfall par défaut. Ajoutez des règles ci-dessous pour personnaliser.",
