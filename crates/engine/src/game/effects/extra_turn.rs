@@ -80,6 +80,7 @@ mod tests {
             repeat_for: None,
             min_x_value: 0,
             cant_be_copied: false,
+            copy_count_finalized: false,
             forward_result: false,
             unless_pay: None,
             distribution: None,

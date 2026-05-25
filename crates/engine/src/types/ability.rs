@@ -10823,6 +10823,14 @@ pub struct ResolvedAbility {
     /// Stack-copy restriction from "This ability can't be copied."
     #[serde(default, skip_serializing_if = "is_false")]
     pub cant_be_copied: bool,
+    /// CR 707.10 + CR 614.1a: Set on a `repeat_for` iteration that the drain
+    /// driver resumes after a per-copy pause, so the "copy an additional time"
+    /// replacement bonus (Twinning Staff) is folded into the iteration count
+    /// exactly once — at the initial resolution — and never re-applied on each
+    /// resumed iteration (which would explode into runaway copies). Only read by
+    /// the `CopySpell` count hook in `effects::resolve_effect`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub copy_count_finalized: bool,
     /// When true, moved/created objects from this effect are forwarded to the sub_ability.
     #[serde(default)]
     pub forward_result: bool,
@@ -10931,6 +10939,7 @@ impl ResolvedAbility {
             repeat_for: None,
             min_x_value: 0,
             cant_be_copied: false,
+            copy_count_finalized: false,
             forward_result: false,
             unless_pay: None,
             distribution: None,

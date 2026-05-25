@@ -3189,7 +3189,16 @@ fn resolve_chain_body(
             // `ProposedEvent` replacement pipeline. The adjusted count flows into
             // `total_iterations` and the resume stash below, so each additional
             // copy runs the same per-copy retarget step as the base copies.
-            let iterations = if matches!(ability.effect, Effect::CopySpell { .. }) {
+            //
+            // `copy_count_finalized` guards against re-application: each per-copy
+            // retarget pause re-stashes a single-iteration resume ability that the
+            // drain driver feeds back through this code. Without the guard, every
+            // resumed iteration would re-add the bonus and the loop would explode
+            // into runaway copies (CR 614.6 — the replacement applies to the copy
+            // event once, not to each individual copy).
+            let iterations = if matches!(ability.effect, Effect::CopySpell { .. })
+                && !ability.copy_count_finalized
+            {
                 copy_spell::copy_count_with_replacements(state, ability, iterations)
             } else {
                 iterations
@@ -3245,6 +3254,10 @@ fn resolve_chain_body(
                         // owns iteration accounting via `next_iteration`.
                         let mut resume_ability = effective.clone();
                         resume_ability.repeat_for = None;
+                        // CR 614.6: the copy-count replacement bonus is already
+                        // folded into `total_iterations`; mark the resume so the
+                        // CopySpell count hook does not re-add it per resumed copy.
+                        resume_ability.copy_count_finalized = true;
                         state.pending_repeat_iteration =
                             Some(crate::types::game_state::PendingRepeatIteration {
                                 ability: Box::new(resume_ability),
