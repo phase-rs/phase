@@ -3532,6 +3532,27 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
             }
         }
     }
+    // CR 115.1 / CR 115.1d: Only effects that use the word "target" require stack-time target
+    // selection. `TargetFilter::Any` is a sentinel value meaning "broadcast to all
+    // matching permanents at resolution time" — it is never a declared target on any
+    // effect. The one exception is `DealDamage`, which uses `TargetFilter::Any` to
+    // represent the "any target" wording in damage-dealing spells and abilities (e.g.
+    // "deals 3 damage to any target"), where the player does choose a single target
+    // from the combined pool of creatures, planeswalkers, and players.
+    //
+    // For all other effects, `TargetFilter::Any` arises in two ways: (a) as a mass
+    // broadcast where the Oracle text contains no "target" keyword (e.g. "creatures
+    // get -N/-M until end of turn"), or (b) as an unthreaded subject sentinel produced
+    // by a sub-parser before the calling parser threads the real subject (SelfRef,
+    // ParentTarget, etc.). In both cases no player-chosen target is required.
+    // Generating a slot for `Any` causes a spurious WaitingFor::TriggerTargetSelection
+    // entry that players and the AI cannot resolve, producing a hard freeze (issue #824
+    // class).
+    if effect.target_filter() == Some(&TargetFilter::Any)
+        && !matches!(effect, Effect::DealDamage { .. })
+    {
+        return None;
+    }
     effect.target_filter().filter(|t| !t.is_context_ref())
 }
 // ---------------------------------------------------------------------------
@@ -8312,6 +8333,79 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
             "source-filtered CopyTokenOf chooses sources at resolution, not as targets"
+        );
+    }
+
+    // === CR 115.1 / CR 115.1d: extract_target_filter mass-effect (Any-filter) tests ===
+
+    /// CR 115.1 / CR 115.1d: `Pump { target: Any }` is a mass broadcast effect — no word
+    /// "target" in Oracle text, so no stack-time target slot should be generated.
+    /// This is also used as a sentinel value by `try_parse_pump` before the
+    /// calling parser threads a real subject (issue #824 class).
+    #[test]
+    fn extract_target_skips_pump_with_any_filter() {
+        use crate::types::ability::PtValue;
+        let effect = Effect::Pump {
+            power: PtValue::Fixed(-2),
+            toughness: PtValue::Fixed(-2),
+            target: TargetFilter::Any,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "Pump{{target: Any}} is a mass effect — must not generate a target slot"
+        );
+    }
+
+    /// CR 115.1 / CR 115.1d: `Pump { target: Typed(Creature) }` is a genuinely targeted
+    /// effect ("target creature gets +N/+M") — must still generate a slot.
+    #[test]
+    fn extract_target_keeps_pump_with_typed_filter() {
+        use crate::types::ability::PtValue;
+        let effect = Effect::Pump {
+            power: PtValue::Fixed(2),
+            toughness: PtValue::Fixed(2),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "Pump with a typed target filter must still generate a target slot"
+        );
+    }
+
+    /// CR 115.1 / CR 115.1d: `GenericEffect { target: Some(Any) }` is a mass continuous
+    /// modification ("each creature gets -2/-2 until end of turn") produced by
+    /// `build_layer_effect_until`. No word "target" in Oracle text, so no slot.
+    #[test]
+    fn extract_target_skips_generic_effect_with_any_filter() {
+        // StaticMode is imported below the test section; use fully qualified path.
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(
+                crate::types::statics::StaticMode::Continuous,
+            )],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::Any),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "GenericEffect{{target: Some(Any)}} is a mass effect — must not generate a target slot (issue #824)"
+        );
+    }
+
+    /// CR 115.1 / CR 115.1d: `GenericEffect { target: Some(Typed(Creature)) }` is a
+    /// targeted continuous modification ("target creature gains haste") — must
+    /// still generate a slot.
+    #[test]
+    fn extract_target_keeps_generic_effect_with_typed_filter() {
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(
+                crate::types::statics::StaticMode::Continuous,
+            )],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::Typed(TypedFilter::creature())),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "GenericEffect with a typed target must still generate a target slot"
         );
     }
 
