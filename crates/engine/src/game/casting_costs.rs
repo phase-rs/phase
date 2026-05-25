@@ -3676,7 +3676,7 @@ pub fn max_x_value(
                 return 0;
             }
             while low < high {
-                let mid = low + (high - low + 1) / 2;
+                let mid = low + (high - low).div_ceil(2);
                 if affordable(mid) {
                     low = mid;
                 } else {
