@@ -127,6 +127,34 @@ fn route_rest_partition(
     }
 }
 
+/// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
+/// library "in any order", so a legal keep-on-top selection is any duplicate-free
+/// subset of the looked-at cards (order is the player's free choice). Because the
+/// multiplayer server bypasses its candidate-enumeration legality gate for these
+/// freeform states (see `WaitingFor::accepts_freeform_card_selection`), `apply()`
+/// is the real validation boundary: a foreign id or a duplicate would corrupt the
+/// library `retain`+`insert` (relocating or duplicating a card), so reject both
+/// here. Mirrors the order-agnostic subset semantics of `selection_mismatch`.
+fn validate_keep_on_top_selection(
+    selection: &[ObjectId],
+    looked_at: &[ObjectId],
+) -> Result<(), EngineError> {
+    let mut seen = std::collections::HashSet::new();
+    for id in selection {
+        if !looked_at.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "keep-on-top selection contains a card that was not looked at".to_string(),
+            ));
+        }
+        if !seen.insert(*id) {
+            return Err(EngineError::InvalidAction(
+                "keep-on-top selection contains a duplicate card".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// CR 701.23a + CR 614.1 / CR 110.5b: Apply a cultivate-class search-destination
 /// split. `primary_ids` are routed to `primary_destination` through the full
 /// `change_zone::resolve` ETB pipeline (carrying `enter_tapped` so ETB-tapped
@@ -188,6 +216,9 @@ pub(super) fn handle_resolution_choice(
             GameAction::SelectCards { cards: top_cards },
         ) => {
             let all_cards = cards;
+            // CR 701.22a: the keep-on-top set must be a duplicate-free subset of
+            // the looked-at cards (any order is legal).
+            validate_keep_on_top_selection(&top_cards, &all_cards)?;
             let bottom_cards: Vec<_> = all_cards
                 .iter()
                 .filter(|id| !top_cards.contains(id))
@@ -907,14 +938,36 @@ pub(super) fn handle_resolution_choice(
         }
         (
             WaitingFor::SurveilChoice { player, cards },
-            GameAction::SelectCards {
-                cards: to_graveyard,
-            },
+            GameAction::SelectCards { cards: top_cards },
         ) => {
+            // CR 701.25a: To surveil N, put any number of the looked-at cards into
+            // your graveyard and the rest on top of your library in any order. The
+            // action payload mirrors scry — it is the ordered keep-on-top set;
+            // every looked-at card not in it is put into the graveyard.
+            let all_cards = cards;
+            // CR 701.25a: the keep-on-top set must be a duplicate-free subset of
+            // the looked-at cards (any order is legal).
+            validate_keep_on_top_selection(&top_cards, &all_cards)?;
+            let to_graveyard: Vec<_> = all_cards
+                .iter()
+                .filter(|id| !top_cards.contains(id))
+                .copied()
+                .collect();
+            // CR 701.25a: every looked-at card not kept on top is put into the
+            // graveyard (emitting its zone-change events).
             for &obj_id in &to_graveyard {
-                if cards.contains(&obj_id) {
-                    zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
-                }
+                zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
+            }
+            // CR 701.25a: the kept cards rest on top of the library in the
+            // player's chosen order (top_cards[0] becomes the topmost card).
+            let player_state = state
+                .players
+                .iter_mut()
+                .find(|candidate| candidate.id == player)
+                .expect("player exists");
+            player_state.library.retain(|id| !top_cards.contains(id));
+            for (index, &card_id) in top_cards.iter().enumerate() {
+                player_state.library.insert(index, card_id);
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }

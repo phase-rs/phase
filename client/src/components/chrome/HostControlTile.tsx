@@ -148,7 +148,7 @@ function SeatRow({
               >
                 {AI_DIFFICULTIES.map((difficulty) => (
                   <option key={difficulty} value={difficulty}>
-                    {difficulty}
+                    {t(`menu:aiDifficulty.levels.${difficulty}`)}
                   </option>
                 ))}
               </select>

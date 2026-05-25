@@ -198,5 +198,11 @@
   },
   "turnBanner": {
     "turn": "Turno {{number}}"
+  },
+  "chrome": {
+    "back": "Voltar",
+    "settings": "Configurações",
+    "languageSettings": "Idioma ({{lang}}) — abrir configurações",
+    "languageTitle": "Idioma: {{lang}}"
   }
 }

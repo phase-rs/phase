@@ -255,7 +255,7 @@ gh issue edit <N> --repo phase-rs/phase --remove-label "status:needs-runtime-ver
 
 ### Mandatory Pre-Implementation Plan Review Gate — Independent Review ROUNDS Until Clean
 
-Before any code is written for a triage item, the implementation plan must pass an **independent plan-review LOOP** applying `.claude/commands/review-engine-plan.md`: review → planner revises every gap → **fresh re-review of the revised plan** → repeat until a whole round returns clean. The gate is a *fixpoint* ("review until stable"), not a single pass and not "two reviewers, done." It runs *before* the post-fix gate — plan review catches design errors (wrong CR section, special-case instead of building-block, missing sibling coverage, blast-radius/registration gaps) when they cost a plan revision instead of a full re-implementation.
+Before any code is written for a triage item, the implementation plan must pass an **independent plan-review LOOP** applying `$review-engine-plan`: review → planner revises every gap → **fresh re-review of the revised plan** → repeat until a whole round returns clean. The gate is a *fixpoint* ("review until stable"), not a single pass and not "two reviewers, done." It runs *before* the post-fix gate — plan review catches design errors (wrong CR section, special-case instead of building-block, missing sibling coverage, blast-radius/registration gaps) when they cost a plan revision instead of a full re-implementation.
 
 How to apply:
 
@@ -278,7 +278,7 @@ How to apply:
 #   - Repeat until a FULL round returns clean (no BLOCKER).
 ```
 
-Do NOT start implementation — do not spawn the `engine-implementer` — until a full round is clean. Real plans this codebase has needed took 4–6 rounds; each round caught a genuine compile-break or rules-correctness defect. Plans should commit to a building-block fix, carry grep-verified CR cites, enumerate the new-variant/new-field blast radius (see below), and (for runtime bugs) be discriminator-first where practical (write the failing test first; let the failing checkpoint localize the bug).
+Do NOT start implementation — do not run `$engine-implementer` — until a full round is clean. Real plans this codebase has needed took 4–6 rounds; each round caught a genuine compile-break or rules-correctness defect. Plans should commit to a building-block fix, carry grep-verified CR cites, enumerate the new-variant/new-field blast radius (see below), and (for runtime bugs) be discriminator-first where practical (write the failing test first; let the failing checkpoint localize the bug).
 
 ### New-Variant / New-Field Blast Radius — Enumerate in the Plan, Verify in Review
 
@@ -294,7 +294,7 @@ A misparse fix can flip the AST to *look* right while the runtime driver ignores
 
 ### Mandatory Post-Fix Review Gate — Isolated Reviewer Required
 
-Every code fix made during bug triage must pass an **isolated reviewer agent's** application of `.claude/commands/review-impl.md` before the fix is committed, marked fixed, or described as complete.
+Every code fix made during bug triage must pass an **isolated reviewer agent's** application of `$review-impl` before the fix is committed, marked fixed, or described as complete.
 
 **Self-review by the implementing agent is NOT sufficient.** Multiple commits during the 2026-05-11 bug-triage rounds passed implementer self-review but had real issues caught only by a fresh-context reviewer (CR hallucinations, tests bypassing the pipeline they claim to exercise, predicate-narrowness latent bugs, missing CR sub-parts that don't exist). Implementers rationalize their own choices; fresh-context reviewers do not.
 
@@ -306,11 +306,11 @@ git log --oneline -1   # capture the SHA
 
 # Spawn an isolated code-quality-reviewer agent (NOT the implementer) with:
 #   - the commit SHA
-#   - the review charter from .claude/commands/review-impl.md
+#   - the review charter from $review-impl
 #   - explicit "you have not seen the implementation" framing
 ```
 
-The reviewer must read the diff (`git show <sha>`) with fresh context and apply the `/review-impl` checklist. Required focus areas:
+The reviewer must read the diff (`git show <sha>`) with fresh context and apply the `$review-impl` checklist. Required focus areas:
 
 - Missing sibling coverage / parameterization smells
 - Overly broad parser or runtime semantics
@@ -448,7 +448,7 @@ Session memory pointer: `feedback_address_inline_no_new_issues.md` (supersedes `
 
 ### Multi-Agent Safe Staging
 
-When other engine-implementer agents are running concurrently on shared files (especially `crates/engine/src/database/synthesis.rs`, `types/ability.rs`, parser modules), **never use `git add <file>` for surgical edits** — it sweeps any concurrent in-progress edits into your commit, polluting the audit trail.
+When other `$engine-implementer` runs are active on shared files (especially `crates/engine/src/database/synthesis.rs`, `types/ability.rs`, parser modules), **never use `git add <file>` for surgical edits** — it sweeps any concurrent in-progress edits into your commit, polluting the audit trail.
 
 Surgical staging options:
 
@@ -472,7 +472,7 @@ Documented collision from 2026-05-11: a small Fabricate-timing comment annotatio
 
 ### Committing From a Shared Multi-Agent Checkout — Classify Every File
 
-The hunk-collision case above is for small overlaps. When an engine-implementer runs for a long time on shared `main`, the working tree becomes a SOUP of your feature's files plus *other agents' whole files* (e.g. an hour-long run produced ~45 modified files spanning your fix and 3 other agents' work). Isolate at the FILE level before committing:
+The hunk-collision case above is for small overlaps. When `$engine-implementer` runs for a long time on shared `main`, the working tree can contain your feature's files plus other agents' whole files. Isolate at the FILE level before committing:
 
 1. Classify every modified file: `git diff -- <f> | grep -qE "<your feature identifiers + blast-radius marker, e.g. 'SearchPartition|split: None'>"`. Files containing a marker are yours (including blast-radius `field: None` edits); files without are foreign.
 2. Spot-confirm the "blast-radius" files contain ONLY the field addition (every added line matches the marker — no foreign hunks rode along).
@@ -482,7 +482,7 @@ The hunk-collision case above is for small overlaps. When an engine-implementer 
 
 ### Implementer Crash / Sub-Agent Overload — Tilt Is the Source of Truth
 
-If an engine-implementer crashes (API `529 Overloaded`) or returns no final report, do NOT blindly relaunch — it ran on the shared `main` checkout and its edits are already in the working tree. Recover by assessment, not re-execution:
+If `$engine-implementer` crashes (API `529 Overloaded`) or returns no final report, do NOT blindly relaunch — it may have run on the shared `main` checkout and its edits may already be in the working tree. Recover by assessment, not re-execution:
 
 1. `git status --short` + `git diff --stat` to see what landed.
 2. Tilt resources are ground truth for completeness: `test-engine` / `card-data` / `check-frontend` green ⇒ the implementation compiles and its tests pass, regardless of whether the agent reported. A dead agent can't lie about test status; the green resource can't be faked. (You can then do the post-fix review yourself from the diff — you are the orchestrator, a legitimate non-implementer reviewer — when spawning a fresh reviewer also fails to overload.)

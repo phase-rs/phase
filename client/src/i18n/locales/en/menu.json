@@ -4,7 +4,14 @@
   },
   "aiDifficulty": {
     "label": "AI difficulty",
-    "ariaLabel": "AI difficulty: {{difficulty}}"
+    "ariaLabel": "AI difficulty: {{difficulty}}",
+    "levels": {
+      "VeryEasy": "Very Easy",
+      "Easy": "Easy",
+      "Medium": "Medium",
+      "Hard": "Hard",
+      "VeryHard": "Very Hard"
+    }
   },
   "bracketFilter": {
     "label": "Bracket filter"
@@ -205,7 +212,8 @@
     "browseAll": "Browse All",
     "loadMore": "Load More",
     "selectedDeck": "Selected deck",
-    "chooseDeckToContinue": "Choose a deck to continue"
+    "chooseDeckToContinue": "Choose a deck to continue",
+    "filterAll": "All"
   },
   "subscriptions": {
     "emptyTitle": "No feed subscriptions",
@@ -213,5 +221,13 @@
     "feedMeta_one": "· {{count}} deck · Updated {{date}}",
     "feedMeta_other": "· {{count}} decks · Updated {{date}}",
     "error": "Error: {{error}}"
+  },
+  "myDecksPage": {
+    "eyebrow": "Decks",
+    "title": "Decks.",
+    "description": "Open a saved list, import a new one, or continue in deck builder."
+  },
+  "loadGameState": {
+    "readFailed": "Failed to read file"
   }
 }
