@@ -9734,30 +9734,14 @@ mod tests {
             "No more than one creature can attack each combat.\nNo more than one creature can block each combat."
                 .to_string(),
         );
-        face.static_abilities.push(StaticDefinition {
-            mode: StaticMode::MaxAttackersEachCombat { max: 1 },
-            affected: None,
-            modifications: vec![],
-            condition: None,
-            per_player_condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            active_zones: vec![],
-            characteristic_defining: false,
-            description: Some("No more than one creature can attack each combat.".to_string()),
-        });
-        face.static_abilities.push(StaticDefinition {
-            mode: StaticMode::MaxBlockersEachCombat { max: 1 },
-            affected: None,
-            modifications: vec![],
-            condition: None,
-            per_player_condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            active_zones: vec![],
-            characteristic_defining: false,
-            description: Some("No more than one creature can block each combat.".to_string()),
-        });
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxAttackersEachCombat { max: 1 })
+                .description("No more than one creature can attack each combat.".to_string()),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxBlockersEachCombat { max: 1 })
+                .description("No more than one creature can block each combat.".to_string()),
+        );
 
         let gaps = card_face_gaps(&face);
         assert!(
