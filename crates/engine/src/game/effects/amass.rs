@@ -117,6 +117,7 @@ fn create_army_token(
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
+        attach_to: None,
         sacrifice_at: None,
         source_id: ability.source_id,
         controller: ability.controller,
@@ -130,6 +131,8 @@ fn create_army_token(
         applied: HashSet::new(),
     };
 
+    // CR 614.16 + CR 701.47a: Token-creation replacement effects apply to the
+    // Army token an amass instruction creates.
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
             apply_create_token_after_replacement(state, event, events);
@@ -281,6 +284,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attach_to: None,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: P0,

@@ -79,6 +79,8 @@ pub(crate) fn begin_variable_speed_payment(
     }
 }
 
+/// CR 107.3a + CR 118.3: X in an activation/additional cost is chosen as part
+/// of activating or casting, bounded by the resources available to pay fully.
 pub(crate) fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
     if count == u32::MAX {
         (0, eligible_len)

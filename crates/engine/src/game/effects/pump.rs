@@ -282,6 +282,8 @@ fn pt_modifications(
     mods
 }
 
+/// CR 107.3a: X in an activation cost defines matching X/-X values while the
+/// activated ability is on the stack.
 fn resolve_pt_variable(alias: &str, ability: &ResolvedAbility) -> Option<i32> {
     let x = ability
         .chosen_x

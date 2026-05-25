@@ -722,6 +722,8 @@ pub(crate) fn handle_sacrifice_for_cost(
             .map_err(|e| EngineError::InvalidAction(format!("{e}")))?;
     }
 
+    // CR 107.3a: The selected payment count defines X for this activation or
+    // additional cost while its ability is on the stack.
     if min_count == 0 {
         pending
             .ability

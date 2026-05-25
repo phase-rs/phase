@@ -292,6 +292,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             };
         }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
+        // CR 107.3a: `X` in an activation or additional cost is chosen as part
+        // of activating or casting, so preserve it as a variable cost marker.
         let (use_count, filter_text) = if let Some(((), rest_after_x)) =
             nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
         {

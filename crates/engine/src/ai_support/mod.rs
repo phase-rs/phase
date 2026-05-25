@@ -397,7 +397,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             selection_mismatch(chosen, cards, None)
                 || chosen.len() < *min_count
                 || chosen.len() > *count
-        },
+        }
         (
             WaitingFor::RemoveCounterForCost {
                 permanents: cards, ..

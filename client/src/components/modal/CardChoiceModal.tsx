@@ -1442,7 +1442,6 @@ function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility[
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-  const minCount = "min_count" in data ? data.min_count : data.count;
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
@@ -1465,9 +1464,7 @@ function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility[
 
   if (!objects) return null;
 
-  const isReady = selected.size >= minCount && selected.size <= data.count;
-  const labelSuffix =
-    minCount === data.count ? `${selected.size}/${data.count}` : `${selected.size}/${data.count} max`;
+  const isReady = selected.size === data.count;
 
   return (
     <ChoiceOverlay
@@ -1540,8 +1537,7 @@ function ExileFromBattlefieldForManaAbilityModal({ data }: { data: ExileFromBatt
 
   if (!objects) return null;
 
-  const minCount = "min_count" in data ? data.min_count : data.count;
-  const isReady = selected.size >= minCount && selected.size <= data.count;
+  const isReady = selected.size === data.count;
 
   return (
     <ChoiceOverlay
