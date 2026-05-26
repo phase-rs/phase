@@ -676,6 +676,7 @@ mod tests {
                 trigger_event: None,
                 description: None,
                 source_name: String::new(),
+                subject_match_count: None,
             },
         });
     }
@@ -1194,6 +1195,7 @@ mod tests {
                 trigger_event: None,
                 description: Some("At the beginning of your end step".to_string()),
                 source_name: "Hope Estheim".to_string(),
+                subject_match_count: None,
             },
         });
         state.stack.push_back(StackEntry {
@@ -1215,6 +1217,7 @@ mod tests {
                 trigger_event: None,
                 description: Some("Opponent trigger".to_string()),
                 source_name: "Opponent Source".to_string(),
+                subject_match_count: None,
             },
         });
 

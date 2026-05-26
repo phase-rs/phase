@@ -40,6 +40,7 @@ pub fn build_resolved_from_def_with_targets(
 ) -> ResolvedAbility {
     let mut resolved =
         ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
+    resolved.context.ability_tag = def.ability_tag;
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
     }
@@ -362,6 +363,59 @@ pub fn compute_unavailable_modes(
     unavailable.sort_unstable();
     unavailable.dedup();
     unavailable
+}
+
+/// CR 700.2a-b + CR 700.2f: Extends `unavailable_modes` with mode indices
+/// whose targeting requirements cannot be satisfied on the current board. For
+/// each mode not already marked unavailable, builds the resolved ability for
+/// that single mode, computes its target slots, and checks whether a legal
+/// target assignment exists. Modes that require targets but have no legal
+/// assignment are appended to `unavailable_modes`.
+///
+/// This prevents the softlock where a player (or AI) selects a mode with no
+/// legal targets, causing `pending_trigger` to be consumed and then the
+/// targeting step to fail irrecoverably.
+pub fn filter_modes_by_target_legality(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    mode_abilities: &[AbilityDefinition],
+    modal: &ModalChoice,
+    unavailable_modes: &mut Vec<usize>,
+) {
+    let target_constraints = target_constraints_from_modal(modal);
+    for mode_idx in 0..modal.mode_count {
+        if unavailable_modes.contains(&mode_idx) {
+            continue;
+        }
+        let Some(def) = mode_abilities.get(mode_idx) else {
+            continue;
+        };
+        let resolved = build_resolved_from_def(def, source_id, controller);
+        let target_slots = match build_target_slots(state, &resolved) {
+            Ok(slots) => slots,
+            Err(_) => {
+                // build_target_slots returns Err when no legal targets exist
+                // for a required targeting slot — mark mode unavailable.
+                unavailable_modes.push(mode_idx);
+                continue;
+            }
+        };
+        // A mode with no target slots does not require targeting — always legal.
+        if target_slots.is_empty() {
+            continue;
+        }
+        if !has_legal_target_assignment_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        ) {
+            unavailable_modes.push(mode_idx);
+        }
+    }
+    unavailable_modes.sort_unstable();
+    unavailable_modes.dedup();
 }
 
 /// Records chosen mode indices for NoRepeat constraint enforcement.
@@ -3321,10 +3375,11 @@ pub fn validate_modal_indices(
                 "Duplicate mode index {idx}"
             )));
         }
-        // CR 700.2: Reject modes already chosen per NoRepeatThisTurn/NoRepeatThisGame.
+        // CR 700.2a-b: Reject modes unavailable due to prior selections or
+        // unsatisfied targeting requirements.
         if unavailable_modes.contains(&idx) {
             return Err(EngineError::InvalidAction(format!(
-                "Mode index {idx} is unavailable (already chosen)"
+                "Mode index {idx} is unavailable"
             )));
         }
     }
@@ -4396,10 +4451,7 @@ mod tests {
         // Mode 1 is unavailable — should be rejected.
         let result = validate_modal_indices(&modal, &[1], &[1]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unavailable (already chosen)"));
+        assert!(result.unwrap_err().to_string().contains("unavailable"));
 
         // Mode 0 is available — should succeed.
         assert!(validate_modal_indices(&modal, &[0], &[1]).is_ok());

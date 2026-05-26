@@ -39,7 +39,9 @@
     "overrideResult": "Modifier le résultat",
     "versusPair": "{{a}} c. {{b}}",
     "kickReplace": "Exclure + Remplacer",
-    "replaceWithBot": "Remplacer {{name}} par un bot"
+    "replaceWithBot": "Remplacer {{name}} par un bot",
+    "endDraft": "Terminer le draft",
+    "endDraftConfirm": "Terminer ce draft pour tout le monde ? Cette action est irreversible."
   },
   "manaCurve": {
     "title": "Courbe de mana"
@@ -60,7 +62,8 @@
     "botDifficulty": "Difficulté des bots",
     "chooseSet": "Choisir une extension",
     "noPools": "Aucun pool de draft disponible. Lancez d'abord le pipeline de données de draft.",
-    "setIconAlt": "Icône d'extension {{name}}"
+    "setIconAlt": "Icône d'extension {{name}}",
+    "loadFailed": "Échec du chargement des éditions"
   },
   "pack": {
     "confirmPick": "Confirmer le choix",

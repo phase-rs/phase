@@ -15,8 +15,6 @@ import {
   ANIMATION_SPEED_STEP,
   PACING_CATEGORIES,
   PACING_DEFAULT,
-  PACING_DESCRIPTIONS,
-  PACING_LABELS,
   PACING_MAX,
   PACING_MIN,
   PACING_STEP,
@@ -52,6 +50,7 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
   { value: "de", label: "Deutsch" },
   { value: "it", label: "Italiano" },
   { value: "pt", label: "Português" },
+  { value: "pl", label: "Polski" },
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
@@ -286,6 +285,7 @@ export function PreferencesModal({
                       options={CARD_SIZES}
                       value={cardSize}
                       onChange={setCardSize}
+                      renderLabel={(opt) => t(`gameplay.cardSizeOptions.${opt}`)}
                     />
                   </SettingGroup>
 
@@ -294,6 +294,7 @@ export function PreferencesModal({
                       options={LOG_DEFAULTS}
                       value={logDefaultState}
                       onChange={setLogDefaultState}
+                      renderLabel={(opt) => t(`gameplay.logDefaultOptions.${opt}`)}
                     />
                   </SettingGroup>
 
@@ -354,6 +355,7 @@ export function PreferencesModal({
                       options={VFX_QUALITIES}
                       value={vfxQuality}
                       onChange={setVfxQuality}
+                      renderLabel={(opt) => t(`visual.vfxQualityOptions.${opt}`)}
                     />
                   </SettingGroup>
 
@@ -874,8 +876,8 @@ function PacingSection({
         {PACING_CATEGORIES.map((category) => (
           <MultiplierSlider
             key={category}
-            label={PACING_LABELS[category]}
-            description={PACING_DESCRIPTIONS[category]}
+            label={t(`pacing.labels.${category}`)}
+            description={t(`pacing.descriptions.${category}`)}
             value={PACING_MAX - pacingMultipliers[category]}
             defaultValue={PACING_MAX - PACING_DEFAULT}
             min={PACING_MIN}
@@ -1098,10 +1100,13 @@ function SegmentedControl<T extends string>({
   options,
   value,
   onChange,
+  renderLabel,
 }: {
   options: T[];
   value: T;
   onChange: (v: T) => void;
+  /** Maps a raw option value to its translated, display-ready label. */
+  renderLabel: (opt: T) => string;
 }) {
   return (
     <div className="flex min-h-11 flex-wrap rounded-[16px] border border-white/10 bg-black/18 p-1">
@@ -1109,13 +1114,13 @@ function SegmentedControl<T extends string>({
         <button
           key={opt}
           onClick={() => onChange(opt)}
-          className={`min-h-9 flex-1 rounded-[12px] px-3 py-2 text-xs font-semibold capitalize transition-colors ${
+          className={`min-h-9 flex-1 rounded-[12px] px-3 py-2 text-xs font-semibold transition-colors ${
             value === opt
               ? "bg-sky-500/80 text-white"
               : "text-slate-400 hover:text-slate-200"
           }`}
         >
-          {opt}
+          {renderLabel(opt)}
         </button>
       ))}
     </div>

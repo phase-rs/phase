@@ -1202,15 +1202,33 @@ fn resolve_ref(
         QuantityRef::ExiledFromHandThisResolution => {
             u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
         }
-        // CR 608.2c: Numeric value from the triggering event.
-        // Falls back to the preceding effect's count or amount for sub_ability
-        // continuations where current_trigger_event has no amount (e.g.,
-        // "discard up to N, then draw that many"; "dealt excess damage this
-        // way, add that much {R}").
+        // CR 603.2c: Numeric value carried by the triggering event,
+        // resolution-precedence ordered:
+        //
+        //   1. `current_trigger_match_count` — the filtered subject count of a
+        //      batched trigger ("one or more <FILTER> <verb>"), set by
+        //      `stack::resolve_top` for the resolution. This is the canonical
+        //      "that many" for Ur-Dragon-style batched triggers; without it
+        //      the `extract_amount_from_event` cascade below falls through to
+        //      0 on `AttackersDeclared` and similar batched events.
+        //   2. `extract_amount_from_event(current_trigger_event)` — scalar
+        //      events with an inherent amount (damage dealt, life changed,
+        //      cards drawn, counters added/removed, die rolls).
+        //   3. `last_effect_counts_by_player` — APNAP per-player counts from
+        //      the preceding effect in the same resolution.
+        //   4. `last_effect_count` / `last_effect_amount` — sub_ability
+        //      continuation fallbacks (e.g. "discard up to N, then draw that
+        //      many"; "dealt excess damage this way, add that much {R}").
+        //   5. `0` — undefined.
         QuantityRef::EventContextAmount => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_amount_from_event)
+            .current_trigger_match_count
+            .map(u32_to_i32_saturating)
+            .or_else(|| {
+                state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_amount_from_event)
+            })
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -6268,6 +6286,60 @@ mod tests {
             qty: QuantityRef::EventContextAmount,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    /// CR 603.2c: When the batched-trigger subject count is set,
+    /// `EventContextAmount` reads it ahead of any event-extracted amount
+    /// (issue #707).
+    #[test]
+    fn resolve_event_context_amount_uses_trigger_match_count_when_set() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(3);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
+    }
+
+    /// CR 603.2c: With no match-count set, `EventContextAmount` falls through
+    /// to `extract_amount_from_event` as before — the new precedence rule
+    /// must not regress existing scalar-event resolution.
+    #[test]
+    fn resolve_event_context_amount_falls_through_when_match_count_none() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = None;
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 5,
+            is_combat: false,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 5);
+    }
+
+    /// CR 603.2c: When both the batched match-count and an event-extracted
+    /// amount are present, the match-count wins — the trigger is "one or
+    /// more <FILTER> <verb>" and the "that many" semantics belong to the
+    /// filtered subject count, not the event's intrinsic amount.
+    #[test]
+    fn resolve_event_context_amount_match_count_takes_precedence_over_event() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(7);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 7);
     }
 
     #[test]

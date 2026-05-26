@@ -39,7 +39,9 @@
     "overrideResult": "Ergebnis überschreiben",
     "versusPair": "{{a}} gegen {{b}}",
     "kickReplace": "Rauswerfen + Ersetzen",
-    "replaceWithBot": "{{name}} durch Bot ersetzen"
+    "replaceWithBot": "{{name}} durch Bot ersetzen",
+    "endDraft": "Draft beenden",
+    "endDraftConfirm": "Diesen Draft fuer alle beenden? Das kann nicht rueckgaengig gemacht werden."
   },
   "manaCurve": {
     "title": "Manakurve"
@@ -60,7 +62,8 @@
     "botDifficulty": "Bot-Schwierigkeit",
     "chooseSet": "Wähle ein Set",
     "noPools": "Keine Draft-Pools verfügbar. Führe zuerst die Draft-Datenpipeline aus.",
-    "setIconAlt": "{{name}} Set-Symbol"
+    "setIconAlt": "{{name}} Set-Symbol",
+    "loadFailed": "Sets konnten nicht geladen werden"
   },
   "pack": {
     "confirmPick": "Pick bestätigen",

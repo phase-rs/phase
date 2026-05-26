@@ -28,6 +28,7 @@ Review the plan as an architectural gate. Reject the plan if any required dimens
    - Types belong in `types/`.
    - Game logic must not leak into frontend or WASM bridge.
    - Display formatting must not leak into the engine.
+   - **i18n boundary:** if the plan adds frontend UI or log text, it must route frontend-authored strings through `t()` (react-i18next, keys in `client/src/i18n/locales/en/<ns>.json`) and leave engine/card pass-through raw. Reject plans that hardcode user-facing chrome strings or that wrap card/Oracle/enum text in `t()`. See `client/src/i18n/README.md`.
 
 5. **Idiomatic Rust**
    - Prefer typed enums such as `ControllerRef`, `Comparator`, and `Option<T>` over bool fields.

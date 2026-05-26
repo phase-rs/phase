@@ -64,6 +64,7 @@ import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
+import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { CLICK_THROUGH_WAITING_FOR_TYPES, DialogHost } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -109,6 +110,7 @@ import {
   useMultiplayerStore,
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
+import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
@@ -1330,6 +1332,12 @@ function GamePageContent({
             <OptionalEffectModal />
           )}
 
+        {/* CR 401.4: Owner puts permanent on top or bottom of library */}
+        {(waitingFor?.type === "TopOrBottomChoice" || waitingFor?.type === "ClashCardPlacement") &&
+          canActForWaitingState && (
+            <TopOrBottomModal />
+          )}
+
         {waitingFor?.type === "UntapChoice" &&
           canActForWaitingState && (
             <UntapChoiceModal />
@@ -2057,6 +2065,7 @@ function GameOverScreen({
   const source = searchParams.get("source");
   const draftId = searchParams.get("draftId");
   const isDraft = source === "draft" && !!draftId;
+  const isDraftPodMatch = mode === "draft-match";
   const gameId = useGameStore((s) => s.gameId);
 
   const [resultRecorded, setResultRecorded] = useState(false);
@@ -2071,6 +2080,17 @@ function GameOverScreen({
       if (meta?.phase === "complete") setRunOver(true);
     });
   }, [isDraft, gameId, isDraw, isVictory, resultRecorded]);
+
+  useEffect(() => {
+    if (!isDraftPodMatch || resultRecorded) return;
+    void useMultiplayerDraftStore
+      .getState()
+      .reportActiveMatchGameResult(winner)
+      .then(() => setResultRecorded(true))
+      .catch((err) => {
+        console.error("[GameOverScreen] failed to report draft pod match result:", err);
+      });
+  }, [isDraftPodMatch, resultRecorded, winner]);
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();
@@ -2174,6 +2194,19 @@ function GameOverScreen({
                 {runOver
                   ? t("gamePage.gameOver.backToDraft")
                   : t("gamePage.gameOver.continueRun")}
+              </button>
+            ) : isDraftPodMatch ? (
+              <button
+                disabled={!resultRecorded}
+                onClick={() => navigate("/draft-pod")}
+                className={gameButtonClass({
+                  tone: isVictory ? "amber" : "slate",
+                  size: "lg",
+                  disabled: !resultRecorded,
+                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                })}
+              >
+                {t("gamePage.gameOver.backToDraft")}
               </button>
             ) : isOnlineMode ? (
               <button
@@ -2331,6 +2364,18 @@ function OptionalEffectModal() {
   if (waitingFor?.type !== "OptionalEffectChoice" && waitingFor?.type !== "OpponentMayChoice") return null;
 
   return <OptionalEffectModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
+// ── Top or Bottom Choice Modal (CR 401.4) ──────────────────────────────
+
+function TopOrBottomModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "TopOrBottomChoice" && waitingFor?.type !== "ClashCardPlacement") return null;
+
+  return <TopOrBottomChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
 // ── Untap Choice Modal ─────────────────────────────────────────────────

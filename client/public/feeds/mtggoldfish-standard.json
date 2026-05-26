@@ -5,15 +5,15 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-06-08T00:00:00Z",
+  "updated": "2026-06-09T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
       "name": "Selesnya Landfall",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "G"
+        "G",
+        "W"
       ],
       "tags": [
         "metagame"
@@ -24,11 +24,11 @@
           "name": "Erode"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Surrak, Elusive Hunter"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Lumbering Worldwagon"
         },
         {
@@ -40,16 +40,16 @@
           "name": "Earthbender Ascension"
         },
         {
-          "count": 2,
-          "name": "Temple Garden"
-        },
-        {
           "count": 7,
           "name": "Forest"
         },
         {
           "count": 4,
           "name": "Sazh's Chocobo"
+        },
+        {
+          "count": 1,
+          "name": "Temple Garden"
         },
         {
           "count": 2,
@@ -68,12 +68,12 @@
           "name": "Badgermole Cub"
         },
         {
-          "count": 4,
-          "name": "Fabled Passage"
-        },
-        {
           "count": 2,
           "name": "Dyadrine, Synthesis Amalgam"
+        },
+        {
+          "count": 4,
+          "name": "Fabled Passage"
         },
         {
           "count": 4,
@@ -84,7 +84,7 @@
           "name": "Mightform Harmonizer"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Escape Tunnel"
         },
         {
@@ -111,11 +111,11 @@
         },
         {
           "count": 1,
-          "name": "Restoration Magic"
+          "name": "Kutzil, Malamet Exemplar"
         },
         {
           "count": 1,
-          "name": "Kutzil, Malamet Exemplar"
+          "name": "Ba Sing Se"
         },
         {
           "count": 2,
@@ -140,7 +140,6 @@
       "author": "MTGGoldfish",
       "colors": [
         "U",
-        "G",
         "R"
       ],
       "tags": [
@@ -148,20 +147,12 @@
       ],
       "main": [
         {
-          "count": 6,
+          "count": 7,
           "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Willowrush Verge"
         },
         {
           "count": 4,
           "name": "Opt"
-        },
-        {
-          "count": 4,
-          "name": "Elusive Otter"
         },
         {
           "count": 4,
@@ -180,32 +171,28 @@
           "name": "Colorstorm Stallion"
         },
         {
-          "count": 1,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 4,
-          "name": "Flow State"
-        },
-        {
-          "count": 1,
-          "name": "Impractical Joke"
-        },
-        {
-          "count": 2,
+          "count": 3,
           "name": "Secret Identity"
+        },
+        {
+          "count": 3,
+          "name": "Flow State"
         },
         {
           "count": 1,
           "name": "Wild Ride"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Multiversal Passage"
         },
         {
           "count": 1,
-          "name": "Spell Pierce"
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 3,
+          "name": "Drake Hatcher"
         },
         {
           "count": 4,
@@ -224,6 +211,10 @@
           "name": "Sleight of Hand"
         },
         {
+          "count": 2,
+          "name": "Vibrant Outburst"
+        },
+        {
           "count": 4,
           "name": "Slickshot Show-Off"
         }
@@ -238,40 +229,36 @@
           "name": "Slagstorm"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Get Out"
         },
         {
-          "count": 1,
-          "name": "Sear"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
+          "count": 2,
           "name": "Roaring Furnace // Steaming Sauna"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Into the Flood Maw"
         },
         {
           "count": 2,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
           "name": "Spell Pierce"
         },
         {
           "count": 1,
-          "name": "Broadside Barrage"
+          "name": "Drake Hatcher"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 2,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 2,
+          "name": "Sunspine Lynx"
         }
       ]
     },
@@ -739,133 +726,6 @@
       ]
     },
     {
-      "name": "Izzet Lessons",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 6,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 2,
-          "name": "Three Steps Ahead"
-        },
-        {
-          "count": 3,
-          "name": "Consult the Star Charts"
-        },
-        {
-          "count": 2,
-          "name": "Agna Qel'a"
-        },
-        {
-          "count": 2,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 4,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 2,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 4,
-          "name": "Monument to Endurance"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 2,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 4,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 2,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 2,
-          "name": "Negate"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 2,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 3,
-          "name": "Flashfreeze"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 1,
-          "name": "Broadside Barrage"
-        }
-      ]
-    },
-    {
       "name": "Dimir Excruciator",
       "author": "MTGGoldfish",
       "colors": [
@@ -993,6 +853,133 @@
         {
           "count": 2,
           "name": "Sunderflock"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Lessons",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 6,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Gran-Gran"
+        },
+        {
+          "count": 2,
+          "name": "Three Steps Ahead"
+        },
+        {
+          "count": 3,
+          "name": "Consult the Star Charts"
+        },
+        {
+          "count": 2,
+          "name": "Agna Qel'a"
+        },
+        {
+          "count": 2,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 4,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 4,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 4,
+          "name": "Monument to Endurance"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 4,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 2,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 4,
+          "name": "Artist's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 2,
+          "name": "Negate"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 2,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 2,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 3,
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 1,
+          "name": "Broadside Barrage"
         }
       ]
     },

@@ -79,7 +79,7 @@ fn build_coalition_relic_drain(controller: PlayerId, source: ObjectId) -> Resolv
         source,
         controller,
     );
-    sub.condition = Some(AbilityCondition::IfYouDo);
+    sub.condition = Some(AbilityCondition::effect_performed());
     sub.kind = AbilityKind::Spell;
 
     let mut outer = ResolvedAbility::new(

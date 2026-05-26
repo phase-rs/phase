@@ -679,6 +679,7 @@ pub(crate) fn extract_source_from_event(
         // trigger fires from; `source_id` is the permanent tapped for mana.
         GameEvent::TappedForMana { source_id, .. } => Some(*source_id),
         GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
+        GameEvent::Evolved { object_id } => Some(*object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
@@ -804,6 +805,10 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
         GameEvent::CounterAdded { count, .. } => Some(*count as i32),
         GameEvent::CounterRemoved { count, .. } => Some(*count as i32),
         GameEvent::Discarded { .. } => Some(1),
+        // CR 508.1m + CR 603.2c: Batched attack-trigger context stores the
+        // attackers that satisfied the trigger subject, so "that many" reads
+        // the size of that contextual attack event.
+        GameEvent::AttackersDeclared { attacker_ids, .. } => Some(attacker_ids.len() as i32),
         // CR 706.2: the final number of a die roll is its result. Lets
         // `EventContextAmount` resolve "where X is the result" pump effects.
         GameEvent::DieRolled { result, .. } => Some(*result as i32),
