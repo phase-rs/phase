@@ -5761,7 +5761,10 @@ fn try_parse_casts_or_copies_trigger(lower: &str) -> Option<(TriggerMode, Trigge
     let (rest, caster_filter) = alt((
         // "you cast or copy " — controller of the triggered permanent.
         terminated(
-            value(TargetFilter::Controller, tag::<_, _, OracleError<'_>>("you")),
+            value(
+                TargetFilter::Controller,
+                tag::<_, _, OracleError<'_>>("you"),
+            ),
             tag(" cast or copy "),
         ),
         // CR 102.2: "an opponent" = any player other than the trigger controller.
