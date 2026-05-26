@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
 import { useAudioContext } from "../audio/useAudioContext";
@@ -5,10 +7,18 @@ import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
+import { useCardDataStore } from "../stores/cardDataStore";
 
 export function MyDecksPage() {
   const navigate = useNavigate();
+  const { t } = useTranslation("menu");
   useAudioContext("deck_builder");
+
+  // Warm the shared card DB so deck compat/coverage scans below are instant.
+  // Idempotent; closes the deep-link hole when opening /my-decks directly.
+  useEffect(() => {
+    void useCardDataStore.getState().warm();
+  }, []);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -20,9 +30,9 @@ export function MyDecksPage() {
       <div className="menu-scene__haze" />
 
       <MenuShell
-        eyebrow="Decks"
-        title="Decks."
-        description="Open a saved list, import a new one, or continue in deck builder."
+        eyebrow={t("myDecksPage.eyebrow")}
+        title={t("myDecksPage.title")}
+        description={t("myDecksPage.description")}
         layout="stacked"
       >
         <MyDecks

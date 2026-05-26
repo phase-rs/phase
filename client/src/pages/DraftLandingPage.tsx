@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useNavigate } from "react-router";
 
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
@@ -43,17 +45,18 @@ function formatSetLabel(code: string, name?: string): string {
   return name ?? SET_LABELS[code.toLowerCase()] ?? code.toUpperCase();
 }
 
-function formatRelativeTime(timestamp: number): string {
+function formatRelativeTime(timestamp: number, t: TFunction<"draft">): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
-  if (seconds < 60) return "just now";
+  if (seconds < 60) return t("relativeTime.justNow");
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return t("relativeTime.minutes", { count: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+  if (hours < 24) return t("relativeTime.hours", { count: hours });
+  return t("relativeTime.days", { count: Math.floor(hours / 24) });
 }
 
 export function DraftLandingPage() {
+  const { t } = useTranslation("draft");
   const navigate = useNavigate();
   const [activeDraft, setActiveDraft] = useState<ActiveQuickDraftMeta | null>(null);
   const [activePod, setActivePod] = useState<ActiveDraftPodMeta | null>(null);
@@ -71,19 +74,19 @@ export function DraftLandingPage() {
       <div className="menu-scene__haze" />
 
       <div className="relative z-10 mx-auto flex w-full max-w-3xl flex-col px-6 py-20">
-        <h1 className="menu-display mb-10 text-4xl text-white">Draft</h1>
+        <h1 className="menu-display mb-10 text-4xl text-white">{t("landing.title")}</h1>
 
         {activeDraft && <ActiveDraftCard meta={activeDraft} />}
         {activePod && <ActivePodCard meta={activePod} />}
 
         <div className="flex flex-col gap-3">
           <h2 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            Start New
+            {t("landing.startNew")}
           </h2>
 
           <DraftModeCard
-            title="Quick Draft"
-            description="Draft 3 packs with 7 AI drafters, build a 40-card deck, then play a Bo1 match against one of them."
+            title={t("landing.quickDraft.title")}
+            description={t("landing.quickDraft.description")}
             icon={<BotIcon />}
             onClick={() => navigate("/draft/quick")}
           />
@@ -91,18 +94,18 @@ export function DraftLandingPage() {
           {experimentalFeatures && (
             <>
               <DraftModeCard
-                title="Cube Draft"
-                description="Paste or load a cube list, tune pack and deck rules, then quick draft against AI bots."
+                title={t("landing.cubeDraft.title")}
+                description={t("landing.cubeDraft.description")}
                 icon={<CubeIcon />}
-                badge="Experimental"
+                badge={t("landing.experimental")}
                 onClick={() => navigate("/draft/quick?mode=cube")}
               />
 
               <DraftModeCard
-                title="Pod Draft"
-                description="Host or join a pod with up to 8 players, draft live together, then play a Swiss or elimination tournament."
+                title={t("landing.podDraft.title")}
+                description={t("landing.podDraft.description")}
                 icon={<PodIcon />}
-                badge="Experimental"
+                badge={t("landing.experimental")}
                 onClick={() => navigate("/draft-pod")}
               />
             </>
@@ -114,23 +117,24 @@ export function DraftLandingPage() {
 }
 
 function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
+  const { t } = useTranslation("draft");
   const navigate = useNavigate();
 
   function getPhaseLabel(): string {
     switch (meta.phase) {
-      case "lobby": return "Lobby";
-      case "drafting": return "Drafting";
-      case "deckbuilding": return "Deck Building";
-      case "pairing": return "Pairing";
-      case "matchInProgress": return "Match In Progress";
-      case "complete": return "Complete";
+      case "lobby": return t("podPhase.lobby");
+      case "drafting": return t("podPhase.drafting");
+      case "deckbuilding": return t("podPhase.deckbuilding");
+      case "pairing": return t("podPhase.pairing");
+      case "matchInProgress": return t("podPhase.matchInProgress");
+      case "complete": return t("podPhase.complete");
     }
   }
 
   return (
     <div className="mb-8">
       <h2 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-        Pod Draft in Progress
+        {t("landing.podInProgress")}
       </h2>
       <button
         type="button"
@@ -143,24 +147,24 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
 
         <div className="min-w-0 flex-1">
           <div className="text-lg font-semibold text-white">
-            {meta.kind} Pod
+            {t("landing.podLabel", { kind: meta.kind })}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
             <span className="rounded-md border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-xs font-medium text-cyan-100">
               {getPhaseLabel()}
             </span>
-            <span>{meta.podSize} seats</span>
-            {meta.roomCode && <span>Room {meta.roomCode}</span>}
+            <span>{t("landing.seatCount", { count: meta.podSize })}</span>
+            {meta.roomCode && <span>{t("landing.roomLabel", { code: meta.roomCode })}</span>}
             {meta.phase === "drafting" && meta.pickCount > 0 && (
-              <span>{meta.pickCount} cards picked</span>
+              <span>{t("landing.cardsPicked", { count: meta.pickCount })}</span>
             )}
-            <span>{formatRelativeTime(meta.updatedAt)}</span>
+            <span>{formatRelativeTime(meta.updatedAt, t)}</span>
           </div>
         </div>
 
         <div className="flex items-center self-stretch pl-2">
           <div className="rounded-full border border-cyan-300/15 bg-cyan-400/10 px-4 py-2 text-sm font-medium text-cyan-100 transition-colors group-hover:border-cyan-300/30 group-hover:bg-cyan-400/18">
-            Resume
+            {t("landing.resume")}
           </div>
         </div>
       </button>
@@ -169,6 +173,7 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
 }
 
 function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
+  const { t } = useTranslation("draft");
   const navigate = useNavigate();
   const [setIcon, setSetIcon] = useState<string | null>(null);
 
@@ -194,15 +199,18 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
 
   function getPhaseLabel(): string {
     switch (meta.phase) {
-      case "drafting": return "Drafting";
-      case "deckbuilding": return "Deck Building";
+      case "drafting": return t("quickPhase.drafting");
+      case "deckbuilding": return t("quickPhase.deckbuilding");
       case "playing": {
         const w = meta.runWins ?? 0;
         const l = meta.runLosses ?? 0;
         const matchNum = w + l + (meta.runDraws ?? 0) + 1;
-        return midMatchGameId ? `Match ${matchNum} — ${w}W-${l}L` : `${w}W-${l}L`;
+        return midMatchGameId
+          ? t("quickPhase.matchRecord", { number: matchNum, wins: w, losses: l })
+          : t("quickPhase.record", { wins: w, losses: l });
       }
-      case "complete": return `Run Complete — ${meta.runWins ?? 0}W-${meta.runLosses ?? 0}L`;
+      case "complete":
+        return t("quickPhase.runComplete", { wins: meta.runWins ?? 0, losses: meta.runLosses ?? 0 });
     }
   }
 
@@ -214,8 +222,12 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
     }
   }
 
-  const resumeLabel = midMatchGameId ? "Resume Match" : meta.phase === "complete" ? "View Results" : "Resume";
-  const heading = meta.phase === "complete" ? "Draft Complete" : "Draft in Progress";
+  const resumeLabel = midMatchGameId
+    ? t("landing.resumeMatch")
+    : meta.phase === "complete"
+      ? t("landing.viewResults")
+      : t("landing.resume");
+  const heading = meta.phase === "complete" ? t("landing.draftComplete") : t("landing.draftInProgress");
 
   return (
     <div className="mb-8">
@@ -231,7 +243,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
           {setIcon ? (
             <img
               src={setIcon}
-              alt={`${meta.setCode} icon`}
+              alt={t("landing.setIconAlt", { code: meta.setCode })}
               className="h-8 w-8 opacity-80 invert"
             />
           ) : (
@@ -251,9 +263,9 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
             </span>
             <span>{difficultyLabel}</span>
             {meta.phase === "drafting" && meta.pickCount > 0 && (
-              <span>{meta.pickCount} cards picked</span>
+              <span>{t("landing.cardsPicked", { count: meta.pickCount })}</span>
             )}
-            <span>{formatRelativeTime(meta.updatedAt)}</span>
+            <span>{formatRelativeTime(meta.updatedAt, t)}</span>
           </div>
         </div>
 

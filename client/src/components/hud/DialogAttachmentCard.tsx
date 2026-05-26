@@ -1,4 +1,5 @@
 import { type CSSProperties, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -41,6 +42,7 @@ interface Props {
  *     legalActionsByObject is the right source here.
  */
 export function DialogAttachmentCard({ objectId, widthPx }: Props) {
+  const { t } = useTranslation("game");
   const playerId = usePlayerId();
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 
@@ -153,7 +155,7 @@ export function DialogAttachmentCard({ objectId, widthPx }: Props) {
       />
       {isValidTarget && (
         <div className="pointer-events-none absolute left-1 top-1 z-30 rounded bg-lime-300 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-black ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]">
-          Target
+          {t("attachments.target")}
         </div>
       )}
       {counters.length > 0 && (

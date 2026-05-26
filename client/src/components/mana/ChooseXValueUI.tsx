@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -16,6 +17,7 @@ import { ManaSymbol } from "./ManaSymbol.tsx";
  * display layer that dispatches the caster's chosen value via `ChooseX`.
  */
 export function ChooseXValueUI() {
+  const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
@@ -71,7 +73,7 @@ export function ChooseXValueUI() {
       >
         <div className="rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[320px] max-w-[420px]">
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
-            Choose a value for X
+            {t("mana.chooseXTitle")}
             {cardName && (
               <span className="ml-1 text-gray-400">&mdash; {cardName}</span>
             )}
@@ -88,7 +90,7 @@ export function ChooseXValueUI() {
           <div className="mb-4 px-2">
             <label className="flex items-center gap-3 text-sm text-gray-200">
               <span className="shrink-0 font-mono text-base text-cyan-300">
-                X = {value}
+                {t("mana.xEquals", { value })}
               </span>
               <input
                 type="range"
@@ -97,10 +99,10 @@ export function ChooseXValueUI() {
                 value={value}
                 onChange={(e) => setValue(Number(e.target.value))}
                 className="h-2 w-full cursor-pointer appearance-none rounded-full bg-gray-700 accent-cyan-500"
-                aria-label="Choose X value"
+                aria-label={t("mana.chooseXAria")}
               />
               <span className="shrink-0 text-xs text-gray-500">
-                {min > 0 ? `min ${min} / max ${max}` : `max ${max}`}
+                {min > 0 ? t("mana.minMax", { min, max }) : t("mana.maxOnly", { max })}
               </span>
             </label>
           </div>
@@ -110,13 +112,13 @@ export function ChooseXValueUI() {
               onClick={handleCommit}
               className={gameButtonClass({ tone: "emerald", size: "md" })}
             >
-              Confirm X = {value}
+              {t("mana.confirmX", { value })}
             </button>
             <button
               onClick={handleCancel}
               className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
             >
-              Cancel
+              {t("common:actions.cancel")}
             </button>
           </div>
         </div>

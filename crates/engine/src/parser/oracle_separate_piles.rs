@@ -29,8 +29,8 @@ use nom::Parser;
 
 use crate::parser::oracle_nom::error::OracleError;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, PlayerScope, TargetFilter, TypeFilter, TypedFilter,
-    VoterScope,
+    AbilityDefinition, AbilityKind, Effect, PlayerScope, QuantityExpr, TargetFilter, TypeFilter,
+    TypedFilter, VoterScope,
 };
 
 use super::oracle_effect::parse_effect_chain_with_context;
@@ -157,8 +157,12 @@ fn parse_choose_line(input: &str) -> Option<(&str, PlayerScope)> {
 /// sacrifice/exile/bounce handler pick it up. Currently only `Effect::Sacrifice`
 /// is exercised; extend with new effect arms as new pile-effect shapes ship.
 fn rewrite_sub_effect_target_to_parent(effect: &mut Effect) {
-    if let Effect::Sacrifice { target, .. } = effect {
+    if let Effect::Sacrifice { target, count, .. } = effect {
+        // `SeparateIntoPiles` applies this sub-effect once per object in the
+        // chosen pile. Keep the sub-effect canonical as "sacrifice this one
+        // parent target"; the parsed "all" cardinality belongs to the pile loop.
         *target = TargetFilter::ParentTarget;
+        *count = QuantityExpr::Fixed { value: 1 };
     }
 }
 

@@ -271,7 +271,7 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
 ///   1. CR 122.1: an optional "with [N] [type] counter(s) on it" clause →
 ///      populates `Effect::ChangeZone::enter_with_counters`.
 ///   2. An optional "If you do, [effect]" follow-up sentence → becomes a
-///      `sub_ability` gated by `AbilityCondition::IfYouDo`, so the dependent
+///      `sub_ability` gated by `AbilityCondition::effect_performed()`, so the dependent
 ///      effect only fires when the player accepts the begin-game opt-in.
 ///
 /// Mirrors `try_parse_opening_hand_reveal_delayed_trigger` end-to-end shape and
@@ -345,7 +345,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
         if has_unimplemented(&sub) {
             return None;
         }
-        def = def.sub_ability(sub.condition(AbilityCondition::IfYouDo));
+        def = def.sub_ability(sub.condition(AbilityCondition::effect_performed()));
     }
 
     Some(def)
@@ -1600,6 +1600,30 @@ pub(crate) fn parse_oracle_ir(
                         continue;
                     }
                 }
+            }
+        }
+
+        // CR 604.3 + CR 604.3a + CR 105.2c: Some instants/sorceries carry
+        // self color-defining characteristic-defining abilities (e.g.,
+        // "~ is colorless.") that define the source's own color in all zones.
+        // Intercept only this narrow class before spell-effect lowering.
+        //
+        // Intercept only that narrow class so we do not steal ordinary spell
+        // instruction lines that happen to have static-like phrasing.
+        if is_spell {
+            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let is_self_color_cda = defs.len() == 1
+                && defs[0].characteristic_defining
+                && defs[0].affected == Some(TargetFilter::SelfRef)
+                && defs[0].modifications.len() == 1
+                && matches!(
+                    defs[0].modifications[0],
+                    ContinuousModification::SetColor { .. }
+                );
+            if is_self_color_cda {
+                result.statics.extend(defs);
+                i += 1;
+                continue;
             }
         }
 
@@ -4028,6 +4052,42 @@ mod tests {
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
     }
 
+    #[test]
+    fn ghostfire_has_self_color_cda_and_spell_damage() {
+        let r = parse(
+            "Ghostfire is colorless.\nGhostfire deals 3 damage to any target.",
+            "Ghostfire",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert_eq!(r.statics.len(), 1, "expected one self color CDA static");
+        let static_def = &r.statics[0];
+        assert!(static_def.characteristic_defining);
+        assert_eq!(static_def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            static_def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+        assert_eq!(
+            static_def.active_zones,
+            vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ]
+        );
+
+        assert_eq!(r.abilities.len(), 1, "expected one spell ability");
+        assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+        assert!(matches!(*r.abilities[0].effect, Effect::DealDamage { .. }));
+    }
+
     /// CR 115.1 + CR 701.9b: "random target X" — the parser stamps
     /// `target_selection_mode = Random` on the produced `AbilityDefinition`.
     /// The runtime then short-circuits `WaitingFor::TargetSelection` and picks
@@ -5268,7 +5328,7 @@ mod tests {
             .sub_ability
             .as_deref()
             .expect("'If you do, exile a card from your hand' must create a sub-ability");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
         assert!(
             !has_unimplemented(sub),
             "exile-from-hand sub-ability must not be Unimplemented: {:?}",

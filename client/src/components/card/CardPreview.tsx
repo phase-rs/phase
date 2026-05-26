@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { GameObject, ManaCost } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
@@ -47,6 +48,17 @@ interface CardPreviewProps {
   position?: { x: number; y: number };
   scryfallId?: string;
   sourcePrinting?: SourcePrinting;
+  /** Overrides the mobile-overlay dismiss handler. Contexts that drive the
+   *  preview via their own state (e.g. the deck builder's hoveredCard) pass
+   *  this so a tap-to-dismiss clears THAT state; defaults to the in-game
+   *  uiStore.dismissPreview. */
+  onDismiss?: () => void;
+  /** Mobile/touch presentation. "modal" (default) is the full-screen,
+   *  tap-to-dismiss overlay used in-game. "compact" is a smaller, non-blocking
+   *  floating card that auto-dismisses on the next tap or scroll — used by the
+   *  deck builder, where you browse many cards quickly and a full-screen
+   *  takeover requiring a separate dismiss tap is too heavy. */
+  mobileLayout?: "modal" | "compact";
 }
 
 export function CardPreview({
@@ -56,6 +68,8 @@ export function CardPreview({
   position,
   scryfallId,
   sourcePrinting,
+  onDismiss,
+  mobileLayout = "modal",
 }: CardPreviewProps) {
   if (!cardName) return null;
 
@@ -67,6 +81,8 @@ export function CardPreview({
       position={position}
       scryfallId={scryfallId}
       sourcePrinting={sourcePrinting}
+      onDismiss={onDismiss}
+      mobileLayout={mobileLayout}
     />
   );
 }
@@ -78,6 +94,8 @@ function CardPreviewInner({
   position,
   scryfallId,
   sourcePrinting,
+  onDismiss,
+  mobileLayout,
 }: {
   cardName: string;
   backFaceName: string | null;
@@ -85,7 +103,10 @@ function CardPreviewInner({
   position?: { x: number; y: number };
   scryfallId?: string;
   sourcePrinting?: SourcePrinting;
+  onDismiss?: () => void;
+  mobileLayout?: "modal" | "compact";
 }) {
+  const { t } = useTranslation("game");
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
   const showDebugId = useUiStore((s) => s.debugPanelOpen || s.debugInteractionMode);
@@ -121,7 +142,7 @@ function CardPreviewInner({
   const defaultFaceIndex = faceIndex ?? (isTransformed ? 1 : 0);
   // Battlefield path: route through oracle_id when the engine attached one.
   // Deck-builder path: `obj` is null, so we keep the name-based fallback.
-  const { src, isLoading, isRotated } = useCardImage(cardName, {
+  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
     size: "normal",
     faceIndex: defaultFaceIndex,
     isToken,
@@ -159,8 +180,12 @@ function CardPreviewInner({
     };
   }, []);
 
+  // Kamigawa flip cards print both halves in one image, the alternate half
+  // rotated 180°. There's no second face to fetch, so Ctrl spins the same image
+  // 180° (flip180) instead of swapping faces the way DFC/MDFC do (showOtherFace).
+  const flip180 = !isMobile && ctrlHeld && isFlip;
   // On desktop, Ctrl swaps to the other face (back face normally, front face if transformed)
-  const showOtherFace = !isMobile && ctrlHeld && backFaceName != null;
+  const showOtherFace = !isMobile && ctrlHeld && backFaceName != null && !isFlip;
   // Fetch other face image when Ctrl is held (hook must always be called, but with empty
   // string when not needed so useCardImage short-circuits without a network request).
   // Battlefield path: the back_face's printed_ref carries the other face's
@@ -212,15 +237,21 @@ function CardPreviewInner({
       const pointer = pointerRef.current;
       if (!preview || !pointer) return;
 
+      // Clamp against the ACTUAL rendered size, not the image-only estimate:
+      // the "Alt: parsed abilities" / "Hold Ctrl" hint bars add height below the
+      // card, and clamping on the estimate let that overflow the bottom of short
+      // (e.g. tablet) viewports.
+      const measuredWidth = preview.offsetWidth || previewWidth;
+      const measuredHeight = preview.offsetHeight || previewHeight;
       const left =
         pointer.x > viewportWidth / 2
-          ? Math.max(16, pointer.x - previewWidth - gap)
-          : Math.min(pointer.x + gap, viewportWidth - previewWidth - 16);
+          ? Math.max(16, pointer.x - measuredWidth - gap)
+          : Math.min(pointer.x + gap, viewportWidth - measuredWidth - 16);
       const top = altHeld
         ? margin
         : Math.min(
-            Math.max(margin, pointer.y - previewHeight / 2),
-            viewportHeight - previewHeight - margin,
+            Math.max(margin, pointer.y - measuredHeight / 2),
+            viewportHeight - measuredHeight - margin,
           );
 
       preview.style.right = "auto";
@@ -241,8 +272,18 @@ function CardPreviewInner({
     window.addEventListener("mousemove", handlePointerMove);
     schedulePositionUpdate();
 
+    // The preview grows when async content settles (image load, hint bars, face
+    // swap); re-clamp on size change so a late-appearing hint bar can't leave the
+    // card hanging off the bottom.
+    const resizeObserver =
+      previewRef.current != null
+        ? new ResizeObserver(() => schedulePositionUpdate())
+        : null;
+    if (resizeObserver && previewRef.current) resizeObserver.observe(previewRef.current);
+
     return () => {
       window.removeEventListener("mousemove", handlePointerMove);
+      resizeObserver?.disconnect();
       if (frameRef.current != null) {
         window.cancelAnimationFrame(frameRef.current);
         frameRef.current = null;
@@ -268,8 +309,9 @@ function CardPreviewInner({
         backFaceName={backFaceName}
         faceIndex={defaultFaceIndex}
         obj={obj}
-        onDismiss={dismissPreview}
+        onDismiss={onDismiss ?? dismissPreview}
         sourcePrinting={sourcePrinting}
+        layout={mobileLayout ?? "modal"}
       />
     );
   }
@@ -292,6 +334,7 @@ function CardPreviewInner({
         <ParsedAbilitiesPanel
           name={showOtherFace ? (engineBackFace?.name ?? backFaceName ?? "") : (obj?.name ?? engineFrontFace?.name ?? frontFaceName)}
           cardTypes={showOtherFace ? engineBackFace?.card_type : (obj?.card_types ?? engineFrontFace?.card_type)}
+          localizedTypeLine={showOtherFace ? engineBackFace?.localized_type_line : engineFrontFace?.localized_type_line}
           parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
           maxHeight={viewportHeight - margin * 2}
         />
@@ -306,9 +349,12 @@ function CardPreviewInner({
           isLoading={activeLoading}
           src={activeSrc}
           isRotated={activeRotated}
-          backFaceHint={backFaceName != null && !showOtherFace
-            ? `Hold Ctrl for ${isTransformed ? "front" : "back"} face`
-            : null}
+          flip180={flip180}
+          backFaceHint={isFlip
+            ? (flip180 ? null : t("preview.holdCtrlFlip"))
+            : backFaceName != null && !showOtherFace
+              ? (isTransformed ? t("preview.holdCtrlFront") : t("preview.holdCtrlBack"))
+              : null}
           altAvailable={Boolean(frontParseDetails || engineFrontFace)}
           debugObjectId={showDebugId && inspectedObjectId != null ? inspectedObjectId : null}
         />
@@ -324,6 +370,7 @@ function MobilePreviewOverlay({
   obj,
   onDismiss,
   sourcePrinting,
+  layout = "modal",
 }: {
   cardName: string;
   backFaceName: string | null;
@@ -331,14 +378,68 @@ function MobilePreviewOverlay({
   obj: GameObject | null;
   onDismiss: () => void;
   sourcePrinting?: SourcePrinting;
+  layout?: "modal" | "compact";
 }) {
-  const { src, isRotated } = useCardImage(cardName, {
+  const { t } = useTranslation("game");
+  const { src, isRotated, isFlip } = useCardImage(cardName, {
     size: "normal",
     faceIndex,
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
     sourcePrinting,
   });
+
+  // Mobile has no Ctrl key, so a Kamigawa flip card's 180° spin is a tap toggle
+  // (desktop holds Ctrl). Only the full-screen modal layout can host the button —
+  // the compact peek dismisses on any tap via document-level capture listeners.
+  const [flipped, setFlipped] = useState(false);
+
+  // Compact layout: dismiss on the next tap or scroll anywhere, so no separate
+  // dismiss gesture is needed. Listeners attach on a deferred tick so the very
+  // tap that opened the preview doesn't immediately close it. Capture phase so
+  // scrolls inside the deck's own overflow container are caught too.
+  useEffect(() => {
+    if (layout !== "compact") return undefined;
+    const id = window.setTimeout(() => {
+      document.addEventListener("pointerdown", onDismiss, true);
+      document.addEventListener("scroll", onDismiss, true);
+      document.addEventListener("touchmove", onDismiss, true);
+      document.addEventListener("wheel", onDismiss, true);
+    }, 0);
+    return () => {
+      window.clearTimeout(id);
+      document.removeEventListener("pointerdown", onDismiss, true);
+      document.removeEventListener("scroll", onDismiss, true);
+      document.removeEventListener("touchmove", onDismiss, true);
+      document.removeEventListener("wheel", onDismiss, true);
+    };
+  }, [layout, onDismiss]);
+
+  if (layout === "compact") {
+    // Non-blocking peek: a smaller card, no dimming backdrop, click-through
+    // container (taps fall through to the deck so the next card can be tapped
+    // directly). The card itself dismisses on tap.
+    return (
+      <div
+        className="pointer-events-none fixed inset-0 z-[100] flex items-center justify-center p-4"
+        data-card-preview
+      >
+        {src && (
+          <img
+            src={src}
+            alt={cardName}
+            draggable={false}
+            onPointerDown={onDismiss}
+            className={
+              isRotated
+                ? "pointer-events-auto max-h-[58vw] max-w-[80vh] rotate-90 rounded-xl border border-white/15 object-contain shadow-2xl"
+                : "pointer-events-auto max-h-[60vh] max-w-[68vw] rounded-xl border border-white/15 object-contain shadow-2xl"
+            }
+          />
+        )}
+      </div>
+    );
+  }
 
   // pointerdown (not click): the touch-release that opened this overlay fires
   // pointerup, not pointerdown, so a fresh tap is required to dismiss.
@@ -361,8 +462,17 @@ function MobilePreviewOverlay({
             draggable={false}
             className={isRotated
               ? "absolute left-1/2 top-1/2 h-[min(84vw,420px)] w-[min(60vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
-              : "max-h-[calc(100dvh-2rem)] max-w-full object-contain"}
+              : `max-h-[calc(100dvh-2rem)] max-w-full object-contain${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
           />
+          {isFlip && (
+            <button
+              type="button"
+              onClick={() => setFlipped((f) => !f)}
+              className="pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/20 bg-black/70 px-4 py-2 text-sm font-semibold text-white shadow-lg backdrop-blur active:bg-black/80"
+            >
+              ⟳ {t("preview.flip")}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -380,6 +490,7 @@ function CardImagePreview({
   isLoading,
   src,
   isRotated,
+  flip180,
   backFaceHint,
   altAvailable,
   mobileMode,
@@ -394,11 +505,13 @@ function CardImagePreview({
   isLoading: boolean;
   src: string | null;
   isRotated: boolean;
+  flip180?: boolean;
   backFaceHint: string | null;
   altAvailable: boolean;
   mobileMode?: boolean;
   debugObjectId?: number | null;
 }) {
+  const { t } = useTranslation("game");
   const frameClass = mobileMode
     ? isRotated
       ? "h-[min(40vw,300px)] w-[min(56vw,420px)] max-h-[75vh] max-w-[84vw]"
@@ -419,7 +532,7 @@ function CardImagePreview({
     ? mobileMode
       ? "absolute left-1/2 top-1/2 h-[min(56vw,420px)] w-[min(40vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
       : "absolute left-1/2 top-1/2 h-[clamp(308px,36.4vw,661px)] w-[clamp(220px,26vw,472px)] max-h-[80vh] max-w-[42vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
-    : `${frameClass} object-cover`;
+    : `${frameClass} object-cover transition-transform duration-200${flip180 ? " rotate-180" : ""}`;
 
   // Use effective spell cost from engine if available (reflects alt costs, reductions),
   // otherwise fall back to printed mana cost. When the user holds Ctrl to view the
@@ -461,7 +574,7 @@ function CardImagePreview({
         )}
         {debugObjectId != null && (
           <div className="absolute top-2 left-2 z-10 rounded bg-black/80 px-1.5 py-0.5 font-mono text-[11px] font-bold text-amber-300 ring-1 ring-amber-500/50">
-            ID: {debugObjectId}
+            {t("preview.debugId", { id: debugObjectId })}
           </div>
         )}
       </div>
@@ -470,7 +583,7 @@ function CardImagePreview({
         <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{backFaceHint}</div>
       )}
       {!showInfoPanel && altAvailable && (
-        <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">Alt: parsed abilities</div>
+        <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{t("preview.altParsedAbilities")}</div>
       )}
     </div>
   );
@@ -512,6 +625,7 @@ function DetailPills({ details, badgeClass }: { details: [string, string][]; bad
 
 /** Renders a single ParsedItem node with support status and recursive children */
 function ParsedItemRow({ item, depth = 0 }: { item: ParsedItem; depth?: number }) {
+  const { t } = useTranslation("game");
   const catStyle = CATEGORY_STYLES[item.category];
   const statusColor = item.supported ? "text-emerald-400" : "text-rose-400";
 
@@ -528,7 +642,7 @@ function ParsedItemRow({ item, depth = 0 }: { item: ParsedItem; depth?: number }
                 {CATEGORY_ABBR[item.category]}
               </span>
               <span className="text-[11px] leading-snug text-gray-200 font-medium">{item.label}</span>
-              {!item.supported && <span className="text-[9px] text-rose-400">unsupported</span>}
+              {!item.supported && <span className="text-[9px] text-rose-400">{t("preview.unsupported")}</span>}
             </div>
             {item.source_text && (
               <div className="text-[10px] leading-snug text-gray-500 mt-0.5 italic">{item.source_text}</div>
@@ -569,13 +683,18 @@ function SupportSummary({ items }: { items: ParsedItem[] }) {
 interface ParsedAbilitiesPanelProps {
   name: string;
   cardTypes?: { supertypes: string[]; core_types: string[]; subtypes: string[] } | null;
+  /** Localized type line from the content sidecar; preferred over formatting
+   *  `cardTypes` when present (non-English locale with a translated card). */
+  localizedTypeLine?: string | null;
   parseDetails: ParsedItem[] | null;
   maxHeight?: number;
 }
 
-function ParsedAbilitiesPanel({ name, cardTypes, parseDetails, maxHeight }: ParsedAbilitiesPanelProps) {
+function ParsedAbilitiesPanel({ name, cardTypes, localizedTypeLine, parseDetails, maxHeight }: ParsedAbilitiesPanelProps) {
+  const { t } = useTranslation("game");
   const items = parseDetails ?? [];
   const rulings = useCardRulings(name);
+  const typeLine = localizedTypeLine ?? (cardTypes ? formatTypeLine(cardTypes) : null);
 
   return (
     <div
@@ -586,16 +705,16 @@ function ParsedAbilitiesPanel({ name, cardTypes, parseDetails, maxHeight }: Pars
       <div className="sticky top-0 z-10 bg-gray-950 border-b border-gray-700/80 px-3 py-2">
         <div className="flex items-center justify-between">
           <div className="text-sm font-semibold text-gray-200">{name}</div>
-          <div className="text-[9px] uppercase tracking-widest text-gray-600">Engine Parse</div>
+          <div className="text-[9px] uppercase tracking-widest text-gray-600">{t("preview.engineParse")}</div>
         </div>
-        {cardTypes && formatTypeLine(cardTypes) && (
-          <div className="text-[10px] text-gray-500 mt-0.5">{formatTypeLine(cardTypes)}</div>
+        {typeLine && (
+          <div className="text-[10px] text-gray-500 mt-0.5">{typeLine}</div>
         )}
         <SupportSummary items={items} />
       </div>
       <div className="px-2 py-2 space-y-0.5">
         {items.length === 0 && (
-          <div className="px-1 py-2 text-xs text-gray-500 italic">Vanilla — no parsed abilities</div>
+          <div className="px-1 py-2 text-xs text-gray-500 italic">{t("preview.vanilla")}</div>
         )}
         {items.map((item, i) => (
           <ParsedItemRow key={itemKey(item, i)} item={item} />
@@ -607,6 +726,7 @@ function ParsedAbilitiesPanel({ name, cardTypes, parseDetails, maxHeight }: Pars
 }
 
 function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: boolean }) {
+  const { t } = useTranslation("game");
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters).filter(([type]) => type !== "loyalty");
   const keywords = sortKeywords(obj.keywords);
@@ -633,12 +753,12 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
       {altAvailable && (
         <div className="pointer-events-none absolute bottom-2 right-3 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-300">
           <kbd className="rounded border border-gray-600 bg-gray-800 px-1.5 py-0.5 font-mono text-[10px] leading-none text-gray-200 shadow-sm">
-            Alt
+            {t("preview.altKey")}
           </kbd>
-          <span>Parse</span>
+          <span>{t("preview.parse")}</span>
           {rulings.length > 0 && (
             <span className="ml-1 rounded bg-indigo-900/70 px-1.5 py-0.5 text-[9px] font-normal normal-case tracking-normal text-indigo-200">
-              {rulings.length} ruling{rulings.length === 1 ? "" : "s"}
+              {t("preview.rulingCount", { count: rulings.length })}
             </span>
           )}
         </div>
@@ -662,7 +782,7 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
                 {getKeywordDisplayText(kw)}
                 {source && (
                   <span className="ml-1 text-[10px] text-indigo-400/80">
-                    (from {source})
+                    {t("preview.fromSource", { source })}
                   </span>
                 )}
               </span>
@@ -693,16 +813,16 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
             {ptDisplay.toughness}
           </span>
           {obj.base_power != null && obj.base_toughness != null && (
-            <span className="ml-1 text-gray-500">(base {obj.base_power}/{obj.base_toughness})</span>
+            <span className="ml-1 text-gray-500">{t("preview.basePT", { power: obj.base_power, toughness: obj.base_toughness })}</span>
           )}
           {obj.damage_marked > 0 && (
-            <span className="ml-2 text-red-400">Damage: {obj.damage_marked}</span>
+            <span className="ml-2 text-red-400">{t("preview.damage", { amount: obj.damage_marked })}</span>
           )}
           {ptSources.length > 0 && (
             <ul className="mt-0.5 ml-1 space-y-px text-[10px] text-indigo-300/90">
               {ptSources.map((c) => (
                 <li key={`${c.sourceName}-${c.deltaPower}-${c.deltaToughness}`}>
-                  {formatPTDelta(c)} from {c.sourceName}
+                  {t("preview.ptDeltaFrom", { delta: formatPTDelta(c), source: c.sourceName })}
                 </li>
               ))}
             </ul>
@@ -713,7 +833,7 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
       {/* Color changes */}
       {colorsChanged && (
         <div className="mt-1 text-gray-400">
-          Colors: {obj.color.length > 0 ? obj.color.join(", ") : "Colorless"}
+          {t("preview.colors", { colors: obj.color.length > 0 ? obj.color.join(", ") : t("preview.colorless") })}
         </div>
       )}
     </div>
@@ -723,6 +843,7 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
 const RULINGS_INITIAL_LIMIT = 3;
 
 function RulingsSection({ rulings }: { rulings: CardRuling[] }) {
+  const { t } = useTranslation("game");
   const [expanded, setExpanded] = useState(false);
 
   // Sort by date descending (most recent first). React interpolation escapes all
@@ -734,7 +855,7 @@ function RulingsSection({ rulings }: { rulings: CardRuling[] }) {
   return (
     <div className="mt-3 border-t border-gray-700 px-2 pb-2 pt-2 text-xs text-gray-300">
       <div className="mb-1 font-semibold uppercase tracking-wide text-[10px] text-gray-500">
-        Rulings
+        {t("preview.rulings")}
       </div>
       <ul className="space-y-1.5">
         {visible.map((ruling, i) => (
@@ -750,7 +871,7 @@ function RulingsSection({ rulings }: { rulings: CardRuling[] }) {
           onClick={() => setExpanded(true)}
           className="mt-1.5 text-[11px] text-indigo-300 hover:text-indigo-200"
         >
-          Show {hiddenCount} more
+          {t("preview.showMore", { count: hiddenCount })}
         </button>
       )}
       {expanded && sorted.length > RULINGS_INITIAL_LIMIT && (
@@ -759,7 +880,7 @@ function RulingsSection({ rulings }: { rulings: CardRuling[] }) {
           onClick={() => setExpanded(false)}
           className="mt-1.5 text-[11px] text-indigo-300 hover:text-indigo-200"
         >
-          Show less
+          {t("preview.showLess")}
         </button>
       )}
     </div>

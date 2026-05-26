@@ -641,7 +641,7 @@ mod tests {
         );
         gain_life.kind = AbilityKind::Spell;
         gain_life.condition = Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::IfYouDo),
+            condition: Box::new(AbilityCondition::effect_performed()),
         });
         state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life)));
 
@@ -706,7 +706,7 @@ mod tests {
         );
         gain_life.kind = AbilityKind::Spell;
         gain_life.condition = Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::IfYouDo),
+            condition: Box::new(AbilityCondition::effect_performed()),
         });
         state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life)));
 

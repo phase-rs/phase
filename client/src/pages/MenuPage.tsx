@@ -1,26 +1,36 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
+import type { GameState } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
 import { DiscordBadge } from "../components/chrome/DiscordBadge";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { LoadGameStateModal } from "../components/menu/LoadGameStateModal";
 import { MainMenuActionCard } from "../components/menu/MainMenuActionCard";
 import { MenuLogo } from "../components/menu/MenuLogo";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { GameplayTooltip } from "../components/ui/GameplayTooltip";
 import {
   ACTIVE_DECK_KEY,
   listSavedDeckNames,
 } from "../constants/storage";
 import { isTauri } from "../services/sidecar";
+import { openExternal } from "../services/openExternal";
+import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { loadWsSession } from "../services/multiplayerSession";
 import { loadP2PSession } from "../services/p2pSession";
+import { useCardDataStore } from "../stores/cardDataStore";
 import {
   clearActiveGame,
   loadActiveGame,
   loadGame,
+  saveActiveGame,
+  saveGame,
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
+import { usePreferencesStore } from "../stores/preferencesStore";
 
 interface FormatCoverageSummary {
   total_cards: number;
@@ -42,12 +52,41 @@ const FORMAT_DISPLAY: { key: string; label: string }[] = [
 ];
 
 export function MenuPage() {
+  const { t } = useTranslation("menu");
   const navigate = useNavigate();
   const [activeGame, setActiveGame] = useState<ActiveGameMeta | null>(null);
+  const [loadModalOpen, setLoadModalOpen] = useState(false);
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
   const [formatCoverage, setFormatCoverage] = useState<[string, FormatCoverageSummary][]>([]);
+  const previewTooltipId = useId();
+  const cardStatus = useCardDataStore((s) => s.status);
+  const lastFormat = usePreferencesStore((s) => s.lastFormat);
+  const lastMatchType = usePreferencesStore((s) => s.lastMatchType);
+  const deckPrewarmStarted = useRef(false);
   useAudioContext("menu");
+
+  // Start warming the shared engine worker's card database immediately so
+  // compat checks and game start are instant by the time the player picks an
+  // action. Idempotent; deck-requiring buttons gate on `cardStatus` below.
+  useEffect(() => {
+    void useCardDataStore.getState().warm();
+  }, []);
+
+  // Once the DB is warm, pre-run summary compatibility for the saved-deck +
+  // AI catalog in the background using the last-used format/match type — the
+  // same keys the setup page evaluates, so its checks become cache hits. This
+  // is the work the gate does NOT block on (per design): the menu un-gates at
+  // DB-ready while these finish moments later. Skipped when no format has been
+  // chosen yet (new users have no decks to pre-check anyway).
+  useEffect(() => {
+    if (cardStatus !== "ready" || !lastFormat || deckPrewarmStarted.current) return;
+    deckPrewarmStarted.current = true;
+    void buildLegalAiDeckCatalog({
+      selectedFormat: lastFormat,
+      selectedMatchType: lastMatchType,
+    }).catch(() => {/* prewarm is best-effort; setup re-runs uncached if needed */});
+  }, [cardStatus, lastFormat, lastMatchType]);
 
   useEffect(() => {
     const savedNames = listSavedDeckNames();
@@ -125,57 +164,90 @@ export function MenuPage() {
     }
   }, [activeGame, navigate]);
 
+  // Load an externally-provided GameState (pasted JSON or an exported .zip)
+  // straight from the menu. We mirror the Resume path: persist the state under
+  // a fresh gameId, record AI-mode active-game meta, then navigate into the
+  // game route — GameProvider.setupLocal sees the saved state via loadGame and
+  // calls resumeGame (which awaits the card DB and rehydrates ability defs),
+  // so no engine work happens here. Non-human seats resolve to Medium
+  // difficulty (no per-seat aiSeats snapshot exists for a loaded state).
+  const handleLoadState = useCallback(
+    async (state: GameState) => {
+      const gameId = crypto.randomUUID();
+      await saveGame(gameId, state);
+      saveActiveGame({ id: gameId, mode: "ai", difficulty: "Medium" });
+      useGameStore.setState({ gameId });
+      // setupLocal derives player count from the restored state, but pass it
+      // explicitly for 3+ player games so the AI loop spawns every opponent
+      // seat (matches handleResumeGame's reasoning above).
+      const playerCount = state.players?.length ?? 0;
+      const playersParam = playerCount > 2 ? `&players=${playerCount}` : "";
+      navigate(`/game/${gameId}?mode=ai&difficulty=Medium${playersParam}`);
+    },
+    [navigate],
+  );
+
   const hasSavedGame = activeGame !== null;
+  // Deck-requiring actions wait for the card DB warm. `error` un-gates so a
+  // failed warm never traps the player — downstream init retries best-effort.
+  // Resume and Draft are never gated (Resume awaits the DB itself; Draft uses
+  // its own DraftAdapter and low-difficulty pods need no card data).
+  const cardsPending = cardStatus !== "ready" && cardStatus !== "error";
   const menuActions = useMemo(() => {
     const actions = [];
     if (hasSavedGame) {
       actions.push({
         key: "resume",
-        title: "Resume Game",
-        description: "Continue the last saved match from its current turn and board state.",
+        title: t("home.resume.title"),
+        description: t("home.resume.description"),
         accent: "ember" as const,
         onClick: handleResumeGame,
         icon: <ResumeIcon />,
+        disabled: false,
       });
     }
     actions.push(
       {
         key: "setup",
-        title: hasSavedGame ? "New AI Match" : "Play vs AI",
-        description: "Play a solo match against an AI opponent — choose format, deck, archetype, and difficulty.",
+        title: hasSavedGame ? t("home.setup.titleSaved") : t("home.setup.title"),
+        description: t("home.setup.description"),
         accent: "arcane" as const,
         onClick: () => navigate("/setup"),
         icon: <SigilIcon />,
+        disabled: cardsPending,
       },
       {
         key: "online",
-        title: "Play Online",
-        description: "Host a room, join by code, or reconnect to multiplayer.",
+        title: t("home.online.title"),
+        description: t("home.online.description"),
         accent: "jade" as const,
         onClick: () => navigate("/multiplayer"),
         icon: <CrownIcon />,
+        disabled: cardsPending,
       },
     );
     actions.push({
       key: "draft",
-      title: "Draft",
-      description: "Quick Draft against AI, plus experimental cube and pod draft options.",
+      title: t("home.draft.title"),
+      description: t("home.draft.description"),
       accent: "ember" as const,
       onClick: () => navigate("/draft"),
       icon: <DraftIcon />,
+      disabled: false,
     });
     actions.push(
       {
         key: "decks",
-        title: "Decks",
-        description: "Open saved decks, switch your active list, and edit builds.",
+        title: t("home.decks.title"),
+        description: t("home.decks.description"),
         accent: "stone" as const,
         onClick: () => navigate("/my-decks"),
         icon: <DeckIcon />,
+        disabled: cardsPending,
       },
     );
     return actions;
-  }, [hasSavedGame, navigate, handleResumeGame]);
+  }, [hasSavedGame, navigate, handleResumeGame, cardsPending, t]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -186,36 +258,94 @@ export function MenuPage() {
       <div className="menu-scene__sigil menu-scene__sigil--right" />
       <div className="menu-scene__haze" />
 
-      <div className="fixed left-4 top-[calc(env(safe-area-inset-top)+1rem)] z-20 flex items-center gap-2">
+      {/* Social cluster. Icon-only on mobile (labels return at sm) with tighter
+          padding/gap so it never collides with the top-right chrome cluster
+          (Fullscreen/Volume/Settings in ScreenChrome) on narrow screens. */}
+      <div className="fixed left-4 top-[calc(env(safe-area-inset-top)+1rem)] z-20 flex items-center gap-1.5 sm:gap-2">
         <DiscordBadge />
         <a
           href="https://github.com/phase-rs/phase"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-3 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-white/20 hover:text-white"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal("https://github.com/phase-rs/phase");
+          }}
+          aria-label="GitHub"
+          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-2 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-white/20 hover:text-white sm:px-3"
         >
           <GitHubIcon />
-          GitHub
+          <span className="hidden sm:inline">GitHub</span>
         </a>
         <a
           href="https://github.com/sponsors/matthewevans"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-3 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-pink-400/40 hover:text-pink-400"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal("https://github.com/sponsors/matthewevans");
+          }}
+          aria-label={t("home.social.sponsor")}
+          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-2 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-pink-400/40 hover:text-pink-400 sm:px-3"
         >
           <SponsorIcon />
-          Sponsor
+          <span className="hidden sm:inline">{t("home.social.sponsor")}</span>
         </a>
         <a
           href="https://ko-fi.com/phasers"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-3 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-[#FF5E5B]/40 hover:text-[#FF5E5B]"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal("https://ko-fi.com/phasers");
+          }}
+          aria-label="Ko-fi"
+          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-2 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-[#FF5E5B]/40 hover:text-[#FF5E5B] sm:px-3"
         >
           <KoFiIcon />
-          Ko-fi
+          <span className="hidden sm:inline">Ko-fi</span>
         </a>
       </div>
+
+      {/* Release builds invite players to the bleeding-edge preview site
+          (deploy.yml → preview.phase-rs.dev). Sits just below the upper-right
+          chrome cluster (Fullscreen/Volume/Settings, h-11 tall, in
+          ScreenChrome). Hidden in dev and on the preview deploy itself — see
+          __IS_RELEASE_BUILD__ in vite.config.ts. */}
+      {__IS_RELEASE_BUILD__ && (
+        <div className="fixed right-3 top-[calc(env(safe-area-inset-top)+4.25rem)] z-20 flex max-w-[calc(100vw-1.5rem)] justify-end sm:right-4">
+          <a
+            href={__PREVIEW_SITE_URL__}
+            target="_blank"
+            rel="noopener noreferrer"
+            // Route through openExternal so the desktop (Tauri) build opens the
+            // system browser deterministically; href/target remain the web path
+            // and the graceful fallback for middle-click / right-click-copy.
+            onClick={(e) => {
+              e.preventDefault();
+              openExternal(__PREVIEW_SITE_URL__);
+            }}
+            aria-describedby={previewTooltipId}
+            className="group relative flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-200 shadow-[0_0_16px_-2px_rgba(245,158,11,0.45)] backdrop-blur-sm transition-all hover:border-amber-300/70 hover:bg-amber-500/20 hover:text-amber-100 hover:shadow-[0_0_22px_0_rgba(245,158,11,0.65)] sm:gap-1.5 sm:px-3.5 sm:py-1.5 sm:text-xs"
+          >
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-0 -z-10 animate-ping rounded-full bg-amber-400/20 [animation-duration:2.4s]"
+            />
+            <BoltIcon />
+            <span>{t("home.preview.cta")}</span>
+            <span className="transition-transform group-hover:translate-x-0.5">&rarr;</span>
+            {/* Below the badge, not above — the default bottom-full placement
+                would cover the chrome cluster overhead. */}
+            <GameplayTooltip
+              id={previewTooltipId}
+              className="top-full bottom-auto! mt-2 mb-0!"
+            >
+              {t("home.preview.tooltip")}
+            </GameplayTooltip>
+          </a>
+        </div>
+      )}
 
       <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col justify-center px-6 py-16 lg:px-10">
         <div className="mx-auto flex w-full max-w-3xl flex-col items-center text-center">
@@ -225,17 +355,17 @@ export function MenuPage() {
           {formatCoverage.length > 0 && (
             <button
               onClick={() => navigate("/coverage")}
-              title="Open the coverage dashboard"
-              aria-label="Open card coverage dashboard"
+              title={t("home.coverage.title")}
+              aria-label={t("home.coverage.ariaLabel")}
               className="group mt-6 flex cursor-pointer flex-col gap-2 rounded-xl border border-sky-400/30 bg-sky-500/[0.06] px-4 py-3 shadow-[0_0_0_1px_rgba(56,189,248,0.08)] transition-colors hover:border-sky-400/60 hover:bg-sky-500/[0.12] hover:shadow-[0_0_0_1px_rgba(56,189,248,0.22)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/70"
             >
               <div className="flex items-center justify-between gap-3">
                 <span className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-200">
                   <span aria-hidden>&#128269;</span>
-                  Card Coverage Dashboard
+                  {t("home.coverage.heading")}
                 </span>
                 <span className="text-[11px] font-medium text-sky-300 transition-transform group-hover:translate-x-0.5">
-                  View details &rarr;
+                  {t("home.coverage.viewDetails")} &rarr;
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-4">
@@ -269,19 +399,31 @@ export function MenuPage() {
               accent={action.accent}
               onClick={action.onClick}
               icon={action.icon}
+              disabled={action.disabled}
+              statusLabel={t("home.preparingCards")}
             />
           ))}
         </div>
 
+        <div className="mx-auto mt-4 flex justify-center">
+          <button
+            onClick={() => setLoadModalOpen(true)}
+            className="flex items-center gap-2 rounded-full border border-white/8 bg-black/20 px-4 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-white/20 hover:text-white"
+          >
+            <LoadIcon />
+            {t("home.load.title")}
+          </button>
+        </div>
+
         <div className="mx-auto mt-8 max-w-md rounded-lg border border-amber-500/20 bg-amber-950/20 px-4 py-2.5 text-center text-sm text-amber-200/70">
-          <span className="font-semibold text-amber-300/90">Early Alpha</span>
-          {" — expect broken cards and missing features."}
+          <span className="font-semibold text-amber-300/90">{t("home.alpha.label")}</span>
+          {t("home.alpha.message")}
         </div>
 
         {hasSavedGame && (
           <div className="mt-3 flex justify-center">
             <div className="rounded-full border border-white/8 bg-black/16 px-4 py-2 text-sm text-slate-500">
-              Saved match available
+              {t("home.savedMatchAvailable")}
             </div>
           </div>
         )}
@@ -294,7 +436,7 @@ export function MenuPage() {
               }}
               className="rounded-full border border-white/8 bg-black/20 px-5 py-1.5 text-xs font-medium text-slate-500 backdrop-blur-sm transition-colors hover:border-red-500/30 hover:text-red-400"
             >
-              Exit
+              {t("home.exit")}
             </button>
           </div>
         )}
@@ -304,6 +446,11 @@ export function MenuPage() {
         </p>
       </div>
 
+      <LoadGameStateModal
+        open={loadModalOpen}
+        onClose={() => setLoadModalOpen(false)}
+        onLoaded={handleLoadState}
+      />
     </div>
   );
 }
@@ -356,6 +503,14 @@ function KoFiIcon() {
   );
 }
 
+function BoltIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 fill-current">
+      <path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z" />
+    </svg>
+  );
+}
+
 function DraftIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-7 w-7 fill-current">
@@ -369,6 +524,14 @@ function DeckIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-7 w-7 fill-current">
       <path d="M7 3h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm1 3v9h7V6H8Zm-2 15h11v-2H6v2Z" />
+    </svg>
+  );
+}
+
+function LoadIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 fill-current">
+      <path d="M12 3a1 1 0 0 1 1 1v8.59l2.3-2.3a1 1 0 1 1 1.4 1.42l-4 4a1 1 0 0 1-1.4 0l-4-4a1 1 0 1 1 1.4-1.42l2.3 2.3V4a1 1 0 0 1 1-1ZM5 19a1 1 0 0 1 1-1h12a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1Z" />
     </svg>
   );
 }
