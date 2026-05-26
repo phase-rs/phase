@@ -248,20 +248,23 @@ pub(crate) fn copy_count_with_replacements(
     // CR 707.10 / CR 614.1a: "if you would copy" — only the copy controller's
     // copy-additional replacements apply.
     let controller = copy_controller(ability);
-    let mut count = base as u32;
+    // Keep `count` as `usize` and widen the `u32` modification values into it.
+    // Widening (`value as usize`) is always lossless; the earlier `base as u32`
+    // was a narrowing cast that could truncate on 64-bit targets.
+    let mut count = base;
     for (_idx, obj, def) in crate::game::functioning_abilities::active_replacements(state) {
         if def.event != ReplacementEvent::CopySpell || obj.controller != controller {
             continue;
         }
         count = match def.quantity_modification {
             Some(QuantityModification::Double) => count.saturating_mul(2),
-            Some(QuantityModification::Plus { value }) => count.saturating_add(value),
-            Some(QuantityModification::Minus { value }) => count.saturating_sub(value),
+            Some(QuantityModification::Plus { value }) => count.saturating_add(value as usize),
+            Some(QuantityModification::Minus { value }) => count.saturating_sub(value as usize),
             // `Prevent` / unspecified is not a copy-count increase — leave as-is.
             Some(QuantityModification::Prevent) | None => count,
         };
     }
-    count as usize
+    count
 }
 
 fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<StackEntry> {
