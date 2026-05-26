@@ -176,8 +176,57 @@ fn matching_batched_trigger_events(
                 check_trigger_condition(state, condition, controller, Some(obj_id), Some(candidate))
             })
         })
-        .cloned()
+        .filter_map(|candidate| {
+            contextual_batched_trigger_event(state, candidate, trig_def, obj_id)
+        })
         .collect()
+}
+
+fn contextual_batched_trigger_event(
+    state: &GameState,
+    event: &GameEvent,
+    trig_def: &TriggerDefinition,
+    obj_id: ObjectId,
+) -> Option<GameEvent> {
+    let GameEvent::AttackersDeclared {
+        defending_player, ..
+    } = event
+    else {
+        return Some(event.clone());
+    };
+
+    let matching_attacks = match trig_def.mode {
+        TriggerMode::Attacks => {
+            super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
+                .into_iter()
+                .flat_map(|event| match event {
+                    GameEvent::AttackersDeclared { attacks, .. } => attacks,
+                    _ => Vec::new(),
+                })
+                .collect()
+        }
+        TriggerMode::YouAttack => {
+            super::trigger_matchers::matching_you_attack_pairs(event, trig_def, obj_id, state)
+        }
+        _ => return Some(event.clone()),
+    };
+
+    let matching_attackers: Vec<_> = matching_attacks
+        .iter()
+        .map(|(attacker_id, _)| *attacker_id)
+        .collect();
+    if matching_attackers.is_empty() {
+        return None;
+    }
+
+    // CR 603.2c + CR 608.2c: batched "one or more ... attack" triggers fire
+    // once, but later "that many" text refers to the members of that matching
+    // event subset, not every attacker in the declaration.
+    Some(GameEvent::AttackersDeclared {
+        attacker_ids: matching_attackers,
+        defending_player: *defending_player,
+        attacks: matching_attacks,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3483,6 +3532,27 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
             }
         }
     }
+    // CR 115.1 / CR 115.1d: Only effects that use the word "target" require stack-time target
+    // selection. `TargetFilter::Any` is a sentinel value meaning "broadcast to all
+    // matching permanents at resolution time" — it is never a declared target on any
+    // effect. The one exception is `DealDamage`, which uses `TargetFilter::Any` to
+    // represent the "any target" wording in damage-dealing spells and abilities (e.g.
+    // "deals 3 damage to any target"), where the player does choose a single target
+    // from the combined pool of creatures, planeswalkers, and players.
+    //
+    // For all other effects, `TargetFilter::Any` arises in two ways: (a) as a mass
+    // broadcast where the Oracle text contains no "target" keyword (e.g. "creatures
+    // get -N/-M until end of turn"), or (b) as an unthreaded subject sentinel produced
+    // by a sub-parser before the calling parser threads the real subject (SelfRef,
+    // ParentTarget, etc.). In both cases no player-chosen target is required.
+    // Generating a slot for `Any` causes a spurious WaitingFor::TriggerTargetSelection
+    // entry that players and the AI cannot resolve, producing a hard freeze (issue #824
+    // class).
+    if effect.target_filter() == Some(&TargetFilter::Any)
+        && !matches!(effect, Effect::DealDamage { .. })
+    {
+        return None;
+    }
     effect.target_filter().filter(|t| !t.is_context_ref())
 }
 // ---------------------------------------------------------------------------
@@ -3499,9 +3569,10 @@ pub mod tests {
         AggregateFunction, ChosenAttribute, ChosenSubtypeKind, CommanderOwnership, Comparator,
         ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
         FilterProp, GainLifePlayer, KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter,
-        PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
-        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
+        StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -3800,7 +3871,7 @@ pub mod tests {
                 target: TargetFilter::Controller,
             },
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
         let pay_then_draw = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PayCost {
@@ -4145,6 +4216,74 @@ pub mod tests {
             plus1_counters(&state, evolver),
             1,
             "Evolve places exactly one +1/+1 counter (CR 702.100a)"
+        );
+    }
+
+    /// CR 702.100b: A creature "evolves" only after its evolve ability
+    /// resolves and actually puts one or more +1/+1 counters on it. This is
+    /// distinct from the CR 702.100a ETB trigger event that starts the evolve
+    /// ability.
+    #[test]
+    fn test_evolved_trigger_fires_after_evolve_counter_is_added() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let evolver = make_evolve_creature(&mut state, PlayerId(0), "Evolve 2/2", 2, 2);
+        let entrant = make_creature(&mut state, PlayerId(0), "Bigger 3/3", 3, 3);
+
+        let draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let evolved_trigger = TriggerDefinition::new(TriggerMode::Evolved)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(draw)
+            .description("Whenever this creature evolves, draw a card.".to_string());
+        state
+            .objects
+            .get_mut(&evolver)
+            .unwrap()
+            .trigger_definitions
+            .push(evolved_trigger.clone());
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&evolver)
+                .unwrap()
+                .base_trigger_definitions,
+        )
+        .push(evolved_trigger);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                entrant,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        assert_eq!(state.stack.len(), 1, "only the evolve ETB trigger fires");
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::Evolved { object_id } if *object_id == evolver
+            )),
+            "evolve resolution must emit the CR 702.100b evolved event"
+        );
+
+        process_triggers(&mut state, &events);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "the separate 'whenever this evolves' trigger must now fire"
         );
     }
 
@@ -8265,6 +8404,79 @@ pub mod tests {
         );
     }
 
+    // === CR 115.1 / CR 115.1d: extract_target_filter mass-effect (Any-filter) tests ===
+
+    /// CR 115.1 / CR 115.1d: `Pump { target: Any }` is a mass broadcast effect — no word
+    /// "target" in Oracle text, so no stack-time target slot should be generated.
+    /// This is also used as a sentinel value by `try_parse_pump` before the
+    /// calling parser threads a real subject (issue #824 class).
+    #[test]
+    fn extract_target_skips_pump_with_any_filter() {
+        use crate::types::ability::PtValue;
+        let effect = Effect::Pump {
+            power: PtValue::Fixed(-2),
+            toughness: PtValue::Fixed(-2),
+            target: TargetFilter::Any,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "Pump{{target: Any}} is a mass effect — must not generate a target slot"
+        );
+    }
+
+    /// CR 115.1 / CR 115.1d: `Pump { target: Typed(Creature) }` is a genuinely targeted
+    /// effect ("target creature gets +N/+M") — must still generate a slot.
+    #[test]
+    fn extract_target_keeps_pump_with_typed_filter() {
+        use crate::types::ability::PtValue;
+        let effect = Effect::Pump {
+            power: PtValue::Fixed(2),
+            toughness: PtValue::Fixed(2),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "Pump with a typed target filter must still generate a target slot"
+        );
+    }
+
+    /// CR 115.1 / CR 115.1d: `GenericEffect { target: Some(Any) }` is a mass continuous
+    /// modification ("each creature gets -2/-2 until end of turn") produced by
+    /// `build_layer_effect_until`. No word "target" in Oracle text, so no slot.
+    #[test]
+    fn extract_target_skips_generic_effect_with_any_filter() {
+        // StaticMode is imported below the test section; use fully qualified path.
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(
+                crate::types::statics::StaticMode::Continuous,
+            )],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::Any),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "GenericEffect{{target: Some(Any)}} is a mass effect — must not generate a target slot (issue #824)"
+        );
+    }
+
+    /// CR 115.1 / CR 115.1d: `GenericEffect { target: Some(Typed(Creature)) }` is a
+    /// targeted continuous modification ("target creature gains haste") — must
+    /// still generate a slot.
+    #[test]
+    fn extract_target_keeps_generic_effect_with_typed_filter() {
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(
+                crate::types::statics::StaticMode::Continuous,
+            )],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::Typed(TypedFilter::creature())),
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "GenericEffect with a typed target must still generate a target slot"
+        );
+    }
+
     // === CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers integration tests ===
 
     use crate::types::statics::{StaticMode, SuppressedTriggerEvent};
@@ -11552,6 +11764,222 @@ pub mod tests {
             trigger_fires(true),
             "subject-led God-filter trigger MUST fire when a God attacks"
         );
+    }
+
+    /// Issue #1055: The Earth King stores "that many" as EventContextAmount.
+    /// For a batched attack trigger, that amount is the number of attackers
+    /// that matched the trigger subject, not the raw number of all attackers.
+    #[test]
+    fn issue_1055_batched_attack_search_uses_matching_attacker_count() {
+        use crate::game::combat::AttackTarget;
+
+        fn add_basic_land(state: &mut GameState, name: &str) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(state.next_object_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Basic);
+            id
+        }
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let source = make_creature(&mut state, PlayerId(0), "The Earth King", 4, 4);
+        let mut trigger =
+            TriggerDefinition::new(TriggerMode::YouAttack).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                        FilterProp::HasSupertype {
+                            value: crate::types::card_type::Supertype::Basic,
+                        },
+                    ])),
+                    count: QuantityExpr::up_to(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                },
+            ));
+        trigger.batched = true;
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 4 },
+                }]),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let big_one = make_creature(&mut state, PlayerId(0), "Big One", 4, 4);
+        let big_two = make_creature(&mut state, PlayerId(0), "Big Two", 5, 5);
+        let small = make_creature(&mut state, PlayerId(0), "Small", 3, 3);
+        add_basic_land(&mut state, "Plains");
+        add_basic_land(&mut state, "Island");
+        add_basic_land(&mut state, "Forest");
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![big_one, big_two, small],
+                defending_player: PlayerId(1),
+                attacks: vec![
+                    (big_one, AttackTarget::Player(PlayerId(1))),
+                    (big_two, AttackTarget::Player(PlayerId(1))),
+                    (small, AttackTarget::Player(PlayerId(1))),
+                ],
+            }],
+        );
+
+        assert_eq!(state.stack.len(), 1, "The Earth King trigger should fire");
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice {
+                count,
+                up_to,
+                cards,
+                ..
+            } => {
+                assert_eq!(*count, 2, "two power-4+ attackers set the search cap");
+                assert!(*up_to, "The Earth King's search is up to that many");
+                assert_eq!(cards.len(), 3, "all three basic lands remain legal choices");
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batched_attack_context_filters_attacked_target_type() {
+        use crate::game::combat::AttackTarget;
+
+        fn add_basic_land(state: &mut GameState, name: &str) {
+            let id = create_object(
+                state,
+                CardId(state.next_object_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types
+                .supertypes
+                .push(crate::types::card_type::Supertype::Basic);
+        }
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let source = make_creature(&mut state, PlayerId(0), "Attack Trigger Source", 4, 4);
+        let mut trigger =
+            TriggerDefinition::new(TriggerMode::YouAttack).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                        FilterProp::HasSupertype {
+                            value: crate::types::card_type::Supertype::Basic,
+                        },
+                    ])),
+                    count: QuantityExpr::up_to(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                },
+            ));
+        trigger.batched = true;
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }],
+        )));
+        trigger.attack_target_filter = Some(AttackTargetFilter::Player);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let attacks_player = make_creature(&mut state, PlayerId(0), "Attacks Player", 4, 4);
+        let attacks_planeswalker =
+            make_creature(&mut state, PlayerId(0), "Attacks Planeswalker", 5, 5);
+        let small_attacks_player =
+            make_creature(&mut state, PlayerId(0), "Small Attacks Player", 3, 3);
+        let planeswalker = create_object(
+            &mut state,
+            CardId(9000),
+            PlayerId(1),
+            "Target Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&planeswalker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Planeswalker);
+        add_basic_land(&mut state, "Plains");
+        add_basic_land(&mut state, "Island");
+        add_basic_land(&mut state, "Forest");
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacks_player, attacks_planeswalker, small_attacks_player],
+                defending_player: PlayerId(1),
+                attacks: vec![
+                    (attacks_player, AttackTarget::Player(PlayerId(1))),
+                    (
+                        attacks_planeswalker,
+                        AttackTarget::Planeswalker(planeswalker),
+                    ),
+                    (small_attacks_player, AttackTarget::Player(PlayerId(1))),
+                ],
+            }],
+        );
+
+        assert_eq!(state.stack.len(), 1, "filtered attack trigger should fire");
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { count, .. } => {
+                assert_eq!(
+                    *count, 1,
+                    "only the power-4+ creature attacking a player contributes to that-many"
+                );
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        }
     }
 
     /// Issue #501 (class coverage): The Tenth Doctor's `Allons-y!` attack

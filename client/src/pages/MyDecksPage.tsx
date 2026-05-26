@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
 import { useAudioContext } from "../audio/useAudioContext";
@@ -10,6 +11,7 @@ import { useCardDataStore } from "../stores/cardDataStore";
 
 export function MyDecksPage() {
   const navigate = useNavigate();
+  const { t } = useTranslation("menu");
   useAudioContext("deck_builder");
 
   // Warm the shared card DB so deck compat/coverage scans below are instant.
@@ -28,9 +30,9 @@ export function MyDecksPage() {
       <div className="menu-scene__haze" />
 
       <MenuShell
-        eyebrow="Decks"
-        title="Decks."
-        description="Open a saved list, import a new one, or continue in deck builder."
+        eyebrow={t("myDecksPage.eyebrow")}
+        title={t("myDecksPage.title")}
+        description={t("myDecksPage.description")}
         layout="stacked"
       >
         <MyDecks

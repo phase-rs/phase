@@ -32,6 +32,15 @@
       "random": "Aleatório",
       "customUrl": "URL personalizada",
       "none": "Nenhum"
+    },
+    "cardSizeOptions": {
+      "small": "Pequeno",
+      "medium": "Médio",
+      "large": "Grande"
+    },
+    "logDefaultOptions": {
+      "open": "Aberto",
+      "closed": "Fechado"
     }
   },
   "visual": {
@@ -45,7 +54,12 @@
     "clearArtOverrides_one": "Limpar Todas as Substituições de Arte ({{count}})",
     "clearArtOverrides_other": "Limpar Todas as Substituições de Arte ({{count}})",
     "clearArtOverridesConfirm_one": "Limpar todas as {{count}} substituição de arte?",
-    "clearArtOverridesConfirm_other": "Limpar todas as {{count}} substituições de arte?"
+    "clearArtOverridesConfirm_other": "Limpar todas as {{count}} substituições de arte?",
+    "vfxQualityOptions": {
+      "full": "Completa",
+      "reduced": "Reduzida",
+      "minimal": "Mínima"
+    }
   },
   "audio": {
     "title": "Áudio",
@@ -106,7 +120,17 @@
     "slowest": "Mais lento",
     "resetSliderLabel": "Redefinir {{label}} para o padrão",
     "atDefault": "No padrão",
-    "resetToDefault": "Redefinir para o padrão"
+    "resetToDefault": "Redefinir para o padrão",
+    "labels": {
+      "effects": "Ritmo dos efeitos",
+      "combat": "Ritmo de combate",
+      "banners": "Ritmo dos banners"
+    },
+    "descriptions": {
+      "effects": "Conjuração de mágicas, mudanças de zona, mortes, mudanças de vida, marcadores, virar/desvirar.",
+      "combat": "Tempo do dano de combate — quanto tempo bloqueadores e atacantes permanecem antes de o dano ser resolvido.",
+      "banners": "Exibição do banner de início de turno."
+    }
   },
   "artChain": {
     "emptyState": "Usando a arte padrão do Scryfall. Adicione regras abaixo para personalizar.",

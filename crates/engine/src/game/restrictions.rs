@@ -530,6 +530,7 @@ fn effective_activation_limit(
     };
     let keyword = match tag {
         AbilityTag::Boast => "boast",
+        AbilityTag::Evolve => "evolve",
         AbilityTag::Exhaust => "exhaust",
         AbilityTag::Outlast => "outlast",
     };

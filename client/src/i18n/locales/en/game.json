@@ -8,6 +8,8 @@
   "preview": {
     "holdCtrlBack": "Hold Ctrl for back face",
     "holdCtrlFront": "Hold Ctrl for front face",
+    "holdCtrlFlip": "Hold Ctrl to flip",
+    "flip": "Flip",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",
@@ -1241,6 +1243,12 @@
     "no": "No",
     "dontAskAgain": "Don't ask again this game"
   },
+  "topOrBottom": {
+    "cardFallback": "Card",
+    "title": "Put {{name}} on top or bottom of library",
+    "top": "Top of library",
+    "bottom": "Bottom of library"
+  },
   "permanentTypeSlot": {
     "eyebrow": "Permanent Type",
     "title": "Choose Type Slot",
@@ -1251,6 +1259,9 @@
     "proliferateSubtitle": "Choose any number of permanents and players with counters. Each chosen target gets one more counter of each kind already there.",
     "chooseObjectsTitle": "Choose Permanents",
     "chooseObjectsSubtitle": "Choose any number of permanents. You pay a cost for each one chosen.",
+    "selectAll": "All",
+    "selectNone": "None",
+    "selectMine": "My side",
     "confirm": "Confirm"
   },
   "replacement": {
@@ -1326,5 +1337,27 @@
     "subtitleLabel": "Choose a label for {{name}}",
     "subtitleVoteRemaining": "Cast a vote ({{count}} remaining)",
     "subtitleVote": "Cast your vote"
+  },
+  "advance": {
+    "resolve": "Resolve",
+    "passPriority": "Pass Priority",
+    "toPhase": "To {{phase}}"
+  },
+  "outsideGame": {
+    "fromExile": "From exile",
+    "fromSideboard": "From sideboard"
+  },
+  "phaseName": {
+    "Upkeep": "Upkeep",
+    "Draw": "Draw",
+    "PreCombatMain": "Main Phase 1",
+    "BeginCombat": "Begin Combat",
+    "DeclareAttackers": "Declare Attackers",
+    "DeclareBlockers": "Declare Blockers",
+    "CombatDamage": "Combat Damage",
+    "EndCombat": "End Combat",
+    "PostCombatMain": "Main Phase 2",
+    "End": "End Step",
+    "Cleanup": "Cleanup"
   }
 }

@@ -8,6 +8,8 @@
   "preview": {
     "holdCtrlBack": "Tieni premuto Ctrl per il retro",
     "holdCtrlFront": "Tieni premuto Ctrl per il fronte",
+    "holdCtrlFlip": "Tieni premuto Ctrl per girare",
+    "flip": "Gira",
     "altParsedAbilities": "Alt: abilità analizzate",
     "debugId": "ID: {{id}}",
     "engineParse": "Analisi del motore",
@@ -307,7 +309,9 @@
     "statHand": "Mano",
     "statCreatures": "Creature",
     "statLands": "Terre",
-    "statOther": "Altro"
+    "statOther": "Altro",
+    "compactHud": "HUD avversario compatto. Riduce ogni avversario a una singola riga sottile (nome + punti vita); tocca un avversario per visualizzare l'intero campo di battaglia.",
+    "expandHud": "Espandi HUD avversario. Mostra la mano e il dettaglio del campo di battaglia di ogni avversario."
   },
   "combat": {
     "attackAll": "Attacca tutti",
@@ -380,7 +384,9 @@
     "nounTarget": "bersaglio",
     "confirmTap": "Conferma TAP ({{selected}}/{{count}})",
     "keepCurrentTargets": "Mantieni i bersagli attuali",
-    "skip": "Salta"
+    "skip": "Salta",
+    "chooseNewTarget": "Scegli il nuovo bersaglio della magia",
+    "chooseNewTargetForSpell": "Scegli un nuovo bersaglio per {{spell}}"
   },
   "log": {
     "title": "Registro di gioco",
@@ -1237,6 +1243,12 @@
     "no": "No",
     "dontAskAgain": "Non chiedere di nuovo in questa partita"
   },
+  "topOrBottom": {
+    "cardFallback": "Card",
+    "title": "Put {{name}} on top or bottom of library",
+    "top": "Top of library",
+    "bottom": "Bottom of library"
+  },
   "permanentTypeSlot": {
     "eyebrow": "Tipo di permanente",
     "title": "Scegli lo slot del tipo",
@@ -1247,6 +1259,9 @@
     "proliferateSubtitle": "Scegli un numero qualsiasi di permanenti e giocatori con segnalini. Ogni bersaglio scelto riceve un altro segnalino di ciascun tipo già presente.",
     "chooseObjectsTitle": "Scegli permanenti",
     "chooseObjectsSubtitle": "Scegli un numero qualsiasi di permanenti. Paghi un costo per ciascuno scelto.",
+    "selectAll": "Tutti",
+    "selectNone": "Nessuno",
+    "selectMine": "Il mio lato",
     "confirm": "Conferma"
   },
   "replacement": {
@@ -1260,7 +1275,8 @@
     "scopeSingle": "Scegli un nuovo bersaglio per la magia",
     "scopeMulti": "Scegli nuovi bersagli per la magia",
     "subtitle": "{{scope}}. Attuale: {{current}}",
-    "confirm": "Conferma"
+    "confirm": "Conferma",
+    "badgeNewTarget": "Nuovo bersaglio"
   },
   "separatePiles": {
     "chooserName": "Giocatore {{number}}",
@@ -1321,5 +1337,27 @@
     "subtitleLabel": "Scegli un'etichetta per {{name}}",
     "subtitleVoteRemaining": "Esprimi un voto ({{count}} rimanenti)",
     "subtitleVote": "Esprimi il tuo voto"
+  },
+  "advance": {
+    "resolve": "Risolvi",
+    "passPriority": "Passa priorità",
+    "toPhase": "A {{phase}}"
+  },
+  "outsideGame": {
+    "fromExile": "Dall'esilio",
+    "fromSideboard": "Dalla sideboard"
+  },
+  "phaseName": {
+    "Upkeep": "Mantenimento",
+    "Draw": "Pesca",
+    "PreCombatMain": "Fase principale 1",
+    "BeginCombat": "Inizio combattimento",
+    "DeclareAttackers": "Dichiarazione attaccanti",
+    "DeclareBlockers": "Dichiarazione bloccanti",
+    "CombatDamage": "Danno da combattimento",
+    "EndCombat": "Fine combattimento",
+    "PostCombatMain": "Fase principale 2",
+    "End": "Sottofase finale",
+    "Cleanup": "Ripulitura"
   }
 }

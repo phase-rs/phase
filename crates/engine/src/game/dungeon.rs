@@ -647,7 +647,7 @@ pub fn room_effects(
                 source_id,
                 controller,
             );
-            draw.condition = Some(AbilityCondition::IfYouDo);
+            draw.condition = Some(AbilityCondition::effect_performed());
             ability.sub_ability = Some(Box::new(draw));
 
             (ability, vec![])
