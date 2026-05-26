@@ -41,21 +41,7 @@ pub fn resolve(
         if idx >= state.steps_to_skip.len() {
             state.steps_to_skip.resize_with(idx + 1, Default::default);
         }
-        // CR 500.11: Skipping a phase means all steps within that phase are
-        // skipped. BeginCombat is the sentinel for "entire combat phase", so
-        // expand it to all five combat steps. Individual step skips are stored
-        // as-is (untap, upkeep, draw steps have no sub-steps to expand).
-        if *step == Phase::BeginCombat {
-            for combat_step in [
-                Phase::BeginCombat,
-                Phase::DeclareAttackers,
-                Phase::DeclareBlockers,
-                Phase::CombatDamage,
-                Phase::EndCombat,
-            ] {
-                *state.steps_to_skip[idx].entry(combat_step).or_default() += n;
-            }
-        } else {
+        for step in step.constituent_steps() {
             *state.steps_to_skip[idx].entry(*step).or_default() += n;
         }
     }
@@ -71,12 +57,12 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext};
+    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, StepSkipTarget};
     use crate::types::identifiers::ObjectId;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
 
-    fn make_ability(step: Phase, count: QuantityExpr) -> ResolvedAbility {
+    fn make_ability(step: StepSkipTarget, count: QuantityExpr) -> ResolvedAbility {
         ResolvedAbility {
             effect: Effect::SkipNextStep {
                 target: TargetFilter::Controller,
@@ -124,7 +110,10 @@ mod tests {
     fn skip_next_step_increments_step_counter() {
         let mut state = GameState::default();
         let mut events = Vec::new();
-        let ability = make_ability(Phase::Untap, QuantityExpr::Fixed { value: 1 });
+        let ability = make_ability(
+            StepSkipTarget::Step(Phase::Untap),
+            QuantityExpr::Fixed { value: 1 },
+        );
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -138,16 +127,17 @@ mod tests {
         )));
     }
 
-    /// CR 500.11: Skipping a phase means all steps within that phase are
-    /// skipped. When the effect targets Phase::BeginCombat (the "combat phase"
-    /// sentinel from parse_skip_step_name), the resolver must expand it to all
-    /// five combat steps. Cards: Stonehorn Dignitary, Blinding Angel, Revenant
-    /// Patriarch, Moment of Silence.
+    /// CR 500.11: Skipping a phase means all steps within that phase are skipped.
+    /// Cards: Stonehorn Dignitary, Blinding Angel, Revenant Patriarch, Moment of
+    /// Silence.
     #[test]
     fn skip_combat_phase_expands_to_all_five_combat_steps() {
         let mut state = GameState::default();
         let mut events = Vec::new();
-        let ability = make_ability(Phase::BeginCombat, QuantityExpr::Fixed { value: 1 });
+        let ability = make_ability(
+            StepSkipTarget::CombatPhase,
+            QuantityExpr::Fixed { value: 1 },
+        );
 
         resolve(&mut state, &ability, &mut events).unwrap();
 

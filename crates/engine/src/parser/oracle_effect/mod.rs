@@ -51,9 +51,9 @@ use crate::types::ability::{
     MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope,
     PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef,
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, UntilCondition,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -3965,15 +3965,13 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
     }))
 }
 
-fn parse_skip_step_name(input: &str) -> OracleResult<'_, Phase> {
+fn parse_skip_step_name(input: &str) -> OracleResult<'_, StepSkipTarget> {
     alt((
-        value(Phase::Untap, tag("untap step")),
-        value(Phase::Upkeep, tag("upkeep step")),
-        value(Phase::Draw, tag("draw step")),
+        value(StepSkipTarget::Step(Phase::Untap), tag("untap step")),
+        value(StepSkipTarget::Step(Phase::Upkeep), tag("upkeep step")),
+        value(StepSkipTarget::Step(Phase::Draw), tag("draw step")),
         // CR 500.11: Skipping a phase skips all steps within it.
-        // "combat phase" → BeginCombat is used as a sentinel for the entire
-        // combat phase; the resolver expands it to all five combat steps.
-        value(Phase::BeginCombat, tag("combat phase")),
+        value(StepSkipTarget::CombatPhase, tag("combat phase")),
     ))
     .parse(input)
 }
@@ -33321,7 +33319,7 @@ mod tests {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
         assert_eq!(target, &TargetFilter::Controller);
-        assert_eq!(step, &Phase::Untap);
+        assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
         assert_eq!(
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }
@@ -33343,7 +33341,7 @@ mod tests {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
         assert_eq!(target, &TargetFilter::Player);
-        assert_eq!(step, &Phase::Draw);
+        assert_eq!(step, &StepSkipTarget::Step(Phase::Draw));
         assert_eq!(
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }
@@ -33370,7 +33368,7 @@ mod tests {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
         assert_eq!(target, &TargetFilter::TriggeringPlayer);
-        assert_eq!(step, &Phase::Untap);
+        assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
         assert_eq!(
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }
@@ -33392,7 +33390,7 @@ mod tests {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
         assert_eq!(target, &TargetFilter::ParentTarget);
-        assert_eq!(step, &Phase::Untap);
+        assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
         assert_eq!(
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }
@@ -33414,7 +33412,7 @@ mod tests {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
         assert_eq!(target, &TargetFilter::DefendingPlayer);
-        assert_eq!(step, &Phase::Untap);
+        assert_eq!(step, &StepSkipTarget::Step(Phase::Untap));
         assert_eq!(
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }
@@ -33422,11 +33420,10 @@ mod tests {
     }
 
     /// CR 500.11: "Target opponent skips their next combat phase" — Stonehorn
-    /// Dignitary. parse_skip_step_name maps "combat phase" → Phase::BeginCombat
-    /// (used as sentinel for the full phase). The resolver later expands this to
-    /// all five combat steps. Parser must produce SkipNextStep{step:BeginCombat}.
+    /// Dignitary. Parser keeps the whole combat phase distinct from the
+    /// beginning-of-combat step.
     #[test]
-    fn target_opponent_skips_next_combat_phase_parses_as_begin_combat() {
+    fn target_opponent_skips_next_combat_phase_parses_as_combat_phase() {
         let def = parse_effect_chain(
             "Target opponent skips their next combat phase.",
             AbilityKind::Spell,
@@ -33439,9 +33436,11 @@ mod tests {
         else {
             panic!("expected SkipNextStep, got {:?}", def.effect);
         };
-        assert_eq!(target, &TargetFilter::Opponent);
-        // BeginCombat is the sentinel for "entire combat phase" per CR 500.11.
-        assert_eq!(step, &Phase::BeginCombat);
+        assert_eq!(
+            target,
+            &TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(step, &StepSkipTarget::CombatPhase);
         assert_eq!(
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }
@@ -33452,7 +33451,7 @@ mod tests {
     /// triggered effect. Subject "that player" resolves to ParentTarget (the
     /// player who was dealt combat damage, set in context by the trigger parser).
     #[test]
-    fn that_player_skips_next_combat_phase_parses_as_begin_combat() {
+    fn that_player_skips_next_combat_phase_parses_as_combat_phase() {
         let def = parse_effect_chain(
             "That player skips their next combat phase.",
             AbilityKind::Spell,
@@ -33467,7 +33466,7 @@ mod tests {
         };
         // "That player" without trigger context defaults to ParentTarget.
         assert_eq!(target, &TargetFilter::ParentTarget);
-        assert_eq!(step, &Phase::BeginCombat);
+        assert_eq!(step, &StepSkipTarget::CombatPhase);
         assert_eq!(
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }

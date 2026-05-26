@@ -4799,6 +4799,42 @@ pub enum SpeedDelta {
     Decrease,
 }
 
+/// CR 500.11 + CR 614.10a: A one-shot skip can name either a single step or a
+/// whole phase. Keep whole-phase skips distinct from their first step so
+/// "skip your next beginning of combat step" remains representable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum StepSkipTarget {
+    Step(Phase),
+    CombatPhase,
+}
+
+impl StepSkipTarget {
+    pub fn constituent_steps(self) -> &'static [Phase] {
+        match self {
+            Self::Step(Phase::Untap) => &[Phase::Untap],
+            Self::Step(Phase::Upkeep) => &[Phase::Upkeep],
+            Self::Step(Phase::Draw) => &[Phase::Draw],
+            Self::Step(Phase::PreCombatMain) => &[Phase::PreCombatMain],
+            Self::Step(Phase::BeginCombat) => &[Phase::BeginCombat],
+            Self::Step(Phase::DeclareAttackers) => &[Phase::DeclareAttackers],
+            Self::Step(Phase::DeclareBlockers) => &[Phase::DeclareBlockers],
+            Self::Step(Phase::CombatDamage) => &[Phase::CombatDamage],
+            Self::Step(Phase::EndCombat) => &[Phase::EndCombat],
+            Self::Step(Phase::PostCombatMain) => &[Phase::PostCombatMain],
+            Self::Step(Phase::End) => &[Phase::End],
+            Self::Step(Phase::Cleanup) => &[Phase::Cleanup],
+            Self::CombatPhase => &[
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ],
+        }
+    }
+}
+
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
 // clippy::large_enum_variant: `Effect` is the engine's central 100+ variant
@@ -6308,13 +6344,13 @@ pub enum Effect {
         count: QuantityExpr,
     },
     /// CR 614.10: "Skip your next [step] step." — the affected player's next N
-    /// occurrences of the named step are skipped. Stored separately from
+    /// occurrences of the named step or phase are skipped. Stored separately from
     /// `SkipNextTurn` because turn and step consumption happen at different
     /// turn-flow boundaries.
     SkipNextStep {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
-        step: Phase,
+        step: StepSkipTarget,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
