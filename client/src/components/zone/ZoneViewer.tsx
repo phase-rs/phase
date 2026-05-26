@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { GameAction, GameObject } from "../../adapter/types.ts";
 import { CardImage } from "../card/CardImage.tsx";
@@ -21,12 +22,18 @@ interface ZoneViewerProps {
   onClose: () => void;
 }
 
-const ZONE_TITLES: Record<string, string> = {
-  graveyard: "Graveyard",
-  exile: "Exile",
+const ZONE_TITLE_KEYS: Record<string, string> = {
+  graveyard: "zone.graveyard",
+  exile: "zone.exile",
+};
+
+const ZONE_TITLE_LOWER_KEYS: Record<string, string> = {
+  graveyard: "zone.graveyardLower",
+  exile: "zone.exileLower",
 };
 
 export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
+  const { t } = useTranslation("game");
   const objects = useGameStore((s) => s.gameState?.objects);
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
@@ -59,7 +66,7 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
 
   return (
     <ModalPanelShell
-      title={`${ZONE_TITLES[zone]} (${cards.length})`}
+      title={t("zone.zoneTitle", { zone: t(ZONE_TITLE_KEYS[zone]), count: cards.length })}
       onClose={onClose}
       maxWidthClassName="max-w-5xl"
       bodyClassName="flex min-h-0 flex-col"
@@ -67,7 +74,7 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
       <div className="min-h-0 flex-1 px-2 pb-2 lg:px-6 lg:pb-6">
         {cards.length === 0 ? (
           <p className="py-8 text-center text-sm italic text-gray-600">
-            No cards in {ZONE_TITLES[zone].toLowerCase()}
+            {t("zone.noCardsIn", { zone: t(ZONE_TITLE_LOWER_KEYS[zone]) })}
           </p>
         ) : (
           <ScrollableCardStrip

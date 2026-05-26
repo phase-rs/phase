@@ -41,7 +41,9 @@ pub fn resolve(
         if idx >= state.steps_to_skip.len() {
             state.steps_to_skip.resize_with(idx + 1, Default::default);
         }
-        *state.steps_to_skip[idx].entry(*step).or_default() += n;
+        for step in step.constituent_steps() {
+            *state.steps_to_skip[idx].entry(*step).or_default() += n;
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -55,12 +57,12 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext};
+    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, StepSkipTarget};
     use crate::types::identifiers::ObjectId;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
 
-    fn make_ability(step: Phase, count: QuantityExpr) -> ResolvedAbility {
+    fn make_ability(step: StepSkipTarget, count: QuantityExpr) -> ResolvedAbility {
         ResolvedAbility {
             effect: Effect::SkipNextStep {
                 target: TargetFilter::Controller,
@@ -108,7 +110,10 @@ mod tests {
     fn skip_next_step_increments_step_counter() {
         let mut state = GameState::default();
         let mut events = Vec::new();
-        let ability = make_ability(Phase::Untap, QuantityExpr::Fixed { value: 1 });
+        let ability = make_ability(
+            StepSkipTarget::Step(Phase::Untap),
+            QuantityExpr::Fixed { value: 1 },
+        );
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -120,5 +125,39 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 500.11: Skipping a phase means all steps within that phase are skipped.
+    /// Cards: Stonehorn Dignitary, Blinding Angel, Revenant Patriarch, Moment of
+    /// Silence.
+    #[test]
+    fn skip_combat_phase_expands_to_all_five_combat_steps() {
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+        let ability = make_ability(
+            StepSkipTarget::CombatPhase,
+            QuantityExpr::Fixed { value: 1 },
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 500.11: all five combat steps must be in steps_to_skip.
+        let skips = &state.steps_to_skip[0];
+        assert_eq!(skips.get(&Phase::BeginCombat), Some(&1), "BeginCombat");
+        assert_eq!(
+            skips.get(&Phase::DeclareAttackers),
+            Some(&1),
+            "DeclareAttackers"
+        );
+        assert_eq!(
+            skips.get(&Phase::DeclareBlockers),
+            Some(&1),
+            "DeclareBlockers"
+        );
+        assert_eq!(skips.get(&Phase::CombatDamage), Some(&1), "CombatDamage");
+        assert_eq!(skips.get(&Phase::EndCombat), Some(&1), "EndCombat");
+        // Non-combat steps must not be touched.
+        assert!(skips.get(&Phase::Untap).is_none(), "Untap must not be set");
+        assert!(skips.get(&Phase::Draw).is_none(), "Draw must not be set");
     }
 }

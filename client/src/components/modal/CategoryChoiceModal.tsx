@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -24,6 +25,7 @@ type CategoryChoice = Extract<WaitingFor, { type: "CategoryChoice" }>;
 // substitutes the choice — that leaver path is handled engine-side and is out
 // of scope for this display layer.
 export function CategoryChoiceModal({ data }: { data: CategoryChoice["data"] }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
@@ -54,16 +56,16 @@ export function CategoryChoiceModal({ data }: { data: CategoryChoice["data"] }) 
 
   const choosingForOpponent = data.player !== data.target_player;
   const subtitle = choosingForOpponent
-    ? `Choose one permanent of each type from among the nonland permanents ${getPlayerDisplayName(
-        data.target_player,
-      )} controls; the rest are sacrificed.`
-    : "Choose one permanent of each type from among the nonland permanents you control; the rest are sacrificed.";
+    ? t("categoryChoice.subtitleOpponent", {
+        name: getPlayerDisplayName(data.target_player),
+      })
+    : t("categoryChoice.subtitleSelf");
 
   return (
     <ChoiceOverlay
-      title="Choose Permanents to Keep"
+      title={t("categoryChoice.title")}
       subtitle={subtitle}
-      footer={<ConfirmButton onClick={handleConfirm} label="Confirm" />}
+      footer={<ConfirmButton onClick={handleConfirm} />}
     >
       <div className="mb-4 space-y-4">
         {data.categories.map((category, categoryIndex) => {
@@ -82,7 +84,7 @@ export function CategoryChoiceModal({ data }: { data: CategoryChoice["data"] }) 
                     " w-full text-left"
                   }
                 >
-                  No {category} — none to keep
+                  {t("categoryChoice.noneToKeep", { category })}
                 </button>
               ) : (
                 eligible.map((id) => {
@@ -108,7 +110,7 @@ export function CategoryChoiceModal({ data }: { data: CategoryChoice["data"] }) 
                       }
                       {...hoverProps(id)}
                     >
-                      {objects[id]?.name ?? `Object ${id}`}
+                      {objects[id]?.name ?? t("categoryChoice.objectFallback", { id })}
                     </button>
                   );
                 })

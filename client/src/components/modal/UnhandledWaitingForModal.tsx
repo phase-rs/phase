@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { useGameStore } from "../../stores/gameStore";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId";
@@ -38,6 +40,7 @@ export function UnhandledWaitingForModal({
   onExit: () => void;
   exitLabel: string;
 }) {
+  const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
   const canAct = useCanActForWaitingState();
   const [copied, setCopied] = useState(false);
@@ -55,11 +58,11 @@ export function UnhandledWaitingForModal({
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
-      window.prompt("Copy this diagnostic:", diagnostic);
+      window.prompt(t("unhandledWaitingFor.copyPrompt"), diagnostic);
     }
   };
 
-  const reportUrl = buildReportUrl(waitingFor.type, diagnostic);
+  const reportUrl = buildReportUrl(waitingFor.type, diagnostic, t);
 
   return (
     <div
@@ -68,15 +71,12 @@ export function UnhandledWaitingForModal({
     >
       <div className="absolute inset-0 bg-black/80" />
       <div className="relative z-10 max-w-lg rounded-xl bg-gray-900 p-8 shadow-2xl ring-1 ring-amber-700/60">
-        <h2 className="mb-3 text-xl font-bold text-white">Action required, but UI is missing</h2>
+        <h2 className="mb-3 text-xl font-bold text-white">{t("unhandledWaitingFor.title")}</h2>
         <p className="mb-4 text-sm text-gray-300">
-          The game is waiting on you for an action, but this version of
-          phase.rs does not yet have a UI for it. This is a bug — please
-          report it so we can fix it. Use the button below to leave the
-          game.
+          {t("unhandledWaitingFor.body")}
         </p>
         <div className="mb-4 rounded-lg bg-black/60 p-3">
-          <div className="text-[10px] uppercase tracking-wider text-gray-500">Missing state</div>
+          <div className="text-[10px] uppercase tracking-wider text-gray-500">{t("unhandledWaitingFor.missingState")}</div>
           <div className="font-mono text-sm text-amber-200">{waitingFor.type}</div>
         </div>
         <div className="flex flex-wrap justify-end gap-3">
@@ -85,7 +85,7 @@ export function UnhandledWaitingForModal({
             onClick={handleCopy}
             className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-600"
           >
-            {copied ? "Copied!" : "Copy diagnostic"}
+            {copied ? t("unhandledWaitingFor.copied") : t("unhandledWaitingFor.copyDiagnostic")}
           </button>
           <a
             href={reportUrl}
@@ -93,7 +93,7 @@ export function UnhandledWaitingForModal({
             rel="noopener noreferrer"
             className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-amber-500"
           >
-            Report on GitHub
+            {t("unhandledWaitingFor.reportOnGithub")}
           </a>
           <button
             type="button"
@@ -127,13 +127,13 @@ function truncate(s: string, max: number): string {
 
 const MAX_DIAGNOSTIC_CHARS_IN_URL = 4000;
 
-function buildReportUrl(typeName: string, diagnostic: string): string {
-  const title = `Unhandled WaitingFor: ${typeName}`;
+function buildReportUrl(typeName: string, diagnostic: string, t: TFunction<"game">): string {
+  const title = t("unhandledWaitingFor.reportTitle", { type: typeName });
   const truncated =
     diagnostic.length > MAX_DIAGNOSTIC_CHARS_IN_URL
       ? `${diagnostic.slice(0, MAX_DIAGNOSTIC_CHARS_IN_URL)}\n[…truncated; click "Copy diagnostic" for full text]`
       : diagnostic;
-  const body = `**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n\`\`\`\n${truncated}\n\`\`\``;
+  const body = t("unhandledWaitingFor.reportWhatHappened", { diagnostic: truncated });
   const params = new URLSearchParams({
     title,
     body,

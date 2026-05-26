@@ -1,6 +1,9 @@
+import { useTranslation } from "react-i18next";
+
 import { useGameStore } from "../../stores/gameStore.ts";
 
 export function PassButton() {
+  const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
   const stackSize = useGameStore((s) => s.gameState?.stack.length ?? 0);
@@ -10,7 +13,7 @@ export function PassButton() {
 
   if (!hasPriority) return null;
 
-  const label = stackSize > 0 ? "Resolve" : "Done";
+  const label = stackSize > 0 ? t("passButton.resolve") : t("passButton.done");
 
   return (
     <button

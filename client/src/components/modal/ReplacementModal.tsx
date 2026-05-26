@@ -1,9 +1,11 @@
 import { useCallback } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
 export function ReplacementModal() {
+  const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
 
@@ -28,9 +30,9 @@ export function ReplacementModal() {
 
   return (
     <DialogShell
-      eyebrow="Resolution Order"
-      title="Replacement Effects"
-      subtitle="Choose which replacement effect applies first."
+      eyebrow={t("replacement.eyebrow")}
+      title={t("replacement.title")}
+      subtitle={t("replacement.subtitle")}
       size="md"
       scrollable
     >
@@ -45,7 +47,7 @@ export function ReplacementModal() {
                 className="min-h-11 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/40"
               >
                 <span className="font-semibold text-white">
-                  {desc || `Replacement Effect ${index + 1}`}
+                  {desc || t("replacement.candidateFallback", { number: index + 1 })}
                 </span>
               </button>
             );

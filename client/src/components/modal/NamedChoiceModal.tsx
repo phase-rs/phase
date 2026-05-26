@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
@@ -14,20 +15,21 @@ import type { PlayerId, WaitingFor } from "../../adapter/types.ts";
 
 type NamedChoice = Extract<WaitingFor, { type: "NamedChoice" }>;
 
-const CHOICE_TYPE_LABELS: Record<string, string> = {
-  CreatureType: "Choose a Creature Type",
-  Color: "Choose a Color",
-  OddOrEven: "Choose Odd or Even",
-  BasicLandType: "Choose a Basic Land Type",
-  CardType: "Choose a Card Type",
-  CardName: "Name a Card",
-  LandType: "Choose a Land Type",
-  Opponent: "Choose an Opponent",
-  Player: "Choose a Player",
-  TwoColors: "Choose Two Colors",
-  NumberRange: "Choose a Number",
-  Labeled: "Make a Choice",
-  Keyword: "Choose an Ability",
+/** Maps a ChoiceType key to its i18n leaf under `namedChoice.title.*`. */
+const CHOICE_TYPE_TITLE_KEYS: Record<string, string> = {
+  CreatureType: "creatureType",
+  Color: "color",
+  OddOrEven: "oddOrEven",
+  BasicLandType: "basicLandType",
+  CardType: "cardType",
+  CardName: "cardName",
+  LandType: "landType",
+  Opponent: "opponent",
+  Player: "player",
+  TwoColors: "twoColors",
+  NumberRange: "numberRange",
+  Labeled: "labeled",
+  Keyword: "keyword",
 };
 
 /** Extract the string key from a ChoiceType value.
@@ -50,6 +52,7 @@ export function NamedChoiceModal({ data }: { data: NamedChoice["data"] }) {
 }
 
 function CardNameSearch() {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -118,7 +121,7 @@ function CardNameSearch() {
   const showResults = matches.length > 0 && !selected;
 
   return (
-    <ChoiceOverlay title="Name a Card" subtitle="Type to search all cards" footer={<ConfirmButton onClick={handleConfirm} disabled={!selected} />}>
+    <ChoiceOverlay title={t("namedChoice.title.cardName")} subtitle={t("namedChoice.searchSubtitle")} footer={<ConfirmButton onClick={handleConfirm} disabled={!selected} />}>
       <div className="flex w-full max-w-md flex-col items-center gap-3">
         <div className="relative w-full">
           <input
@@ -130,7 +133,7 @@ function CardNameSearch() {
               setSelected(null);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Search by name..."
+            placeholder={t("namedChoice.searchPlaceholder")}
             className="w-full rounded-lg border-2 border-gray-600 bg-gray-900/90 px-4 py-3 text-base text-white placeholder-gray-500 outline-none transition focus:border-cyan-400"
           />
           {selected && (
@@ -172,7 +175,7 @@ function CardNameSearch() {
         )}
 
         {query.length >= 2 && matches.length === 0 && !selected && (
-          <p className="text-sm text-gray-500">No cards found</p>
+          <p className="text-sm text-gray-500">{t("namedChoice.noCardsFound")}</p>
         )}
 
         {selected && (
@@ -206,6 +209,7 @@ function HighlightedName({ name, query }: { name: string; query: string }) {
 }
 
 function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: string }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -215,13 +219,16 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
     }
   }, [dispatch, selected]);
 
-  const title = CHOICE_TYPE_LABELS[typeKey] ?? "Make a Choice";
+  const titleKey = CHOICE_TYPE_TITLE_KEYS[typeKey];
+  const title = titleKey
+    ? t(`namedChoice.title.${titleKey}`)
+    : t("namedChoice.title.fallback");
   const isPlayerChoice = typeKey === "Player" || typeKey === "Opponent";
 
   return (
     <ChoiceOverlay
       title={title}
-      subtitle="Select one option"
+      subtitle={t("namedChoice.buttonSubtitle")}
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-3xl"
       footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}

@@ -356,13 +356,23 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             });
         }
 
-        if let Some((_, _)) = nom_on_lower(rest, &rest_lower, |i| {
+        if let Some((_, after_color)) = nom_on_lower(rest, &rest_lower, |i| {
             alt((
                 value((), tag("mana of the chosen color")),
                 value((), tag("mana of that color")),
             ))
             .parse(i)
         }) {
+            let after_lower = after_color.trim().to_lowercase();
+            let mut mana_target: Option<TargetFilter> = None;
+            let count = if let Some((dynamic_qty, target)) =
+                try_parse_any_color_for_each_suffix(after_lower.as_str())
+            {
+                mana_target = target;
+                QuantityExpr::Ref { qty: dynamic_qty }
+            } else {
+                count
+            };
             return Some(Effect::Mana {
                 produced: ManaProduction::ChosenColor {
                     count,
@@ -372,7 +382,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                target: None,
+                target: mana_target,
             });
         }
 
@@ -1697,6 +1707,32 @@ mod tests {
                     QuantityExpr::Ref {
                         qty: QuantityRef::Devotion {
                             colors: crate::types::ability::DevotionColors::ChosenColor
+                        }
+                    }
+                );
+            }
+            other => panic!("expected ChosenColor mana production, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chosen_color_for_each_counter_on_self() {
+        let effect =
+            try_parse_add_mana_effect("Add one mana of that color for each charge counter on ~.")
+                .expect("chosen-color for-each counter mana must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        match produced {
+            ManaProduction::ChosenColor { count, .. } => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: crate::types::ability::ObjectScope::Source,
+                            counter_type: Some(crate::types::counter::CounterType::Generic(
+                                "charge".to_string()
+                            )),
                         }
                     }
                 );
