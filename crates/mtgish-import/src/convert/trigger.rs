@@ -286,6 +286,17 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
         Trigger::WhenAPermanentIsDestroyed(filter) => {
             TriggerDefinition::new(TriggerMode::Destroyed).valid_card(convert_permanents(filter)?)
         }
+
+        // CR 702.110b: Exploit trigger — "whenever [source] exploits [target]".
+        // Engine `TriggerMode::Exploited` mirrors the native parser at
+        // oracle_trigger.rs:5230. `valid_card` constrains the exploiting
+        // permanent (the source); the exploited-target filter (`_target`) is
+        // dropped — engine `TriggerDefinition` has no exploited-target axis today.
+        Trigger::WhenAPermanentExploitsAPermanent(source, _target) => {
+            TriggerDefinition::new(TriggerMode::Exploited)
+                .valid_card(convert_permanents(source)?)
+        }
+
         // CR 701.9: Discard triggers — "when [players] discards [cards]". Engine
         // TriggerDefinition::Discarded has no valid_player or discarded-card
         // filter axis today, so dropping the player/card constraints fires the
@@ -335,6 +346,25 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
             def.constraint = Some(TriggerConstraint::OncePerTurn);
             def
         }
+        // CR 305.1 + CR 603.2: "Whenever [a player] plays a land" — fires when
+        // a player puts a land card onto the battlefield from their hand as a
+        // special action (CR 305.1). Engine `TriggerMode::LandPlayed` mirrors
+        // the native parser at oracle_trigger.rs:6982. `valid_target` carries
+        // the player filter when the player axis is not `AnyPlayer`; the
+        // `_lands` arg is always `IsCardtype::Land` in practice (all lands are
+        // lands) and adds no additional constraint beyond the mode itself, so
+        // it is dropped.
+        Trigger::WhenAPlayerPlaysALand(players, _lands) => {
+            let mut def = TriggerDefinition::new(TriggerMode::LandPlayed);
+            if !matches!(players.as_ref(), Players::AnyPlayer) {
+                let controller = players_to_controller(players)?;
+                def.valid_target = Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(controller),
+                ));
+            }
+            def
+        }
+
         // CR 702.37c (Morph) + CR 701.40b (Turn Face Up): "Whenever [permanent]
         // is turned face up" — fires when a face-down permanent flips face up
         // via the morph activation (or any other Turn-Face-Up effect, e.g.
@@ -584,6 +614,26 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
         // above (e.g. AtTheBeginningOfAPlayersUpkeep).
         Trigger::AtTheBeginningOfAPlayersFirstMainPhase(_players) => {
             TriggerDefinition::new(TriggerMode::Phase).phase(Phase::PreCombatMain)
+        }
+
+        // CR 505.1 + CR 603.2b: "At the beginning of [a player's] postcombat
+        // (second) main phase" — the main phase after the combat phase. Engine
+        // `Phase::PostCombatMain` mirrors the native parser's mapping at
+        // oracle_trigger.rs:9063 ("postcombat main phase" / "second main phase").
+        // The `_players` axis is dropped, mirroring the convention on all other
+        // phase arms (e.g. AtTheBeginningOfAPlayersUpkeep).
+        Trigger::AtTheBeginningOfAPlayersSecondMainPhase(_players) => {
+            TriggerDefinition::new(TriggerMode::Phase).phase(Phase::PostCombatMain)
+        }
+
+        // CR 511.2 + CR 603.2b: "At end of combat" / "at the end of combat" —
+        // triggers as the end of combat step begins (CR 511.2). Engine
+        // `Phase::EndCombat` mirrors the native parser's mapping at
+        // oracle_trigger.rs:6820. No `_players` arm because this variant
+        // carries no player axis — it always fires for the active player's
+        // end of combat step.
+        Trigger::AtTheEndOfCombat => {
+            TriggerDefinition::new(TriggerMode::Phase).phase(Phase::EndCombat)
         }
 
         // CR ???: Specialize is a Strixhaven Mystical Archive / Lost Caverns
