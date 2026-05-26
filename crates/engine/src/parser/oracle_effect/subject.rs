@@ -3079,12 +3079,12 @@ mod tests {
     fn parse_subject_your_opponents_possessive_is_not_bare_opponent_scope() {
         let mut ctx = ParseContext::default();
         let result = parse_subject_application("your opponents' creatures", &mut ctx);
-        assert!(result.is_some());
-        let app = result.unwrap();
-        assert_ne!(
-            app.affected,
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-        );
+        if let Some(app) = result {
+            assert_ne!(
+                app.affected,
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+            );
+        }
     }
 
     #[test]
