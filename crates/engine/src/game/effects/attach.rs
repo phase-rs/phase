@@ -1,4 +1,6 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
+use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -35,6 +37,48 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id,
+    });
+
+    Ok(())
+}
+
+/// CR 701.3d: Unattach each matching Equipment from the matched host, leaving
+/// it on the battlefield but no longer attached.
+pub fn resolve_unattach_all(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let (attachment_filter, target_filter) = match &ability.effect {
+        Effect::UnattachAll { attachment, target } => (attachment, target),
+        _ => (&TargetFilter::Any, &TargetFilter::Any),
+    };
+
+    let target_ids = resolved_object_ids_for_filter(state, ability, target_filter);
+
+    let ctx = FilterContext::from_ability(ability);
+    for target_id in target_ids {
+        let attachments = state
+            .objects
+            .get(&target_id)
+            .map(|target| target.attachments.clone())
+            .unwrap_or_default();
+        for attachment_id in attachments {
+            if !matches_target_filter(state, attachment_id, attachment_filter, &ctx) {
+                continue;
+            }
+            if let Some(old_target) = unattach(state, attachment_id) {
+                events.push(GameEvent::Unattached {
+                    attachment_id,
+                    old_target,
+                });
+            }
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
     });
 
     Ok(())
@@ -220,9 +264,9 @@ pub fn attach_to_player(
     old_target
 }
 
-/// CR 701.3d: Move an Equipment away from the object it is equipping while it
-/// remains on the battlefield. This is the single graph update primitive for
-/// explicit unattach costs and effects.
+/// CR 701.3d: Move an attachment away from the object or player it was attached
+/// to while it remains on the battlefield. This is the single graph update
+/// primitive for explicit unattach costs and effects.
 pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option<TargetRef> {
     let old_target = current_attachment_target(state, attachment_id)?;
     let old_target_id = state
@@ -247,7 +291,7 @@ pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{StaticDefinition, TargetFilter};
+    use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
@@ -273,13 +317,11 @@ mod tests {
     }
 
     fn spawn_creature(state: &mut GameState, name: &str) -> ObjectId {
-        let id = create_object(
-            state,
-            CardId(2),
-            PlayerId(0),
-            name.to_string(),
-            Zone::Battlefield,
-        );
+        spawn_creature_for(state, name, PlayerId(0))
+    }
+
+    fn spawn_creature_for(state: &mut GameState, name: &str, owner: PlayerId) -> ObjectId {
+        let id = create_object(state, CardId(2), owner, name.to_string(), Zone::Battlefield);
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
         id
@@ -470,6 +512,162 @@ mod tests {
             .unwrap()
             .attachments
             .contains(&equipment_id));
+    }
+
+    #[test]
+    fn unattach_all_removes_matching_equipment_from_target() {
+        let mut state = setup();
+        let sword = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let shield = spawn_with_subtype(&mut state, "Shield", "Equipment");
+        let aura = spawn_with_subtype(&mut state, "Pacifism", "Aura");
+        let creature = spawn_creature(&mut state, "Bear");
+        attach_to(&mut state, sword, creature);
+        attach_to(&mut state, shield, creature);
+        attach_to(&mut state, aura, creature);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().subtype("Equipment".to_string()),
+                ),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects.get(&sword).unwrap().attached_to, None);
+        assert_eq!(state.objects.get(&shield).unwrap().attached_to, None);
+        assert_eq!(
+            state.objects.get(&aura).unwrap().attached_to,
+            Some(AttachTarget::Object(creature))
+        );
+        assert_eq!(
+            state.objects.get(&creature).unwrap().attachments,
+            vec![aura]
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::Unattached { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn unattach_all_parent_target_removes_equipment_from_each_parent_host() {
+        let mut state = setup();
+        let sword = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let shield = spawn_with_subtype(&mut state, "Shield", "Equipment");
+        let bear = spawn_creature(&mut state, "Bear");
+        let elf = spawn_creature(&mut state, "Elf");
+        attach_to(&mut state, sword, bear);
+        attach_to(&mut state, shield, elf);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().subtype("Equipment".to_string()),
+                ),
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(bear), TargetRef::Object(elf)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects.get(&sword).unwrap().attached_to, None);
+        assert_eq!(state.objects.get(&shield).unwrap().attached_to, None);
+        assert!(state.objects.get(&bear).unwrap().attachments.is_empty());
+        assert!(state.objects.get(&elf).unwrap().attachments.is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::Unattached { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn unattach_all_empty_target_set_resolves_noop() {
+        let mut state = setup();
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().subtype("Equipment".to_string()),
+                ),
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature()
+                        .controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            events.as_slice(),
+            [GameEvent::EffectResolved {
+                kind: EffectKind::UnattachAll,
+                source_id: ObjectId(999)
+            }]
+        ));
+    }
+
+    #[test]
+    fn unattach_all_filters_explicit_object_targets() {
+        let mut state = setup();
+        let sword = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let shield = spawn_with_subtype(&mut state, "Shield", "Equipment");
+        let own_creature = spawn_creature(&mut state, "Bear");
+        let opponent_creature = spawn_creature_for(&mut state, "Elf", PlayerId(1));
+        attach_to(&mut state, sword, own_creature);
+        attach_to(&mut state, shield, opponent_creature);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().subtype("Equipment".to_string()),
+                ),
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature().controller(ControllerRef::You),
+                ),
+            },
+            vec![
+                TargetRef::Object(own_creature),
+                TargetRef::Object(opponent_creature),
+            ],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects.get(&sword).unwrap().attached_to, None);
+        assert_eq!(
+            state.objects.get(&shield).unwrap().attached_to,
+            Some(AttachTarget::Object(opponent_creature))
+        );
+        assert!(state
+            .objects
+            .get(&opponent_creature)
+            .unwrap()
+            .attachments
+            .contains(&shield));
     }
 
     #[test]

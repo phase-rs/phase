@@ -43,8 +43,16 @@ pub(super) fn handle_optional_effect_choice(
         let pending_event = state.pending_optional_trigger_event.take();
         let previous_trigger_event = state.current_trigger_event.clone();
         state.current_trigger_event = pending_event;
+        // CR 603.2c + CR 608.2: mirror restoration of the batched-trigger
+        // subject count so a `QuantityRef::EventContextAmount` resolved during
+        // the resumed sub-ability reads the same "that many" the pre-pause
+        // resolution would have observed.
+        let pending_count = state.pending_optional_trigger_match_count.take();
+        let previous_trigger_match_count = state.current_trigger_match_count;
+        state.current_trigger_match_count = pending_count;
         let result = effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
         state.current_trigger_event = previous_trigger_event;
+        state.current_trigger_match_count = previous_trigger_match_count;
         result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     }
 
@@ -171,7 +179,11 @@ pub(super) fn handle_opponent_may_choice(
         set_active_priority(state);
         if let Some(ability) = state.pending_optional_effect.take() {
             if let Some(ref sub) = ability.sub_ability {
-                if matches!(sub.condition, Some(AbilityCondition::IfAPlayerDoes)) {
+                if sub
+                    .condition
+                    .as_ref()
+                    .is_some_and(AbilityCondition::is_optional_effect_performed)
+                {
                     if let Some(ref else_branch) = sub.else_ability {
                         let mut else_resolved = else_branch.as_ref().clone();
                         else_resolved.context = ability.context.clone();
@@ -646,11 +658,11 @@ pub(super) fn handle_unless_payment(
             // accepted ability so `evaluate_condition` honors `IfAPlayerDoes`
             // (`effects/mod.rs` L2156-L2158). Cards: Rhystic Lightning,
             // Don't Make a Sound, Divert Disaster, Assimilate Essence.
-            if let Some(sub) = pending_effect
-                .sub_ability
-                .as_ref()
-                .filter(|sub| matches!(sub.condition, Some(AbilityCondition::IfAPlayerDoes)))
-            {
+            if let Some(sub) = pending_effect.sub_ability.as_ref().filter(|sub| {
+                sub.condition
+                    .as_ref()
+                    .is_some_and(AbilityCondition::is_optional_effect_performed)
+            }) {
                 // Abandon Attachments #81 parallel: a stale
                 // `cost_payment_failed_flag` from a previous resolution would
                 // make `evaluate_condition` reject the IfAPlayerDoes condition
@@ -1037,7 +1049,7 @@ mod tests {
         let mut decline_branch =
             ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
         decline_branch.condition = Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::IfYouDo),
+            condition: Box::new(AbilityCondition::effect_performed()),
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.pending_optional_effect = Some(Box::new(optional));
@@ -1063,7 +1075,7 @@ mod tests {
         let mut decline_branch =
             ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
         decline_branch.condition = Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::IfAPlayerDoes),
+            condition: Box::new(AbilityCondition::effect_performed()),
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.pending_optional_effect = Some(Box::new(optional));
@@ -1095,7 +1107,7 @@ mod tests {
         let mut decline_branch =
             ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
         decline_branch.condition = Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::IfYouDo),
+            condition: Box::new(AbilityCondition::effect_performed()),
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.pending_optional_effect = Some(Box::new(optional));
@@ -1119,7 +1131,7 @@ mod tests {
         let mut optional = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));
         optional.optional = true;
         let mut if_you_do = ResolvedAbility::new(gain_life(2), vec![], ObjectId(100), PlayerId(0));
-        if_you_do.condition = Some(AbilityCondition::IfYouDo);
+        if_you_do.condition = Some(AbilityCondition::effect_performed());
         if_you_do.else_ability = Some(Box::new(ResolvedAbility::new(
             gain_life(4),
             vec![],
@@ -1177,7 +1189,7 @@ mod tests {
         let mut decline_branch =
             ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
         decline_branch.condition = Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::IfYouDo),
+            condition: Box::new(AbilityCondition::effect_performed()),
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.pending_optional_effect = Some(Box::new(optional));

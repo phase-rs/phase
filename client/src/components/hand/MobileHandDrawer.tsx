@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -15,6 +16,7 @@ import {
 } from "../../viewmodel/cardActionChoice.ts";
 
 export function MobileHandDrawer() {
+  const { t } = useTranslation("game");
   const isOpen = useUiStore((s) => s.mobileHandOpen);
   const setOpen = useUiStore((s) => s.setMobileHandOpen);
   const playerId = usePerspectivePlayerId();
@@ -122,13 +124,13 @@ export function MobileHandDrawer() {
           >
             <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2">
               <span className="text-sm font-semibold text-white/80">
-                Hand ({handObjects.length})
+                {t("hand.handTitle", { count: handObjects.length })}
               </span>
               <button
                 onClick={() => setOpen(false)}
                 className="rounded-lg px-3 py-1 text-xs font-medium text-white/70 hover:bg-white/10 active:bg-white/20"
               >
-                Close
+                {t("common:actions.close")}
               </button>
             </div>
 

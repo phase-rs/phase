@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import type { GameLogEntry } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -14,7 +15,14 @@ const EMPTY_LOG: GameLogEntry[] = [];
 const VERBOSITY_OPTIONS: LogVerbosity[] = ["full", "compact", "minimal"];
 const LOG_PANEL_WIDTH_PX = 320;
 
+const VERBOSITY_LABEL_KEYS: Record<LogVerbosity, string> = {
+  full: "log.verbosityFull",
+  compact: "log.verbosityCompact",
+  minimal: "log.verbosityMinimal",
+};
+
 export function GameLogPanel() {
+  const { t } = useTranslation("game");
   const logHistory = useGameStore((s) => s.logHistory ?? EMPTY_LOG);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const isGameOver = useGameStore((s) => s.gameState?.waiting_for?.type === "GameOver");
@@ -89,12 +97,12 @@ export function GameLogPanel() {
             {/* Header */}
             <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-300">
-                Game Log
+                {t("log.title")}
               </h3>
               <button
                 onClick={() => setLogPanelOpen(false)}
                 className="rounded p-1 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300"
-                aria-label="Close game log"
+                aria-label={t("log.closeLog")}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
                   <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
@@ -114,7 +122,7 @@ export function GameLogPanel() {
                       : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-300"
                   }`}
                 >
-                  {v}
+                  {t(VERBOSITY_LABEL_KEYS[v])}
                 </button>
               ))}
             </div>
@@ -122,7 +130,7 @@ export function GameLogPanel() {
             {/* Log entry list */}
             <div ref={scrollRef} className="select-text flex-1 overflow-y-auto px-3 py-1">
               {filteredEntries.length === 0 ? (
-                <p className="py-4 text-center text-xs italic text-gray-600">No events yet</p>
+                <p className="py-4 text-center text-xs italic text-gray-600">{t("log.noEvents")}</p>
               ) : (
                 filteredEntries.map((entry) => (
                   <LogEntry key={entry.seq} entry={entry} />

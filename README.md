@@ -72,7 +72,8 @@ Hand this to your LLM:
 ```
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow it end-to-end to implement {a card I name, or pick one for me}.
-Use medium thinking. Don't stop for my input. Open a PR when done.
+Use the $engine-implementer skill. Use medium thinking. Don't stop for my input.
+Open a PR when done.
 ```
 
 Full procedure, two tracks (developer / non-developer), and copy-paste prompts for LLM UIs without web fetch: [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md).

@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 import { useCallback, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { MoveList } from "../deck-builder/MoveList";
 import type { DeckCardCount, MatchScore } from "../../adapter/types";
@@ -81,6 +82,7 @@ export function BetweenGamesSideboardModal({
   score,
   onSubmit,
 }: BetweenGamesSideboardModalProps) {
+  const { t } = useTranslation("multiplayer");
   const [drafts, setDrafts] = useState<{ main: DeckEntry[]; side: DeckEntry[] }>(
     () => ({
       main: poolToEntries(pool.current_main),
@@ -122,7 +124,8 @@ export function BetweenGamesSideboardModal({
     onSubmit(entriesToCounts(drafts.main), entriesToCounts(drafts.side));
   };
 
-  const drawsLabel = score.draws > 0 ? ` (${score.draws} draw)` : "";
+  const drawsLabel =
+    score.draws > 0 ? t("sideboardModal.draws", { count: score.draws }) : "";
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto px-2 py-2 lg:px-4 lg:py-6">
@@ -139,33 +142,39 @@ export function BetweenGamesSideboardModal({
         >
           <header className="modal-header-compact border-b border-white/10">
             <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500">
-              Game {gameNumber}
+              {t("sideboardModal.game", { number: gameNumber })}
             </div>
             <h2 id="sideboarding-title" className="font-semibold text-white">
-              Sideboarding
+              {t("sideboardModal.title")}
             </h2>
             <p className="modal-subtitle max-w-2xl text-slate-400">
-              Match score {score.p0_wins}-{score.p1_wins}
-              {drawsLabel}. Move cards between main and sideboard, then submit.
+              {t("sideboardModal.matchScore", {
+                p0: score.p0_wins,
+                p1: score.p1_wins,
+                draws: drawsLabel,
+              })}
             </p>
           </header>
 
           <div className="grid flex-1 grid-cols-1 gap-4 px-3 py-3 md:grid-cols-2 lg:px-5 lg:py-5">
             <MoveList
               section="main"
-              title={`Main (${mainTotal}/${registeredMainTotal})`}
+              title={t("sideboardModal.main", {
+                count: mainTotal,
+                total: registeredMainTotal,
+              })}
               entries={drafts.main}
               onMove={moveCard}
               alwaysShow
-              emptyHint="Move cards from the sideboard."
+              emptyHint={t("sideboardModal.moveFromSideboard")}
             />
             <MoveList
               section="sideboard"
-              title={`Sideboard (${sideTotal})`}
+              title={t("sideboardModal.sideboard", { count: sideTotal })}
               entries={drafts.side}
               onMove={moveCard}
               alwaysShow
-              emptyHint="Move cards from the main deck."
+              emptyHint={t("sideboardModal.moveFromMain")}
             />
           </div>
 
@@ -176,26 +185,31 @@ export function BetweenGamesSideboardModal({
               aria-live="polite"
             >
               {canSubmit
-                ? `Main deck matches registered size (${registeredMainTotal}).`
-                : `Main deck is ${mainTotal} / ${registeredMainTotal} — submit disabled.`}
+                ? t("sideboardModal.matchesRegistered", {
+                    total: registeredMainTotal,
+                  })
+                : t("sideboardModal.submitDisabled", {
+                    count: mainTotal,
+                    total: registeredMainTotal,
+                  })}
             </span>
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={reset}
-                aria-label="Reset to registered deck"
+                aria-label={t("sideboardModal.resetAria")}
                 className="rounded px-3 py-1.5 text-sm text-slate-300 hover:bg-white/8 hover:text-white"
               >
-                Reset
+                {t("sideboardModal.reset")}
               </button>
               <button
                 type="button"
                 onClick={handleSubmit}
                 disabled={!canSubmit}
-                aria-label="Submit deck for next game"
+                aria-label={t("sideboardModal.submitAria")}
                 className="rounded bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white enabled:hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Submit Deck
+                {t("sideboardModal.submitDeck")}
               </button>
             </div>
           </footer>

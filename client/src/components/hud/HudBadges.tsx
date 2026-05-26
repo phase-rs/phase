@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { DungeonId } from "../../adapter/types.ts";
 
 interface StatusBadgeProps {
@@ -26,11 +28,12 @@ export function StatusBadge({
 }
 
 export function MonarchBadge() {
+  const { t } = useTranslation("game");
   return (
     <span
       role="img"
-      aria-label="Monarch"
-      title="The Monarch — draws an extra card at end of turn"
+      aria-label={t("badges.monarch")}
+      title={t("badges.monarchTooltip")}
       className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-amber-400 ring-amber-200/80 shadow-[0_0_14px_rgba(251,191,36,0.55)]"
     >
       <span
@@ -47,11 +50,12 @@ export function MonarchBadge() {
 }
 
 export function InitiativeBadge() {
+  const { t } = useTranslation("game");
   return (
     <span
       role="img"
-      aria-label="Initiative"
-      title="Has the Initiative — ventures into Undercity at start of upkeep"
+      aria-label={t("badges.initiative")}
+      title={t("badges.initiativeTooltip")}
       className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-cyan-500 ring-cyan-200/80 shadow-[0_0_14px_rgba(34,211,238,0.55)]"
     >
       <span
@@ -68,11 +72,12 @@ export function InitiativeBadge() {
 }
 
 export function CityBlessingBadge() {
+  const { t } = useTranslation("game");
   return (
     <span
       role="img"
-      aria-label="City's Blessing"
-      title="City's Blessing — controls ten or more permanents (Ascend)"
+      aria-label={t("badges.cityBlessing")}
+      title={t("badges.cityBlessingTooltip")}
       className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-yellow-400 ring-yellow-200/80 shadow-[0_0_14px_rgba(250,204,21,0.6)]"
     >
       <span
@@ -98,13 +103,14 @@ const DUNGEON_DISPLAY_NAMES: Record<DungeonId, string> = {
 };
 
 export function DungeonBadge({ dungeonName, roomIndex }: DungeonBadgeProps) {
+  const { t } = useTranslation("game");
   const display = DUNGEON_DISPLAY_NAMES[dungeonName];
   const room = roomIndex + 1;
   return (
     <span
       role="img"
-      aria-label={`Venturing in ${display}, room ${room}`}
-      title={`Venturing in ${display} — room ${room}`}
+      aria-label={t("badges.dungeonAriaLabel", { name: display, room })}
+      title={t("badges.dungeonTooltip", { name: display, room })}
       className="relative inline-flex h-6 shrink-0 items-center gap-1 overflow-hidden rounded-full bg-violet-500/85 px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-50 ring-1 ring-violet-300/70 shadow-[0_0_12px_rgba(139,92,246,0.45)]"
     >
       <span aria-hidden className="text-[12px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🏰</span>
@@ -122,12 +128,13 @@ interface CounterBadgeProps {
 }
 
 export function CounterBadge({ kind, value }: CounterBadgeProps) {
+  const { t } = useTranslation("game");
   if (kind === "poison") {
     return (
       <span
         role="img"
-        aria-label={`${value} poison counter${value === 1 ? "" : "s"}`}
-        title={`Poison counters: ${value}`}
+        aria-label={t("badges.poisonAriaLabel", { count: value })}
+        title={t("badges.poisonTooltip", { count: value })}
         className={`relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-lime-950 ring-1 ${
           value >= 8
             ? "bg-lime-300 ring-lime-100 shadow-[0_0_16px_rgba(217,249,157,0.55)]"
@@ -151,8 +158,8 @@ export function CounterBadge({ kind, value }: CounterBadgeProps) {
     return (
       <span
         role="img"
-        aria-label={`${value} energy counter${value === 1 ? "" : "s"}`}
-        title={`Energy: ${value}`}
+        aria-label={t("badges.energyAriaLabel", { count: value })}
+        title={t("badges.energyTooltip", { count: value })}
         className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center gap-px overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-cyan-950 ring-1 bg-cyan-300 ring-cyan-100 shadow-[0_0_12px_rgba(103,232,249,0.5)]"
       >
         <span
@@ -168,8 +175,8 @@ export function CounterBadge({ kind, value }: CounterBadgeProps) {
     return (
       <span
         role="img"
-        aria-label={`The Ring tempts you (level ${value})`}
-        title={`The Ring tempts you — level ${value}`}
+        aria-label={t("badges.ringAriaLabel", { level: value })}
+        title={t("badges.ringTooltip", { level: value })}
         className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center gap-px overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-amber-950 ring-1 bg-yellow-600 ring-yellow-300/70 shadow-[0_0_12px_rgba(202,138,4,0.55)]"
       >
         <span
@@ -185,8 +192,8 @@ export function CounterBadge({ kind, value }: CounterBadgeProps) {
     return (
       <span
         role="img"
-        aria-label={`${value} rad counter${value === 1 ? "" : "s"}`}
-        title={`Rad counters: ${value}`}
+        aria-label={t("badges.radAriaLabel", { count: value })}
+        title={t("badges.radTooltip", { count: value })}
         className={`relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center gap-px overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-amber-950 ring-1 ${
           value >= 8
             ? "bg-amber-300 ring-amber-100 shadow-[0_0_16px_rgba(252,211,77,0.55)]"
@@ -209,8 +216,8 @@ export function CounterBadge({ kind, value }: CounterBadgeProps) {
   return (
     <span
       role="img"
-      aria-label={`Speed ${value}`}
-      title={`Speed: ${value}`}
+      aria-label={t("badges.speedAriaLabel", { value })}
+      title={t("badges.speedTooltip", { value })}
       className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-[6px] px-1 text-[11px] font-black leading-none tabular-nums text-white ring-1 ring-slate-100/60 shadow-[0_0_10px_rgba(226,232,240,0.22)]"
     >
       <span

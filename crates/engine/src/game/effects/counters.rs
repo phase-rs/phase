@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    CounterTransferMode, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityTag, CounterTransferMode, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
@@ -323,6 +324,7 @@ pub fn resolve_add(
     if let Some(distribution) = &ability.distribution {
         for (target, count) in distribution {
             if let crate::types::ability::TargetRef::Object(obj_id) = target {
+                let event_start = events.len();
                 add_counter_with_replacement(
                     state,
                     ability.controller,
@@ -331,11 +333,19 @@ pub fn resolve_add(
                     *count,
                     events,
                 );
+                emit_evolved_event_for_counter_addition(
+                    ability,
+                    events,
+                    event_start,
+                    *obj_id,
+                    &counter_type,
+                );
             }
         }
     } else {
         let targets = resolve_defined_or_targets(state, ability);
         for obj_id in targets {
+            let event_start = events.len();
             add_counter_with_replacement(
                 state,
                 ability.controller,
@@ -343,6 +353,13 @@ pub fn resolve_add(
                 counter_type.clone(),
                 counter_num,
                 events,
+            );
+            emit_evolved_event_for_counter_addition(
+                ability,
+                events,
+                event_start,
+                obj_id,
+                &counter_type,
             );
         }
     }
@@ -353,6 +370,33 @@ pub fn resolve_add(
     });
 
     Ok(())
+}
+
+fn emit_evolved_event_for_counter_addition(
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    object_id: ObjectId,
+    counter_type: &CounterType,
+) {
+    if ability.context.ability_tag != Some(AbilityTag::Evolve)
+        || *counter_type != CounterType::Plus1Plus1
+    {
+        return;
+    }
+    let evolved = events[event_start..].iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::CounterAdded {
+                object_id: added_to,
+                counter_type: CounterType::Plus1Plus1,
+                count
+            } if *added_to == object_id && *count > 0
+        )
+    });
+    if evolved {
+        events.push(GameEvent::Evolved { object_id });
+    }
 }
 
 /// CR 122.1: Place counters on all battlefield objects matching a filter (no targeting).
