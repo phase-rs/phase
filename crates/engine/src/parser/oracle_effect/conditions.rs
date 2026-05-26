@@ -2264,7 +2264,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
             .parse(lower.as_str())
             .is_ok()
     {
-        return Some(AbilityCondition::IfYouDo);
+        return Some(AbilityCondition::EventOutcomeWon);
     }
 
     if alt((
@@ -3304,13 +3304,13 @@ mod tests {
     }
 
     #[test]
-    fn leading_you_win_maps_to_if_you_do_for_clash() {
+    fn leading_you_win_maps_to_event_outcome_won() {
         let (condition, body) = strip_leading_general_conditional(
             "If you win, put a +1/+1 counter on this creature.",
             &mut ParseContext::default(),
         );
         assert_eq!(body, "put a +1/+1 counter on this creature.");
-        assert_eq!(condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(condition, Some(AbilityCondition::EventOutcomeWon));
     }
 
     #[test]

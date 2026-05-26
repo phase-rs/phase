@@ -4451,10 +4451,7 @@ mod tests {
         // Mode 1 is unavailable — should be rejected.
         let result = validate_modal_indices(&modal, &[1], &[1]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unavailable (already chosen)"));
+        assert!(result.unwrap_err().to_string().contains("unavailable"));
 
         // Mode 0 is available — should succeed.
         assert!(validate_modal_indices(&modal, &[0], &[1]).is_ok());

@@ -64,6 +64,7 @@ import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
+import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { CLICK_THROUGH_WAITING_FOR_TYPES, DialogHost } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -1331,6 +1332,12 @@ function GamePageContent({
             <OptionalEffectModal />
           )}
 
+        {/* CR 401.4: Owner puts permanent on top or bottom of library */}
+        {(waitingFor?.type === "TopOrBottomChoice" || waitingFor?.type === "ClashCardPlacement") &&
+          canActForWaitingState && (
+            <TopOrBottomModal />
+          )}
+
         {waitingFor?.type === "UntapChoice" &&
           canActForWaitingState && (
             <UntapChoiceModal />
@@ -2357,6 +2364,18 @@ function OptionalEffectModal() {
   if (waitingFor?.type !== "OptionalEffectChoice" && waitingFor?.type !== "OpponentMayChoice") return null;
 
   return <OptionalEffectModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
+// ── Top or Bottom Choice Modal (CR 401.4) ──────────────────────────────
+
+function TopOrBottomModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "TopOrBottomChoice" && waitingFor?.type !== "ClashCardPlacement") return null;
+
+  return <TopOrBottomChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
 // ── Untap Choice Modal ─────────────────────────────────────────────────

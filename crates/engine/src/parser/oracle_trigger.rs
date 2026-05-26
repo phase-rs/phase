@@ -2440,6 +2440,17 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 "if it's the first combat phase of the turn",
                 TriggerCondition::FirstCombatPhaseOfTurn,
             ),
+            // CR 605.1a + CR 603.4: Bracers-class triggered abilities use
+            // "if it isn't a mana ability" as a leading intervening-if after
+            // the trigger event.
+            (
+                "if it isn't a mana ability",
+                TriggerCondition::ActivatedAbilityIsNonMana,
+            ),
+            (
+                "if it is not a mana ability",
+                TriggerCondition::ActivatedAbilityIsNonMana,
+            ),
         ],
     ) {
         return result;
@@ -3016,12 +3027,52 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         ),
     );
 
-    let (_, (subject, _, qualifier)) = all_consuming(parse_line).parse(lower).ok()?;
-    let mut def = make_base();
-    def.mode = TriggerMode::AbilityActivated;
-    def.valid_target = subject;
-    def.condition = qualifier;
-    Some((TriggerMode::AbilityActivated, def))
+    if let Ok((_, (subject, _, qualifier))) = all_consuming(parse_line).parse(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::AbilityActivated;
+        def.valid_target = subject;
+        def.condition = qualifier;
+        return Some((TriggerMode::AbilityActivated, def));
+    }
+
+    // Passive form: "whenever an ability of [source] is activated"
+    // The source object filter goes into `valid_card` so `match_ability_activated`
+    // can check `valid_card_matches` against the activated ability's source.
+    // CR 605.1a: the following "if it isn't a mana ability" intervening-if is
+    // stripped by `extract_if_condition` and represented as `ActivatedAbilityIsNonMana`.
+    // Cards: Battlemage's Bracers, Illusionist's Bracers.
+    fn parse_attached_to_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+        value(
+            TargetFilter::AttachedTo,
+            (
+                alt((tag("equipped"), tag("enchanted"))),
+                space1,
+                alt((tag("creature"), tag("land"), tag("permanent"))),
+            ),
+        )
+        .parse(input)
+    }
+
+    fn parse_passive_source(input: &str) -> OracleResult<'_, TargetFilter> {
+        preceded(tag("an ability of "), parse_attached_to_subject).parse(input)
+    }
+
+    fn parse_passive_line(input: &str) -> OracleResult<'_, TargetFilter> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            terminated(parse_passive_source, tag(" is activated")),
+        )
+        .parse(input)
+    }
+
+    if let Ok((_, source_filter)) = all_consuming(parse_passive_line).parse(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::AbilityActivated;
+        def.valid_card = Some(source_filter);
+        return Some((TriggerMode::AbilityActivated, def));
+    }
+
+    None
 }
 
 /// CR 702.49: Extract ninjutsu/sneak cost-paid conditions.
@@ -7439,6 +7490,38 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             TypedFilter::default().controller(ControllerRef::Opponent),
         ));
         return Some((TriggerMode::DamageReceived, def));
+    }
+
+    // CR 701.30b-c: "whenever you clash" fires when the controller of the
+    // trigger source is either player participating in a clash.
+    // Cards: Entangling Trap, Rebellion of the Flamekin.
+    if all_consuming(preceded(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        value((), (tag("you"), space1, tag("clash"))),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::Clashed;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::Clashed, def));
+    }
+
+    // CR 701.30: "whenever a player clashes" — fires for any clashing player.
+    if all_consuming(preceded(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        value(
+            (),
+            (tag("a"), space1, tag("player"), space1, tag("clashes")),
+        ),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::Clashed;
+        return Some((TriggerMode::Clashed, def));
     }
 
     None
@@ -20488,6 +20571,8 @@ mod tests {
 /// `parse_trigger_line_with_index_ir` / `lower_trigger_ir` refactor.
 #[cfg(test)]
 mod snapshot_tests {
+    use crate::types::ability::AbilityCondition;
+
     use super::*;
 
     fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
@@ -20847,5 +20932,100 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 701.30b-c: "Whenever you clash" scopes to the trigger controller as
+    /// either player participating in the clash.
+    /// Cards: Entangling Trap, Rebellion of the Flamekin.
+    #[test]
+    fn trigger_you_clash_whenever() {
+        let def = parse_trigger_line(
+            "Whenever you clash, tap target creature an opponent controls. If you won, that creature doesn't untap during its controller's next untap step.",
+            "Entangling Trap",
+        );
+        assert_eq!(def.mode, TriggerMode::Clashed);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let Some(execute) = def.execute.as_deref() else {
+            panic!("expected trigger body");
+        };
+        let Some(tail) = execute.sub_ability.as_deref() else {
+            panic!("expected if-you-won tail");
+        };
+        assert_eq!(tail.condition, Some(AbilityCondition::EventOutcomeWon));
+    }
+
+    /// CR 701.30b-c: "When you clash" accepts the alternate trigger prefix.
+    #[test]
+    fn trigger_you_clash_when_prefix() {
+        let def = parse_trigger_line(
+            "When you clash, you may pay {1}. If you do, create a 3/1 red Elemental Shaman creature token. If you won, that token gains haste until end of turn.",
+            "Rebellion of the Flamekin",
+        );
+        assert_eq!(def.mode, TriggerMode::Clashed);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let Some(pay_cost) = def.execute.as_deref() else {
+            panic!("expected trigger body");
+        };
+        let Some(token) = pay_cost.sub_ability.as_deref() else {
+            panic!("expected if-you-do token tail");
+        };
+        assert_eq!(token.condition, Some(AbilityCondition::IfYouDo));
+        let Some(haste) = token.sub_ability.as_deref() else {
+            panic!("expected if-you-won haste tail");
+        };
+        assert_eq!(haste.condition, Some(AbilityCondition::EventOutcomeWon));
+    }
+
+    /// CR 701.30b-c: "Whenever a player clashes" is not scoped to a specific player.
+    #[test]
+    fn trigger_a_player_clashes() {
+        let def = parse_trigger_line("Whenever a player clashes, draw a card.", "Clash Watcher");
+        assert_eq!(def.mode, TriggerMode::Clashed);
+        assert_eq!(def.valid_target, None);
+    }
+
+    /// CR 602.1 + CR 605.1a: Passive form — "whenever an ability of equipped creature
+    /// is activated" routes to AbilityActivated with valid_card = AttachedTo.
+    /// Cards: Battlemage's Bracers, Illusionist's Bracers.
+    #[test]
+    fn trigger_ability_of_equipped_creature_is_activated_bracers() {
+        let def = parse_trigger_line(
+            "Whenever an ability of equipped creature is activated, if it isn't a mana ability, you may pay {1}. If you do, copy that ability. You may choose new targets for the copy.",
+            "Battlemage's Bracers",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        assert_eq!(def.valid_target, None);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::PayCost { .. })
+        ));
+    }
+
+    /// CR 602.1 + CR 605.1a: Illusionist's Bracers uses the same passive trigger phrase.
+    #[test]
+    fn trigger_ability_of_equipped_creature_is_activated_illusionists() {
+        let def = parse_trigger_line(
+            "Whenever an ability of equipped creature is activated, if it isn't a mana ability, copy that ability. You may choose new targets for the copy.",
+            "Illusionist's Bracers",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::CopySpell { .. })
+        ));
     }
 }

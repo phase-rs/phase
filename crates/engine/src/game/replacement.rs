@@ -2532,14 +2532,27 @@ fn evaluate_replacement_condition(
             }
             _ => false,
         },
-        // CR 614.1d: "if you control a [filter]" — replacement applies only while
-        // the controller has at least one permanent matching the filter on the battlefield.
-        // Used by Worship.
-        ReplacementCondition::IfControlsMatching { filter } => {
+        // CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
+        // while the controller has at least `minimum` permanents matching `filter` on
+        // the battlefield. minimum=1 covers the singular "a [type]" form (Worship);
+        // higher values cover "N or more [type]" forms (Lair of the Hydra, etc.).
+        //
+        // Source-exclusion is handled by `FilterProp::Another` injected by the parser
+        // when the Oracle text says "other" (e.g. "two or more other lands"). When the
+        // text does NOT say "other" (e.g. Worship's "if you control a creature"), the
+        // source MUST count toward its own condition — relevant when the source itself
+        // satisfies the filter (e.g. Worship animated into a creature). Do not add a
+        // hardcoded `o.id != source_id` here; it would silently override the filter.
+        ReplacementCondition::IfControlsMatching { minimum, filter } => {
             let ctx = FilterContext::from_source_with_controller(source_id, controller);
-            state.objects.values().any(|o| {
-                o.zone == Zone::Battlefield && matches_target_filter(state, o.id, filter, &ctx)
-            })
+            let matching_count = state
+                .objects
+                .values()
+                .filter(|o| {
+                    o.zone == Zone::Battlefield && matches_target_filter(state, o.id, filter, &ctx)
+                })
+                .count();
+            matching_count >= *minimum as usize
         }
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
@@ -5589,6 +5602,129 @@ mod tests {
             None,
             &dummy_begin_turn_event(),
         ));
+    }
+
+    /// CR 614.1d: `IfControlsMatching` with `minimum: 1` and a "creature" filter
+    /// must count the source itself when the source satisfies the filter and the
+    /// Oracle text does NOT say "other" (no `FilterProp::Another`). Models
+    /// Worship's "if you control a creature" once Worship has been animated into
+    /// a creature — the condition is self-satisfying and the replacement still
+    /// applies. Regression guard: a previous revision hardcoded
+    /// `o.id != source_id`, which silently broke this case.
+    #[test]
+    fn if_controls_matching_counts_self_when_filter_lacks_another() {
+        use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let source = ObjectId(10);
+        let mut state = test_state_with_object(source, Zone::Battlefield, Vec::new());
+        // Animate the source into a creature — the only creature on the battlefield.
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let cond = ReplacementCondition::IfControlsMatching {
+            minimum: 1,
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+
+        assert!(
+            evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &dummy_begin_turn_event(),
+            ),
+            "source itself must count toward 'if you control a creature' when no \
+             FilterProp::Another is present (Worship-when-animated case)"
+        );
+    }
+
+    /// CR 614.1d: `IfControlsMatching` with `FilterProp::Another` in the filter
+    /// must NOT count the source — exclusion is filter-driven, not hardcoded.
+    /// Models Lair of the Hydra's "if you control two or more other lands": the
+    /// land itself, plus exactly one other land, must NOT satisfy `minimum: 2`.
+    #[test]
+    fn if_controls_matching_excludes_self_via_another_prop() {
+        use crate::types::ability::{
+            ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+
+        let source = ObjectId(10);
+        let other_land = ObjectId(11);
+        let mut state = test_state_with_object(source, Zone::Battlefield, Vec::new());
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let mut other = GameObject::new(
+            other_land,
+            CardId(2),
+            PlayerId(0),
+            "Other Land".to_string(),
+            Zone::Battlefield,
+        );
+        other.card_types.core_types.push(CoreType::Land);
+        state.objects.insert(other_land, other);
+        state.battlefield.push_back(other_land);
+
+        let cond = ReplacementCondition::IfControlsMatching {
+            minimum: 2,
+            filter: TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                type_filters: vec![TypeFilter::Land],
+                properties: vec![FilterProp::Another],
+            }),
+        };
+
+        // With only one OTHER land, condition is false (source excluded by Another).
+        assert!(
+            !evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &dummy_begin_turn_event(),
+            ),
+            "FilterProp::Another must exclude the source from the count"
+        );
+
+        // Add a second other land — now condition is true.
+        let third = ObjectId(12);
+        let mut third_obj = GameObject::new(
+            third,
+            CardId(3),
+            PlayerId(0),
+            "Third Land".to_string(),
+            Zone::Battlefield,
+        );
+        third_obj.card_types.core_types.push(CoreType::Land);
+        state.objects.insert(third, third_obj);
+        state.battlefield.push_back(third);
+
+        assert!(
+            evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &dummy_begin_turn_event(),
+            ),
+            "two other lands satisfy `minimum: 2` with Another excluding source"
+        );
     }
 
     #[test]

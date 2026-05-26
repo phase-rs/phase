@@ -1243,6 +1243,12 @@
     "no": "No",
     "dontAskAgain": "No volver a preguntar en esta partida"
   },
+  "topOrBottom": {
+    "cardFallback": "Card",
+    "title": "Put {{name}} on top or bottom of library",
+    "top": "Top of library",
+    "bottom": "Bottom of library"
+  },
   "permanentTypeSlot": {
     "eyebrow": "Tipo de permanente",
     "title": "Elegir ranura de tipo",

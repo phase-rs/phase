@@ -1243,6 +1243,12 @@
     "no": "Nie",
     "dontAskAgain": "Nie pytaj ponownie w tej grze"
   },
+  "topOrBottom": {
+    "cardFallback": "Karta",
+    "title": "Umieść {{name}} na wierzchu lub spodzie biblioteki",
+    "top": "Wierzch biblioteki",
+    "bottom": "Spód biblioteki"
+  },
   "permanentTypeSlot": {
     "eyebrow": "Typ trwałego",
     "title": "Wybierz slot typu",
