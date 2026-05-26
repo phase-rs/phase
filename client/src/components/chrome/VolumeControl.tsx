@@ -159,14 +159,14 @@ export function VolumeControl({ variant }: VolumeControlProps) {
   return (
     <div
       ref={containerRef}
-      className="flex flex-row-reverse min-h-11 items-center overflow-hidden rounded-[16px] border border-white/12 bg-black/18 backdrop-blur-sm transition-all duration-200"
-      style={{ width: expanded ? 200 : 44 }}
+      className="flex flex-row-reverse min-h-9 items-center overflow-hidden rounded-[12px] border border-white/12 bg-black/18 backdrop-blur-sm transition-all duration-200"
+      style={{ width: expanded ? 180 : 36 }}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
       <button
         onClick={handleToggleMute}
-        className="flex min-h-11 min-w-11 shrink-0 items-center justify-center text-white/46 transition-colors hover:text-white/72"
+        className="flex min-h-9 min-w-9 shrink-0 items-center justify-center text-white/46 transition-colors hover:text-white/72"
         aria-label={masterMuted ? t("volume.unmute") : t("volume.mute")}
         title={masterMuted ? t("volume.unmute") : t("volume.mute")}
       >

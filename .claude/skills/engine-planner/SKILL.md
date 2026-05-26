@@ -1,0 +1,72 @@
+---
+name: engine-planner
+description: Produce an architecturally idiomatic implementation plan for a phase.rs parser or engine change. Design for the class of cards, not the single card. Use this when you need a plan that will survive `/review-engine-plan` without bandaids or workarounds.
+---
+
+# Engine Planner
+
+Produce an implementation plan for the phase.rs engine. Design for the class, not the card. Never propose bandaids, workarounds, or shortcuts — everything lives in its rules-correct place.
+
+This skill produces the plan only. The plan-review loop belongs to the caller — when invoked from `/engine-implementer`, the orchestrator owns the loop. When invoked standalone, run `/review-engine-plan` against the plan yourself and iterate until clean.
+
+## Input
+
+A task description: parser enhancement/fix, or engine mechanic enhancement/fix. May reference cards, Oracle text patterns, CR rules, or coverage gaps.
+
+## Process
+
+Complete every step. Do not skip any.
+
+### Step 1: Identify applicable skills
+
+Determine which skill(s) apply and read each that does:
+
+| Skill | When it applies |
+|-------|----------------|
+| `/add-engine-effect` | New effects or stub completions |
+| `/oracle-parser` | Parser-only changes (authoritative parser reference) |
+| `/add-keyword` | Keyword abilities |
+| `/add-trigger` | Triggered abilities |
+| `/add-static-ability` | Static/continuous effects |
+| `/add-replacement-effect` | Replacement effects |
+| `/add-interactive-effect` | Effects requiring player choices (WaitingFor + GameAction continuations) |
+| `/casting-stack-conditions` | Casting flow or stack changes |
+| `/add-ai-feature-policy` | Deck-aware AI features — new `DeckFeatures` axis + `TacticalPolicy`/`MulliganPolicy` wiring |
+| `/add-frontend-component` | React components for WaitingFor overlays, board elements, or any UI that dispatches `GameAction`s |
+| `/add-card-data-pipeline` | Card export shape changes, synthesis functions, coverage-report changes |
+| `/add-engine-variant` | Any new enum variant on engine types (mandatory gate) |
+
+Use the skill checklist(s) as the skeleton of the final plan. Every checklist step must appear.
+
+### Step 2: Trace an analogous feature
+
+Find the existing feature most similar to what you're implementing. Trace it end-to-end through every layer it touches: types → parser → resolver → effect handler → tests. Record each file path you followed. **Hard gate** — the plan must name the traced feature and list the full trace path.
+
+### Step 3: Read every file you will touch
+
+Before proposing changes, read every file you plan to modify. Understand existing patterns, abstractions, and conventions in each.
+
+### Step 4: Answer architectural questions
+
+The plan MUST include these sections with substantive, specific answers:
+
+- **Pattern Coverage** — What class of cards/patterns does this cover? Estimate card count. If the answer is 1, stop and find the general pattern.
+- **Building Blocks** — Which existing modules and helpers will you compose from? Reference specific functions by name from `parser/oracle_nom/`, `parser/oracle_util.rs`, `game/filter.rs`, `game/quantity.rs`, `game/ability_utils.rs`, `game/keywords.rs`, etc. Justify any new helper.
+- **Logic Placement** — Where does each piece of logic belong (parser vs game vs effects vs types)? Justify each choice.
+- **Rust Idioms** — Most idiomatic representation. Typed enums not bools. Exhaustive match not wildcards. Existing type reuse over new types.
+- **Nom Compliance** (mandatory if any file under `crates/engine/src/parser/` changes) — For every detection, dispatch, or classification step, specify the exact nom combinator or existing parser function. If the plan describes `contains()`/`starts_with()`/`find()` for parsing dispatch, **STOP and redesign**. The parser IS the detector — try `parse_static_line(text).is_some()` instead of `text.contains("gets ")`.
+- **Extension vs Creation** — Does this extend an existing pattern or create a new one? Justify any new pattern.
+- **Analogous Trace** — Name the traced feature and the full file path (e.g., "Traced `Scry` through `types/ability.rs` → `parser/oracle_effect/imperative.rs` → `game/effects/scry.rs` → `game/effects/mod.rs`").
+- **Variant Discoverability** (if adding any enum variant) — Confirm `cargo engine-inventory` was consulted and run the `/add-engine-variant` checklist.
+
+### Step 5: Write the plan
+
+Step-by-step implementation plan using the skill checklist as your guide. For each step:
+
+- Exact file path to modify
+- Specific changes (executable without ambiguity)
+- Any CR rules that apply, verified by grepping `docs/MagicCompRules.txt`
+
+## Output
+
+Return the finalized plan including every mandatory architectural section. The caller will run it through `/review-engine-plan` (and loop until clean).

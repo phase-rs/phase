@@ -8,7 +8,9 @@ import { NonFatalPanicToast } from "./components/modal/NonFatalPanicToast";
 import { SplashScreen } from "./components/splash/SplashScreen";
 import { useFeedInitialization } from "./hooks/useFeedInitialization";
 import { useHostingSession } from "./hooks/useHostingSession";
+import { migrateSavedDecks } from "./services/deckMigrations";
 import { ensurePreload, subscribePreload } from "./startup/preloadAssets";
+import { useCloudSyncStore } from "./stores/cloudSyncStore";
 import { MenuPage } from "./pages/MenuPage";
 
 const GamePage = lazy(() =>
@@ -36,6 +38,18 @@ export function App() {
 function AppContent() {
   useFeedInitialization();
   useHostingSession();
+
+  // One-shot localStorage migrations. Must run before cloud-sync init so the
+  // first sync sees the canonical (repaired) deck shapes and doesn't push a
+  // tab full of "changed" decks that are byte-identical after repair.
+  useEffect(() => {
+    migrateSavedDecks();
+  }, []);
+
+  // Install the storage watcher, restore any cloud-sync session, and reconcile
+  // on boot. init() returns an uninstaller so listeners are cleaned up on
+  // unmount / hot reload rather than stacking.
+  useEffect(() => useCloudSyncStore.getState().init(), []);
 
   const [showSplash, setShowSplash] = useState(true);
   const [progress, setProgress] = useState(0);

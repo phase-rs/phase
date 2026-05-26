@@ -11,6 +11,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
 import { mouseHoverPreview } from "./hoverPreview";
+import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckStackProps {
   deck: ParsedDeck;
@@ -18,8 +19,12 @@ interface DeckStackProps {
   cardDataCache: Map<string, ScryfallCard>;
   onAddCard: (name: string) => void;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  /** Deck format string — resolves the sideboard policy so the second section
+   *  is labelled "Sideboard" or "Maybeboard" consistently with the list view. */
+  format?: string;
 }
 
 type DeckStackSection = "commander" | "main" | "sideboard";
@@ -152,8 +157,10 @@ function DeckStackCard({
   zIndex,
   className,
   canAdd,
+  isMaybeboard,
   onAddCard,
   onRemoveCard,
+  onMoveCard,
   onRemoveCommander,
   onCardHover,
   onContextMenu,
@@ -162,8 +169,10 @@ function DeckStackCard({
   zIndex: number;
   className?: string;
   canAdd: boolean;
+  isMaybeboard: boolean;
   onAddCard: (name: string) => void;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
@@ -175,9 +184,20 @@ function DeckStackCard({
   const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;
   const isCommander = item.section === "commander";
   const showAddButton = item.section === "main";
+  // The commander isn't part of the main/maybeboard partition, so it has no
+  // move target. Main cards move out to the sideboard/maybeboard; second-section
+  // cards move back to main — the destination is shown on the button label so
+  // it's explicit on touch (where the title tooltip is invisible).
+  const showMove = item.section !== "commander";
+  const moveTargetLabel =
+    item.section === "main"
+      ? isMaybeboard
+        ? t("stack.maybeboardName")
+        : t("stack.sideboardName")
+      : t("stack.mainName");
 
-  // Buttons stop propagation so tapping +/- doesn't also fire the card-body
-  // tap-to-preview (the +/- sit on top of the card).
+  // Buttons stop propagation so tapping +/-/move doesn't also fire the
+  // card-body tap-to-preview (the controls sit on top of the card).
   const handleRemove = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (item.section === "commander") {
@@ -191,6 +211,12 @@ function DeckStackCard({
     e.stopPropagation();
     if (!canAdd) return;
     onAddCard(item.name);
+  };
+
+  const handleMove = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (item.section === "commander") return;
+    onMoveCard(item.name, item.section);
   };
 
   return (
@@ -224,12 +250,22 @@ function DeckStackCard({
               {t("stack.commanderBadge")}
             </span>
           )}
+          {hasAlternates && (
+            <span
+              className="rounded-full bg-sky-500/70 px-1.5 py-0.5 text-[10px] text-sky-50"
+              title={t("card.alternateArtRightClick")}
+            >
+              ✦
+            </span>
+          )}
         </div>
+        {/* Quantity controls are always visible (not hover-gated) so they're
+            usable on touch, where :hover never fires. */}
         {showAddButton && (
           <button
             onClick={handleAdd}
             disabled={!canAdd}
-            className="absolute right-10 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-emerald-300 opacity-0 transition group-hover:opacity-100 hover:bg-emerald-500/85 hover:text-white disabled:cursor-not-allowed disabled:text-slate-500 disabled:hover:bg-black/78"
+            className="absolute right-10 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-emerald-300 transition hover:bg-emerald-500/85 hover:text-white disabled:cursor-not-allowed disabled:text-slate-500 disabled:hover:bg-black/78"
             title={canAdd ? t("stack.addOne", { name: item.name }) : t("stack.copyLimit", { name: item.name })}
           >
             +
@@ -237,7 +273,7 @@ function DeckStackCard({
         )}
         <button
           onClick={handleRemove}
-          className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-red-300 opacity-0 transition group-hover:opacity-100 hover:bg-red-500/85 hover:text-white"
+          className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-red-300 transition hover:bg-red-500/85 hover:text-white"
           title={
             item.section === "commander"
               ? t("stack.removeCommander", { name: item.name })
@@ -260,19 +296,25 @@ function DeckStackCard({
             style={{ height: CARD_HEIGHT, width: CARD_WIDTH }}
           />
         )}
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/70 to-transparent px-2 pb-2 pt-8">
-          <div className="truncate text-[11px] font-medium text-white">
+        {/* The overlay is pointer-events-none so the card body stays tappable
+            for preview; the move pill re-enables pointer events for itself. */}
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end gap-1 bg-gradient-to-t from-black via-black/70 to-transparent px-2 pb-2 pt-8">
+          <div className="min-w-0 flex-1 truncate text-[11px] font-medium text-white">
             {item.name}
           </div>
+          {showMove && (
+            <button
+              type="button"
+              onClick={handleMove}
+              className="pointer-events-auto inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-full bg-black/78 px-2 py-1 text-[10px] font-semibold text-sky-300 transition hover:bg-sky-500/85 hover:text-white"
+              aria-label={t("card.moveToTarget", { name: item.name, target: moveTargetLabel })}
+              title={t("card.moveToTarget", { name: item.name, target: moveTargetLabel })}
+            >
+              <span aria-hidden="true">→</span>
+              {moveTargetLabel}
+            </button>
+          )}
         </div>
-        {hasAlternates && (
-          <span
-            className="pointer-events-none absolute bottom-1.5 right-2 z-10 text-sm text-sky-400 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
-            title={t("card.alternateArtRightClick")}
-          >
-            ✦
-          </span>
-        )}
       </div>
     </div>
   );
@@ -285,9 +327,11 @@ function DeckStackSectionLane({
   emptyLabel,
   showTypeSections = false,
   extraGroups,
+  isMaybeboard,
   onAddCard,
   canAddCard,
   onRemoveCard,
+  onMoveCard,
   onRemoveCommander,
   onCardHover,
   onContextMenu,
@@ -300,9 +344,11 @@ function DeckStackSectionLane({
   /** Extra groups rendered after the type groups (e.g. Sideboard appended
    *  to the Main Deck lane below the Lands subsection). */
   extraGroups?: DeckStackTypeGroup[];
+  isMaybeboard: boolean;
   onAddCard: (name: string) => void;
   canAddCard: (item: DeckStackItem) => boolean;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
@@ -357,8 +403,10 @@ function DeckStackSectionLane({
                       item={item}
                       zIndex={group.entries.length - itemIndex}
                       canAdd={canAddCard(item)}
+                      isMaybeboard={isMaybeboard}
                       onAddCard={onAddCard}
                       onRemoveCard={onRemoveCard}
+                      onMoveCard={onMoveCard}
                       onRemoveCommander={onRemoveCommander}
                       onCardHover={onCardHover}
                       onContextMenu={onContextMenu}
@@ -380,10 +428,13 @@ export function DeckStack({
   cardDataCache,
   onAddCard,
   onRemoveCard,
+  onMoveCard,
   onRemoveCommander,
   onCardHover,
+  format,
 }: DeckStackProps) {
   const { t } = useTranslation("deck-builder");
+  const isMaybeboard = isMaybeboardPolicy(useSideboardPolicy(format));
   const sections = useMemo(
     () => createDeckStackItems(deck, commanders, cardDataCache),
     [deck, commanders, cardDataCache],
@@ -407,15 +458,22 @@ export function DeckStack({
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const clearArtOverride = usePreferencesStore((s) => s.clearArtOverride);
 
-  // Sideboard renders as a "Sideboard" subsection appended to the Main Deck
-  // lane below the Lands subsection, so it shows up naturally as you scroll
-  // the visual stack.
+  // The second section renders as a subsection appended to the Main Deck lane
+  // below the Lands subsection, so it shows up naturally as you scroll the
+  // visual stack. Titled "Maybeboard" for Forbidden-policy formats, else
+  // "Sideboard" — consistent with the list view.
   const sideboardGroups = useMemo<DeckStackTypeGroup[]>(
     () =>
       sections.sideboard.length > 0
-        ? [{ key: "sideboard", title: "sideboardGroup", entries: sections.sideboard }]
+        ? [
+            {
+              key: "sideboard",
+              title: isMaybeboard ? "maybeboardGroup" : "sideboardGroup",
+              entries: sections.sideboard,
+            },
+          ]
         : [],
-    [sections.sideboard],
+    [sections.sideboard, isMaybeboard],
   );
 
   const [contextMenu, setContextMenu] = useState<{ cardName: string; x: number; y: number } | null>(null);
@@ -452,7 +510,9 @@ export function DeckStack({
           </span>
           {sideboardCount > 0 && (
             <span className="rounded-full border border-white/10 bg-black/20 px-2 py-1">
-              {t("stack.sideboardBadge", { count: sideboardCount })}
+              {isMaybeboard
+                ? t("stack.maybeboardBadge", { count: sideboardCount })
+                : t("stack.sideboardBadge", { count: sideboardCount })}
             </span>
           )}
         </div>
@@ -471,9 +531,11 @@ export function DeckStack({
                 badge={t("stack.cardCount", { count: sections.commander.length })}
                 entries={sections.commander}
                 emptyLabel={t("stack.noCommander")}
+                isMaybeboard={isMaybeboard}
                 onAddCard={onAddCard}
                 canAddCard={canAddCard}
                 onRemoveCard={onRemoveCard}
+                onMoveCard={onMoveCard}
                 onRemoveCommander={onRemoveCommander}
                 onCardHover={onCardHover}
                 onContextMenu={handleContextMenu}
@@ -483,16 +545,20 @@ export function DeckStack({
               title={t("stack.mainDeckLane")}
               badge={
                 sideboardCount > 0
-                  ? t("stack.mainSideBadge", { main: mainDeckCount, side: sideboardCount })
+                  ? isMaybeboard
+                    ? t("stack.mainMaybeBadge", { main: mainDeckCount, side: sideboardCount })
+                    : t("stack.mainSideBadge", { main: mainDeckCount, side: sideboardCount })
                   : t("stack.cardCount", { count: mainDeckCount })
               }
               entries={sections.main}
               emptyLabel={t("stack.mainEmpty")}
               showTypeSections
               extraGroups={sideboardGroups}
+              isMaybeboard={isMaybeboard}
               onAddCard={onAddCard}
               canAddCard={canAddCard}
               onRemoveCard={onRemoveCard}
+              onMoveCard={onMoveCard}
               onRemoveCommander={onRemoveCommander}
               onCardHover={onCardHover}
               onContextMenu={handleContextMenu}

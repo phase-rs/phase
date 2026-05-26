@@ -2,7 +2,11 @@ import type { FormatConfig } from "../adapter/types";
 
 export type DeckChoice =
   | { type: "Random" }
-  | { type: "Named"; data: string };
+  | { type: "Named"; data: string }
+  | {
+      type: "DeckList";
+      data: { main_deck: string[]; sideboard: string[]; commander: string[] };
+    };
 
 export type SeatKind =
   | { type: "HostHuman" }

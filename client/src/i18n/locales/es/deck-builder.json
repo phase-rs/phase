@@ -68,7 +68,8 @@
     "unsupportedExpand_one": "{{count}} mecánica no compatible; expandir detalles",
     "unsupportedExpand_other": "{{count}} mecánicas no compatibles; expandir detalles",
     "unsupportedTitle_one": "{{count}} mecánica no compatible — haz clic para expandir",
-    "unsupportedTitle_other": "{{count}} mecánicas no compatibles — haz clic para expandir"
+    "unsupportedTitle_other": "{{count}} mecánicas no compatibles — haz clic para expandir",
+    "moveToTarget": "Mover una {{name}} a {{target}}"
   },
   "grid": {
     "allFormats": "Todos",
@@ -102,7 +103,15 @@
     "exportModalTitle": "Exportar mazo",
     "saveToFile": "Guardar en archivo",
     "copied": "¡Copiado!",
-    "copy": "Copiar"
+    "copy": "Copiar",
+    "maybeboardTab": "Maybeboard ({{count}})",
+    "mainName": "Principal",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
+    "maybeboard": "Maybeboard ({{count}})",
+    "maybeboardEmptyHint": "Cartas que estás considerando. Toca → Maybeboard en una carta del mazo para guardarla aquí.",
+    "commanderHeading": "Comandante",
+    "removeCommander": "Quitar a {{name}} como comandante"
   },
   "moveList": {
     "empty": "Vacío"
@@ -132,7 +141,13 @@
     "addOne": "Añadir una {{name}}",
     "copyLimit": "{{name}} está en el límite de copias",
     "removeOne": "Quitar una {{name}}",
-    "removeCommander": "Quitar a {{name}} como comandante"
+    "removeCommander": "Quitar a {{name}} como comandante",
+    "maybeboardBadge": "Maybeboard {{count}}",
+    "mainName": "Principal",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
+    "mainMaybeBadge": "{{main}} principal + {{side}} maybe",
+    "maybeboardGroup": "Maybeboard"
   },
   "printingPicker": {
     "title": "Elegir ilustración",

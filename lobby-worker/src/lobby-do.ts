@@ -11,12 +11,15 @@
 //   - snapshots the broker to storage after mutations (a hibernated DO loses
 //     in-memory state), and
 //   - drives the reaper from a DO alarm (no tokio interval in a Worker).
+// Public-lobby name moderation is intentionally applied here, not in the shared
+// Rust broker, so self-hosted native servers keep their own policy surface.
 //
 // Mirrors the engine -> engine-wasm -> React-adapter pattern: the WASM owns the
 // logic, the host language is a serialization boundary with zero game logic.
 
 import wasmModule from "./broker-wasm-pkg/broker_bg.wasm";
 import { initSync, WasmBroker } from "./broker-wasm-pkg/broker.js";
+import { moderationErrorForLobbyFrame } from "./name-filter";
 import { PROTOCOL_VERSION } from "./protocol";
 
 // Instantiate the broker WASM once per isolate, at top level (CF imports `.wasm`
@@ -115,6 +118,12 @@ export class LobbyDO {
     const broker = await this.loadBroker();
     const conn = ws.deserializeAttachment() ?? DEFAULT_CONN;
     const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+    const moderationError = moderationErrorForLobbyFrame(text);
+    if (moderationError) {
+      ws.send(JSON.stringify({ type: "Error", data: { message: moderationError } }));
+      console.warn({ event: "lobby_name_rejected" });
+      return;
+    }
 
     const result = JSON.parse(broker.handle(JSON.stringify(conn), text, Date.now())) as CallResult;
 
