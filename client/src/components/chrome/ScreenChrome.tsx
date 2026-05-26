@@ -6,6 +6,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PreferencesModal } from "../settings/PreferencesModal";
 import { LanguageFlag } from "../ui/LanguageFlag";
+import { AccountControl } from "./AccountControl";
 import { FullscreenButton } from "./FullscreenButton";
 import { VolumeControl } from "./VolumeControl";
 
@@ -21,7 +22,7 @@ function BackIcon() {
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 20 20"
       fill="currentColor"
-      className="h-6 w-6"
+      className="h-5 w-5"
       aria-hidden="true"
     >
       <path
@@ -39,7 +40,7 @@ function SettingsIcon() {
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 20 20"
       fill="currentColor"
-      className="w-6 h-6"
+      className="h-5 w-5"
     >
       <path
         fillRule="evenodd"
@@ -76,9 +77,8 @@ export function ScreenChrome({
           <motion.button
             className={menuButtonClass({
               tone: "neutral",
-              size: "sm",
-              className:
-                "h-11 min-w-11 rounded-[16px] px-3 py-0 text-white/68 hover:text-white",
+              size: "chrome",
+              className: "text-white/68 hover:text-white",
             })}
             whileHover={{ y: -1 }}
             whileTap={{ scale: 0.98 }}
@@ -91,16 +91,16 @@ export function ScreenChrome({
         </div>
       )}
 
-      {/* Fullscreen + Volume control + Settings cog — upper-right */}
+      {/* Account + Volume control + Settings cog — upper-right.
+          Fullscreen lives lower-right (below) to keep this cluster uncrowded. */}
       <div className="fixed right-4 top-[calc(env(safe-area-inset-top)+1rem)] z-30 flex gap-2">
-        <FullscreenButton variant="chrome" />
         <VolumeControl variant="chrome" />
+        <AccountControl />
         <motion.button
           className={menuButtonClass({
             tone: "neutral",
-            size: "sm",
-            className:
-              "h-11 min-w-11 rounded-[16px] px-3 py-0 text-white/46 hover:text-white/72",
+            size: "chrome",
+            className: "text-white/46 hover:text-white/72",
           })}
           whileHover={{ y: -1 }}
           whileTap={{ scale: 0.98 }}
@@ -108,14 +108,13 @@ export function ScreenChrome({
           aria-label={t("chrome.languageSettings", { lang: language.toUpperCase() })}
           title={t("chrome.languageTitle", { lang: language.toUpperCase() })}
         >
-          <LanguageFlag lng={language} className="h-4 w-6 rounded-sm" />
+          <LanguageFlag lng={language} className="h-3.5 w-5 rounded-sm" />
         </motion.button>
         <motion.button
           className={menuButtonClass({
             tone: "neutral",
-            size: "sm",
-            className:
-              "h-11 min-w-11 rounded-[16px] px-3 py-0 text-white/46 hover:text-white/72",
+            size: "chrome",
+            className: "text-white/46 hover:text-white/72",
           })}
           whileHover={{ y: -1 }}
           whileTap={{ scale: 0.98 }}
@@ -125,6 +124,11 @@ export function ScreenChrome({
         >
           <SettingsIcon />
         </motion.button>
+      </div>
+
+      {/* Fullscreen — lower-right, separated from the top cluster */}
+      <div className="fixed right-4 bottom-[calc(env(safe-area-inset-bottom)+1rem)] z-30">
+        <FullscreenButton variant="chrome" />
       </div>
 
       {/* Settings modal */}

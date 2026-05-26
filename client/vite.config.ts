@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import wasm from "vite-plugin-wasm";
@@ -63,10 +63,17 @@ function workspaceVersion(): string {
 // weight since no frontend code fetches it. Local dev falls back to the
 // public/ copy served at `/card-data.json` (also used by Tauri bundles and
 // phase-server via `data/card-data.json`).
-function dataFileDefines(): Record<string, string> {
+function dataFileDefines(mode: string): Record<string, string> {
   const manifest = JSON.parse(
     readFileSync(path.resolve(__dirname, "../data-files.json"), "utf-8"),
   ) as string[];
+  // Bridge a gitignored repo-root .env into build-time defines for local dev.
+  // Vite does not auto-populate process.env from .env files, so without this the
+  // __SUPABASE_*__ tokens would never resolve from a .env. CI/deploy sets these
+  // as real env vars, which take precedence over any .env entry.
+  const fileEnv = loadEnv(mode, path.resolve(__dirname, ".."), "");
+  const envVar = (name: string): string =>
+    process.env[name] ?? fileEnv[name] ?? "";
   const base = process.env.DATA_BASE_URL || "";
   const defines: Record<string, string> = {
     __APP_VERSION__: JSON.stringify(workspaceVersion()),
@@ -80,6 +87,12 @@ function dataFileDefines(): Record<string, string> {
     // preview" link on the preview site itself. dev + staging → false (hidden);
     // tagged release → true (shown).
     __IS_RELEASE_BUILD__: JSON.stringify(process.env.RELEASE_BUILD === "true"),
+    // Supabase cloud-sync config. Anon key is public by design (RLS is the
+    // access control), so it ships in the bundle. Empty when unset → cloud sync
+    // is disabled, leaving file backup as the only data-portability path. This
+    // keeps self-hosted builds working with no Supabase account.
+    __SUPABASE_URL__: JSON.stringify(envVar("SUPABASE_URL")),
+    __SUPABASE_ANON_KEY__: JSON.stringify(envVar("SUPABASE_ANON_KEY")),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
     // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
     // The sidecars are listed in data-files.json, so on deploy they are uploaded
@@ -105,7 +118,7 @@ function dataFileDefines(): Record<string, string> {
   return defines;
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   resolve: {
     alias: {
       "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm"),
@@ -184,11 +197,11 @@ export default defineConfig({
     }),
     compression({ algorithms: ["brotliCompress"] }),
   ],
-  define: dataFileDefines(),
+  define: dataFileDefines(mode),
   worker: {
     plugins: () => [wasmEnvShim()],
   },
   build: {
     target: "esnext",
   },
-});
+}));

@@ -16,6 +16,7 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.106.2",
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",

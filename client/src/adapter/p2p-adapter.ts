@@ -545,6 +545,15 @@ export class P2PHostAdapter implements EngineAdapter {
     this.emit({ type: "playerSlotsUpdated", slots: this.getPlayerSlots() });
   }
 
+  private playerNamesForSeats(): Record<number, string> {
+    const names: Record<number, string> = {};
+    for (const [playerId, kind] of this.pregameSeatState.seats.entries()) {
+      const name = this.displayNameForSeat(playerId, kind);
+      if (name) names[playerId] = name;
+    }
+    return names;
+  }
+
   private syncLobbyMetadata(consumedReservationTokens: string[] = []): void {
     const currentPlayers = occupiedSeatCount(this.pregameSeatState);
     const maxPlayers = this.pregameSeatState.seats.length;
@@ -905,9 +914,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.pregameSeatState.gameStarted = true;
       this.saveSession();
 
-      const allNames: Record<number, string> = {};
-      if (this.hostDisplayName) allNames[0] = this.hostDisplayName;
-      for (const [pid, name] of this.guestNames) allNames[pid] = name;
+      const allNames = this.playerNamesForSeats();
       this.emit({ type: "playerIdentity", playerId: 0, playerNames: allNames });
 
       if (this.broker && this.brokerGameCode) {
@@ -1276,6 +1283,7 @@ export class P2PHostAdapter implements EngineAdapter {
         wireProtocolVersion: WIRE_PROTOCOL_VERSION,
         assignedPlayerId: pid as PlayerId,
         state: snapshot.state,
+        playerNames: this.playerNamesForSeats(),
         ...legalActionsToWire(snapshot),
       });
     })();
@@ -1684,7 +1692,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         }
         this.gameState = msg.state;
         this.legalActions = legalActionsFromWire(msg);
-        this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId });
+        this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.emit({
           type: "stateChanged",
           state: msg.state,

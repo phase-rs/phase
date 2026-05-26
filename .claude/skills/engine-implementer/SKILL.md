@@ -1,163 +1,124 @@
 ---
 name: engine-implementer
-description: "Run the strict phase.rs engine implementation pipeline: create an idiomatic plan with engine-planner, review it independently until no gaps remain, implement surgically, run Tilt-first verification, review the implementation with review-impl until clean, and commit only the relevant files."
+description: "End-to-end phase.rs implementation pipeline: plan, review-plan, implement, review-impl, commit — each step run in a fresh spawned agent."
 ---
 
-# Engine Implementer
+# Engine Implementer (Orchestrator)
 
-Run the full plan -> implement -> review -> commit pipeline for phase.rs engine, parser, AI, or frontend GameAction work. The goal is the most idiomatic, maintainable, rules-correct solution that fits the repo architecture.
+This is the orchestrator for the phase.rs implementation pipeline. It runs as a **skill in the main thread** so it can spawn agents for every step that benefits from fresh context (plan review, surgical implementation, implementation review). Do not turn this into an agent — agents cannot spawn sub-agents, which is what made earlier versions silently degrade.
+
+## Roles
+
+| Step | Where it runs | Why |
+|---|---|---|
+| 1. Produce plan | **Spawned `general-purpose` agent** invoking `/engine-planner` | Fresh context = plan is shaped by the task, not by the conversation history that led here |
+| 2. Review plan | **Spawned `general-purpose` agent** invoking `/review-engine-plan` | Fresh context = honest architectural review, independent of the planner |
+| 3. Implement | **Spawned `engine-implementation-executor` agent** | Surgical edits + Tilt verification; worktree-isolatable |
+| 4. Spot-check verification | This thread | Re-run anything the executor skipped; confirm formatting |
+| 5. Review implementation | **Spawned `general-purpose` agent** invoking `/review-impl` | Independent reviewer, not the implementer |
+| 6. Commit | This thread | Owner of the working tree decides what gets staged |
+
+The orchestrator never authors content itself. Its only jobs are: spawn agents, route their output to the next step, loop review steps until clean, and own the commit.
 
 ## Inputs
 
-Accept either:
+Either:
 
-1. A task description: cards, CR rules, Oracle text patterns, affected subsystems, and expected behavior.
-2. A pre-existing plan. Treat it as a draft unless it has already passed the full independent `$review-engine-plan` loop.
+1. A task description (cards, CR rules, Oracle text patterns, affected subsystems, expected behavior), or
+2. A pre-existing plan — treat as a draft unless it has already passed `/review-engine-plan` to clean.
 
-## Required Pipeline
+If running in worktree-isolation mode, prepare the worktree before Step 3 and pass its path to the executor agent. Per `feedback_session_default_no_worktree`, do not re-ask about worktrees during an active pipeline session — use the session default.
 
-Complete these phases in order. Do not skip review loops.
+## Pipeline
 
-### 1. Plan With `engine-planner`
+### Step 1 — Produce the plan
 
-Use `engine-planner` to create the implementation plan. If an agent runner is unavailable, read `.claude/agents/engine-planner.md` and follow it exactly.
+Spawn a `general-purpose` agent and instruct it to invoke `/engine-planner`. The agent returns a plan with every mandatory architectural section.
 
-The plan must meet the strictest architectural standards:
+**Spawn inputs:** task description; in-scope file/subsystem hints; any prior reviewer findings (none on first round).
 
-- class-of-cards/mechanics design, not a one-card fix
-- idiomatic Rust representation with typed enums instead of bool flags
-- existing building-block reuse before new helpers
-- exact logic placement by layer
-- verified CR rules for rules behavior
-- parser work designed with `nom` combinators from the start
-- analogous feature trace through real files
-- concrete file-level implementation steps and verification
+Do not author or edit the plan in this thread. If the returned plan is missing sections or is superficial, send the same inputs plus an explicit "missing sections" note to a **fresh** planning agent — do not patch it yourself.
 
-### 2. Review The Plan Until Clean
+### Step 2 — Review the plan until clean (unbounded loop)
 
-Run `$review-engine-plan` against the full plan. Send every finding back into the plan and re-review the entire revised plan with fresh context. Repeat until a full review round returns no gaps.
+Spawn a `general-purpose` agent and instruct it to invoke `/review-engine-plan` against the full plan.
 
-Do not proceed to implementation while any plan-review gap remains. Stop only for a true human design decision, missing external access, or an environment blocker that makes review impossible.
+**Reviewer spawn inputs:** the full plan; the original task description.
 
-### 3. Implement Surgically
+If the reviewer returns gaps, spawn a **fresh** planning agent (Step 1 inputs plus the reviewer's findings as additional constraints) to produce a revised plan, then spawn a **fresh** reviewer agent against the revised plan.
 
-Before editing, verify that the reviewed plan is still consistent with the current code. Re-read relevant files rather than trusting stale context.
+**Repeat until a full review round returns zero gaps.** There is no iteration cap — "two rounds and ship" is not acceptable. Stop only for:
 
-Stop and return to planning when:
+- a true human design decision the planner cannot resolve,
+- missing external access (CR text unavailable, file inaccessible), or
+- an environment blocker that makes review impossible.
 
-- required sections are missing or superficial
-- current code contradicts the plan
-- the work no longer fits existing architecture
-- parser work would require ad hoc string dispatch
-- CR behavior is uncertain and not verified
+Each review must run in a fresh agent context — never reuse the previous reviewer's context.
 
-Then follow these implementation rules:
+### Step 3 — Dispatch implementation
 
-- Re-read a file immediately before modifying it.
-- Preserve other agents' work. Never stash, reset, restore, or checkout unrelated changes.
-- Use targeted edits for existing files. Avoid whole-file rewrites.
-- Keep game logic in the engine, parser logic in parser modules, and frontend code as display/action dispatch only.
-- Use `nom` combinators from the first parser line. Do not use `find()`, `split_once()`, `contains()`, `starts_with()`, or similar heuristics for Oracle dispatch.
-- Verify every CR number against `docs/MagicCompRules.txt` before writing or changing CR annotations.
-- Build the class of cards/mechanics, not a one-card special case.
-- If implementation friction reveals a design flaw, stop and return the gap rather than hacking around it.
+Spawn the `engine-implementation-executor` agent.
 
-### 4. Verify
+**Spawn inputs:** the reviewed clean plan in full; in-bounds / out-of-bounds file scope; worktree path if applicable; any prior reviewer findings (none on first round).
 
-Always format directly:
+The executor edits files, runs Tilt-first verification, runs the parser diff gate if any parser file changed, and returns a structured report (diff summary, verification results, judgement calls, stop-and-return items, CR annotations verified, deviations, risks).
+
+If the executor returns "stop and return" items (plan contradicts current code, ad hoc parser dispatch unavoidable, CR uncertain), do NOT improvise around them. Loop back to Step 1, feed the executor's findings into `/engine-planner` as new constraints, and re-run Steps 1–3.
+
+### Step 4 — Spot-check verification
+
+The executor already ran the appropriate Tilt block. Re-run only what the executor skipped or what changed because of intervening commits from other agents. Always confirm formatting:
 
 ```bash
 cargo fmt --all
 ```
 
-For Rust, engine, and parser work:
+After a non-zero `tilt-wait.sh`, fetch details with `tilt logs <resource> --tail 50 --since 2m`. Distinguish your diff's errors from concurrent-agent errors per CLAUDE.md's "Defer to other active agents" guidance.
 
-```bash
-if tilt get uiresource clippy >/dev/null 2>&1; then
-  ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
-else
-  cargo clippy --all-targets -- -D warnings
-  cargo test -p engine
-  ./scripts/gen-card-data.sh
-fi
-```
+### Step 5 — Review implementation until clean (unbounded loop)
 
-For frontend work:
+Spawn a `general-purpose` agent and instruct it to invoke `/review-impl` against the implementation diff. The reviewer MUST also verify the originally reported bug or requirement is actually fixed via a discriminating runtime test — not just that the code looks clean (`feedback_review_impl_verify_bug_fixed`).
 
-```bash
-if tilt get uiresource clippy >/dev/null 2>&1; then
-  ./scripts/tilt-wait.sh --timeout 180 check-frontend
-else
-  (cd client && pnpm run type-check && pnpm lint)
-fi
-```
+**Reviewer spawn inputs:** `git diff` of the in-flight branch against its base; the original task description; the reviewed plan.
 
-After a non-zero `tilt-wait.sh`, fetch details with:
+If the reviewer returns findings, spawn a **fresh** `engine-implementation-executor` agent to apply fixes:
 
-```bash
-tilt logs <resource> --tail 50 --since 2m
-```
+**Fix-round executor spawn inputs:** the reviewed plan; current `git diff HEAD` of the in-flight branch; the reviewer findings as the fix constraints; same scope and worktree as the original Step 3 spawn.
 
-For parser work, always run the parser combinator gate and both parser audits:
+Then spawn a **fresh** review agent against the new diff. Repeat until a full review round returns zero findings. Per `feedback_engine_implementer_runs_review`, never self-review — always spawn an isolated reviewer.
 
-```bash
-./scripts/check-parser-combinators.sh
-cargo coverage
-cargo semantic-audit
-```
+**Repeat until a full review round returns zero findings.** No iteration cap. Per `feedback_engine_implementer_runs_review`, never self-review — always spawn an isolated reviewer.
 
-## Parser Diff Gate
-
-If any modified file is under `crates/engine/src/parser/`, inspect added lines for string dispatch:
-
-```bash
-git diff --name-only | grep 'crates/engine/src/parser/' | while read f; do
-  git diff "$f" | grep '^+' | grep -v '^+++' | grep -vE '^\+\s*//' \
-    | grep -E '\.(contains|starts_with|ends_with|find)\(' \
-    | grep -v '#\[test\]' | grep -v '#\[cfg(test)\]'
-done
-```
-
-Any output is a hard failure unless it is a test, comment, explicitly annotated non-dispatch structural use, or `oracle_util.rs` dual-string `TextPair` helper work.
-
-### 5. Review Implementation Until Clean
-
-Run `$review-impl` against the implementation diff after verification. Address every finding, then rerun the implementation review against the full revised diff. Repeat until a full review round returns no findings.
-
-Prefer an independent reviewer or fresh context for this review when available. If no independent reviewer is available, apply `$review-impl` directly and record that limitation in the final report.
-
-### 6. Commit
+### Step 6 — Commit
 
 Commit only after:
 
-- the plan-review loop is clean
-- implementation verification passes or unrelated failures are clearly isolated
-- the `$review-impl` loop is clean
+- Step 2 plan-review loop is clean,
+- Step 4 verification passes (or unrelated failures are clearly isolated to other agents),
+- Step 5 implementation-review loop is clean.
 
-Stage only relevant files. Do not sweep unrelated user or agent work into the commit:
+Stage by pathspec — never `git add -A` and never `git commit` without a pathspec, because the shared index can sweep in other agents' staged files (`feedback_git_add_file_bundles_concurrent_work`, `feedback_shared_index_commit_pathspec`):
 
 ```bash
 git status --short
 git diff --stat
-git add <specific-files>
-git commit -m "<type>: <short implementation summary>"
+git diff --cached <paths>                 # confirm nothing unrelated is staged
+git commit <paths> -m "<type>: <summary>"
 ```
 
-Do not push unless explicitly requested.
+Verify HEAD is on a branch before any push (`feedback_verify_head_attached_before_push`). Never pipe `git push` into `tail`/`head` (`feedback_git_push_no_pipe`). Do not push unless explicitly requested.
 
 ## Final Report
 
-Return a structured report after the commit.
+Return after the commit:
 
-Include:
-
-1. Plan-review rounds and final clean result.
+1. Plan-review rounds (count) and final clean result.
 2. What changed, grouped by subsystem and file.
 3. Key architectural decisions.
-4. Verification commands and results.
-5. Implementation-review rounds and final clean result.
+4. Verification commands run and results (executor's + your spot-checks).
+5. Implementation-review rounds (count) and final clean result.
 6. Commit hash and staged file list.
 7. Coverage impact for parser changes.
-8. Deviations from the plan.
-9. Self-flagged risks and judgment calls.
+8. Deviations from the plan with reasons.
+9. Self-flagged risks and judgment calls (yours + executor's).
 10. Remaining items, if any, with reasons.

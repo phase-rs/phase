@@ -5,6 +5,7 @@ import "./i18n"; // initialize i18next before any component renders
 import { App } from "./App";
 import { registerServiceWorker } from "./pwa/registerServiceWorker";
 import { registerTauriUpdater } from "./pwa/tauriUpdater";
+import { installChunkReloadHandler } from "./pwa/chunkReloadHandler";
 import { installTauriExternalLinkHandler } from "./services/externalLinks";
 
 createRoot(document.getElementById("root")!).render(
@@ -15,4 +16,5 @@ createRoot(document.getElementById("root")!).render(
 
 registerServiceWorker();
 registerTauriUpdater();
+installChunkReloadHandler();
 installTauriExternalLinkHandler();

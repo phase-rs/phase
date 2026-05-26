@@ -68,7 +68,8 @@
     "unsupportedExpand_one": "{{count}} nicht unterstützte Mechanik; Details aufklappen",
     "unsupportedExpand_other": "{{count}} nicht unterstützte Mechaniken; Details aufklappen",
     "unsupportedTitle_one": "{{count}} nicht unterstützte Mechanik — zum Aufklappen klicken",
-    "unsupportedTitle_other": "{{count}} nicht unterstützte Mechaniken — zum Aufklappen klicken"
+    "unsupportedTitle_other": "{{count}} nicht unterstützte Mechaniken — zum Aufklappen klicken",
+    "moveToTarget": "Ein {{name}} in {{target}} verschieben"
   },
   "grid": {
     "allFormats": "Alle",
@@ -102,7 +103,15 @@
     "exportModalTitle": "Deck exportieren",
     "saveToFile": "In Datei speichern",
     "copied": "Kopiert!",
-    "copy": "Kopieren"
+    "copy": "Kopieren",
+    "maybeboardTab": "Maybeboard ({{count}})",
+    "mainName": "Haupt",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
+    "maybeboard": "Maybeboard ({{count}})",
+    "maybeboardEmptyHint": "Karten, die du in Betracht ziehst. Tippe bei einer Deck-Karte auf → Maybeboard, um sie hier abzulegen.",
+    "commanderHeading": "Kommandeur",
+    "removeCommander": "{{name}} als Kommandeur entfernen"
   },
   "moveList": {
     "empty": "Leer"
@@ -132,7 +141,13 @@
     "addOne": "Ein {{name}} hinzufügen",
     "copyLimit": "{{name}} hat das Kopienlimit erreicht",
     "removeOne": "Ein {{name}} entfernen",
-    "removeCommander": "{{name}} als Kommandeur entfernen"
+    "removeCommander": "{{name}} als Kommandeur entfernen",
+    "maybeboardBadge": "Maybeboard {{count}}",
+    "mainName": "Haupt",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
+    "mainMaybeBadge": "{{main}} Haupt + {{side}} Maybe",
+    "maybeboardGroup": "Maybeboard"
   },
   "printingPicker": {
     "title": "Artwork wählen",

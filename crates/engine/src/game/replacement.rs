@@ -788,15 +788,12 @@ fn draw_applier(
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    // CR 614.6 + CR 614.11 + CR 121.6: When the replacement's `execute` is a
-    // non-Draw effect chain (e.g., Abundance: Choose → RevealUntil), the
-    // original draw event is *fully replaced* — it never happens. Suppress
-    // the draw by zeroing the count; the `post_replacement_continuation` slot
-    // already carries the chain that replaces it, and the Draw arm of
-    // `handle_replacement_choice` drains the continuation after the
-    // (now-no-op) draw apply. Count-modifying replacements (Alhammarret's
-    // Archive draws 2× → `Effect::Draw { count: 2× }`) keep their existing
-    // path through `draw_replacement_count`.
+    // CR 614.6 + CR 614.11: Count-modifying replacements (Alhammarret's Archive:
+    // `count -> 2 * count`) substitute the count via `draw_replacement_count`.
+    // Full-substitution replacements (Jace WinTheGame, Abundance reveal-until)
+    // are pre-zeroed in `apply_single_replacement` so the original draw is a
+    // no-op (CR 614.6 — the replaced event never happens), and the substitute
+    // runs via the `post_replacement_continuation` drain.
     if let Some(new_count) = draw_replacement_count(state, rid, &event) {
         if let ProposedEvent::Draw {
             player_id, applied, ..
@@ -808,43 +805,8 @@ fn draw_applier(
                 applied,
             });
         }
-        return ApplyResult::Modified(event);
     }
-
-    if let ProposedEvent::Draw {
-        player_id,
-        count,
-        applied,
-    } = event
-    {
-        // CR 614.6 + CR 614.11: When the replacement's `execute` is a non-Draw
-        // chain (Abundance: Choose → RevealUntil), the original draw is *fully
-        // replaced* — never happens — and the chain is the substitute. The
-        // post_replacement_continuation slot is populated by `continue_replacement`
-        // only on the accept/Execute branch, so its presence is the discriminator
-        // between "accept → suppress draw" and "decline → original draw proceeds".
-        let suppress_draw = state.post_replacement_continuation.is_some()
-            && state
-                .objects
-                .get(&rid.source)
-                .and_then(|src| src.replacement_definitions.get(rid.index))
-                .and_then(|repl| repl.execute.as_deref())
-                .is_some_and(|def| !matches!(*def.effect, Effect::Draw { .. }));
-        if suppress_draw {
-            return ApplyResult::Modified(ProposedEvent::Draw {
-                player_id,
-                count: 0,
-                applied,
-            });
-        }
-        ApplyResult::Modified(ProposedEvent::Draw {
-            player_id,
-            count,
-            applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
-    }
+    ApplyResult::Modified(event)
 }
 
 fn draw_replacement_count(
@@ -3272,7 +3234,7 @@ fn optional_decline_is_noop(
 
 fn apply_single_replacement(
     state: &mut GameState,
-    proposed: ProposedEvent,
+    mut proposed: ProposedEvent,
     rid: ReplacementId,
     branch: ReplacementBranch,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
@@ -3372,6 +3334,50 @@ fn apply_single_replacement(
                 }
                 _ => None,
             };
+            // CR 614.6 + CR 614.11: When the branch being applied substitutes the
+            // draw with a non-Draw chain (Jace's WinTheGame, Abundance's
+            // reveal-until), zero the count here so `draw_applier` and
+            // `apply_draw_after_replacement` see a no-op draw — the original draw
+            // never happens (CR 614.6). Branch-aware via the `ability` binding
+            // above, so an optional replacement's decline never pre-zeros against
+            // the accept-side AST. The `draw_replacement_count` guard preserves
+            // the count-modifier path (Alhammarret's Archive: count -> 2*count).
+            if matches!(proposed, ProposedEvent::Draw { .. }) {
+                if let Some(def) = ability {
+                    let is_non_draw_substitute = !matches!(*def.effect, Effect::Draw { .. })
+                        && !EventModifiers::has_only_event_modifier(Some(def))
+                        && draw_replacement_count(state, rid, &proposed).is_none();
+                    if is_non_draw_substitute {
+                        if let ProposedEvent::Draw { count, .. } = &mut proposed {
+                            *count = 0;
+                        }
+                    }
+                }
+            }
+            // CR 614.6: When the applier itself substitutes the event with the
+            // execute's effect (Draw count-modifier via `draw_replacement_count`,
+            // Scry → Draw / Scry → Scry via `scry_applier`), the work is already
+            // encoded in the substituted event — do NOT also stash the same
+            // ability as a post-replacement continuation, or it will execute
+            // twice (once via the applier-modified event, once via the drain).
+            // Only the "residual work beyond the event substitution" case (a
+            // sub_ability chain or a non-event-substituting effect like Choose /
+            // WinTheGame) belongs in the continuation slot.
+            let post_effect = post_effect.filter(|_| {
+                let Some(def) = ability else {
+                    return true;
+                };
+                if def.sub_ability.is_some() {
+                    return true;
+                }
+                !matches!(
+                    (&proposed, &*def.effect),
+                    (ProposedEvent::Draw { .. }, Effect::Draw { .. })
+                        | (ProposedEvent::Scry { .. }, Effect::Draw { .. })
+                        | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
+                        | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
+                )
+            });
             (
                 repl_def.event.clone(),
                 event_modifiers_for_ability(ability, state, rid.source, &proposed),
@@ -4680,6 +4686,16 @@ mod tests {
             }
             other => panic!("expected Execute with LifeGain, got {:?}", other),
         }
+        // CR 614.6: the applier substituted the amount; the `post_effect`
+        // filter must suppress stashing the same execute ability as a
+        // continuation. A leaked Template here is the same defect class as
+        // the Jace empty-library win bug.
+        assert!(
+            state.post_replacement_continuation.is_none(),
+            "GainLife→GainLife amount-substitution must not leak a post-replacement \
+             continuation; found {:?}",
+            state.post_replacement_continuation
+        );
     }
 
     #[test]
