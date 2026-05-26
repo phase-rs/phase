@@ -3859,11 +3859,11 @@ pub(super) fn max_x_value_excluding(
         .sum();
 
     if let Some(spell_id) = object_id {
-        if let Some(pending) = state
-            .pending_cast
-            .as_ref()
-            .filter(|pending| pending.object_id == spell_id)
-        {
+        if let Some(pending) = state.pending_cast.as_ref().filter(|pending| {
+            pending.object_id == spell_id
+                && pending.card_id != CardId(0)
+                && pending.casting_variant == CastingVariant::Normal
+        }) {
             let affordable = |x_value: u32| {
                 let Some(recomputed) = super::casting::recompute_pending_spell_cost_with_chosen_x(
                     state, player, pending, x_value,
