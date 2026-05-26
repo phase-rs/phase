@@ -65,6 +65,7 @@ use engine::types::game_state::{GameState, TransientContinuousEffect};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 use super::activation::turn_only;
 use super::context::PolicyContext;
@@ -77,6 +78,33 @@ use crate::features::DeckFeatures;
 /// stabilising lifegain; 30+ is deep into diminishing-returns territory
 /// where an extra 2-3 life is unlikely to affect the winning line.
 const LIFE_DIMINISHING_RETURNS: i32 = 30;
+
+/// Penalty delta applied when the ETB self-bounce predicate fires (Whitemane
+/// Lion class — see `bounce_self_undo_redundancy`). Promoted to a named
+/// constant so the magnitude is documented and traceable rather than a bare
+/// `-3.0` magic number at the predicate's `return` sites.
+const BOUNCE_SELF_UNDO_DELTA: f64 = -3.0;
+
+/// Origin layer for an effect being evaluated by the redundancy policy.
+///
+/// The redundancy semantics differ depending on whether the effect comes
+/// from the spell's primary ability chain, or from an immediate ETB trigger
+/// on a cast spell. Self-undo detection (Whitemane Lion class) only applies
+/// to ETB triggers: an activated/triggered bounce on an already-resolved
+/// permanent (Soulherder-style blink) is a legitimate value loop and must
+/// not be penalised. A typed enum here keeps the call-site intent
+/// self-documenting and leaves room to add further origin layers (e.g.,
+/// `ResolutionReplacement`, `LeavesBattlefieldTrigger`) without retrofitting
+/// a wider boolean parameter list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectOrigin {
+    /// Effect from `ctx.effects()` — the candidate's primary ability chain.
+    /// Used for activated abilities and the primary effects of cast spells.
+    PrimaryAbility,
+    /// Effect from `cast_facts.immediate_etb_triggers` on a `CastSpell`
+    /// candidate — fires only on the first ETB after the cast resolves.
+    CastImmediateEtbTrigger,
+}
 
 /// Reason kind emitted on every `Score` verdict. Per-arm detail lives in
 /// `PolicyReason.facts` (`source_id`, `effect_kind`, etc.).
@@ -93,12 +121,16 @@ const KIND_DRAW_ZERO: i64 = 4;
 const KIND_GENERIC_KEYWORD: i64 = 5;
 const KIND_ANIMATE_KEYWORDS: i64 = 6;
 const KIND_UNTAP: i64 = 7;
-/// CR 400.7 + CR 701.4: ETB-triggered self-bounce where the only legal
-/// returnee is the source itself (or no creature qualifies), so the trigger
-/// re-pings the spell back into the caster's hand. Whitemane Lion / Stonecloaker
-/// class — left unchecked, the AI casts and re-casts in a positive-scoring loop
-/// because `EtbValuePolicy` rewards the bounce without distinguishing self-undo
-/// from genuine blink value.
+/// CR 603.6a + CR 400.7 + CR 608.2b: ETB-triggered self-bounce where the
+/// only legal returnee is the source itself (or no creature qualifies). The
+/// trigger fires when the permanent enters the battlefield (CR 603.6a); on
+/// resolution, target legality is rechecked (CR 608.2b) and — because the
+/// permanent that resolved on the battlefield is a new object distinct from
+/// the spell that was cast (CR 400.7) — the only legal "creature you control"
+/// is the source itself, so it re-enters the caster's hand. Whitemane Lion /
+/// Stonecloaker class — left unchecked, the AI casts and re-casts in a
+/// positive-scoring loop because `EtbValuePolicy` rewards the bounce without
+/// distinguishing self-undo from genuine blink value.
 const KIND_BOUNCE_SELF_UNDO: i64 = 8;
 
 pub struct RedundancyAvoidancePolicy;
@@ -146,7 +178,7 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
                 effect,
                 source_id,
                 ctx.ai_player,
-                /* is_self_etb= */ false,
+                EffectOrigin::PrimaryAbility,
             ) {
                 total += delta;
                 last_fact = Some((kind_tag, extra));
@@ -154,11 +186,13 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
         }
 
         // CR 603.6a + CR 400.7: For permanent spell casts, also walk the
-        // immediate ETB-trigger effect chain. `ctx.effects()` only covers the
-        // spell's primary abilities — a vanilla creature whose only on-cast
-        // interaction is an ETB trigger (e.g., Whitemane Lion's "return a
-        // creature you control") would otherwise present an empty effect list
-        // here, blinding the policy to ETB-self-undo loops.
+        // immediate ETB-trigger effect chain. CR 603.6a says ETB abilities
+        // trigger when the permanent enters; CR 400.7 says the resolved
+        // permanent is a new object distinct from the spell. `ctx.effects()`
+        // only covers the spell's primary abilities — a vanilla creature
+        // whose only on-cast interaction is an ETB trigger (e.g., Whitemane
+        // Lion's "return a creature you control") would otherwise present an
+        // empty effect list here, blinding the policy to ETB-self-undo loops.
         if matches!(ctx.candidate.action, GameAction::CastSpell { .. }) {
             if let Some(facts) = ctx.cast_facts() {
                 for trigger in &facts.immediate_etb_triggers {
@@ -171,7 +205,7 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
                             effect,
                             source_id,
                             ctx.ai_player,
-                            /* is_self_etb= */ true,
+                            EffectOrigin::CastImmediateEtbTrigger,
                         ) {
                             total += delta;
                             last_fact = Some((kind_tag, extra));
@@ -211,16 +245,16 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
 ///   - Generic/Animate keyword: count of granted keywords already present
 ///   - Bounce self-undo: candidate-set size (0 = trigger fizzles, 1 = source-only)
 ///
-/// `is_self_etb` is set only when the effect comes from an immediate
-/// ETB-trigger on the cast spell itself. Most arms ignore it; the `Bounce`
-/// arm uses it to detect the ETB-self-undo class (Whitemane Lion) without
-/// penalising legitimate activated/triggered bounce abilities like Soulherder.
+/// `origin` records which layer the effect was pulled from. Most arms ignore
+/// it; the `Bounce` arm uses it to detect the ETB-self-undo class (Whitemane
+/// Lion) without penalising legitimate activated/triggered bounce abilities
+/// like Soulherder.
 fn redundancy_delta(
     state: &GameState,
     effect: &Effect,
     source_id: ObjectId,
     ai_player: PlayerId,
-    is_self_etb: bool,
+    origin: EffectOrigin,
 ) -> Option<(f64, i64, i64)> {
     match effect {
         Effect::Tap { target } => tap_redundancy(state, source_id, target),
@@ -257,9 +291,21 @@ fn redundancy_delta(
         Effect::Animate {
             keywords, target, ..
         } => animate_keyword_redundancy(state, source_id, keywords, target),
-        Effect::Bounce { target, .. } => {
-            bounce_self_undo_redundancy(state, source_id, target, is_self_etb)
-        }
+        // CR 603.6a + CR 400.7 + CR 608.2b: ETB-triggered self-bounce is only
+        // a self-undo loop when the destination is the owner's hand (the
+        // default for `Effect::Bounce`). Library/Exile destinations have
+        // their own value/concern axes — they don't refill the caster's hand
+        // for an immediate recast — so we route only hand-destined bounces
+        // through the self-undo predicate.
+        Effect::Bounce {
+            target,
+            destination,
+        } => match destination {
+            None | Some(Zone::Hand) => {
+                bounce_self_undo_redundancy(state, source_id, target, origin)
+            }
+            Some(_) => None,
+        },
 
         // ----- Variants with no shipped redundancy check -----
         //
@@ -483,35 +529,47 @@ fn resolved_candidate_targets(
 /// not stick — the source either re-enters the caster's hand or contributes
 /// no on-resolution value beyond a vanilla body that didn't enter.
 ///
-/// Only fires when `is_self_etb == true`. Activated/triggered abilities that
-/// happen to bounce a creature you control (Soulherder-style blink) must NOT
-/// be penalised — those are legitimate value loops, not self-undo.
+/// Categorical scope:
+///   - Only fires when `origin == EffectOrigin::CastImmediateEtbTrigger`.
+///     Activated/triggered abilities that happen to bounce a creature you
+///     control (Soulherder-style blink) must NOT be penalised — those are
+///     legitimate value loops, not self-undo.
+///   - The caller (the `Effect::Bounce` match arm in `redundancy_delta`) is
+///     responsible for restricting this predicate to bounces whose
+///     destination is the owner's hand (default `None` or explicit
+///     `Some(Zone::Hand)`). Library/Exile destinations are not handled by
+///     this predicate.
 ///
-/// Returns `(-3.0, KIND_BOUNCE_SELF_UNDO, count)` on a confirmed self-undo;
-/// `None` otherwise. The `count` fact is 0 when the trigger fizzles and 1
-/// when the source is the only legal return target — enough signal in traces
-/// to distinguish the two pathological subcases.
+/// Returns `(BOUNCE_SELF_UNDO_DELTA, KIND_BOUNCE_SELF_UNDO, count)` on a
+/// confirmed self-undo; `None` otherwise. The `count` fact is 0 when the
+/// trigger fizzles and 1 when the source is the only legal return target —
+/// enough signal in traces to distinguish the two pathological subcases.
 fn bounce_self_undo_redundancy(
     state: &GameState,
     source_id: ObjectId,
     target: &TargetFilter,
-    is_self_etb: bool,
+    origin: EffectOrigin,
 ) -> Option<(f64, i64, i64)> {
-    if !is_self_etb {
+    if origin != EffectOrigin::CastImmediateEtbTrigger {
         return None;
     }
     let candidates = resolved_candidate_targets(state, source_id, target);
-    // CR 603.6a: if the candidate set is empty, the trigger has no legal
-    // target — the bounce does nothing. Penalise: the AI is paying mana for
-    // a trigger that fizzles.
+    // CR 608.2b: if the candidate set is empty, the trigger has no legal
+    // target — the targeted ability is removed from the stack at resolution
+    // and does nothing. Penalise: the AI is paying mana for a trigger that
+    // fizzles.
     if candidates.is_empty() {
-        return Some((-3.0, KIND_BOUNCE_SELF_UNDO, 0));
+        return Some((BOUNCE_SELF_UNDO_DELTA, KIND_BOUNCE_SELF_UNDO, 0));
     }
     // Whitemane-Lion / Stonecloaker case: every candidate IS the source.
     // The trigger must pick the source itself, bouncing the spell-just-cast
     // back to hand. Net effect: spend mana, gain nothing, prime the loop.
     if candidates.iter().all(|&id| id == source_id) {
-        return Some((-3.0, KIND_BOUNCE_SELF_UNDO, candidates.len() as i64));
+        return Some((
+            BOUNCE_SELF_UNDO_DELTA,
+            KIND_BOUNCE_SELF_UNDO,
+            candidates.len() as i64,
+        ));
     }
     None
 }
@@ -1276,6 +1334,19 @@ mod tests {
         name: &str,
         bounce_target: TargetFilter,
     ) -> (ObjectId, CardId) {
+        make_etb_bouncer_in_hand_with_destination(state, name, bounce_target, None)
+    }
+
+    /// Variant of `make_etb_bouncer_in_hand` allowing the ETB-bounce
+    /// destination to be set explicitly. `None` matches the default
+    /// (owner's hand); `Some(Zone::Library)` covers top-of-library variants
+    /// used to verify the destination-axis short-circuit in the bounce arm.
+    fn make_etb_bouncer_in_hand_with_destination(
+        state: &mut GameState,
+        name: &str,
+        bounce_target: TargetFilter,
+        destination: Option<Zone>,
+    ) -> (ObjectId, CardId) {
         let card_id = CardId(state.objects.len() as u64 + 1);
         let obj_id = create_object(state, card_id, PlayerId(0), name.to_string(), Zone::Hand);
         let obj = state.objects.get_mut(&obj_id).unwrap();
@@ -1288,7 +1359,7 @@ mod tests {
                     AbilityKind::Spell,
                     Effect::Bounce {
                         target: bounce_target,
-                        destination: None,
+                        destination,
                     },
                 )),
         );
@@ -1385,8 +1456,8 @@ mod tests {
         // bounces "a creature you control". This is a legitimate value loop,
         // not self-undo — the policy must NOT penalise. Even if the only
         // legal target is the source itself, the activated/spell path runs
-        // `redundancy_delta` with `is_self_etb=false`, which short-circuits
-        // the bounce arm to `None`.
+        // `redundancy_delta` with `EffectOrigin::PrimaryAbility`, which
+        // short-circuits the bounce arm to `None`.
         let mut state = GameState::new_two_player(0);
         let obj_id = make_creature_with_ability(
             &mut state,
@@ -1441,6 +1512,43 @@ mod tests {
         assert!(
             delta <= -3.0,
             "ETB bounce with no legal target should emit delta <= -3.0; got {delta}"
+        );
+    }
+
+    #[test]
+    fn etb_bounce_to_library_not_penalised() {
+        // Categorical scope: only `destination == None` or
+        // `Some(Zone::Hand)` are self-undo loops, because only those land the
+        // source back where it can be immediately re-cast. A bounce to library
+        // is a different category (top-of-library setup, e.g., Crystal Shard
+        // variants) — `bounce_self_undo_redundancy` must NOT fire here even
+        // when the only legal target is the source itself.
+        let mut state = GameState::new_two_player(0);
+        let (obj_id, card_id) = make_etb_bouncer_in_hand_with_destination(
+            &mut state,
+            "Library Bouncer",
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            Some(Zone::Library),
+        );
+        // Mirror the self-undo battlefield shape: the bouncer is the only
+        // creature controlled. Whitemane-Lion test geometry — if the
+        // destination-axis short-circuit is missing, this test will go
+        // negative and fail.
+        state.battlefield.push_back(obj_id);
+        state.objects.get_mut(&obj_id).unwrap().zone = Zone::Battlefield;
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = cast_candidate(obj_id, card_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(
+            delta, 0.0,
+            "ETB-bounce with destination=Library is not the self-undo class; got {delta}"
         );
     }
 
