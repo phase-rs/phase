@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { GameAction, GameState, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceModal } from "./ChoiceModal.tsx";
@@ -19,6 +20,7 @@ export function OptionalEffectModalContent({
   objects,
   dispatch,
 }: OptionalEffectModalProps) {
+  const { t } = useTranslation("game");
   const [remember, setRemember] = useState(false);
 
   useEffect(() => {
@@ -26,18 +28,18 @@ export function OptionalEffectModalContent({
   }, [waitingFor]);
 
   const sourceObj = objects?.[waitingFor.data.source_id];
-  const sourceName = sourceObj?.name ?? "Effect";
+  const sourceName = sourceObj?.name ?? t("optionalEffect.sourceFallback");
   const description = waitingFor.data.description as string | undefined;
   const canRemember =
     waitingFor.type === "OptionalEffectChoice" && waitingFor.data.may_trigger_key != null;
 
   return (
     <ChoiceModal
-      title={`${sourceName} - Optional Effect`}
+      title={t("optionalEffect.title", { name: sourceName })}
       subtitle={description}
       options={[
-        { id: "accept", label: "Yes" },
-        { id: "decline", label: "No" },
+        { id: "accept", label: t("optionalEffect.yes") },
+        { id: "decline", label: t("optionalEffect.no") },
       ]}
       onChoose={(id) => {
         const accept = id === "accept";
@@ -59,7 +61,7 @@ export function OptionalEffectModalContent({
               onChange={(event) => setRemember(event.currentTarget.checked)}
               className="h-4 w-4 accent-cyan-400"
             />
-            <span>Don't ask again this game</span>
+            <span>{t("optionalEffect.dontAskAgain")}</span>
           </label>
         ) : undefined
       }

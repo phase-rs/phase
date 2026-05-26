@@ -1,4 +1,6 @@
 import { createContext, useEffect, useRef, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
@@ -35,7 +37,12 @@ import {
 } from "../stores/gameStore";
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
-import { assignRandomAvatars, fetchAvatarArtUrl } from "../services/playerAvatars";
+import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
+import {
+  assignRandomAvatars,
+  avatarCardNameForName,
+  fetchAvatarArtUrl,
+} from "../services/playerAvatars";
 
 /** Build per-seat AI controller bindings for a game about to start. Reads
  *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
@@ -60,7 +67,7 @@ function resolveAiSeatBindings(
 
 let avatarGeneration = 0;
 
-function setupRandomAvatars(playerCount: number, seed: string) {
+function setupRandomAvatars(playerCount: number, seed: string, preservePlayerNames = false) {
   const generation = ++avatarGeneration;
   const avatars = assignRandomAvatars(playerCount, seed);
   const names = new Map<number, string>();
@@ -68,7 +75,9 @@ function setupRandomAvatars(playerCount: number, seed: string) {
   for (let i = 1; i < avatars.length; i++) {
     names.set(i, avatars[i].name);
   }
-  useMultiplayerStore.setState({ playerNames: names, playerAvatars: new Map() });
+  useMultiplayerStore.setState(
+    preservePlayerNames ? { playerAvatars: new Map() } : { playerNames: names, playerAvatars: new Map() },
+  );
   for (let i = 0; i < avatars.length; i++) {
     fetchAvatarArtUrl(avatars[i].cardName).then((url) => {
       if (!url || avatarGeneration !== generation) return;
@@ -79,7 +88,10 @@ function setupRandomAvatars(playerCount: number, seed: string) {
   }
 }
 
-function setupCommanderAvatars(gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> }) {
+function setupCommanderAvatars(
+  gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> },
+  preservePlayerNames = false,
+) {
   const generation = ++avatarGeneration;
   const names = new Map<number, string>();
   const commanderNames = new Map<number, string>();
@@ -94,7 +106,9 @@ function setupCommanderAvatars(gameState: { objects: Record<number, { name: stri
     names.set(playerId, cardName.split(",")[0].split(" //")[0]);
   }
 
-  useMultiplayerStore.setState({ playerNames: names, playerAvatars: new Map() });
+  useMultiplayerStore.setState(
+    preservePlayerNames ? { playerAvatars: new Map() } : { playerNames: names, playerAvatars: new Map() },
+  );
 
   for (const [playerId, cardName] of commanderNames) {
     fetchAvatarArtUrl(cardName).then((url) => {
@@ -104,6 +118,52 @@ function setupCommanderAvatars(gameState: { objects: Record<number, { name: stri
       useMultiplayerStore.setState({ playerAvatars: next });
     });
   }
+}
+
+function setupDraftMatchAvatars(seed: string) {
+  const generation = ++avatarGeneration;
+  const matchPairing = useMultiplayerDraftStore.getState().matchPairing;
+  const randomAvatars = assignRandomAvatars(2, seed);
+  const names = new Map<number, string>();
+
+  const localPlayerId = matchPairing?.type === "HumanGuest" ? 1 : 0;
+  const opponentPlayerId = localPlayerId === 0 ? 1 : 0;
+  let opponentName = randomAvatars[1]?.name ?? "Opponent";
+  if (matchPairing) {
+    opponentName = matchPairing.type === "Bot"
+      ? matchPairing.botName
+      : matchPairing.opponentName;
+  }
+  names.set(localPlayerId, "You");
+  names.set(opponentPlayerId, opponentName);
+
+  useMultiplayerStore.setState({
+    activePlayerId: localPlayerId,
+    playerNames: names,
+    playerAvatars: new Map(),
+  });
+
+  const avatarCards = new Map<number, string | undefined>([
+    [localPlayerId, randomAvatars[localPlayerId]?.cardName ?? randomAvatars[0]?.cardName],
+    [opponentPlayerId, avatarCardNameForName(opponentName) ?? randomAvatars[opponentPlayerId]?.cardName],
+  ]);
+  for (const [playerId, cardName] of avatarCards) {
+    if (!cardName) continue;
+    fetchAvatarArtUrl(cardName).then((url) => {
+      if (!url || avatarGeneration !== generation) return;
+      const next = new Map(useMultiplayerStore.getState().playerAvatars);
+      next.set(playerId, url);
+      useMultiplayerStore.setState({ playerAvatars: next });
+    });
+  }
+}
+
+function playerNamesRecordToMap(playerNames: Record<number, string>): Map<number, string> {
+  const names = new Map<number, string>();
+  for (const [playerId, name] of Object.entries(playerNames)) {
+    names.set(Number(playerId), name);
+  }
+  return names;
 }
 
 function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
@@ -160,6 +220,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck): DeckListPayload {
 }
 
 async function buildLocalAiDeckList(
+  t: TFunction,
   deck: ParsedDeck,
   playerCount: number,
   formatConfig?: FormatConfig,
@@ -171,7 +232,11 @@ async function buildLocalAiDeckList(
     selectedMatchType,
   });
   if (catalog.candidates.length === 0) {
-    throw new Error(`No legal AI decks are available for ${formatConfig?.format ?? "the selected format"}.`);
+    throw new Error(
+      formatConfig?.format
+        ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
+        : t("gameProvider.noLegalAiDecks.generic"),
+    );
   }
 
   const opponentCount = Math.max(1, playerCount - 1);
@@ -220,7 +285,7 @@ let pendingStoreReset: ReturnType<typeof setTimeout> | null = null;
  * `new Notification()` outside a ServiceWorker (Safari, some mobile).
  * Shared by the WS and P2P host-side join paths.
  */
-function notifyOpponentJoined(opponentName?: string): void {
+function notifyOpponentJoined(t: TFunction, opponentName?: string): void {
   if (
     typeof Notification === "undefined"
     || Notification.permission !== "granted"
@@ -231,9 +296,9 @@ function notifyOpponentJoined(opponentName?: string): void {
   }
   try {
     const body = opponentName
-      ? `${opponentName} joined your game. Come back and play!`
-      : "Your opponent has joined the game. Come back and play!";
-    const n = new Notification("Opponent joined", { body });
+      ? t("gameProvider.notification.opponentJoinedNamed", { name: opponentName })
+      : t("gameProvider.notification.opponentJoined");
+    const n = new Notification(t("gameProvider.notification.title"), { body });
     n.onclick = () => {
       window.focus();
       n.close();
@@ -260,7 +325,7 @@ function scheduleStoreReset(reset: () => void): void {
 
 export interface GameProviderProps {
   gameId: string;
-  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join";
+  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match";
   difficulty?: string;
   joinCode?: string;
   formatConfig?: FormatConfig;
@@ -309,6 +374,8 @@ export function GameProvider({
   onResumeReset,
   children,
 }: GameProviderProps) {
+  const { t } = useTranslation("game");
+
   // Sync the persistent phaseStops preference into engine-owned state so the
   // engine remains the single authority for auto-pass / empty-blocker decisions.
   usePhaseStopsSync();
@@ -321,12 +388,17 @@ export function GameProvider({
   const onCardDataMissingRef = useRef(onCardDataMissing);
   const onNoDeckRef = useRef(onNoDeck);
   const onResumeResetRef = useRef(onResumeReset);
+  // `t` is referenced inside the game-setup effect. Keep it in a ref (like the
+  // callback props above) so the effect dep array stays free of it — a language
+  // switch must not re-run the heavy initGame/resumeGame pipeline.
+  const tRef = useRef(t);
   onWsEventRef.current = onWsEvent;
   onP2PEventRef.current = onP2PEvent;
   onReadyRef.current = onReady;
   onCardDataMissingRef.current = onCardDataMissing;
   onNoDeckRef.current = onNoDeck;
   onResumeResetRef.current = onResumeReset;
+  tRef.current = t;
 
   useEffect(() => {
     if (mode !== "ai") return;
@@ -347,6 +419,25 @@ export function GameProvider({
   }, [mode, gameId]);
 
   useEffect(() => {
+    if (mode !== "online" && mode !== "p2p-host" && mode !== "p2p-join") return;
+    const state = useGameStore.getState().gameState;
+    const count = state?.players.length ?? playerCount ?? 2;
+    setupRandomAvatars(count, gameId, true);
+    let appliedCommanderAvatars = false;
+    const applyCommanderAvatars = (gameState: typeof state) => {
+      if (!gameState?.format_config?.uses_commander || !gameState.command_zone?.length) return;
+      appliedCommanderAvatars = true;
+      setupCommanderAvatars(gameState, true);
+    };
+    applyCommanderAvatars(state);
+    const unsub = useGameStore.subscribe((next) => {
+      if (appliedCommanderAvatars) return;
+      applyCommanderAvatars(next.gameState);
+    });
+    return unsub;
+  }, [mode, gameId, playerCount]);
+
+  useEffect(() => {
     // A prior cleanup may have deferred a store reset. Cancel it — this mount
     // is about to populate the store via initGame/resumeGame, and a fire from
     // the previous cleanup would null out the state we just wrote.
@@ -360,6 +451,8 @@ export function GameProvider({
     if (!isOnline && !isP2P) {
       if (mode === "ai") {
         setupRandomAvatars(playerCount ?? 2, gameId);
+      } else if (mode === "draft-match") {
+        setupDraftMatchAvatars(gameId);
       } else {
         useMultiplayerStore.setState({ playerNames: new Map(), playerAvatars: new Map() });
       }
@@ -391,6 +484,19 @@ export function GameProvider({
     let p2pAdapter: P2PHostAdapter | P2PGuestAdapter | null = null;
     let controller: ReturnType<typeof createGameLoopController> | null = null;
 
+    if (mode === "draft-match") {
+      const existing = useGameStore.getState();
+      if (existing.gameId !== gameId || !existing.adapter || !existing.gameState) {
+        onNoDeckRef.current?.();
+        return;
+      }
+      onReadyRef.current?.();
+      audioManager.setContext("battlefield");
+      return () => {
+        audioManager.setContext("menu");
+      };
+    }
+
     if (isP2P) {
       const parsedDeck = loadActiveDeck();
       if (!parsedDeck) {
@@ -413,17 +519,16 @@ export function GameProvider({
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
             if (event.playerNames) {
-              const names = new Map(Object.entries(event.playerNames).map(
-                ([k, v]) => [Number(k), v] as [number, string],
-              ));
-              useMultiplayerStore.setState({ playerNames: names });
+              useMultiplayerStore.setState({
+                playerNames: playerNamesRecordToMap(event.playerNames),
+              });
             }
           }
           if (event.type === "stateChanged") {
             processRemoteUpdate(event.state, event.events, event.legalResult);
           }
           if (event.type === "guestConnected") {
-            notifyOpponentJoined();
+            notifyOpponentJoined(tRef.current);
           }
           onP2PEventRef.current?.(event);
         });
@@ -590,6 +695,8 @@ export function GameProvider({
             // their original seat.
             const hostPeerId = `phase-${code}`;
             const existing = await loadP2PSession(hostPeerId);
+            const reservationToken =
+              window.sessionStorage.getItem(`phase-p2p-reservation:${code}`) ?? undefined;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
@@ -598,6 +705,7 @@ export function GameProvider({
               conn,
               existing?.playerToken,
               useMultiplayerStore.getState().displayName || undefined,
+              reservationToken,
             );
             p2pAdapter = adapter;
             hostPeerHandle = null;
@@ -688,6 +796,9 @@ export function GameProvider({
       const sessionKey = `phase-join-password:${joinCode ?? ""}`;
       let password: string | undefined =
         (joinCode && window.sessionStorage.getItem(sessionKey)) || undefined;
+      const reservationSessionKey = `phase-join-reservation:${joinCode ?? ""}`;
+      const reservationToken: string | undefined =
+        (joinCode && window.sessionStorage.getItem(reservationSessionKey)) || undefined;
       if (!password && urlParams.has("password")) {
         password = urlParams.get("password") ?? undefined;
         if (password && joinCode) {
@@ -714,6 +825,7 @@ export function GameProvider({
           deck,
           wsMode === "join" ? joinCode : undefined,
           wsMode === "join" ? password : undefined,
+          wsMode === "join" ? reservationToken : undefined,
           useMultiplayerStore.getState().displayName || "Player",
         );
 
@@ -721,6 +833,11 @@ export function GameProvider({
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
             useMultiplayerStore.getState().setOpponentDisplayName(event.opponentName);
+            if (event.playerNames) {
+              useMultiplayerStore.setState({
+                playerNames: playerNamesRecordToMap(event.playerNames),
+              });
+            }
           }
           if (event.type === "actionPendingChanged") {
             useMultiplayerStore.getState().setActionPending(event.pending);
@@ -762,7 +879,7 @@ export function GameProvider({
             }
           }
           if (event.type === "opponentJoined") {
-            notifyOpponentJoined(event.opponentName);
+            notifyOpponentJoined(tRef.current, event.opponentName);
           }
           if (event.type === "passwordRequired") {
             // Server rejected the join because the room is password-protected
@@ -772,7 +889,7 @@ export function GameProvider({
             // We deliberately avoid putting the password in the URL: that
             // would land it in browser history and in outbound Referer
             // headers to any image CDN / Scryfall / analytics request.
-            const entered = window.prompt("This room requires a password:");
+            const entered = window.prompt(tRef.current("gameProvider.passwordPrompt"));
             if (entered && joinCode) {
               window.sessionStorage.setItem(
                 `phase-join-password:${joinCode}`,
@@ -791,7 +908,7 @@ export function GameProvider({
           }
           if (event.type === "error" || event.type === "reconnectFailed") {
             useMultiplayerStore.getState().setConnectionStatus("disconnected");
-            useMultiplayerStore.getState().showToast("Connection failed. Retry or change server in Settings.");
+            useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
           }
           if (event.type === "reconnecting") {
             useMultiplayerStore.getState().setConnectionStatus("connecting");
@@ -803,7 +920,7 @@ export function GameProvider({
           }
           if (event.type === "playerEliminated" && event.becameSpectator) {
             useMultiplayerStore.getState().setIsSpectator(true);
-            useMultiplayerStore.getState().showToast("You have been eliminated. Now spectating.");
+            useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.eliminatedSpectating"));
           }
           onWsEventRef.current?.(event);
         });
@@ -831,7 +948,7 @@ export function GameProvider({
             if (msg.includes("Deck not legal")) {
               onWsEventRef.current?.({ type: "deckRejected", reason: msg });
             } else {
-              useMultiplayerStore.getState().showToast("Connection failed. Retry or change server in Settings.");
+              useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
             }
           });
         }
@@ -889,8 +1006,10 @@ export function GameProvider({
           console.warn("Failed to resume saved game, starting fresh:", err);
           const wasAutoUpdate = consumeRecentAutoUpdateMarker();
           const reason = wasAutoUpdate
-            ? "The app was updated and your saved game is incompatible with the new version."
-            : `Could not restore saved game: ${err instanceof Error ? err.message : String(err)}`;
+            ? tRef.current("gameProvider.resumeReset.appUpdated")
+            : tRef.current("gameProvider.resumeReset.restoreFailed", {
+                error: err instanceof Error ? err.message : String(err),
+              });
           onResumeResetRef.current?.(reason);
           clearGame(gameId);
           const parsedDeck = loadActiveDeck();
@@ -901,6 +1020,7 @@ export function GameProvider({
           let deckList: DeckListPayload;
           try {
             deckList = await buildLocalAiDeckList(
+              tRef.current,
               parsedDeck,
               playerCount ?? 2,
               formatConfig,
@@ -998,6 +1118,7 @@ export function GameProvider({
       let deckList: DeckListPayload;
       try {
         deckList = await buildLocalAiDeckList(
+          tRef.current,
           parsedDeck,
           playerCount ?? 2,
           formatConfig,

@@ -11,6 +11,7 @@ import type {
   MatchConfig,
   PlayerId,
   SubmitResult,
+  WaitingFor,
 } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
@@ -164,6 +165,24 @@ function seatStateToView(state: SeatState): SeatView {
 
 function occupiedSeatCount(state: SeatState): number {
   return state.seats.filter((seat) => seat.type !== "WaitingHuman").length;
+}
+
+function aiActorFromWaitingFor(
+  waitingFor: WaitingFor,
+  seats: SeatState["seats"],
+): PlayerId | null {
+  if (
+    waitingFor.type === "MulliganDecision" ||
+    waitingFor.type === "MulliganBottomCards" ||
+    waitingFor.type === "OpeningHandBottomCards"
+  ) {
+    return (
+      waitingFor.data.pending.find((entry) => seats[entry.player]?.type === "Ai")
+        ?.player ?? null
+    );
+  }
+
+  return "player" in waitingFor.data ? waitingFor.data.player : null;
 }
 
 function playerSlotsFromSeatView(view: SeatView): PlayerSlot[] {
@@ -526,12 +545,17 @@ export class P2PHostAdapter implements EngineAdapter {
     this.emit({ type: "playerSlotsUpdated", slots: this.getPlayerSlots() });
   }
 
-  private syncLobbyMetadata(): void {
+  private syncLobbyMetadata(consumedReservationTokens: string[] = []): void {
     const currentPlayers = occupiedSeatCount(this.pregameSeatState);
     const maxPlayers = this.pregameSeatState.seats.length;
     this.emit({ type: "lobbyProgress", joined: currentPlayers, total: maxPlayers });
     if (this.broker && this.brokerGameCode) {
-      this.broker.updateMetadata(this.brokerGameCode, currentPlayers, maxPlayers);
+      this.broker.updateMetadata(
+        this.brokerGameCode,
+        currentPlayers,
+        maxPlayers,
+        consumedReservationTokens,
+      );
     }
   }
 
@@ -613,18 +637,22 @@ export class P2PHostAdapter implements EngineAdapter {
       if (!waitingFor || typeof waitingFor !== "object") {
         return;
       }
-      if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) {
+      if (!("data" in waitingFor) || !waitingFor.data) {
         return;
       }
-      const aiSeat = this.pregameSeatState.seats[waitingFor.data.player];
+      const actor = aiActorFromWaitingFor(waitingFor as WaitingFor, this.pregameSeatState.seats);
+      if (actor == null) {
+        return;
+      }
+      const aiSeat = this.pregameSeatState.seats[actor];
       if (!aiSeat || aiSeat.type !== "Ai") {
         return;
       }
-      const action = await this.wasm.getAiAction(aiSeat.data.difficulty, waitingFor.data.player);
+      const action = await this.wasm.getAiAction(aiSeat.data.difficulty, actor);
       if (!action) {
         return;
       }
-      const result = await this.wasm.submitAction(action, waitingFor.data.player);
+      const result = await this.wasm.submitAction(action, actor);
       await this.broadcastStateUpdate(result.events);
       const nextState = await this.wasm.getState();
       const legalResult = await this.wasm.getLegalActions();
@@ -715,7 +743,7 @@ export class P2PHostAdapter implements EngineAdapter {
         this.handleReconnect(session, msg.playerToken);
       } else if (msg.type === "guest_deck") {
         traceAdapter("Host", "first-message", { type: msg.type });
-        this.handleNewGuest(session, msg.deckData, msg.displayName);
+        this.handleNewGuest(session, msg.deckData, msg.displayName, msg.reservationToken);
       } else {
         traceAdapter("Host", "first-message", { type: msg.type });
         // Unexpected first message — reject.
@@ -728,7 +756,12 @@ export class P2PHostAdapter implements EngineAdapter {
     });
   }
 
-  private handleNewGuest(session: PeerSession, deckData: unknown, displayName?: string): void {
+  private handleNewGuest(
+    session: PeerSession,
+    deckData: unknown,
+    displayName?: string,
+    reservationToken?: string,
+  ): void {
     if (this.gameStarted) {
       session.send({ type: "kick", reason: "Game already in progress" });
       session.close("Game in progress");
@@ -755,7 +788,7 @@ export class P2PHostAdapter implements EngineAdapter {
     session.onMessage((msg) => this.handleGuestMessage(pid, msg));
 
     this.broadcastSeatSnapshot();
-    this.syncLobbyMetadata();
+    this.syncLobbyMetadata(reservationToken ? [reservationToken] : []);
 
     if (this.formatConfig) {
       void this.validateGuestDeck(pid, guestDeck);
@@ -1465,6 +1498,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     private readonly initialConn: DataConnection,
     existingPlayerToken?: string,
     private readonly displayName?: string,
+    private readonly reservationToken?: string,
   ) {
     if (existingPlayerToken) {
       this.playerToken = existingPlayerToken;
@@ -1496,7 +1530,12 @@ export class P2PGuestAdapter implements EngineAdapter {
       this.session!.send({ type: "reconnect", playerToken: this.playerToken });
     } else {
       traceAdapter("Guest", "send-guest-deck", { hostPeerId: this.hostPeerId });
-      this.session!.send({ type: "guest_deck", deckData: this.deckData, displayName: this.displayName });
+      this.session!.send({
+        type: "guest_deck",
+        deckData: this.deckData,
+        displayName: this.displayName,
+        reservationToken: this.reservationToken,
+      });
     }
   }
 

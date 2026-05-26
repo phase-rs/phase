@@ -1,5 +1,5 @@
 import type { GameFormat, MatchType } from "../adapter/types";
-import { EngineWorkerClient } from "../adapter/engine-worker-client";
+import { getSharedAdapter } from "../adapter/wasm-adapter";
 import { expandParsedDeck, type ParsedDeck } from "./deckParser";
 
 export interface CompatibilityCheck {
@@ -64,25 +64,10 @@ interface EvaluateOptions {
   onStatus?: (status: "starting-worker" | "loading-card-database" | "checking-deck", name?: string) => void;
 }
 
-let compatibilityWorkerPromise: Promise<EngineWorkerClient> | null = null;
 const fullCompatibilityCache = new Map<string, DeckCompatibilityResult>();
 const summaryCompatibilityCache = new Map<string, DeckCompatibilityResult>();
 const fullCompatibilityInflight = new Map<string, Promise<DeckCompatibilityResult>>();
 const summaryCompatibilityInflight = new Map<string, Promise<DeckCompatibilityResult>>();
-
-async function getCompatibilityWorker(onStatus?: EvaluateOptions["onStatus"]): Promise<EngineWorkerClient> {
-  if (!compatibilityWorkerPromise) {
-    compatibilityWorkerPromise = (async () => {
-      onStatus?.("starting-worker");
-      const worker = new EngineWorkerClient();
-      await worker.initialize();
-      onStatus?.("loading-card-database");
-      await worker.loadCardDbFromUrl();
-      return worker;
-    })();
-  }
-  return compatibilityWorkerPromise;
-}
 
 function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibilityRequest {
   return {
@@ -146,9 +131,16 @@ async function evaluateDeckCompatibilityUncached(
   request: DeckCompatibilityRequest,
   options: EvaluateOptions,
 ): Promise<DeckCompatibilityResult> {
-  const worker = await getCompatibilityWorker(options.onStatus);
+  // Route through the single shared engine worker (the same instance used for
+  // gameplay and bracket estimation) instead of a dedicated compat worker —
+  // one card-DB copy, no OOM peak, instant once warmed on the menu. Compat is
+  // a stateless CARD_DB read, so it shares the worker safely.
+  const adapter = getSharedAdapter();
+  if (!adapter.cardDbLoaded) {
+    options.onStatus?.("loading-card-database");
+  }
   options.onStatus?.("checking-deck");
-  return await worker.evaluateDeckCompatibility(request) as DeckCompatibilityResult;
+  return await adapter.checkDeckCompatibility(request) as DeckCompatibilityResult;
 }
 
 export async function evaluateDeckCompatibilityBatch(

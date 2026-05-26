@@ -95,6 +95,21 @@ function ShuffleLibraryForm({ onDispatch }: Props) {
   );
 }
 
+function ProliferateForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "Proliferate", data: { player_id: playerId } })}>
+        Proliferate
+      </SubmitButton>
+    </>
+  );
+}
+
 function AddManaForm({ onDispatch }: Props) {
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [mana, setMana] = useState<ManaType[]>([]);
@@ -184,6 +199,9 @@ export function DebugPlayerActions({ onDispatch }: Props) {
       </AccordionItem>
       <AccordionItem label="Shuffle Library" expanded={expanded === "shuffle"} onToggle={() => toggle("shuffle")}>
         <ShuffleLibraryForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Proliferate" expanded={expanded === "proliferate"} onToggle={() => toggle("proliferate")}>
+        <ProliferateForm onDispatch={onDispatch} />
       </AccordionItem>
       <AccordionItem label="Add Mana" expanded={expanded === "mana"} onToggle={() => toggle("mana")}>
         <AddManaForm onDispatch={onDispatch} />

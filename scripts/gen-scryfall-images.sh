@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/scryfall-fetch.sh"
+
 DATA_DIR="data/scryfall"
 ORACLE_FILE="$DATA_DIR/oracle-cards.json"
 OUTPUT="client/public/scryfall-data.json"
@@ -11,9 +14,7 @@ echo "=== Scryfall Data Generation ==="
 if [ ! -f "$ORACLE_FILE" ]; then
   echo "Downloading Scryfall oracle-cards bulk data..."
   mkdir -p "$DATA_DIR"
-  DOWNLOAD_URI=$(curl -s "https://api.scryfall.com/bulk-data" \
-    | jq -r '.data[] | select(.type == "oracle_cards") | .download_uri')
-  curl -L -o "$ORACLE_FILE" "$DOWNLOAD_URI"
+  scryfall_fetch_bulk oracle_cards "$ORACLE_FILE"
   echo "Downloaded $ORACLE_FILE."
 fi
 
@@ -56,6 +57,9 @@ mkdir -p "$(dirname "$OUTPUT")"
 #                        Used by the frontend to resolve `faceIndex` from the
 #                        engine-reported `printed_ref.face_name`.
 #   - faces            — array of {normal, art_crop} per face (image URLs)
+#   - layout           — Scryfall layout string; the frontend uses this for
+#                        presentation-only orientation such as sideways split
+#                        cards, including Room cards.
 #   - name, mana_cost, cmc, type_line, colors, color_identity, keywords
 #
 # Token entries are included separately with a "token:" prefix key to avoid
@@ -84,6 +88,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
       else
         [{normal: $card.image_uris.normal, art_crop: $card.image_uris.art_crop}]
       end),
+      layout: $card.layout,
       name: $card.name,
       mana_cost: ($card.mana_cost // $card.card_faces[0].mana_cost // ""),
       cmc: $card.cmc,
@@ -110,6 +115,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
       oracle_id: $tok.oracle_id,
       face_names: [$tok.name | ascii_downcase],
       faces: [{normal: $tok.image_uris.normal, art_crop: $tok.image_uris.art_crop}],
+      layout: $tok.layout,
       name: $tok.name,
       mana_cost: "",
       cmc: 0,

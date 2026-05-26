@@ -537,11 +537,24 @@ pub fn convert_layer_effect_dynamic(e: &LayerEffect) -> ConvResult<Vec<Continuou
         }
 
         // CR 613.1f: Layer 6 — keyword removal ("loses Flying until end of
-        // turn"). The dominant transient pattern. CheckHasable variants
-        // carrying parameter payloads (Enchant(filter), Landwalk(filter),
-        // ProtectionFromColor) need engine-side parameterized RemoveKeyword
-        // emission and strict-fail.
-        LayerEffect::LosesAbility(checkhasable) => check_hasable_to_remove_keyword(checkhasable)?,
+        // turn"). The dominant transient pattern.
+        //
+        // Special-case `CheckHasable::TheChosenAbility` (CR 608.2d): used by
+        // Urborg and Walking Sponge. The keyword to strip was selected by a
+        // preceding `Action::ChooseACheckableAbility` in the same ActionList
+        // and persisted on the source's `chosen_attributes`. Emit the
+        // engine's typed `RemoveChosenKeyword` modification so layer
+        // evaluation reads the chosen keyword off the source at apply time.
+        // Phyrexian Splicer additionally requires
+        // `Cost::ChooseACheckableAbility` and
+        // `LayerEffect::AddAbilityVariable(TheChosenAbility)` (out of scope
+        // for this change). Other parameterized shapes (Enchant(filter),
+        // ProtectionFromColor, Any*) still strict-fail through
+        // `check_hasable_to_remove_keyword`.
+        LayerEffect::LosesAbility(checkhasable) => match checkhasable {
+            CheckHasable::TheChosenAbility => vec![ContinuousModification::RemoveChosenKeyword],
+            other => check_hasable_to_remove_keyword(other)?,
+        },
 
         // CR 613.4b: Layer 7b — typed PT set, mirrors `StaticLayerEffect::SetPT`.
         LayerEffect::SetPT(pt) => match pt {
@@ -883,16 +896,42 @@ fn require_player_is_you(player: &Player, idiom: &'static str) -> ConvResult<()>
 }
 
 /// CR 613.1f: Lower a `CheckHasable` (the keyword-loss subject) onto a
-/// `Vec<ContinuousModification::RemoveKeyword>`. Only the unparameterized
-/// vanilla keywords map cleanly — `Enchant(filter)`, `Landwalk(filter)`,
+/// `Vec<ContinuousModification::RemoveKeyword>`. The unparameterized vanilla
+/// keywords map directly to `Keyword::<X>`; `Landwalk(IsLandType(<subtype>))`
+/// lowers to `Keyword::Landwalk(<subtype>)`. `Enchant(filter)`,
 /// `ProtectionFromColor(color)` and the `Any*` (kicker / disturb / cycling)
-/// classes need engine-side parameterized RemoveKeyword emission and
+/// classes still need engine-side parameterized RemoveKeyword emission and
 /// strict-fail. Abstract subjects (ActivatedAbility, NonManaAbility,
-/// ThisAbility, etc.) are scoped to a different StaticMode shape and also
-/// strict-fail.
+/// ThisAbility, TheChosenAbility, etc.) are scoped to a different shape and
+/// also strict-fail here (the caller routes `TheChosenAbility` separately).
 fn check_hasable_to_remove_keyword(c: &CheckHasable) -> ConvResult<Vec<ContinuousModification>> {
+    let kw = check_hasable_to_keyword(c)?;
+    Ok(vec![ContinuousModification::RemoveKeyword { keyword: kw }])
+}
+
+/// CR 608.2d: Lower a `CheckHasable` to an `engine::Keyword` option for a
+/// `ChoiceType::Keyword` prompt. Same coverage as
+/// `check_hasable_to_remove_keyword` (every keyword that's a valid removal
+/// target is also a valid choice option); unmappable variants strict-fail so
+/// the gap report surfaces the exact shape. Used by
+/// `action::convert::Action::ChooseACheckableAbility`.
+pub fn check_hasable_to_keyword_option(
+    c: &CheckHasable,
+) -> ConvResult<engine::types::keywords::Keyword> {
+    check_hasable_to_keyword(c)
+}
+
+/// CR 613.1f + CR 702.14: Shared `CheckHasable → engine::Keyword` mapping
+/// used by both the removal-emission path and the choose-option path. The
+/// `Landwalk(<filter>)` arm delegates to the canonical
+/// `filter::extract_subtype`, which accepts the bare `IsLandType(_)` form
+/// and the canonical `And([IsCardtype(Land), IsLandType(_)])` shape that
+/// the native parser also emits. Alternation (`Or(...)`) and other
+/// non-reducible composite shapes strict-fail because the engine's
+/// `Keyword::Landwalk(String)` carries exactly one subtype string.
+fn check_hasable_to_keyword(c: &CheckHasable) -> ConvResult<engine::types::keywords::Keyword> {
     use engine::types::keywords::Keyword;
-    let kw = match c {
+    Ok(match c {
         CheckHasable::Flying => Keyword::Flying,
         CheckHasable::FirstStrike => Keyword::FirstStrike,
         CheckHasable::DoubleStrike => Keyword::DoubleStrike,
@@ -921,20 +960,33 @@ fn check_hasable_to_remove_keyword(c: &CheckHasable) -> ConvResult<Vec<Continuou
         CheckHasable::Soulbond => Keyword::Soulbond,
         CheckHasable::Shroud => Keyword::Shroud,
         CheckHasable::StartYourEngines => Keyword::StartYourEngines,
+        // CR 702.14: Parameterized landwalk. The schema's `Landwalk(Permanents)`
+        // payload describes the land subtype the ability uses. Engine
+        // `Keyword::Landwalk(String)` is keyed to the canonical subtype string
+        // ("Swamp", "Plains", "Forest", "Island", "Mountain", and the rarer
+        // "Snow" / "Legendary" / "Nonbasic" forms). Delegates to the canonical
+        // `filter::extract_subtype` helper, which mirrors the call site at
+        // `convert/keyword.rs:Rule::Landwalk` and recognises the
+        // `And([IsCardtype(Land), IsLandType(Swamp)])` canonical shape in
+        // addition to the bare `IsLandType(_)` form. Composite alternation
+        // shapes (`Or(...)`) still strict-fail — they have no single-subtype
+        // reduction.
+        CheckHasable::Landwalk(permanents) => {
+            Keyword::Landwalk(crate::convert::filter::extract_subtype(permanents)?)
+        }
         other => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "ContinuousModification::RemoveKeyword",
                 needed_variant: format!("CheckHasable::{other:?}"),
             });
         }
-    };
-    Ok(vec![ContinuousModification::RemoveKeyword { keyword: kw }])
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::types::{PermanentRule, Permanents, Player};
+    use crate::schema::types::{LandType, PermanentRule, Permanents, Player};
     use engine::types::ability::{TargetFilter, TypeFilter, TypedFilter};
 
     #[test]
@@ -991,5 +1043,55 @@ mod tests {
                 player: PlayerScope::Controller,
             }
         );
+    }
+
+    // CR 608.2d: `LosesAbility(TheChosenAbility)` inside a
+    // `CreatePermanentLayerEffectUntil` body is the load-bearing Urborg
+    // lowering. The arm must emit `RemoveChosenKeyword` (no payload — the
+    // engine reads the source's `chosen_attributes` at layer-evaluation time).
+    #[test]
+    fn loses_ability_the_chosen_ability_emits_remove_chosen_keyword() {
+        let mods = convert_layer_effect_dynamic(&LayerEffect::LosesAbility(
+            CheckHasable::TheChosenAbility,
+        ))
+        .unwrap();
+        assert_eq!(mods, vec![ContinuousModification::RemoveChosenKeyword]);
+    }
+
+    // CR 702.14: `CheckHasable::Landwalk(IsLandType(Swamp))` must lower onto
+    // `Keyword::Landwalk("Swamp")`. Same path is used by Urborg's choose
+    // option list and by `LosesAbility(Landwalk(IsLandType(...)))` in the
+    // long tail of Hammerheim / Acid Rain-class cards.
+    #[test]
+    fn check_hasable_landwalk_swamp_lowers_to_keyword_landwalk_swamp() {
+        use engine::types::keywords::Keyword;
+        let kw = check_hasable_to_keyword_option(&CheckHasable::Landwalk(Box::new(
+            Permanents::IsLandType(LandType::Swamp),
+        )))
+        .unwrap();
+        assert_eq!(kw, Keyword::Landwalk("Swamp".to_string()));
+    }
+
+    // CR 608.2d: alternation `Permanents::Or` filters inside a Landwalk
+    // payload are not reducible to a single subtype string. The canonical
+    // `filter::extract_subtype` helper strict-fails rather than coercing —
+    // the gap report surfaces the exact missing shape via the
+    // `Permanents/extract_subtype` idiom tag. (`And(...)` shapes are
+    // explicitly supported by `extract_subtype` — it recurses into parts —
+    // so the strict-fail fixture must use `Or(...)` to exercise the
+    // composite-rejection path.)
+    #[test]
+    fn check_hasable_landwalk_with_composite_filter_strict_fails() {
+        let result = check_hasable_to_keyword_option(&CheckHasable::Landwalk(Box::new(
+            Permanents::Or(vec![
+                Permanents::IsLandType(LandType::Swamp),
+                Permanents::IsLandType(LandType::Forest),
+            ]),
+        )));
+        assert!(matches!(
+            result,
+            Err(ConversionGap::MalformedIdiom { idiom, .. })
+                if idiom == "Permanents/extract_subtype"
+        ));
     }
 }

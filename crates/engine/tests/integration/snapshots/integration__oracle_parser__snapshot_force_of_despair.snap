@@ -14,13 +14,17 @@ expression: result
             "Creature"
           ],
           "controller": null,
-          "properties": []
+          "properties": [
+            {
+              "type": "EnteredThisTurn"
+            }
+          ]
         },
         "cant_regenerate": false
       },
       "cost": null,
       "sub_ability": null,
-      "duration": "UntilEndOfTurn",
+      "duration": null,
       "description": "Destroy all creatures that entered this turn.",
       "target_prompt": null,
       "sorcery_speed": false,

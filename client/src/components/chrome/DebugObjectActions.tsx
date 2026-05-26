@@ -134,6 +134,34 @@ function RemoveObjectForm({ onDispatch }: Props) {
   );
 }
 
+function CreateTokenCopyForm({ onDispatch }: Props) {
+  const [sourceId, setSourceId] = useState<ObjectId | null>(null);
+  const [owner, setOwner] = useState<PlayerId>(0);
+
+  return (
+    <>
+      <ObjectSelect
+        value={sourceId}
+        onChange={setSourceId}
+        label="Source"
+        placeholder="Pick object to copy…"
+      />
+      <FieldRow label="Owner">
+        <PlayerSelect value={owner} onChange={setOwner} />
+      </FieldRow>
+      <SubmitButton
+        disabled={sourceId == null}
+        onClick={() =>
+          sourceId != null &&
+          onDispatch({ type: "CreateTokenCopy", data: { source_id: sourceId, owner } })
+        }
+      >
+        Copy Object
+      </SubmitButton>
+    </>
+  );
+}
+
 function SetBasePTForm({ onDispatch }: Props) {
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [power, setPower] = useState(0);
@@ -397,6 +425,9 @@ export function DebugObjectActions({ onDispatch }: Props) {
       </AccordionItem>
       <AccordionItem label="Remove Object" expanded={expanded === "remove"} onToggle={() => toggle("remove")}>
         <RemoveObjectForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Copy Object" expanded={expanded === "copy"} onToggle={() => toggle("copy")}>
+        <CreateTokenCopyForm onDispatch={onDispatch} />
       </AccordionItem>
       <AccordionItem label="Set Base P/T" expanded={expanded === "pt"} onToggle={() => toggle("pt")}>
         <SetBasePTForm onDispatch={onDispatch} />

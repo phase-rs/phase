@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 220
 expression: "&ir"
 ---
 {
@@ -30,9 +29,6 @@ expression: "&ir"
         "activation_restrictions": [
           {
             "type": "AsSorcery"
-          },
-          {
-            "type": "OnlyOnceEachTurn"
           }
         ],
         "condition": null,
@@ -54,7 +50,7 @@ expression: "&ir"
             "type_filters": [
               "Creature"
             ],
-            "controller": null,
+            "controller": "TargetPlayer",
             "properties": []
           },
           "count": {
@@ -74,9 +70,6 @@ expression: "&ir"
         "activation_restrictions": [
           {
             "type": "AsSorcery"
-          },
-          {
-            "type": "OnlyOnceEachTurn"
           }
         ],
         "condition": null,
@@ -110,8 +103,18 @@ expression: "&ir"
               "properties": []
             },
             "count": {
-              "type": "Fixed",
-              "value": 1
+              "type": "Ref",
+              "qty": {
+                "type": "ObjectCount",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Permanent"
+                  ],
+                  "controller": null,
+                  "properties": []
+                }
+              }
             }
           },
           "cost": null,
@@ -133,9 +136,6 @@ expression: "&ir"
         "activation_restrictions": [
           {
             "type": "AsSorcery"
-          },
-          {
-            "type": "OnlyOnceEachTurn"
           }
         ],
         "condition": null,

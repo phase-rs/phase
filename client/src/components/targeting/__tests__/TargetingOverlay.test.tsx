@@ -298,7 +298,7 @@ describe("TargetingOverlay", () => {
     });
   });
 
-  it("hides Keep Current Targets button when current target is not in legal_alternatives", () => {
+  it("hides Keep Current Targets button when the copy has no current target", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
       waiting_for: {
@@ -308,7 +308,6 @@ describe("TargetingOverlay", () => {
           copy_id: 231,
           target_slots: [
             {
-              current: { Object: 227 },
               legal_alternatives: [{ Object: 61 }, { Object: 91 }],
             },
           ],

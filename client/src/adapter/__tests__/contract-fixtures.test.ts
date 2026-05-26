@@ -93,6 +93,7 @@ describe("shared adapter contract fixtures", () => {
       type: "playerIdentity",
       playerId: 0,
       opponentName: "Opponent",
+      playerNames: { 0: "Host", 1: "Opponent" },
     });
   });
 

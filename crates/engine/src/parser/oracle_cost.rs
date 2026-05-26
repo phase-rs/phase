@@ -3,7 +3,7 @@ use nom::bytes::complete::{tag, take_till, take_until};
 use nom::combinator::{all_consuming, map, rest, value};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_modal::split_short_label_prefix;
@@ -180,6 +180,64 @@ fn parse_behold_cost(lower: &str) -> Option<AbilityCost> {
         filter,
         action,
     })
+}
+
+fn parse_remove_counter_kind(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, crate::types::counter::CounterMatch> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    alt((
+        value(
+            crate::types::counter::CounterMatch::Any,
+            alt((tag("counters"), tag("counter"))),
+        ),
+        map(
+            terminated(
+                take_until::<_, _, E<'_>>(" counter"),
+                alt((tag(" counters"), tag(" counter"))),
+            ),
+            parse_counter_match,
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_remove_counter_quantity_and_kind(
+    input: &str,
+) -> Option<(u32, crate::types::counter::CounterMatch)> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let input = input.trim();
+    if let Ok((_, counter_type)) = all_consuming(preceded(
+        tag::<_, _, E<'_>>("all "),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((u32::MAX, counter_type));
+    }
+    if let Ok((_, (count, counter_type))) = all_consuming(pair(
+        terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((count, counter_type));
+    }
+    all_consuming(preceded(
+        alt((tag::<_, _, E<'_>>("a "), tag("an "))),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    .ok()
+    .map(|(_, counter_type)| (1, counter_type))
+}
+
+fn parse_remove_counter_target(target_text: &str) -> Option<TargetFilter> {
+    let (target, remainder) = parse_target(target_text);
+    if !remainder.trim().is_empty() || matches!(target, TargetFilter::Any | TargetFilter::SelfRef) {
+        return None;
+    }
+    Some(target)
 }
 
 pub fn parse_single_cost(text: &str) -> AbilityCost {
@@ -427,42 +485,26 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("remove ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
         if scan_contains(&rest_lower, "counter") {
-            // CR 122.1: "remove all" uses u32::MAX as sentinel, resolved at runtime.
-            if let Some(((), all_rest)) =
-                nom_on_lower(rest, &rest_lower, |i| value((), tag("all ")).parse(i))
+            let (counter_phrase, target) = pair(
+                terminated(take_until::<_, _, E<'_>>(" from "), tag(" from ")),
+                nom::combinator::rest,
+            )
+            .parse(rest_lower.as_str())
+            .ok()
+            .map_or(
+                (rest_lower.as_str(), None),
+                |(_, split): (&str, (&str, &str))| {
+                    let (before_from, target_text) = split;
+                    (before_from.trim(), parse_remove_counter_target(target_text))
+                },
+            );
+            if let Some((count, counter_type)) =
+                parse_remove_counter_quantity_and_kind(counter_phrase)
             {
-                let counter_type = all_rest
-                    .to_lowercase()
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
-                return AbilityCost::RemoveCounter {
-                    count: u32::MAX,
-                    counter_type: parse_counter_match(&counter_type),
-                    target: None,
-                };
-            }
-            if let Some((count, after_count)) = parse_number(&rest_lower) {
-                let counter_type = after_count
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
                 return AbilityCost::RemoveCounter {
                     count,
-                    counter_type: parse_counter_match(&counter_type),
-                    target: None,
-                };
-            }
-            // Fallback: "remove a/an {type} counter from ~"
-            let words: Vec<&str> = text.split_whitespace().collect();
-            if words.len() >= 4 {
-                let counter_type = words[2].to_string();
-                return AbilityCost::RemoveCounter {
-                    count: 1,
-                    counter_type: parse_counter_match(&counter_type),
-                    target: None,
+                    counter_type,
+                    target,
                 };
             }
         }
@@ -1021,6 +1063,7 @@ fn parse_mana_cost_nom(
 mod tests {
     use super::*;
     use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+    use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
     #[test]
@@ -1637,6 +1680,42 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Mill a card"),
             AbilityCost::Mill { count: 1 }
+        );
+    }
+
+    #[test]
+    fn cost_remove_counter_from_permanent_you_control() {
+        match parse_oracle_cost("Remove a counter from a permanent you control") {
+            AbilityCost::RemoveCounter {
+                count,
+                counter_type,
+                target: Some(TargetFilter::Typed(filter)),
+            } => {
+                assert_eq!(count, 1);
+                assert_eq!(counter_type, CounterMatch::Any);
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+                assert!(
+                    filter
+                        .type_filters
+                        .iter()
+                        .any(|filter| matches!(filter, TypeFilter::Permanent)),
+                    "expected permanent filter, got {:?}",
+                    filter.type_filters
+                );
+            }
+            other => panic!("Expected targeted RemoveCounter cost, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_remove_counter_from_self_stays_source_cost() {
+        assert_eq!(
+            parse_oracle_cost("Remove a +1/+1 counter from ~"),
+            AbilityCost::RemoveCounter {
+                count: 1,
+                counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
+                target: None,
+            }
         );
     }
 

@@ -1,0 +1,42 @@
+# Standalone wasm32 artifact: the compiled Rust `lobby-broker` brain that the
+# Cloudflare Durable Object shell (lobby-worker/src/lobby-do.ts) calls into,
+# replacing the throwaway TS protocol mirror. Excluded from the root workspace
+# (see root Cargo.toml) so the native build never targets it; built only via
+# wasm-bindgen. Mirrors the engine -> engine-wasm bindings pattern.
+[package]
+name = "lobby-broker-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+lobby-broker = { path = "../../crates/lobby-broker" }
+# Pinned exactly: wasm-bindgen requires the crate schema to match the installed
+# `wasm-bindgen-cli` byte-for-byte. CI/the toolchain ship 0.2.121, and this
+# standalone crate has its own lockfile (it would otherwise float to the newest
+# 0.2.x and fail the bindgen step with a schema-version mismatch).
+wasm-bindgen = "=0.2.121"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Token/game-code generation in the WorkerEnv. Reaches `globalThis.crypto` via
+# getrandom's JS backend; mirrors `server_core::generate_*` for format parity.
+rand = "0.9"
+# `engine` (via `lobby-broker`) pulls `getrandom` transitively. On
+# wasm32-unknown-unknown getrandom needs its JS-crypto backend, which the
+# Cloudflare Worker runtime provides via `globalThis.crypto`. Declared directly
+# (feature-unifies onto the transitive copy) + the `getrandom_backend` rustflag
+# in .cargo/config.toml. Required as of getrandom 0.3.2+ where the feature alone
+# no longer selects the backend.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+# WASM size: the Worker bundle must stay well under Cloudflare's limits. `z` +
+# LTO strips the unused engine surface (GameState / parser / database) that the
+# config leaf types drag in transitively.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

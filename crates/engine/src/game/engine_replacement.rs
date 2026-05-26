@@ -1244,6 +1244,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(1),
             controller: PlayerId(0),
+            attach_to: None,
         };
 
         let battlefield_before = state.battlefield.clone();

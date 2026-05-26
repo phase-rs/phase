@@ -289,7 +289,7 @@ fn louisoix_counter_resolves_each_legal_target() {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: filter.clone(),
-                source_static: None,
+                source_rider: None,
             },
             vec![TargetRef::Object(activated)],
             ObjectId(1000),
@@ -315,7 +315,7 @@ fn louisoix_counter_resolves_each_legal_target() {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: filter.clone(),
-                source_static: None,
+                source_rider: None,
             },
             vec![TargetRef::Object(triggered)],
             ObjectId(1000),
@@ -335,7 +335,7 @@ fn louisoix_counter_resolves_each_legal_target() {
         let ability = ResolvedAbility::new(
             Effect::Counter {
                 target: filter.clone(),
-                source_static: None,
+                source_rider: None,
             },
             vec![TargetRef::Object(noncreature_spell)],
             ObjectId(1000),

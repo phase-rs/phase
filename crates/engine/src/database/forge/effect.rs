@@ -502,7 +502,7 @@ fn translate_counter(params: &ForgeParams) -> Result<Effect, ForgeTranslateError
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::Counter {
         target,
-        source_static: None,
+        source_rider: None,
     })
 }
 

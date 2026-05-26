@@ -386,6 +386,27 @@ SIDEBOARD:
     expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
   });
 
+  it('strips Moxfield etched (*E*) markers from MTGA-format lines', () => {
+    const result = detectAndParseDeck('1x Grand Arbiter Augustin IV (2X2) 501 *E*');
+    expect(result.main).toMatchObject([{ count: 1, name: 'Grand Arbiter Augustin IV' }]);
+    expect(result.main[0].sourcePrinting).toEqual({ setCode: '2x2', collectorNumber: '501' });
+  });
+
+  it('strips etched markers from simple (non-set) lines', () => {
+    const result = detectAndParseDeck('1 Sol Ring *E*');
+    expect(result.main).toMatchObject([{ count: 1, name: 'Sol Ring' }]);
+    expect(result.main[0].sourcePrinting).toBeUndefined();
+  });
+
+  it('extracts set/number even when an unrecognized annotation trails the line', () => {
+    // Any trailing token after the collector number (unknown finish code,
+    // language tag, etc.) must not demote the line to the simple matcher,
+    // which would swallow the set and number into the card name.
+    const result = detectAndParseDeck('1 Lightning Bolt (FDN) 123 *XYZ*');
+    expect(result.main).toMatchObject([{ count: 1, name: 'Lightning Bolt' }]);
+    expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
+  });
+
   it('routes inline [Commander] annotations to the commander slot', () => {
     const content = `1 Zimone, Infinite Analyst (SOC) 10 [Commander {top}]
 1 Sol Ring (SOC) 128`;

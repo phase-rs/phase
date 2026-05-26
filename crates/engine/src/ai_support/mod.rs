@@ -13,6 +13,7 @@ use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 pub use candidates::{
@@ -168,6 +169,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             *index >= branches.len()
         }
         (
+            WaitingFor::ActivationCostOneOfChoice {
+                player,
+                costs,
+                pending_cast,
+            },
+            GameAction::ChooseActivationCostBranch { index },
+        ) => costs
+            .get(*index)
+            .is_none_or(|cost| !cost.is_payable(state, *player, pending_cast.object_id)),
+        (
             WaitingFor::DamageSourceChoice { options, .. },
             GameAction::ChooseDamageSource { source },
         ) => !options.contains(source),
@@ -186,24 +197,50 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 up_to,
                 ..
             },
-            GameAction::ChooseOutsideGameCards { sideboard_indices },
+            GameAction::ChooseOutsideGameCards { selections },
         ) => {
+            use crate::types::actions::OutsideGameSelection;
+            use crate::types::game_state::OutsideGameChoiceSource;
             let valid_count = if *up_to {
-                sideboard_indices.len() <= *count
+                selections.len() <= *count
             } else {
-                sideboard_indices.len() == *count
+                selections.len() == *count
             };
-            let mut requested_counts = HashMap::new();
-            for index in sideboard_indices {
-                *requested_counts.entry(*index).or_insert(0usize) += 1;
+            let mut sideboard_counts: HashMap<usize, usize> = HashMap::new();
+            let mut exile_seen: HashSet<ObjectId> = HashSet::new();
+            let mut exile_dup = false;
+            for selection in selections {
+                match selection {
+                    OutsideGameSelection::Sideboard { sideboard_index } => {
+                        *sideboard_counts.entry(*sideboard_index).or_insert(0) += 1;
+                    }
+                    OutsideGameSelection::FaceUpExile { object_id } => {
+                        if !exile_seen.insert(*object_id) {
+                            exile_dup = true;
+                        }
+                    }
+                }
             }
-            !valid_count
-                || requested_counts.iter().any(|(index, requested_count)| {
-                    choices
-                        .iter()
-                        .find(|choice| choice.sideboard_index == *index)
-                        .is_none_or(|choice| *requested_count > choice.entry.count as usize)
-                })
+            let bad_sideboard = sideboard_counts.iter().any(|(idx, count)| {
+                choices
+                    .iter()
+                    .find(|choice| {
+                        matches!(
+                            &choice.source,
+                            OutsideGameChoiceSource::Sideboard { sideboard_index, .. }
+                                if sideboard_index == idx
+                        )
+                    })
+                    .is_none_or(|choice| *count > choice.count as usize)
+            });
+            let bad_exile =
+                exile_seen.iter().any(|object_id| {
+                    !choices.iter().any(|choice| matches!(
+                    &choice.source,
+                    OutsideGameChoiceSource::FaceUpExile { object_id: oid } if oid == object_id
+                ))
+                });
+            !valid_count || exile_dup || bad_sideboard || bad_exile
         }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
@@ -382,6 +419,12 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(*count)),
+        (
+            WaitingFor::RemoveCounterForCost {
+                permanents: cards, ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some(1)),
         // CR 701.68a: Blight always selects exactly one creature, regardless of N.
         (WaitingFor::BlightChoice { creatures, .. }, GameAction::SelectCards { cards: chosen }) => {
             selection_mismatch(chosen, creatures, Some(1))
@@ -491,6 +534,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player,
                 valid_blocker_ids,
                 valid_block_targets,
+                ..
             },
             GameAction::DeclareBlockers { assignments },
         ) => {
@@ -564,10 +608,15 @@ pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction])
     })
 }
 
+fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
+    state.stack.is_empty() && matches!(state.phase, Phase::Upkeep | Phase::Draw)
+}
+
 /// Determines whether the frontend should auto-pass the current priority window.
 ///
 /// Returns `true` when auto-passing is recommended:
 /// - Only `PassPriority` is available (no spells, abilities, or lands to play)
+/// - Initial upkeep/draw priority without an explicit phase stop (MTGA-style)
 /// - Player's own spell/ability is on top of the stack (MTGA-style: let your
 ///   own spells resolve without pausing)
 ///
@@ -578,6 +627,10 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         WaitingFor::Priority { player } => *player,
         _ => return false,
     };
+
+    if auto_passes_initial_priority_by_default(state) {
+        return true;
+    }
 
     if !has_meaningful_priority_action(state, actions) {
         return true;
@@ -1593,6 +1646,7 @@ mod tests {
             reveal: false,
             up_to: true,
             constraint: SearchSelectionConstraint::None,
+            split: None,
         };
 
         assert!(!cheap_reject_candidate(
@@ -1630,6 +1684,7 @@ mod tests {
             reveal: false,
             up_to: false,
             constraint: SearchSelectionConstraint::None,
+            split: None,
         };
 
         assert!(cheap_reject_candidate(
@@ -1836,6 +1891,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn auto_passes_initial_upkeep_and_draw_priority_with_instant_speed_actions() {
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: ObjectId(10),
+                card_id: CardId(10),
+                targets: Vec::new(),
+            },
+        ];
+
+        for phase in [
+            crate::types::phase::Phase::Upkeep,
+            crate::types::phase::Phase::Draw,
+        ] {
+            let mut state = GameState::new_two_player(42);
+            state.phase = phase;
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+
+            assert!(
+                super::auto_pass_recommended(&state, &actions),
+                "initial {phase:?} priority should auto-pass unless a phase stop/full control gates it"
+            );
+        }
+
+        let mut main_phase = GameState::new_two_player(42);
+        main_phase.phase = crate::types::phase::Phase::PreCombatMain;
+        main_phase.active_player = PlayerId(0);
+        main_phase.priority_player = PlayerId(0);
+        main_phase.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        assert!(
+            !super::auto_pass_recommended(&main_phase, &actions),
+            "main-phase meaningful actions must still stop auto-pass"
+        );
+    }
+
     // Witherbloom, the Balancer regression: the commander sits in the command zone
     // with `Keyword::Affinity(Creature)`. Even when the player has no mana available
     // (so no `CastSpell` action is offered), `legal_actions_full` must still expose
@@ -1976,6 +2074,7 @@ mod tests {
                 affected: Some(affected),
                 modifications: vec![],
                 condition: None,
+                per_player_condition: None,
                 affected_zone: None,
                 effect_zone: None,
                 active_zones: vec![],

@@ -544,7 +544,10 @@ export async function processRemoteUpdate(
  * Restore a previously captured GameState snapshot.
  * Returns null on success, or an error message string on failure.
  */
-export async function restoreGameState(state: GameState): Promise<string | null> {
+export async function restoreGameState(
+  state: GameState,
+  options: { preserveCheckpoints?: boolean } = {},
+): Promise<string | null> {
   const { adapter, gameId } = useGameStore.getState();
   if (!adapter) return "No adapter available";
 
@@ -556,6 +559,9 @@ export async function restoreGameState(state: GameState): Promise<string | null>
 
   const restoredState = await adapter.getState();
   const legalResult = await adapter.getLegalActions();
+  const preservedCheckpoints = options.preserveCheckpoints
+    ? useGameStore.getState().turnCheckpoints
+    : [];
   useGameStore.setState({
     gameState: restoredState,
     waitingFor: restoredState.waiting_for,
@@ -565,11 +571,11 @@ export async function restoreGameState(state: GameState): Promise<string | null>
     logHistory: [],
     nextLogSeq: 0,
     stateHistory: [],
-    turnCheckpoints: [],
+    turnCheckpoints: preservedCheckpoints,
   });
   if (gameId) {
     await saveGame(gameId, restoredState);
-    await saveCheckpoints(gameId, []);
+    await saveCheckpoints(gameId, preservedCheckpoints);
   }
 
   return null;

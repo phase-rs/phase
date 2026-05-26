@@ -78,6 +78,7 @@ pub fn resolve(
 
     state.waiting_for = WaitingFor::DigChoice {
         player: ability.controller,
+        library_owner: ability.controller,
         selectable_cards: cards.clone(),
         cards,
         keep_count,

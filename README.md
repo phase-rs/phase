@@ -72,7 +72,8 @@ Hand this to your LLM:
 ```
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow it end-to-end to implement {a card I name, or pick one for me}.
-Use medium thinking. Don't stop for my input. Open a PR when done.
+Use the $engine-implementer skill. Use medium thinking. Don't stop for my input.
+Open a PR when done.
 ```
 
 Full procedure, two tracks (developer / non-developer), and copy-paste prompts for LLM UIs without web fetch: [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md).
@@ -122,6 +123,68 @@ cd client && pnpm dev  # Start dev server at localhost:5173
 ./scripts/build-wasm.sh               # Build WASM bindings
 cd client && pnpm install && pnpm dev # Start frontend
 ```
+
+## Dedicated Server
+
+The easiest way to run a dedicated multiplayer server is the Docker image:
+
+```bash
+docker volume create phase-server-data
+docker run -d \
+  --platform linux/amd64 \
+  --name phase-server \
+  --restart unless-stopped \
+  -p 9374:9374 \
+  -v phase-server-data:/var/lib/phase-server \
+  -e PHASE_LOBBY_ONLY=true \
+  -e PHASE_CORS_ORIGIN='*' \
+  ghcr.io/phase-rs/phase-server:latest
+```
+
+The image includes the server binary and generated card data. It exposes:
+
+- `http://localhost:9374/health` for health checks
+- `ws://localhost:9374/ws` for WebSocket clients
+
+### Server Modes and Options
+
+`PHASE_LOBBY_ONLY=true` runs the same lightweight matchmaking mode as the public
+phase.rs server. Omit it for full server-hosted games and drafts.
+
+Docker uses environment variables for the common options:
+
+| Environment variable | Equivalent flag | Default | Notes |
+|----------------------|-----------------|---------|-------|
+| `PORT` | `--port`, `-p` | `9374` | Port inside the container |
+| `PHASE_DATA_DIR` | `--data-dir`, `-d` | `/var/lib/phase-server` | Container data directory |
+| `PHASE_CORS_ORIGIN` | `--cors-origin` | permissive | Use `*` or a specific origin |
+| `PHASE_LOBBY_ONLY` | `--lobby-only` | false | Matchmaking broker mode |
+| `PHASE_LOG_JSON` | `--log-json` | false | Emit JSON logs |
+| `PHASE_LOG_DIR` | `--log-dir` | stdout | Write logs to files |
+
+You can also pass server flags after the image name:
+
+```bash
+docker run --rm --platform linux/amd64 -p 9374:9374 ghcr.io/phase-rs/phase-server:latest --lobby-only --cors-origin '*'
+```
+
+For public internet play, put the container behind a TLS reverse proxy and give
+players the `wss://your-domain.example/ws` URL. If the reverse proxy is on the
+same host, bind Docker to localhost instead:
+
+```bash
+docker run -d \
+  --platform linux/amd64 \
+  --name phase-server \
+  --restart unless-stopped \
+  -p 127.0.0.1:9374:9374 \
+  -v phase-server-data:/var/lib/phase-server \
+  -e PHASE_LOBBY_ONLY=true \
+  -e PHASE_CORS_ORIGIN='*' \
+  ghcr.io/phase-rs/phase-server:latest
+```
+
+The same flags work when running the `phase-server` release binary directly.
 
 ## Architecture
 

@@ -7,14 +7,16 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::space1;
-use nom::combinator::{map, value};
+use nom::combinator::{map, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
 use super::error::OracleResult;
 use super::primitives::{parse_article, parse_pt_modifier};
-use super::quantity::parse_quantity_expr_number;
-use crate::types::ability::{Comparator, ControllerRef, FilterProp, QuantityExpr};
+use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
+use crate::types::ability::{
+    Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
+};
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -122,43 +124,143 @@ pub fn parse_with_property(input: &str) -> OracleResult<'_, FilterProp> {
 /// Parse the inner content of a "with" clause.
 fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
-        parse_with_power_constraint,
-        // "with greater power" — relative to source (e.g., "can't be blocked by creatures with greater power")
+        // CR 510.1c relative comparison — must precede the general P/T
+        // combinator so "toughness greater than its power" wins over a
+        // "toughness <comparator>" numeric parse.
+        value(
+            FilterProp::ToughnessGTPower,
+            tag("toughness greater than its power"),
+        ),
+        // CR 509.1b: "greater power" — relative to source.
         value(FilterProp::PowerGTSource, tag("greater power")),
-        parse_with_toughness_constraint,
+        // CR 208: the shared power/toughness comparison combinator (handles
+        // "[base ][each ](power|toughness|power or toughness) ... N or less/greater").
+        parse_pt_comparison,
         parse_with_counter_property,
     ))
     .parse(input)
 }
 
-/// Parse "power N or greater" / "power X or less" from a "with" clause.
-/// CR 208.1 + CR 107.3a: Accepts both literal integers and the variable X,
-/// emitting a `QuantityExpr` so dynamic thresholds resolve at effect time.
-fn parse_with_power_constraint(input: &str) -> OracleResult<'_, FilterProp> {
-    let (rest, _) = tag("power ").parse(input)?;
-    let (rest, value) = parse_quantity_expr_number(rest)?;
-    let (rest, _) = tag(" or ").parse(rest)?;
-    alt((
-        map(tag("greater"), {
-            let value = value.clone();
-            move |_| FilterProp::PowerGE {
-                value: value.clone(),
-            }
-        }),
-        map(tag("less"), move |_| FilterProp::PowerLE {
-            value: value.clone(),
-        }),
+/// CR 208 + CR 208.4b + CR 613.4b: the single, shared power/toughness comparison
+/// combinator. This is the canonical home for the
+/// `[base ][each ](power|toughness|power or toughness) <comparison> N` grammar;
+/// every context (target suffixes, "with" clauses, sacrifice filters) delegates
+/// here so the grammar lives in exactly one place.
+///
+/// Axes parsed:
+/// - optional leading `each ` — the distributive qualifier in "creatures each
+///   with X" (CR 109.1 / natural-language "each"). Has no semantic effect on the
+///   filter ("each with X" ≡ "with X" applied per object), so it is consumed and
+///   discarded.
+/// - optional `base ` → `PtValueScope::Base` (CR 208.4b); otherwise `Current`.
+/// - stat selector: `power or toughness` (disjunction → `AnyOf` of two
+///   `PtComparison`), `power`, or `toughness`.
+/// - comparison tail: either the postfix `N or less` / `N or greater` form, or
+///   the infix `less than [or equal to] N` / `greater than [or equal to] N`
+///   form (resolving to LE/GE with an `Offset` for strict `<`/`>`).
+pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
+    // Optional distributive "each " qualifier (no semantic effect).
+    let (input, _) = opt(tag("each ")).parse(input)?;
+    let (input, _) = opt((tag("with"), space1)).parse(input)?;
+    // Optional "base " scope marker (CR 208.4b).
+    let (input, scope) = map(opt(tag("base ")), |b| {
+        if b.is_some() {
+            PtValueScope::Base
+        } else {
+            PtValueScope::Current
+        }
+    })
+    .parse(input)?;
+    // Stat selector. "power or toughness" must be tried before "power".
+    let (input, stats): (_, &[PtStat]) = alt((
+        value(
+            &[PtStat::Power, PtStat::Toughness][..],
+            tag("power or toughness"),
+        ),
+        value(&[PtStat::Power][..], tag("power")),
+        value(&[PtStat::Toughness][..], tag("toughness")),
     ))
-    .parse(rest)
+    .parse(input)?;
+    let (rest, (comparator, value)) = parse_pt_comparison_tail(input)?;
+    let props: Vec<FilterProp> = stats
+        .iter()
+        .map(|&stat| FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value: value.clone(),
+        })
+        .collect();
+    let prop = if props.len() == 1 {
+        props.into_iter().next().unwrap()
+    } else {
+        FilterProp::AnyOf { props }
+    };
+    Ok((rest, prop))
 }
 
-/// Parse "toughness greater than its power" from a "with" clause.
-fn parse_with_toughness_constraint(input: &str) -> OracleResult<'_, FilterProp> {
-    value(
-        FilterProp::ToughnessGTPower,
-        tag("toughness greater than its power"),
-    )
-    .parse(input)
+/// CR 208.1 + CR 107.3a: Parse the comparison tail of a P/T constraint, after the
+/// stat word has been consumed. Returns `(Comparator, QuantityExpr)`.
+///
+/// Supports two grammatical forms:
+/// - infix: `less than [or equal to] N` / `greater than [or equal to] N`
+///   (dynamic `QuantityRef` thresholds; strict `<`/`>` lower to LE/GE with an
+///   `Offset` of -1/+1).
+/// - postfix: `N or less` / `N or greater` (literal or X thresholds).
+fn parse_pt_comparison_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExpr)> {
+    let input = input.trim_start();
+    alt((parse_pt_infix_tail, parse_pt_postfix_tail)).parse(input)
+}
+
+/// Infix form: "less than [or equal to] <qty>" / "greater than [or equal to] <qty>".
+fn parse_pt_infix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExpr)> {
+    let (rest, base_cmp) = alt((
+        value(Comparator::LT, tag("less than")),
+        value(Comparator::GT, tag("greater than")),
+    ))
+    .parse(input)?;
+    let rest = rest.trim_start();
+    let (rest, includes_equal) = map(opt(tag("or equal to")), |e| e.is_some()).parse(rest)?;
+    let rest = rest.trim_start();
+    let (rest, qty) = parse_quantity_ref(rest)?;
+    let value = QuantityExpr::Ref { qty };
+    // Strict `<`/`>` lower to LE/GE by shifting the threshold by ∓1 (CR 107.1:
+    // integers only, so "less than N" ≡ "≤ N-1").
+    let (comparator, value) = match (base_cmp, includes_equal) {
+        (Comparator::LT, true) => (Comparator::LE, value),
+        (Comparator::GT, true) => (Comparator::GE, value),
+        (Comparator::LT, false) => (
+            Comparator::LE,
+            QuantityExpr::Offset {
+                inner: Box::new(value),
+                offset: -1,
+            },
+        ),
+        (Comparator::GT, false) => (
+            Comparator::GE,
+            QuantityExpr::Offset {
+                inner: Box::new(value),
+                offset: 1,
+            },
+        ),
+        _ => unreachable!("base_cmp is only LT or GT"),
+    };
+    Ok((rest, (comparator, value)))
+}
+
+/// Postfix form: "<qty> or less" / "<qty> or greater".
+fn parse_pt_postfix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExpr)> {
+    let input = input.trim_start();
+    let (rest, value) = parse_quantity_expr_number(input)?;
+    let rest = rest.trim_start();
+    alt((
+        map(tag("or less"), {
+            let value = value.clone();
+            move |_| (Comparator::LE, value.clone())
+        }),
+        map(tag("or greater"), move |_| (Comparator::GE, value.clone())),
+    ))
+    .parse(rest)
 }
 
 /// Parse "a +1/+1 counter" / "a -1/-1 counter" from a "with" clause.
@@ -307,7 +409,10 @@ mod tests {
         let (rest, p) = parse_with_property("with power 3 or greater").unwrap();
         assert_eq!(
             p,
-            FilterProp::PowerGE {
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
                 value: QuantityExpr::Fixed { value: 3 }
             }
         );
@@ -316,7 +421,10 @@ mod tests {
         let (rest2, p2) = parse_with_property("with power 2 or less and").unwrap();
         assert_eq!(
             p2,
-            FilterProp::PowerLE {
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
                 value: QuantityExpr::Fixed { value: 2 }
             }
         );
@@ -331,7 +439,10 @@ mod tests {
         let (rest, p) = parse_with_property("with power x or greater").unwrap();
         assert_eq!(
             p,
-            FilterProp::PowerGE {
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
                 value: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string()
@@ -340,6 +451,66 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_base_disjunction() {
+        // CR 208.4b: "base power or toughness 1 or less" → AnyOf of two
+        // Base-scope PtComparison props (the Angelic Aberration sacrifice filter).
+        let (rest, p) = parse_pt_comparison("base power or toughness 1 or less").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                    FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_each_with_qualifier() {
+        // The distributive "each with" qualifier is consumed; the emitted prop
+        // is identical to the plain "with" form.
+        let (rest, p) = parse_pt_comparison("each with base toughness 3 or greater").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Base,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_plain_current() {
+        // No "base" → Current scope; single-stat "power 2 or less".
+        let (rest, p) = parse_pt_comparison("power 2 or less").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }
+        );
     }
 
     #[test]

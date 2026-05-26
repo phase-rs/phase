@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::game::game_object::AttachTarget;
+
 use super::counter::CounterType;
 
 use super::ability::{Duration, StaticDefinition, TargetRef};
@@ -110,6 +112,12 @@ pub struct TokenSpec {
     /// creating the token (distinct from `owner`, the player to whom the
     /// token belongs).
     pub controller: PlayerId,
+    /// CR 303.4 + CR 303.7: When the token is an Aura/Role created "attached to" a
+    /// host, the resolved host (object or player). `None` for ordinary tokens.
+    /// Resolved once at propose time so the replacement-safe apply path attaches
+    /// each created token without re-reading ability.targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_to: Option<AttachTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -575,6 +583,7 @@ mod tests {
                     sacrifice_at: None,
                     source_id: ObjectId(1),
                     controller: PlayerId(0),
+                    attach_to: None,
                 }),
                 enter_tapped: EtbTapState::Unspecified,
                 count: 1,

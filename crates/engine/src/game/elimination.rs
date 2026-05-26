@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -325,6 +326,12 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
 ///
 /// Check if the game should end. Game ends when 1 or fewer living players/teams remain.
 fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if state.match_phase != MatchPhase::InGame
+        || matches!(state.waiting_for, WaitingFor::GameOver { .. })
+    {
+        return;
+    }
+
     let living: Vec<PlayerId> = state
         .players
         .iter()
@@ -360,6 +367,12 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
             state.waiting_for = WaitingFor::GameOver { winner };
         }
     }
+}
+
+/// Re-establish the CR 104 terminal-state invariant if an outer action path
+/// overwrote the `WaitingFor::GameOver` produced by elimination.
+pub(super) fn ensure_game_over_if_terminal(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    check_game_over(state, events);
 }
 
 #[cfg(test)]

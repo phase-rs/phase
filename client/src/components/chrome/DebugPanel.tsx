@@ -1,15 +1,19 @@
-import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+import { strToU8, zipSync } from "fflate";
 import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { GameState } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
+import { usePlayerId } from "../../hooks/usePlayerId";
+import { getSeatColor } from "../../hooks/useSeatColor";
 import {
   copyGameStateDebugSnapshot,
   exportGameStateDebugZip,
 } from "../../services/gameStateExport";
+import { gameStateFromImportText, readImportFile } from "../../services/gameStateImport";
 import { useGameStore } from "../../stores/gameStore";
+import { getPlayerDisplayName } from "../../stores/multiplayerStore";
 import { useUiStore } from "../../stores/uiStore";
 import { DebugActions } from "./DebugActions";
 
@@ -22,45 +26,6 @@ interface ConsoleEntry {
   level: ConsoleLevel;
   message: string;
   timestamp: number;
-}
-
-function gameStateFromImportText(importText: string): GameState | string {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(importText);
-  } catch {
-    return "Invalid JSON";
-  }
-
-  // Accept either a bare GameState or the full debug export format {gameState, ...}
-  const state = (
-    parsed && typeof parsed === "object" && "gameState" in parsed
-      ? (parsed as { gameState: GameState }).gameState
-      : parsed
-  ) as GameState;
-
-  if (!state || typeof state !== "object" || !("waiting_for" in state)) {
-    return "JSON does not look like a GameState (missing waiting_for)";
-  }
-
-  return state;
-}
-
-async function readImportFile(file: File): Promise<string> {
-  if (!file.name.toLowerCase().endsWith(".zip")) {
-    return file.text();
-  }
-
-  const archive = unzipSync(new Uint8Array(await file.arrayBuffer()));
-  const importFilename = Object.keys(archive).find((name) => {
-    const lowerName = name.toLowerCase();
-    return lowerName.endsWith(".json") || lowerName.endsWith(".txt");
-  });
-  if (!importFilename) {
-    throw new Error("ZIP does not contain a JSON or text file");
-  }
-
-  return strFromU8(archive[importFilename]);
 }
 
 /** Ring buffer of captured console output, shared across mount/unmount cycles. */
@@ -96,6 +61,7 @@ export function DebugPanel() {
   const turnCheckpoints = useGameStore((s) => s.turnCheckpoints);
   const gameState = useGameStore((s) => s.gameState);
   const gameMode = useGameStore((s) => s.gameMode);
+  const localPlayerId = usePlayerId();
   const [importText, setImportText] = useState("");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -115,12 +81,15 @@ export function DebugPanel() {
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const prevSnapshotLenRef = useRef(0);
 
-  const [activeTab, setActiveTab] = useState<"console" | "actions">("console");
+  // Tab lives in uiStore so external entry points (Sandbox Tools nudge/button)
+  // can open the panel straight to "actions" via `openSandboxTools()`.
+  const activeTab = useUiStore((s) => s.debugPanelTab);
+  const setActiveTab = useUiStore((s) => s.setDebugPanelTab);
   const canRestoreCheckpoints = gameMode === "ai" || gameMode === "local";
 
   const handleRestore = useCallback(async (state: GameState) => {
     setStatus(null);
-    const err = await restoreGameState(state);
+    const err = await restoreGameState(state, { preserveCheckpoints: true });
     if (err) {
       setStatus({ type: "error", message: err });
     } else {
@@ -346,15 +315,31 @@ export function DebugPanel() {
             <p className="text-xs text-gray-600">No checkpoints yet (saved at turn start)</p>
           ) : (
             <div className="flex flex-col gap-1">
-              {turnCheckpoints.map((cp, i) => (
-                <button
-                  key={i}
-                  onClick={() => handleRestore(cp)}
-                  className="rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
-                >
-                  Turn {cp.turn_number} &middot; Player {cp.active_player}
-                </button>
-              ))}
+              {turnCheckpoints.map((cp, i) => {
+                const activePlayerName = getPlayerDisplayName(cp.active_player, localPlayerId);
+                const activePlayerColor = getSeatColor(
+                  cp.active_player,
+                  cp.seat_order ?? gameState?.seat_order,
+                );
+                return (
+                  <button
+                    key={i}
+                    onClick={() => handleRestore(cp)}
+                    className="flex items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
+                  >
+                    <span>Turn {cp.turn_number}</span>
+                    <span
+                      className="max-w-36 truncate rounded px-1.5 py-0.5 font-semibold"
+                      style={{
+                        backgroundColor: `${activePlayerColor}22`,
+                        color: activePlayerColor,
+                      }}
+                    >
+                      {activePlayerName}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
         </section>

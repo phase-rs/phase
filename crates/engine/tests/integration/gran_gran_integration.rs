@@ -255,7 +255,7 @@ fn abandon_attachments_chain(source_id: ObjectId, controller: PlayerId) -> Resol
         controller,
     )
     .kind(AbilityKind::Spell);
-    draw_sub.condition = Some(AbilityCondition::IfYouDo);
+    draw_sub.condition = Some(AbilityCondition::effect_performed());
 
     let mut outer = ResolvedAbility::new(
         Effect::Discard {

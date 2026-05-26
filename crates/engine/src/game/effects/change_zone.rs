@@ -3,8 +3,8 @@ use rand::Rng;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetSelectionMode,
-    TypedFilter,
+    Duration, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter,
+    TargetSelectionMode, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -16,11 +16,17 @@ use crate::types::zones::Zone;
 
 /// CR 401.3: Shuffle a player's library using the game's seeded RNG.
 /// Reusable helper for auto-shuffle after zone moves to Library.
-pub fn shuffle_library(state: &mut GameState, player: PlayerId) {
+pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
     let GameState { players, rng, .. } = state;
     if let Some(p) = players.iter_mut().find(|p| p.id == player) {
         crate::util::im_ext::shuffle_vector(&mut p.library, rng);
     }
+    // CR 701.24a: Emit player-action event so trigger matchers can filter
+    // by the identity of the shuffling player.
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: player,
+        action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+    });
 }
 
 /// CR 701.17c + CR 603.7: For a `TrackedSet` / `TrackedSetFiltered` target,
@@ -152,7 +158,7 @@ pub(crate) fn deliver_replaced_zone_change(
         if to == Zone::Library {
             let owner = state.objects.get(&object_id).map(|o| o.owner);
             if let Some(owner) = owner {
-                shuffle_library(state, owner);
+                shuffle_library(state, owner, events);
             }
         }
         // Track cards exiled by the source. Some linked exiles return when the
@@ -172,6 +178,20 @@ pub(crate) fn deliver_replaced_zone_change(
                     kind,
                 });
             }
+        }
+        // CR 614.12a: Drain mandatory replacement post-effects after the zone
+        // change completes. This shared delivery path covers effect-driven moves
+        // (`ChangeZone`) in the same way stack resolution and land play already
+        // do, so as-enters work such as "enters prepared" or persisted choices
+        // applies before triggers and priority.
+        if state.post_replacement_continuation.is_some() {
+            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                state,
+                Some(object_id),
+                None,
+                Some(crate::types::replacements::ReplacementEvent::Moved),
+                events,
+            );
         }
     }
 }
@@ -795,6 +815,10 @@ pub fn resolve_all(
         _ => None,
     };
 
+    let filter_controller =
+        crate::game::effects::controller_for_relative_filter(ability, &target_filter);
+    let target_filter = owner_scoped_nonbattlefield_mass_filter(target_filter, &origin_zones);
+
     // Use a permissive default filter if the effect's target is None
     let effective_filter = if matches!(target_filter, crate::types::ability::TargetFilter::None) {
         crate::types::ability::TargetFilter::Typed(TypedFilter {
@@ -815,8 +839,6 @@ pub fn resolve_all(
     let effective_filter =
         crate::game::targeting::resolve_tracked_set_sentinel(state, effective_filter);
 
-    let filter_controller =
-        crate::game::effects::controller_for_relative_filter(ability, &effective_filter);
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
@@ -943,6 +965,50 @@ pub fn resolve_all(
     });
 
     Ok(())
+}
+
+fn owner_scoped_nonbattlefield_mass_filter(
+    filter: TargetFilter,
+    origin_zones: &[Zone],
+) -> TargetFilter {
+    if origin_zones.contains(&Zone::Battlefield) {
+        return filter;
+    }
+
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if let Some(controller) = typed.controller.take() {
+                typed.properties.push(FilterProp::Owned { controller });
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| owner_scoped_nonbattlefield_mass_filter(filter, origin_zones))
+                .collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| owner_scoped_nonbattlefield_mass_filter(filter, origin_zones))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(owner_scoped_nonbattlefield_mass_filter(
+                *filter,
+                origin_zones,
+            )),
+        },
+        TargetFilter::TrackedSetFiltered { id, filter } => TargetFilter::TrackedSetFiltered {
+            id,
+            filter: Box::new(owner_scoped_nonbattlefield_mass_filter(
+                *filter,
+                origin_zones,
+            )),
+        },
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -1678,6 +1744,74 @@ mod tests {
                 "opponent-owned graveyard card {id:?} should be exiled regardless of stale controller",
             );
         }
+    }
+
+    #[test]
+    fn change_zone_all_your_graveyard_typed_filter_uses_owner_not_stale_controller() {
+        let mut state = GameState::new_two_player(42);
+        let owned_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Owned Land".to_string(),
+            Zone::Graveyard,
+        );
+        let stolen_then_died_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Stolen Then Died Land".to_string(),
+            Zone::Graveyard,
+        );
+        let opponent_land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Land".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [owned_land, stolen_then_died_land, opponent_land] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+        state
+            .objects
+            .get_mut(&stolen_then_died_land)
+            .unwrap()
+            .controller = PlayerId(1);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(
+                    TypedFilter::land()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+                enter_tapped: true,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        for id in [owned_land, stolen_then_died_land] {
+            let obj = &state.objects[&id];
+            assert_eq!(obj.zone, Zone::Battlefield);
+            assert!(obj.tapped);
+        }
+        assert_eq!(state.objects[&opponent_land].zone, Zone::Graveyard);
     }
 
     #[test]

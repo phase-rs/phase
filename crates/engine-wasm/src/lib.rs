@@ -6,7 +6,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_actions_full};
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::{
     estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
@@ -233,6 +233,26 @@ pub fn get_card_face_data(name: &str) -> JsValue {
             Some(face) => to_js(face),
             None => JsValue::NULL,
         }
+    })
+}
+
+/// Search the loaded card database. The engine is the single authority for the
+/// rules data search filters on — format legality, set membership, card types,
+/// mana value, and colors — so deck-builder search runs here, never as a
+/// third-party API call. Returns `{ results, total }` (see `CardSearchResults`),
+/// or an error if the database is not loaded or the query is malformed.
+#[wasm_bindgen]
+pub fn search_cards_js(query: JsValue) -> Result<JsValue, JsValue> {
+    let query: CardSearchQuery = serde_wasm_bindgen::from_value(query)
+        .map_err(|e| JsValue::from_str(&format!("Invalid search query: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&db.search(&query)))
     })
 }
 
@@ -672,6 +692,21 @@ fn handle_debug_create_card(
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
         state.layers_dirty = true;
+
+        // Hydrate `back_face` for dual-faced spawns (MDFC, Transform, Adventure,
+        // Omen, Meld, Prepare). `apply_card_face_to_object` only writes the named
+        // face; without this, a debug-spawned Esika, God of the Tree has no
+        // Prismatic Bridge back face, so Ctrl-to-flip preview and MDFC face-choice
+        // casting silently no-op until a page refresh re-runs deck hydration. This
+        // is the same canonical primitive `load_and_hydrate_decks` uses, so the
+        // debug-spawn path can't drift from the normal load path. The new object
+        // already carries `printed_ref` (set by `apply_card_face_to_object`), which
+        // rehydrate uses to resolve the card and its other face.
+        CARD_DB.with(|cell| {
+            if let Some(db) = cell.borrow().as_ref() {
+                engine::game::printed_cards::rehydrate_game_from_card_db(state, db);
+            }
+        });
 
         // CR 303.4f + CR 704.5n: When the user picks an attachment target,
         // wire the host through the engine's attach resolvers BEFORE routing

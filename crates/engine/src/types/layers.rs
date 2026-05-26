@@ -87,6 +87,7 @@ impl ContinuousModification {
             | ContinuousModification::SetDynamicToughness { .. } => Layer::CharDef,
             ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
+            | ContinuousModification::RemoveChosenKeyword
             | ContinuousModification::AddDynamicKeyword { .. }
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantTrigger { .. }
@@ -218,7 +219,8 @@ mod tests {
                     trigger_definitions: Default::default(),
                     replacement_definitions: Default::default(),
                     static_definitions: Default::default(),
-                })
+                }),
+                printed_ref: None,
             }
             .layer(),
             Layer::Copy

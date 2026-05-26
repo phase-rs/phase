@@ -386,6 +386,7 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     "enters the battlefield tapped",
     "enters tapped",
     "enters untapped",
+    "enters prepared",
     "enter as a copy of",
     "enter tapped as a copy of",
     // CR 614.1c: "As ~ enters, you may have it become a copy of …" (Cursed Mirror

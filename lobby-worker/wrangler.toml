@@ -1,0 +1,80 @@
+# Cloudflare Worker + Durable Object for the official phase.rs lobby broker.
+#
+# The DO body (src/lobby-do.ts) is a thin imperative shell around the compiled
+# Rust `lobby-broker` core (lobby-worker/broker-wasm -> src/broker-wasm-pkg).
+# All protocol parsing, dispatch, reservations, capacity caps, build-commit
+# gating, and the staleness reaper live in Rust — the SAME code phase-server
+# runs natively — so the two deployments behave identically by construction.
+
+name = "phase-lobby"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+# Build the Rust broker to WASM (+ wasm-bindgen glue) before bundling. wrangler
+# runs this on `wrangler deploy` and `wrangler dev`; the generated glue under
+# src/broker-wasm-pkg/ is gitignored and regenerated. Requires the wasm32 target,
+# wasm-bindgen-cli (0.2.121), and wasm-opt — the release workflow sets these up.
+[build]
+command = "bash ../scripts/build-broker-wasm.sh release"
+
+# Single global lobby = one DO instance addressed by a fixed name ("global").
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "LobbyDO"
+
+# SQLite-backed DO class — REQUIRED for the Workers Free plan (KV-backed DOs
+# need a paid plan). Also what WebSocket Hibernation + DO storage build on.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LobbyDO"]
+
+# Workers Logs — persistent logs in the dashboard Observability tab. We keep this
+# ON for our structured console.* output: relay-mint failures surface via
+# `console.error({event:"turn_mint_failed"})` in turn.ts (the always-on Workers
+# *Metrics* view masks them — a handled `Response(502)` counts as a "Success"
+# invocation). Those content logs are what matter, and they are captured
+# regardless of `invocation_logs`.
+#
+# `invocation_logs = false`: the lobby is a WebSocket DO, so every inbound frame
+# is its own invocation. With invocation logs ON, each frame emitted an empty
+# `websocket:message` summary record (outcome+timing, no body) — one billable log
+# per heartbeat against the 200k/day free-tier cap, for zero signal. Disabling
+# them drops those envelopes while keeping every explicit console.* line. Per-
+# invocation counts / CPU time / error rate remain visible in the free Metrics
+# tab, which is a separate product from Logs.
+#
+# head_sampling_rate=1 keeps 100% of the (now rare, all-meaningful) content logs.
+# `persist`/`traces` from the dashboard's exported blob are NOT documented
+# wrangler keys and would fail deploy validation, so they are omitted.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+invocation_logs = false
+
+[vars]
+# Cloudflare Realtime TURN key ID (NOT secret — useless without the API token,
+# which is set via `wrangler secret put TURN_KEY_API_TOKEN`).
+TURN_KEY_ID = "97c7984d6c155084f9d0fdf8090e02f8"
+# Credential lifetime in seconds (Cloudflare max 48h). 24h covers any session.
+TURN_TTL_SECONDS = "86400"
+# Origin allowlist for the /turn-credentials fetch. "*" is fine during rollout
+# (TURN creds are short-lived; worst case is quota use). Tighten for prod, e.g.
+# "https://phase-rs.dev,http://localhost:5173".
+ALLOWED_ORIGINS = "*"
+
+# The TURN API token is a SECRET — never put it here. Set it with:
+#   npx wrangler secret put TURN_KEY_API_TOKEN
+# Until both TURN_KEY_ID and the secret are set, /turn-credentials returns 503
+# and the client falls back to STUN-only (relay disabled for symmetric NAT).
+
+# Test first on the automatic *.workers.dev URL (no config needed — just
+# `wrangler deploy`). When ready to serve from your own domain (the phase-rs.dev
+# zone is already on Cloudflare), uncomment this: `custom_domain = true` makes
+# Workers auto-provision the DNS record + TLS cert. Endpoint becomes
+# wss://lobby.phase-rs.dev/ws. Do NOT point the production default at it until
+# the real Rust broker is in (keep phase-server as DEFAULT_SERVER until cutover).
+# [[routes]]
+# pattern = "lobby.phase-rs.dev"
+# custom_domain = true

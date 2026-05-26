@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { useHorizontalScroll } from "../../hooks/useHorizontalScroll.ts";
@@ -21,6 +22,7 @@ export function ChoiceOverlay({
   widthClassName?: string;
   maxWidthClassName?: string;
 }) {
+  const { t } = useTranslation("game");
   const contentRef = useRef<HTMLDivElement>(null);
   const peek = useOptionalDialogPeek();
 
@@ -36,7 +38,7 @@ export function ChoiceOverlay({
         >
           <div className="modal-header-compact relative shrink-0 border-b border-white/10">
             <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500 lg:absolute lg:right-4 lg:top-3">
-              Game Choice
+              {t("choiceOverlay.eyebrow")}
             </div>
             <div className="lg:flex lg:items-baseline lg:gap-3">
               <h2 className="shrink-0 font-semibold text-white">
@@ -74,6 +76,7 @@ export function ScrollableCardStrip({
   stripClassName?: string;
   innerClassName?: string;
 }) {
+  const { t } = useTranslation("game");
   const stripRef = useHorizontalScroll<HTMLDivElement>();
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
@@ -131,7 +134,7 @@ export function ScrollableCardStrip({
             <button
               onClick={() => scroll(-1)}
               className="pointer-events-auto rounded-full border border-white/20 bg-black/60 p-2 shadow-lg shadow-black/40 backdrop-blur-sm transition hover:bg-white/20 hover:shadow-xl"
-              aria-label="Scroll left"
+              aria-label={t("choiceOverlay.scrollLeft")}
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-6 w-6 text-white">
                 <path fillRule="evenodd" d="M11.78 5.22a.75.75 0 0 1 0 1.06L8.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06l-4.25-4.25a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z" clipRule="evenodd" />
@@ -154,7 +157,7 @@ export function ScrollableCardStrip({
             <button
               onClick={() => scroll(1)}
               className="pointer-events-auto rounded-full border border-white/20 bg-black/60 p-2 shadow-lg shadow-black/40 backdrop-blur-sm transition hover:bg-white/20 hover:shadow-xl"
-              aria-label="Scroll right"
+              aria-label={t("choiceOverlay.scrollRight")}
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-6 w-6 text-white">
                 <path fillRule="evenodd" d="M8.22 5.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 1 1-1.06-1.06L11.94 10 8.22 6.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
@@ -170,12 +173,14 @@ export function ScrollableCardStrip({
 export function ConfirmButton({
   onClick,
   disabled = false,
-  label = "Confirm",
+  label,
 }: {
   onClick: () => void;
   disabled?: boolean;
   label?: string;
 }) {
+  const { t } = useTranslation("game");
+  const resolvedLabel = label ?? t("choiceOverlay.confirm");
   return (
     <AnimatePresence>
       <motion.div
@@ -194,7 +199,7 @@ export function ConfirmButton({
             className: "w-full",
           })}
         >
-          {label}
+          {resolvedLabel}
         </button>
       </motion.div>
     </AnimatePresence>
@@ -203,11 +208,13 @@ export function ConfirmButton({
 
 export function CancelButton({
   onClick,
-  label = "Cancel",
+  label,
 }: {
   onClick: () => void;
   label?: string;
 }) {
+  const { t } = useTranslation("game");
+  const resolvedLabel = label ?? t("choiceOverlay.cancel");
   return (
     <button
       onClick={onClick}
@@ -217,7 +224,7 @@ export function CancelButton({
         className: "w-full",
       })}
     >
-      {label}
+      {resolvedLabel}
     </button>
   );
 }

@@ -1,4 +1,4 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::combinator::{map, opt, peek, value};
@@ -16,13 +16,14 @@ use super::super::oracle_target::{
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
 };
+use super::sequence::{parse_choice_partition_destination, parse_rest_cards_reference};
 use super::{capitalize, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, ObjectScope,
-    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
-    TargetFilter, TypeFilter, TypedFilter,
+    QuantityExpr, QuantityRef, SearchDestinationSplit, SearchSelectionConstraint, SharedQuality,
+    SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 #[cfg(test)]
@@ -162,6 +163,16 @@ pub(super) fn parse_search_library_details(
         SearchSelectionConstraint::None
     };
 
+    // CR 701.23a + CR 608.2c: Detect cultivate-class split destinations ("put
+    // one onto the battlefield tapped and the other into your hand"). Only the
+    // single-filter case carries a split; multi-filter chains handle their own
+    // destinations via the interleaved-ChangeZone lowering.
+    let split = if extra_filters.is_empty() {
+        detect_search_split_destination(lower)
+    } else {
+        None
+    };
+
     SearchLibraryDetails {
         filter,
         count,
@@ -173,6 +184,7 @@ pub(super) fn parse_search_library_details(
         extra_filters,
         multi_destination,
         multi_enter_tapped,
+        split,
     }
 }
 
@@ -2133,6 +2145,44 @@ fn parse_search_enchant_keyword_suffix(
 
 /// Parse the destination zone from search Oracle text.
 /// Looks for "put it into your hand", "put it onto the battlefield", etc.
+/// CR 701.23a + CR 608.2c: Parse the tail of a cultivate-class split-destination
+/// clause — the portion AFTER the leading "put " — into a
+/// [`SearchDestinationSplit`]. Expects e.g. "one onto the battlefield tapped and
+/// the other into your hand". The primary destination is the battlefield (the
+/// only primary in the A/B/C cluster); the count is the literal integer in
+/// "put N"; `primary_enter_tapped` reflects the optional "tapped" modifier; the
+/// rest zone is parsed from the "...and the rest/other into <zone>" tail.
+///
+/// All-nom; consumes via `scan_preceded`, which strips the leading "put ".
+fn parse_search_split_destination(input: &str) -> OracleResult<'_, SearchDestinationSplit> {
+    let (input, primary_count) = nom_primitives::parse_number(input)?;
+    // Primary is always the battlefield for the A/B/C split cluster.
+    let (input, _) =
+        alt((tag(" onto the battlefield"), tag(" to the battlefield"))).parse(input)?;
+    let (input, tapped) = opt(tag(" tapped")).parse(input)?;
+    let (input, _) = tag(" and ").parse(input)?;
+    let (input, _) = opt(tag("put ")).parse(input)?;
+    let (input, _) = parse_rest_cards_reference(input)?;
+    let (input, rest_destination) = parse_choice_partition_destination(input)?;
+    Ok((
+        input,
+        SearchDestinationSplit {
+            primary_destination: Zone::Battlefield,
+            primary_count,
+            primary_enter_tapped: tapped.is_some(),
+            rest_destination,
+        },
+    ))
+}
+
+/// Detector: scan `lower` at word boundaries for the "put N onto the battlefield
+/// ... and the rest/other into <zone>" split clause. Returns the parsed split
+/// when the cultivate-class grammar matches, else `None` so the caller falls
+/// back to single-zone destination handling.
+fn detect_search_split_destination(lower: &str) -> Option<SearchDestinationSplit> {
+    scan_preceded(lower, "put ", parse_search_split_destination).map(|(split, _)| split)
+}
+
 pub(super) fn parse_search_destination(lower: &str) -> Zone {
     if scan_contains_phrase(lower, "onto the battlefield") {
         Zone::Battlefield
@@ -2158,6 +2208,50 @@ mod tests {
     use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
+
+    #[test]
+    fn cultivate_lowers_to_split_destination() {
+        // CR 701.23a + CR 608.2c: Cultivate's "put one onto the battlefield
+        // tapped and the other into your hand" must populate the split, not
+        // collapse to a single battlefield destination.
+        let details = parse_search_library_details(
+            "search your library for up to two basic land cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        let split = details
+            .split
+            .expect("cultivate must populate a SearchDestinationSplit");
+        assert_eq!(split.primary_destination, Zone::Battlefield);
+        assert_eq!(split.primary_count, 1);
+        assert!(split.primary_enter_tapped);
+        assert_eq!(split.rest_destination, Zone::Hand);
+    }
+
+    #[test]
+    fn viewpoint_synchronization_primary_count_two() {
+        // Pattern C: "put two onto the battlefield tapped and the other into
+        // your hand" — proves primary_count is the literal integer, not 1.
+        let details = parse_search_library_details(
+            "search your library for up to three basic land cards, reveal those cards, put two onto the battlefield tapped and the other into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        let split = details
+            .split
+            .expect("pattern C must populate a SearchDestinationSplit");
+        assert_eq!(split.primary_count, 2);
+        assert_eq!(split.primary_destination, Zone::Battlefield);
+        assert_eq!(split.rest_destination, Zone::Hand);
+    }
+
+    #[test]
+    fn single_zone_search_has_no_split() {
+        // A plain tutor must NOT be misread as a split.
+        let details = parse_search_library_details(
+            "search your library for a basic land card, put it onto the battlefield tapped, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(details.split.is_none());
+    }
 
     #[test]
     fn search_target_opponent_library() {

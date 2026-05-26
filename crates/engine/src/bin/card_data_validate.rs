@@ -27,6 +27,17 @@ fn main() {
                 eprintln!("FAIL: card database parsed but contained 0 cards");
                 process::exit(1);
             }
+            let integrity_errors = db.export_integrity_errors();
+            if !integrity_errors.is_empty() {
+                eprintln!("FAIL: card database parsed but failed export integrity checks");
+                for error in integrity_errors.iter().take(20) {
+                    eprintln!("      {error}");
+                }
+                if integrity_errors.len() > 20 {
+                    eprintln!("      ... and {} more", integrity_errors.len() - 20);
+                }
+                process::exit(1);
+            }
             println!("OK: {} cards parsed from {}", count, path.display());
         }
         Err(e) => {

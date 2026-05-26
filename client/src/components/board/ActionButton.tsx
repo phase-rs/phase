@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { AttackTarget, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -9,6 +10,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
+import { useBlockRequirements } from "../combat/useBlockRequirements.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
@@ -50,6 +52,7 @@ function getActionButtonMode(
 }
 
 export function ActionButton() {
+  const { t } = useTranslation("game");
   const priorityTooltipId = useId();
   const resolveTooltipId = useId();
   const resolveAllTooltipId = useId();
@@ -74,6 +77,16 @@ export function ActionButton() {
   const clearCombatSelection = useUiStore((s) => s.clearCombatSelection);
   const setCombatMode = useUiStore((s) => s.setCombatMode);
   const setCombatClickHandler = useUiStore((s) => s.setCombatClickHandler);
+
+  // Engine-declared per-attacker minimum-blocker requirements (menace /
+  // "blocked by N or more"). Used to block confirmation while any attacker is
+  // under-assigned, so the player gets a clear message instead of an engine
+  // rejection (CR 702.111b / CR 509.1b).
+  const { byAttacker: blockRequirements } = useBlockRequirements();
+  const incompleteBlockCount = useMemo(
+    () => Array.from(blockRequirements.values()).filter((r) => r.status === "incomplete").length,
+    [blockRequirements],
+  );
 
   const canCompanionToHand = useGameStore((s) =>
     s.legalActions.some((a) => a.type === "CompanionToHand"),
@@ -245,6 +258,7 @@ export function ActionButton() {
   // Read auto-pass state from engine
   const autoPass = gameState?.auto_pass?.[playerId];
   const isEndingTurn = autoPass?.type === "UntilEndOfTurn";
+  const canActDuringAutoPass = mode === "combat-blockers";
 
   const actionPending = useMultiplayerStore((s) => s.actionPending);
   const idle = mode === "hidden" && !isEndingTurn;
@@ -270,7 +284,7 @@ export function ActionButton() {
               }}
               className={gameButtonClass({ tone: "amber", size: "md", disabled: actionPending, className: secondaryButtonClass })}
             >
-              {selectedAttackers.length > 0 ? "Clear Attackers" : "Attack with All"}
+              {selectedAttackers.length > 0 ? t("actionButton.clearAttackers") : t("actionButton.attackWithAll")}
             </button>
             {selectedAttackers.length > 0 ? (
               <button
@@ -278,7 +292,7 @@ export function ActionButton() {
                 onClick={handleConfirmAttackers}
                 className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionPending, className: primaryButtonClass })}
               >
-                Confirm Attackers ({selectedAttackers.length})
+                {t("actionButton.confirmAttackers", { count: selectedAttackers.length })}
               </button>
             ) : (
               <button
@@ -287,30 +301,30 @@ export function ActionButton() {
                 className={gameButtonClass({ tone: "slate", size: "md", disabled: actionPending, className: primaryButtonClass })}
               >
                 {skipArmed === "attackers"
-                  ? "Tap Again: Attack with None"
-                  : "Attack with None"}
+                  ? t("actionButton.attackWithNoneConfirm")
+                  : t("actionButton.attackWithNone")}
               </button>
             )}
           </>
         )}
 
-        {mode === "combat-blockers" && !isEndingTurn && (
+        {mode === "combat-blockers" && (
           <>
             {blockerAssignments.size > 0 ? (
               <>
                 <button
-                  disabled={actionPending}
+                  disabled={actionPending || incompleteBlockCount > 0}
                   onClick={handleConfirmBlockers}
-                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionPending, className: primaryButtonClass })}
+                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionPending || incompleteBlockCount > 0, className: primaryButtonClass })}
                 >
-                  Confirm Blockers ({blockerAssignments.size})
+                  {t("actionButton.confirmBlockers", { count: blockerAssignments.size })}
                 </button>
                 <button
                   disabled={actionPending}
                   onClick={handleClearBlockers}
                   className={gameButtonClass({ tone: "neutral", size: "md", disabled: actionPending, className: secondaryButtonClass })}
                 >
-                  Reset Blocks
+                  {t("actionButton.resetBlocks")}
                 </button>
               </>
             ) : (
@@ -320,13 +334,18 @@ export function ActionButton() {
                 className={gameButtonClass({ tone: "slate", size: "md", disabled: actionPending, className: primaryButtonClass })}
               >
                 {skipArmed === "blockers"
-                  ? "Tap Again: Block with None"
-                  : "Block with None"}
+                  ? t("actionButton.blockWithNoneConfirm")
+                  : t("actionButton.blockWithNone")}
               </button>
             )}
             {pendingBlocker !== null && (
               <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-full border border-cyan-300/25 bg-cyan-950/80 px-4 py-2 text-sm font-medium text-cyan-100 shadow-lg backdrop-blur-xl">
-                Select the attacker this blocker should defend against
+                {t("actionButton.selectAttackerForBlocker")}
+              </div>
+            )}
+            {pendingBlocker === null && incompleteBlockCount > 0 && (
+              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-full border border-amber-300/30 bg-amber-950/85 px-4 py-2 text-sm font-medium text-amber-100 shadow-lg backdrop-blur-xl">
+                {t("combat.blockIncomplete", { count: incompleteBlockCount })}
               </div>
             )}
           </>
@@ -340,7 +359,7 @@ export function ActionButton() {
                 onClick={() => dispatchAction({ type: "CompanionToHand" })}
                 className={gameButtonClass({ tone: "amber", size: "md", disabled: actionPending, className: secondaryButtonClass })}
               >
-                Companion to Hand
+                {t("actionButton.companionToHand")}
               </button>
             )}
             <button
@@ -349,9 +368,9 @@ export function ActionButton() {
               aria-describedby={resolveTooltipId}
               className={gameButtonClass({ tone: "blue", size: "md", disabled: actionPending, className: `${primaryButtonClass} group relative` })}
             >
-              Resolve
+              {t("actionButton.resolve")}
               <GameplayTooltip id={resolveTooltipId}>
-                Pass priority so the top stack item can resolve if every player also passes. Shortcut: Space.
+                {t("actionButton.resolveTooltip")}
               </GameplayTooltip>
             </button>
             <button
@@ -368,9 +387,9 @@ export function ActionButton() {
               aria-describedby={resolveAllTooltipId}
               className={gameButtonClass({ tone: "slate", size: "md", disabled: actionPending, className: `${secondaryButtonClass} group relative` })}
             >
-              Resolve All
+              {t("actionButton.resolveAll")}
               <GameplayTooltip id={resolveAllTooltipId}>
-                Keep passing priority while the stack resolves. A required choice or stop can interrupt it.
+                {t("actionButton.resolveAllTooltip")}
               </GameplayTooltip>
             </button>
           </>
@@ -384,7 +403,7 @@ export function ActionButton() {
                 onClick={() => dispatchAction({ type: "CompanionToHand" })}
                 className={gameButtonClass({ tone: "amber", size: "md", disabled: actionPending, className: secondaryButtonClass })}
               >
-                Companion to Hand
+                {t("actionButton.companionToHand")}
               </button>
             )}
             <button
@@ -398,9 +417,9 @@ export function ActionButton() {
                 className: `${primaryButtonClass} group relative`,
               })}
             >
-              {idle ? "Waiting" : advanceLabel}
+              {idle ? t("actionButton.waiting") : advanceLabel}
               <GameplayTooltip id={priorityTooltipId}>
-                Pass priority. If the stack is empty, this advances through the current priority window. Shortcut: Space.
+                {t("actionButton.priorityTooltip")}
               </GameplayTooltip>
             </button>
             <button
@@ -410,19 +429,19 @@ export function ActionButton() {
               className={`group relative ${gameButtonClass({ tone: "slate", size: "md", disabled: blocked, className: secondaryButtonClass })}`}
             >
               <span className="flex items-center gap-1">
-                Pass
+                {t("actionButton.pass")}
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
                   <path fillRule="evenodd" d="M2 10a.75.75 0 0 1 .75-.75h12.59l-2.1-1.95a.75.75 0 1 1 1.02-1.1l3.5 3.25a.75.75 0 0 1 0 1.1l-3.5 3.25a.75.75 0 1 1-1.02-1.1l2.1-1.95H2.75A.75.75 0 0 1 2 10Z" clipRule="evenodd" />
                 </svg>
               </span>
               <GameplayTooltip id={passToEndTooltipId} className="w-56">
-                Auto-pass until the end step unless a choice, stop, or Full Control interrupts. Shortcut: Enter.
+                {t("actionButton.passToEndTooltip")}
               </GameplayTooltip>
             </button>
           </>
         )}
 
-        {isEndingTurn && (
+        {isEndingTurn && !canActDuringAutoPass && (
           <button
             disabled={actionPending}
             onClick={() => dispatchAction({ type: "CancelAutoPass" })}
@@ -432,7 +451,7 @@ export function ActionButton() {
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 animate-spin">
                 <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.451a.75.75 0 0 0 0-1.5H4.5a.75.75 0 0 0-.75.75v3.75a.75.75 0 0 0 1.5 0v-2.033l.364.363a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm-10.624-2.85a5.5 5.5 0 0 1 9.201-2.465l.312.31H11.75a.75.75 0 0 0 0 1.5h3.75a.75.75 0 0 0 .75-.75V3.42a.75.75 0 0 0-1.5 0v2.033l-.364-.364A7 7 0 0 0 3.074 8.227a.75.75 0 0 0 1.449.39l.165-.044Z" clipRule="evenodd" />
               </svg>
-              Auto-Passing to End Step...
+              {t("actionButton.autoPassing")}
             </span>
           </button>
         )}

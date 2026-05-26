@@ -133,4 +133,33 @@ describe("restoreGameState", () => {
       expect.anything(),
     );
   });
+
+  it("preserves turn checkpoints when requested", async () => {
+    const oldState = createMockState({ turn_number: 3 });
+    const checkpoint = createMockState({ turn_number: 2 });
+    const restoredState = createMockState({ turn_number: 1 });
+    const adapter = createMockAdapter(oldState);
+
+    useGameStore.setState({
+      gameId: "debug-checkpoint",
+      adapter,
+      gameState: oldState,
+      waitingFor: oldState.waiting_for,
+      turnCheckpoints: [checkpoint],
+    });
+
+    let err: string | null = "not run";
+    await act(async () => {
+      err = await restoreGameState(restoredState, { preserveCheckpoints: true });
+    });
+
+    const store = useGameStore.getState();
+    expect(err).toBeNull();
+    expect(store.turnCheckpoints).toEqual([checkpoint]);
+    expect(idbSet).toHaveBeenCalledWith(
+      GAME_CHECKPOINTS_PREFIX + "debug-checkpoint",
+      [checkpoint],
+      expect.anything(),
+    );
+  });
 });

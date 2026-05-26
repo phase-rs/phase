@@ -14,6 +14,8 @@ export interface PlayerSlot {
   playerId: number;
   name: string;
   kind: SeatKind;
+  reserved?: boolean;
+  reservationExpiresAtMs?: number | null;
 }
 
 export type SeatMutation =

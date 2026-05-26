@@ -31,15 +31,32 @@ pub fn resolve(
 fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbility) {
     match restriction {
         GameRestriction::DamagePreventionDisabled { source, .. }
-        | GameRestriction::CastOnlyFromZones { source, .. }
-        | GameRestriction::CantCastSpells { source, .. } => {
+        | GameRestriction::ProhibitActivity { source, .. } => {
             *source = ability.source_id;
         }
     }
 
+    let resolved_target_player = ability.target_player();
+
     match restriction {
-        GameRestriction::CastOnlyFromZones { expiry, .. }
-        | GameRestriction::CantCastSpells { expiry, .. } => {
+        GameRestriction::ProhibitActivity {
+            affected_players, ..
+        } => {
+            if matches!(
+                affected_players,
+                crate::types::ability::RestrictionPlayerScope::TargetedPlayer
+                    | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
+            ) {
+                *affected_players = crate::types::ability::RestrictionPlayerScope::SpecificPlayer(
+                    resolved_target_player,
+                );
+            }
+        }
+        GameRestriction::DamagePreventionDisabled { .. } => {}
+    }
+
+    match restriction {
+        GameRestriction::ProhibitActivity { expiry, .. } => {
             if let Some(crate::types::ability::Duration::UntilNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             }) = ability.duration.as_ref()
@@ -57,7 +74,8 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Duration, GameRestriction, RestrictionExpiry, RestrictionPlayerScope,
+        Duration, GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+        TargetRef,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -111,11 +129,13 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::AddRestriction {
-                restriction: GameRestriction::CastOnlyFromZones {
+                restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
                     affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
-                    allowed_zones: vec![Zone::Hand],
                     expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastOnlyFromZones {
+                        allowed_zones: vec![Zone::Hand],
+                    },
                 },
             },
             vec![],
@@ -131,12 +151,80 @@ mod tests {
 
         assert!(matches!(
             &state.restrictions[0],
-            GameRestriction::CastOnlyFromZones {
+            GameRestriction::ProhibitActivity {
                 source: ObjectId(9),
                 affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
-                allowed_zones,
                 expiry: RestrictionExpiry::UntilPlayerNextTurn { player: PlayerId(1) },
+                activity: ProhibitedActivity::CastOnlyFromZones { allowed_zones },
             } if allowed_zones == &vec![Zone::Hand]
+        ));
+    }
+
+    #[test]
+    fn targeted_player_scope_is_resolved_on_restrictions() {
+        let mut state = GameState::new_two_player(42);
+
+        let ability = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::TargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::ActivateAbilities {
+                        exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                    },
+                },
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(7),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            &state.restrictions[0],
+            GameRestriction::ProhibitActivity {
+                source: ObjectId(7),
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                activity: ProhibitedActivity::ActivateAbilities { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parent_targeted_player_scope_is_resolved_from_inherited_target() {
+        let mut state = GameState::new_two_player(42);
+
+        let ability = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::ActivateAbilities {
+                        exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                    },
+                },
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(7),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            &state.restrictions[0],
+            GameRestriction::ProhibitActivity {
+                source: ObjectId(7),
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                activity: ProhibitedActivity::ActivateAbilities { .. },
+                ..
+            }
         ));
     }
 }

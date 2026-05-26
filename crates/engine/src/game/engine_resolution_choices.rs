@@ -4,10 +4,11 @@ use crate::types::ability::{
     CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
     PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
-use crate::types::actions::{GameAction, LearnOption};
+use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, ChosenDamageSource, GameState, PayableResource, PendingContinuation, WaitingFor,
+    ActionResult, ChosenDamageSource, GameState, OutsideGameChoiceSource, PayableResource,
+    PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -78,6 +79,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
+            | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
@@ -99,6 +101,109 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     )
 }
 
+/// CR 701.20e / CR 701.23a + CR 401.4: Move the "rest" partition of an
+/// interactive selection (Dig's unkept cards, a search-split's non-primary
+/// cards) to a concrete destination zone. `Library` routes to the bottom of the
+/// owner's library (CR 401.4); every other zone uses the standard cross-zone
+/// mover. Extracted from the Dig rest-move block so the search-partition handler
+/// reuses the exact same routing.
+fn route_rest_partition(
+    state: &mut GameState,
+    rest_ids: &[ObjectId],
+    rest_zone: Zone,
+    events: &mut Vec<GameEvent>,
+) {
+    match rest_zone {
+        Zone::Library => {
+            for &obj_id in rest_ids {
+                zones::move_to_library_position(state, obj_id, false, events);
+            }
+        }
+        zone => {
+            for &obj_id in rest_ids {
+                zones::move_to_zone(state, obj_id, zone, events);
+            }
+        }
+    }
+}
+
+/// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
+/// library "in any order", so a legal keep-on-top selection is any duplicate-free
+/// subset of the looked-at cards (order is the player's free choice). Because the
+/// multiplayer server bypasses its candidate-enumeration legality gate for these
+/// freeform states (see `WaitingFor::accepts_freeform_card_selection`), `apply()`
+/// is the real validation boundary: a foreign id or a duplicate would corrupt the
+/// library `retain`+`insert` (relocating or duplicating a card), so reject both
+/// here. Mirrors the order-agnostic subset semantics of `selection_mismatch`.
+fn validate_keep_on_top_selection(
+    selection: &[ObjectId],
+    looked_at: &[ObjectId],
+) -> Result<(), EngineError> {
+    let mut seen = std::collections::HashSet::new();
+    for id in selection {
+        if !looked_at.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "keep-on-top selection contains a card that was not looked at".to_string(),
+            ));
+        }
+        if !seen.insert(*id) {
+            return Err(EngineError::InvalidAction(
+                "keep-on-top selection contains a duplicate card".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// CR 701.23a + CR 614.1 / CR 110.5b: Apply a cultivate-class search-destination
+/// split. `primary_ids` are routed to `primary_destination` through the full
+/// `change_zone::resolve` ETB pipeline (carrying `enter_tapped` so ETB-tapped
+/// REPLACEMENT effects can intercept — "lands you control enter untapped
+/// instead"); `rest_ids` are routed to `rest_destination` via the shared rest
+/// mover. The `Shuffle` continuation drain is the caller's responsibility.
+fn apply_search_partition(
+    state: &mut GameState,
+    primary_ids: &[ObjectId],
+    rest_ids: &[ObjectId],
+    split: &crate::types::ability::SearchDestinationSplit,
+    source_id: ObjectId,
+    controller: crate::types::player::PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if !primary_ids.is_empty() {
+        // CR 614.1 / CR 110.5b: Synthesize a ChangeZone over the explicit primary
+        // targets and route through the ETB pipeline so the permanent enters
+        // tapped (and ETB-tapped replacements apply), unlike a bare move_to_zone.
+        let primary_targets: Vec<TargetRef> = primary_ids
+            .iter()
+            .map(|&id| TargetRef::Object(id))
+            .collect();
+        let change_zone = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: split.primary_destination,
+                target: crate::types::ability::TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: split.primary_enter_tapped,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+            },
+            primary_targets,
+            source_id,
+            controller,
+        );
+        crate::game::effects::change_zone::resolve(state, &change_zone, events)
+            .map_err(|e| EngineError::InvalidAction(format!("search-split primary move: {e:?}")))?;
+    }
+    // Rest is never Battlefield across the A/B/C cluster; the standard rest mover
+    // (Library => bottom per CR 401.4, else move_to_zone) is correct.
+    route_rest_partition(state, rest_ids, split.rest_destination, events);
+    Ok(())
+}
+
 pub(super) fn handle_resolution_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -111,6 +216,9 @@ pub(super) fn handle_resolution_choice(
             GameAction::SelectCards { cards: top_cards },
         ) => {
             let all_cards = cards;
+            // CR 701.22a: the keep-on-top set must be a duplicate-free subset of
+            // the looked-at cards (any order is legal).
+            validate_keep_on_top_selection(&top_cards, &all_cards)?;
             let bottom_cards: Vec<_> = all_cards
                 .iter()
                 .filter(|id| !top_cards.contains(id))
@@ -714,6 +822,7 @@ pub(super) fn handle_resolution_choice(
         (
             WaitingFor::DigChoice {
                 player,
+                library_owner,
                 cards,
                 keep_count,
                 up_to,
@@ -771,7 +880,7 @@ pub(super) fn handle_resolution_choice(
                     let player_state = state
                         .players
                         .iter_mut()
-                        .find(|candidate| candidate.id == player)
+                        .find(|candidate| candidate.id == library_owner)
                         .expect("player exists");
                     player_state.library.retain(|id| !cards.contains(id));
                     for (index, &card_id) in kept.iter().enumerate() {
@@ -813,23 +922,14 @@ pub(super) fn handle_resolution_choice(
                 state.next_tracked_set_id += 1;
                 state.tracked_object_sets.insert(tracked_id, kept.clone());
             }
-            match rest_destination {
-                Some(Zone::Library) => {
-                    for &obj_id in &unkept {
-                        zones::move_to_library_position(state, obj_id, false, events);
-                    }
-                }
-                Some(zone) => {
-                    for &obj_id in &unkept {
-                        zones::move_to_zone(state, obj_id, zone, events);
-                    }
-                }
-                None => {
-                    for &obj_id in &unkept {
-                        zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
-                    }
-                }
-            }
+            // CR 701.20e: None => Graveyard; map to a concrete zone so the rest
+            // mover (shared with the search-split partition) has a single Zone.
+            route_rest_partition(
+                state,
+                &unkept,
+                rest_destination.unwrap_or(Zone::Graveyard),
+                events,
+            );
             if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = kept.iter().map(|&id| TargetRef::Object(id)).collect();
                 cont.chain.context.optional_effect_performed = !kept.is_empty();
@@ -838,14 +938,36 @@ pub(super) fn handle_resolution_choice(
         }
         (
             WaitingFor::SurveilChoice { player, cards },
-            GameAction::SelectCards {
-                cards: to_graveyard,
-            },
+            GameAction::SelectCards { cards: top_cards },
         ) => {
+            // CR 701.25a: To surveil N, put any number of the looked-at cards into
+            // your graveyard and the rest on top of your library in any order. The
+            // action payload mirrors scry — it is the ordered keep-on-top set;
+            // every looked-at card not in it is put into the graveyard.
+            let all_cards = cards;
+            // CR 701.25a: the keep-on-top set must be a duplicate-free subset of
+            // the looked-at cards (any order is legal).
+            validate_keep_on_top_selection(&top_cards, &all_cards)?;
+            let to_graveyard: Vec<_> = all_cards
+                .iter()
+                .filter(|id| !top_cards.contains(id))
+                .copied()
+                .collect();
+            // CR 701.25a: every looked-at card not kept on top is put into the
+            // graveyard (emitting its zone-change events).
             for &obj_id in &to_graveyard {
-                if cards.contains(&obj_id) {
-                    zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
-                }
+                zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
+            }
+            // CR 701.25a: the kept cards rest on top of the library in the
+            // player's chosen order (top_cards[0] becomes the topmost card).
+            let player_state = state
+                .players
+                .iter_mut()
+                .find(|candidate| candidate.id == player)
+                .expect("player exists");
+            player_state.library.retain(|id| !top_cards.contains(id));
+            for (index, &card_id) in top_cards.iter().enumerate() {
+                player_state.library.insert(index, card_id);
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -931,6 +1053,7 @@ pub(super) fn handle_resolution_choice(
                 reveal,
                 up_to,
                 constraint,
+                split,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -983,6 +1106,49 @@ pub(super) fn handle_resolution_choice(
                 state.last_revealed_ids.clear();
             }
 
+            // CR 701.23a + CR 608.2c: Cultivate-class split destination. The
+            // found set was just chosen; now partition it. Up to two prompts
+            // total (CR 609.3): SearchChoice (done) then SearchPartitionChoice
+            // (only when more than primary_count were found).
+            if let Some(split) = split {
+                // The Shuffle continuation always exists for cultivate-class
+                // splits; its `source_id` is the search card. Falls back to the
+                // first chosen card's id only in the degenerate no-continuation
+                // case (used solely as an event source label).
+                let source_id = state
+                    .pending_continuation
+                    .as_ref()
+                    .map(|cont| cont.chain.source_id)
+                    .or_else(|| chosen.first().copied())
+                    .unwrap_or(ObjectId(0));
+                let primary_count = split.primary_count as usize;
+                if chosen.len() > primary_count {
+                    // CR 608.2d: Genuine choice — the searcher picks which
+                    // primary_count cards go to the primary destination.
+                    set_priority(state, player);
+                    state.waiting_for = WaitingFor::SearchPartitionChoice {
+                        player,
+                        cards: chosen.clone(),
+                        primary_destination: split.primary_destination,
+                        primary_count: split.primary_count,
+                        primary_enter_tapped: split.primary_enter_tapped,
+                        rest_destination: split.rest_destination,
+                        source_id,
+                    };
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+                // CR 609.3 fast-path: found <= primary_count, so ALL chosen go to
+                // the primary destination and the rest is empty. No second prompt.
+                apply_search_partition(state, &chosen, &[], &split, source_id, player, events)?;
+                set_priority(state, player);
+                effects::drain_pending_continuation(state, events);
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
             set_priority(state, player);
             if let Some(cont) = state.pending_continuation.as_mut() {
                 let mut continuation_targets: Vec<_> =
@@ -1003,59 +1169,177 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
+            WaitingFor::SearchPartitionChoice {
+                player,
+                cards,
+                primary_destination,
+                primary_count,
+                primary_enter_tapped,
+                rest_destination,
+                source_id,
+            },
+            GameAction::SelectCards {
+                cards: primary_chosen,
+            },
+        ) => {
+            // CR 608.2d: The searcher must choose exactly primary_count cards for
+            // the primary destination; this branch is only parked when more than
+            // primary_count cards were found.
+            if primary_chosen.len() != primary_count as usize {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select exactly {} card(s) for the battlefield, got {}",
+                    primary_count,
+                    primary_chosen.len()
+                )));
+            }
+            for card_id in &primary_chosen {
+                if !cards.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in the found set".to_string(),
+                    ));
+                }
+            }
+            let rest_ids: Vec<ObjectId> = cards
+                .iter()
+                .filter(|id| !primary_chosen.contains(id))
+                .copied()
+                .collect();
+            let split = crate::types::ability::SearchDestinationSplit {
+                primary_destination,
+                primary_count,
+                primary_enter_tapped,
+                rest_destination,
+            };
+            apply_search_partition(
+                state,
+                &primary_chosen,
+                &rest_ids,
+                &split,
+                source_id,
+                player,
+                events,
+            )?;
+            set_priority(state, player);
+            effects::drain_pending_continuation(state, events);
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
             WaitingFor::OutsideGameChoice {
                 player,
+                source_id,
                 choices,
                 count,
                 reveal,
                 up_to,
                 destination,
             },
-            GameAction::ChooseOutsideGameCards { sideboard_indices },
+            GameAction::ChooseOutsideGameCards { selections },
         ) => {
             let valid = if up_to {
-                sideboard_indices.len() <= count
+                selections.len() <= count
             } else {
-                sideboard_indices.len() == count
+                selections.len() == count
             };
             if !valid {
                 return Err(EngineError::InvalidAction(format!(
                     "Must select {}{} outside-game card(s), got {}",
                     if up_to { "up to " } else { "exactly " },
                     count,
-                    sideboard_indices.len()
+                    selections.len()
                 )));
             }
-            let mut requested_counts = HashMap::new();
-            for index in &sideboard_indices {
-                *requested_counts.entry(*index).or_insert(0usize) += 1;
+            // CR 400.11 + CR 406.3: Each selection must match an offered choice
+            // and (for sideboard) not exceed the remaining copies. Face-up
+            // exile selections are single-object so duplicates of the same
+            // object_id are illegal.
+            let mut sideboard_counts: HashMap<usize, usize> = HashMap::new();
+            let mut exile_seen: std::collections::HashSet<ObjectId> =
+                std::collections::HashSet::new();
+            for selection in &selections {
+                match selection {
+                    OutsideGameSelection::Sideboard { sideboard_index } => {
+                        *sideboard_counts.entry(*sideboard_index).or_insert(0) += 1;
+                    }
+                    OutsideGameSelection::FaceUpExile { object_id } => {
+                        if !exile_seen.insert(*object_id) {
+                            return Err(EngineError::InvalidAction(
+                                "Same face-up exile card selected more than once".to_string(),
+                            ));
+                        }
+                    }
+                }
             }
-            for (index, requested_count) in requested_counts {
-                let Some(choice) = choices
-                    .iter()
-                    .find(|choice| choice.sideboard_index == index)
-                else {
+            for (sideboard_index, requested_count) in &sideboard_counts {
+                let Some(choice) = choices.iter().find(|choice| match &choice.source {
+                    OutsideGameChoiceSource::Sideboard {
+                        sideboard_index: idx,
+                        ..
+                    } => idx == sideboard_index,
+                    _ => false,
+                }) else {
                     return Err(EngineError::InvalidAction(
-                        "Selected card not in outside-game choices".to_string(),
+                        "Selected sideboard slot not in outside-game choices".to_string(),
                     ));
                 };
-                if requested_count > choice.entry.count as usize {
+                if *requested_count > choice.count as usize {
                     return Err(EngineError::InvalidAction(
                         "Selected more copies than are available outside the game".to_string(),
                     ));
                 }
             }
+            for object_id in &exile_seen {
+                if !choices.iter().any(|choice| match &choice.source {
+                    OutsideGameChoiceSource::FaceUpExile { object_id: oid } => oid == object_id,
+                    _ => false,
+                }) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected face-up exile card not in outside-game choices".to_string(),
+                    ));
+                }
+            }
 
             let mut chosen_ids = Vec::new();
-            for sideboard_index in sideboard_indices {
-                let object_id = effects::search_outside_game::put_sideboard_entry_into_game(
-                    state,
-                    player,
-                    sideboard_index,
-                    destination,
-                )
-                .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
-                chosen_ids.push(object_id);
+            for selection in selections {
+                match selection {
+                    OutsideGameSelection::Sideboard { sideboard_index } => {
+                        let object_id =
+                            effects::search_outside_game::put_sideboard_entry_into_game(
+                                state,
+                                player,
+                                sideboard_index,
+                                destination,
+                            )
+                            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+                        chosen_ids.push(object_id);
+                    }
+                    OutsideGameSelection::FaceUpExile { object_id } => {
+                        match effects::search_outside_game::put_face_up_exile_into(
+                            state,
+                            object_id,
+                            destination,
+                            source_id,
+                            player,
+                            events,
+                        )
+                        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?
+                        {
+                            effects::change_zone::ZoneMoveResult::Done => {
+                                chosen_ids.push(object_id);
+                            }
+                            effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
             }
 
             if reveal {

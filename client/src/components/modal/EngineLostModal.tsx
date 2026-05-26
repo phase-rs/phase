@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import type { TFunction } from "i18next";
+import { Trans, useTranslation } from "react-i18next";
 
 import { onEngineLost } from "../../game/engineRecovery";
 import { useGameStore } from "../../stores/gameStore";
@@ -35,6 +37,7 @@ interface EngineLostSnapshot {
 }
 
 export function EngineLostModal() {
+  const { t } = useTranslation("game");
   const [snapshot, setSnapshot] = useState<EngineLostSnapshot | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -80,11 +83,11 @@ export function EngineLostModal() {
       // Clipboard API can fail in insecure contexts. Fall back to opening
       // a prompt so the user can copy manually rather than leaving them
       // stuck — the whole point of this modal is making the report easy.
-      window.prompt("Copy this diagnostic:", diagnostic);
+      window.prompt(t("engineLost.copyPrompt"), diagnostic);
     }
   };
 
-  const reportUrl = buildReportUrl({ panic, diagnostic });
+  const reportUrl = buildReportUrl({ panic, diagnostic }, t);
 
   return (
     <div
@@ -95,12 +98,15 @@ export function EngineLostModal() {
       <div className="relative z-10 max-w-lg rounded-xl bg-gray-900 p-8 shadow-2xl ring-1 ring-rose-700/60">
         {isPanic ? (
           <>
-            <h2 className="mb-3 text-xl font-bold text-white">Engine crashed</h2>
+            <h2 className="mb-3 text-xl font-bold text-white">
+              {t("engineLost.crashTitle")}
+            </h2>
             <p className="mb-4 text-sm text-gray-300">
-              phase.rs hit an internal error and can&rsquo;t safely continue this
-              action. Your last saved turn is preserved &mdash; reload to restore the
-              game. <strong className="text-rose-200">Please report this</strong>{" "}
-              so we can fix it.
+              <Trans
+                i18nKey="engineLost.crashBody"
+                t={t}
+                components={{ strong: <strong className="text-rose-200" /> }}
+              />
             </p>
             <pre className="mb-4 max-h-40 overflow-auto rounded-lg bg-black/60 p-3 font-mono text-[11px] leading-relaxed text-rose-100 whitespace-pre-wrap">
               {panic}
@@ -108,17 +114,17 @@ export function EngineLostModal() {
           </>
         ) : (
           <>
-            <h2 className="mb-3 text-xl font-bold text-white">Engine connection lost</h2>
+            <h2 className="mb-3 text-xl font-bold text-white">
+              {t("engineLost.connectionTitle")}
+            </h2>
             <p className="mb-4 text-sm text-gray-300">
-              phase.rs lost its link to the game engine &mdash; most often caused by a
-              background update activating mid-game. Your last saved turn is
-              preserved; reload to restore the game.
+              {t("engineLost.connectionBody")}
             </p>
           </>
         )}
         {showDetails ? (
           <p className="mb-6 font-mono text-[11px] text-gray-500">
-            diagnostic: {reason}
+            {t("engineLost.diagnostic", { reason })}
           </p>
         ) : (
           <button
@@ -126,7 +132,7 @@ export function EngineLostModal() {
             onClick={() => setShowDetails(true)}
             className="mb-6 text-[11px] text-gray-600 underline hover:text-gray-400"
           >
-            Show details
+            {t("engineLost.showDetails")}
           </button>
         )}
         <div className="flex flex-wrap justify-end gap-3">
@@ -137,7 +143,7 @@ export function EngineLostModal() {
                 onClick={handleCopy}
                 className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-600"
               >
-                {copied ? "Copied!" : "Copy diagnostic"}
+                {copied ? t("engineLost.copied") : t("engineLost.copyDiagnostic")}
               </button>
               <a
                 href={reportUrl}
@@ -145,7 +151,7 @@ export function EngineLostModal() {
                 rel="noopener noreferrer"
                 className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-amber-500"
               >
-                Report on GitHub
+                {t("engineLost.reportOnGithub")}
               </a>
             </>
           )}
@@ -154,7 +160,7 @@ export function EngineLostModal() {
             className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-rose-500"
             autoFocus
           >
-            Reload
+            {t("engineLost.reload")}
           </button>
         </div>
       </div>
@@ -197,20 +203,25 @@ function buildDiagnostic({ reason, panic, gameId, gameMode }: EngineLostSnapshot
  *  text — only the URL prefill is bounded. */
 const MAX_DIAGNOSTIC_CHARS_IN_URL = 4000;
 
-function buildReportUrl({
-  panic,
-  diagnostic,
-}: {
-  panic: string | null;
-  diagnostic: string;
-}): string {
-  const titleSeed = panic ? extractPanicSummary(panic) : "Engine connection lost";
-  const title = `Engine crash: ${titleSeed}`;
+function buildReportUrl(
+  {
+    panic,
+    diagnostic,
+  }: {
+    panic: string | null;
+    diagnostic: string;
+  },
+  t: TFunction<"game">,
+): string {
+  const titleSeed = panic
+    ? extractPanicSummary(panic)
+    : t("engineLost.reportConnectionSummary");
+  const title = t("engineLost.reportTitle", { summary: titleSeed });
   const truncated =
     diagnostic.length > MAX_DIAGNOSTIC_CHARS_IN_URL
       ? `${diagnostic.slice(0, MAX_DIAGNOSTIC_CHARS_IN_URL)}\n[…truncated; click "Copy diagnostic" for full text]`
       : diagnostic;
-  const body = `**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n\`\`\`\n${truncated}\n\`\`\``;
+  const body = t("engineLost.reportWhatHappened", { diagnostic: truncated });
   const params = new URLSearchParams({
     title,
     body,

@@ -39,6 +39,16 @@ pub struct CardMetadata {
     /// Number of replacement effects translated from Forge card scripts.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub forge_replacements: u32,
+    /// MTGJSON token UUIDs linked from the printed source card.
+    ///
+    /// Display/catalog metadata only: token creation rules still flow through
+    /// `Effect::Token` -> `TokenSpec` -> `ProposedEvent::CreateToken`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_token_ids: Vec<String>,
+    /// Exact Scryfall printing IDs seen for this card in MTGJSON set files.
+    /// Used only as future-facing image/catalog metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_printing_ids: Vec<String>,
 }
 
 impl CardMetadata {
@@ -47,6 +57,8 @@ impl CardMetadata {
             && self.forge_triggers == 0
             && self.forge_statics == 0
             && self.forge_replacements == 0
+            && self.related_token_ids.is_empty()
+            && self.source_printing_ids.is_empty()
     }
 }
 
@@ -58,6 +70,21 @@ fn is_zero(v: &u32) -> bool {
 pub struct PrintedCardRef {
     pub oracle_id: String,
     pub face_name: String,
+}
+
+/// Exact image reference for a printed token.
+///
+/// This is display metadata only. It is deliberately separate from
+/// `TokenCharacteristics`/`TokenSpec` because CR 111.3 characteristics define
+/// token game state, while art selection is a client presentation concern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenImageRef {
+    pub scryfall_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scryfall_oracle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_name: Option<String>,
+    pub preset_id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

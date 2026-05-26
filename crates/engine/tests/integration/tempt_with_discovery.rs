@@ -278,6 +278,7 @@ fn make_step_4_ability() -> ResolvedAbility {
             reveal: false,
             target_player: None, // searcher = controller (P0)
             selection_constraint: SearchSelectionConstraint::None,
+            split: None,
         },
         vec![],
         ObjectId(9000),
@@ -312,6 +313,7 @@ fn searched_this_way_survives_search_choice_continuation() {
             reveal: false,
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
+            split: None,
         },
         vec![],
         ObjectId(9000),
@@ -333,6 +335,7 @@ fn searched_this_way_survives_search_choice_continuation() {
             reveal: false,
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
+            split: None,
         },
         vec![],
         ObjectId(9000),

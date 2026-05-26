@@ -71,6 +71,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
         | WaitingFor::DamageSourceChoice { .. }
         | WaitingFor::SearchChoice { .. }
+        | WaitingFor::SearchPartitionChoice { .. }
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
@@ -103,6 +104,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::ChooseManaColor { .. }
         | WaitingFor::ExileForCost { .. }
+        | WaitingFor::RemoveCounterForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. }
         | WaitingFor::OptionalEffectChoice { .. }
@@ -148,7 +150,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::DiscardForManaAbility { .. }
         | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. }
-        | WaitingFor::PayManaAbilityMana { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::PayManaAbilityMana { .. }
+        | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,
     }
 }
 
@@ -214,6 +217,7 @@ mod tests {
                     player: PlayerId(0),
                     valid_blocker_ids: vec![],
                     valid_block_targets: std::collections::HashMap::new(),
+                    block_requirements: std::collections::HashMap::new(),
                 },
                 &dummy_action
             ),

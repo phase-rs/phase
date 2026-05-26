@@ -44,7 +44,7 @@ export interface ServerInfo {
 /** Events emitted by the WebSocketAdapter for UI state updates. */
 export type WsAdapterEvent =
   | { type: "serverHello"; info: ServerInfo; compatible: boolean }
-  | { type: "playerIdentity"; playerId: PlayerId; opponentName: string | null }
+  | { type: "playerIdentity"; playerId: PlayerId; opponentName: string | null; playerNames?: Record<number, string> }
   | { type: "actionPendingChanged"; pending: boolean }
   | { type: "latencyChanged"; latencyMs: number | null }
   | { type: "sessionChanged"; session: WsSessionData | null }
@@ -72,6 +72,16 @@ export type WsAdapterEvent =
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number };
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
+
+function playerNamesFromWire(names: string[]): Record<number, string> {
+  const playerNames: Record<number, string> = {};
+  names.forEach((name, playerId) => {
+    if (name.length > 0) {
+      playerNames[playerId] = name;
+    }
+  });
+  return playerNames;
+}
 
 /**
  * WebSocket-backed implementation of EngineAdapter.
@@ -122,6 +132,7 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly deckData: DeckData,
     private readonly joinGameCode?: string,
     private readonly joinPassword?: string,
+    private readonly reservationToken?: string,
     private readonly displayName = "Player",
   ) {}
 
@@ -179,6 +190,7 @@ export class WebSocketAdapter implements EngineAdapter {
                 deck: this.deckData,
                 display_name: this.displayName,
                 password: this.joinPassword ?? null,
+                reservation_token: this.reservationToken ?? null,
               },
             };
 
@@ -501,7 +513,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string };
+        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string };
         if (this.reconnectInFlight) {
           this.reconnectInFlight = false;
           this.reconnectAttempt = 0;
@@ -530,10 +542,14 @@ export class WebSocketAdapter implements EngineAdapter {
           this.playerToken = data.player_token;
           this.emit({ type: "sessionChanged", session: this.currentSession() });
         }
+        const playerNames = data.player_names === undefined
+          ? undefined
+          : playerNamesFromWire(data.player_names);
         this.emit({
           type: "playerIdentity",
           playerId: data.your_player,
           opponentName: data.opponent_name ?? null,
+          ...(playerNames === undefined ? {} : { playerNames }),
         });
         if (this.initResolve) {
           this.initResolve();

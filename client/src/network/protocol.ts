@@ -54,7 +54,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
 export const WIRE_PROTOCOL_VERSION = 2 as const;
 
 export type P2PMessage =
-  | { type: "guest_deck"; deckData: unknown; displayName?: string }
+  | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
   | ({
       type: "game_setup";
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;

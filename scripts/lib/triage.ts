@@ -21,21 +21,11 @@ export interface TriageItem {
   extraction_confidence: number;
   source_url: string;
   parser_status: "fully_parsed" | "has_gaps" | "unknown_card" | "no_card";
-  proposed_action:
-    | "create_issue"
-    | "append_to_existing"
-    | "skip"
-    | "skip_existing_closed"
-    | "needs_human_review";
+  // Kept in lockstep with the canonical definition in ./types.ts. The script
+  // never pre-judges duplication; an LLM operator is the sole arbiter of whether
+  // a report duplicates an existing GH issue.
+  proposed_action: "create_issue" | "skip" | "needs_human_review";
   dedup_group: string | null;
-  github_issue?: {
-    number: number;
-    title: string;
-    state: "OPEN" | "CLOSED";
-    url: string;
-    closed_at: string | null;
-    match_kind: "report_id" | "source_url" | "discord_message";
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -170,10 +160,6 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
   for (const items of byThread.values()) {
     items.sort((a, b) => a.reported_at.localeCompare(b.reported_at));
   }
-
-  // Track which cards have already been seen as primary reports across threads
-  // Maps lowercase card name → first report_id that claimed it
-  const primaryCardsSeen = new Map<string, string>();
 
   const result: TriageItem[] = [];
 
@@ -318,27 +304,23 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
           extraction_confidence: r.extraction_confidence,
           source_url: sourceUrl,
           parser_status: parserStatus,
-          proposed_action: "append_to_existing",
+          // Same-thread follow-up from the original reporter — context for the
+          // thread's primary report, not its own issue. Publish files one issue
+          // per thread from the primary, so this item is skipped.
+          proposed_action: "skip",
           dedup_group,
         });
         continue;
       }
 
       // --- First in thread (primary candidate) ---
-
-      // Determine dedup action
-      let proposed_action: TriageItem["proposed_action"];
-
-      if (r.cards.length === 0 || r.extraction_confidence < 0.7) {
-        proposed_action = "needs_human_review";
-      } else if (dedup_group !== null && primaryCardsSeen.has(dedup_group)) {
-        proposed_action = "append_to_existing";
-      } else {
-        proposed_action = "create_issue";
-        if (dedup_group !== null) {
-          primaryCardsSeen.set(dedup_group, r.report_id);
-        }
-      }
+      // Low-signal primaries go to the operator; everything else is a candidate
+      // issue. The script does NOT guess duplicates — the LLM operator decides
+      // whether a candidate duplicates an existing GH issue.
+      const proposed_action: TriageItem["proposed_action"] =
+        r.cards.length === 0 || r.extraction_confidence < 0.7
+          ? "needs_human_review"
+          : "create_issue";
 
       const classification: TriageClassification = threadHasPrimary
         ? "additional_report"

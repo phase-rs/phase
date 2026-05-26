@@ -29,6 +29,7 @@ export interface RegisterHostRequest {
   matchConfig: MatchConfig;
   formatConfig: FormatConfig | null;
   aiSeats: unknown[];
+  startWhenFull?: boolean;
   roomName: string | null;
   /** Draft-specific metadata. When set, the lobby entry is badged as a
    *  draft pod with set code and draft kind. */
@@ -77,7 +78,12 @@ export type LookupJoinTargetResult =
 export interface BrokerClient {
   readonly serverInfo: ServerInfo;
   registerHost(req: RegisterHostRequest): Promise<RegisteredGame>;
-  updateMetadata(gameCode: string, currentPlayers: number, maxPlayers: number): void;
+  updateMetadata(
+    gameCode: string,
+    currentPlayers: number,
+    maxPlayers: number,
+    consumedReservationTokens?: string[],
+  ): void;
   unregister(gameCode: string): Promise<void>;
   close(): void;
 }
@@ -168,18 +174,29 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
             room_name: req.roomName,
             host_peer_id: req.hostPeerId,
             draft_metadata: req.draftMetadata,
+            start_when_full: req.startWhenFull ?? true,
           },
         }),
       );
     });
   };
 
-  const updateMetadata = (gameCode: string, currentPlayers: number, maxPlayers: number): void => {
+  const updateMetadata = (
+    gameCode: string,
+    currentPlayers: number,
+    maxPlayers: number,
+    consumedReservationTokens: string[] = [],
+  ): void => {
     if (closed || ws.readyState !== WebSocket.OPEN) return;
     ws.send(
       JSON.stringify({
         type: "UpdateLobbyMetadata",
-        data: { game_code: gameCode, current_players: currentPlayers, max_players: maxPlayers },
+        data: {
+          game_code: gameCode,
+          current_players: currentPlayers,
+          max_players: maxPlayers,
+          consumed_reservation_tokens: consumedReservationTokens,
+        },
       }),
     );
   };
@@ -229,6 +246,13 @@ export interface ResolveGuestOptions {
    * pass `Infinity`.
    */
   timeoutMs?: number;
+  reservationToken?: string | null;
+}
+
+export interface LookupJoinTargetOptions extends ResolveGuestOptions {
+  reserve?: boolean;
+  displayName?: string | null;
+  releaseReservationToken?: string | null;
 }
 
 /**
@@ -350,6 +374,7 @@ export function resolveGuestOver(
           deck: { main_deck: [], sideboard: [], commander: [] },
           display_name: "",
           password: password ?? null,
+          reservation_token: opts.reservationToken ?? null,
         },
       }),
     );
@@ -360,7 +385,7 @@ export function lookupJoinTargetOver(
   socket: PhaseSocket,
   code: string,
   password?: string,
-  opts: ResolveGuestOptions = {},
+  opts: LookupJoinTargetOptions = {},
 ): Promise<LookupJoinTargetResult> {
   const { ws } = socket;
   const { signal, timeoutMs = 10_000 } = opts;
@@ -458,6 +483,9 @@ export function lookupJoinTargetOver(
         data: {
           game_code: code,
           password: password ?? null,
+          reserve: opts.reserve ?? false,
+          display_name: opts.displayName ?? null,
+          release_reservation_token: opts.releaseReservationToken ?? null,
         },
       }),
     );

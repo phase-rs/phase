@@ -1,7 +1,7 @@
 //! Atomic parsing combinators for numbers, mana symbols, colors, counters, and P/T modifiers.
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until, take_while_m_n};
+use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
 use nom::character::complete::{char, digit1, space0};
 use nom::combinator::{all_consuming, map, map_res, not, opt, peek, recognize, value};
 use nom::multi::{many0, many1};
@@ -10,7 +10,7 @@ use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
 use crate::types::ability::PtValue;
-use crate::types::counter::CounterType;
+use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
@@ -280,11 +280,53 @@ pub fn parse_counter_type_typed(input: &str) -> OracleResult<'_, CounterType> {
         map(parse_pt_modifier, |(power, toughness)| {
             crate::types::counter::parse_counter_type(&format!("{power:+}/{toughness:+}"))
         }),
+        map(parse_keyword_counter_name, |raw| {
+            crate::types::counter::parse_counter_type(raw)
+        }),
         map(parse_named_counter_type, |raw| {
+            crate::types::counter::parse_counter_type(raw)
+        }),
+        // CR 122.1b: custom Oracle-named counter types ("hunger", "oil", "page",
+        // "feather", …) are open-ended. Consume one whitespace-delimited token
+        // and let `types::counter::parse_counter_type` map it to
+        // `CounterType::Generic`. Must be the LAST arm so the enumerated
+        // alternatives win when they apply.
+        map(take_till1(|c: char| c.is_whitespace()), |raw: &str| {
             crate::types::counter::parse_counter_type(raw)
         }),
     ))
     .parse(input)
+}
+
+/// Parse a keyword counter name: "flying", "first strike", "double strike", etc.
+///
+/// CR 122.1b: A keyword counter on a permanent causes that object to gain the
+/// named keyword (flying, first strike, double strike, deathtouch, decayed,
+/// exalted, haste, hexproof, indestructible, lifelink, menace, reach, shadow,
+/// trample, vigilance).
+///
+/// SOURCE OF TRUTH: `crate::types::counter::KEYWORD_COUNTERS`
+/// (`crates/engine/src/types/counter.rs:53`). The parser iterates that table
+/// and applies nom `tag()` to each entry, so additions to the table
+/// automatically become parseable keyword counters.
+///
+/// Multi-word entries (`first strike`, `double strike`) MUST come before any
+/// single-word entry whose name could be a prefix of them — nom `alt` commits
+/// to the first arm that matches. No current single-word keyword name is a
+/// prefix of `first` or `double`, but the ordering is preserved as a
+/// non-negotiable invariant for future additions.
+fn parse_keyword_counter_name(input: &str) -> OracleResult<'_, &str> {
+    for (name, _) in KEYWORD_COUNTERS {
+        let parsed: OracleResult<'_, &str> = tag(*name).parse(input);
+        if parsed.is_ok() {
+            return parsed;
+        }
+    }
+
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Tag,
+    )))
 }
 
 /// Parse a named counter type: "loyalty", "charge", "lore", "defense", etc.
@@ -308,7 +350,10 @@ fn parse_named_counter_type(input: &str) -> OracleResult<'_, &str> {
         tag("verse"),
         tag("level"),
         tag("vitality"),
-        tag("vigilance"),
+        // `vigilance` lives in `parse_keyword_counter_name` per CR 122.1b
+        // (keyword counters) — it is NOT a named counter. Listing it in both
+        // alt branches would be dead code: the keyword-counter combinator runs
+        // first in `parse_counter_type_typed`.
         tag("bounty"),
     ))
     .or(alt((
@@ -1220,9 +1265,83 @@ mod tests {
         assert_eq!(rest, " counters");
     }
 
+    /// CR 122.1b: an unrecognized single-word counter type ("hunger", "page",
+    /// "oil", etc.) is open-ended Oracle text and falls through to
+    /// `CounterType::Generic`. This matches the legacy
+    /// `find(whitespace)` + `normalize_counter_type` behavior the combinator
+    /// replaces. The combinator only fails on empty input or input starting
+    /// with whitespace, since no arm can consume zero characters.
     #[test]
-    fn test_parse_counter_type_failure() {
-        assert!(parse_counter_type_typed("unknown_counter").is_err());
+    fn test_parse_counter_type_unknown_falls_back_to_generic() {
+        let (rest, ct) = parse_counter_type_typed("hunger counters").unwrap();
+        assert_eq!(ct, CounterType::Generic("hunger".to_string()));
+        assert_eq!(rest, " counters");
+
+        // Empty input has no token to consume — combinator fails.
+        assert!(parse_counter_type_typed("").is_err());
+    }
+
+    /// CR 122.1b: every entry in `KEYWORD_COUNTERS` must be recognized by
+    /// `parse_keyword_counter_name` and round-trip through `parse_counter_type_typed`
+    /// to the corresponding `CounterType::Keyword(kind)`.
+    #[test]
+    fn test_parse_keyword_counter_name_covers_table() {
+        for (name, kind) in KEYWORD_COUNTERS {
+            // 1. The bare keyword name parses through the keyword combinator.
+            let (rest, raw) = parse_keyword_counter_name(name)
+                .unwrap_or_else(|_| panic!("parse_keyword_counter_name failed for {name:?}"));
+            assert_eq!(raw, *name, "keyword name {name:?}");
+            assert_eq!(rest, "", "keyword name {name:?} should fully consume");
+
+            // 2. End-to-end: "{name} counter on it" → CounterType::Keyword(kind),
+            //    remainder beginning with " counter on it".
+            let input = format!("{name} counter on it");
+            let (rest, ct) = parse_counter_type_typed(&input)
+                .unwrap_or_else(|_| panic!("parse_counter_type_typed failed for {name:?}"));
+            assert_eq!(ct, CounterType::Keyword(*kind), "keyword name {name:?}");
+            assert_eq!(rest, " counter on it", "keyword name {name:?}");
+        }
+    }
+
+    #[test]
+    fn test_keyword_counter_table_is_longest_match_first() {
+        for pair in KEYWORD_COUNTERS.windows(2) {
+            assert!(
+                pair[0].0.len() >= pair[1].0.len(),
+                "KEYWORD_COUNTERS must stay longest-match-first: {:?} before {:?}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+    }
+
+    /// Explicit readability checks for the two multi-word entries — these are
+    /// the cases the previous `.find(whitespace)` slicing broke.
+    #[test]
+    fn test_parse_keyword_counter_name_multi_word() {
+        let (rest, raw) = parse_keyword_counter_name("double strike").unwrap();
+        assert_eq!(raw, "double strike");
+        assert_eq!(rest, "");
+
+        let (rest, raw) = parse_keyword_counter_name("first strike").unwrap();
+        assert_eq!(raw, "first strike");
+        assert_eq!(rest, "");
+
+        // With trailing text the combinator must consume only the keyword name.
+        let (rest, raw) = parse_keyword_counter_name("double strike counter on it").unwrap();
+        assert_eq!(raw, "double strike");
+        assert_eq!(rest, " counter on it");
+    }
+
+    /// CR 122.1b: end-to-end check matching the Avenging Huntbonder trigger
+    /// effect's counter clause through `parse_counter_type_typed`.
+    #[test]
+    fn test_parse_counter_type_typed_double_strike_full_clause() {
+        let (rest, ct) =
+            parse_counter_type_typed("double strike counter on another target attacking creature")
+                .unwrap();
+        assert_eq!(ct, CounterType::Keyword(KeywordKind::DoubleStrike));
+        assert_eq!(rest, " counter on another target attacking creature");
     }
 
     #[test]

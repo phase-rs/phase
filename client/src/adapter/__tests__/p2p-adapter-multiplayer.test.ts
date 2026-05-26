@@ -61,6 +61,36 @@ const mocks = vi.hoisted(() => {
       actions: [],
       autoPassRecommended: false,
     })),
+    getAiAction: vi.fn(async (_difficulty: string, _playerId: number) => null),
+    applySeatMutation: vi.fn(async (_stateJson: string, _mutationJson: string) => ({
+      state: {
+        seats: [{ type: "HostHuman" }, { type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } } }],
+        tokens: ["host", ""],
+        format: {
+          format: "Standard",
+          starting_life: 20,
+          min_players: 2,
+          max_players: 2,
+          deck_size: 60,
+          singleton: false,
+          command_zone: false,
+          commander_damage_threshold: null,
+          range_of_influence: null,
+          team_based: false,
+          uses_commander: false,
+          allow_debug_actions: false,
+        },
+        gameStarted: false,
+      },
+      delta: {
+        mutatedSeats: [1],
+        invalidatedTokens: [],
+        removedAi: [],
+        newAi: [[1, "Medium", { main_deck: [], sideboard: [], commander: [] }]],
+        renumbering: null,
+        nowStarted: false,
+      },
+    })),
     initializeGame: vi.fn(async () => ({ events: [] })),
     setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
   };
@@ -69,6 +99,12 @@ const mockSubmitAction = mocks.submitAction;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
 const mockInitializeGame = mocks.initializeGame;
 const mockSetMultiplayerMode = mocks.setMultiplayerMode;
+interface AsyncMockWithResolvedValueOnce {
+  mockClear: () => void;
+  mockResolvedValueOnce: (value: unknown) => AsyncMockWithResolvedValueOnce;
+}
+const mockGetState = mocks.getState as unknown as AsyncMockWithResolvedValueOnce;
+const mockGetAiAction = mocks.getAiAction as unknown as AsyncMockWithResolvedValueOnce;
 
 vi.mock("../wasm-adapter", () => ({
   WasmAdapter: vi.fn().mockImplementation(() => ({
@@ -80,6 +116,8 @@ vi.mock("../wasm-adapter", () => ({
     getLegalActionsForViewer: mocks.getLegalActionsForViewer,
     getFilteredState: mocks.getFilteredState,
     getViewerSnapshot: mocks.getViewerSnapshot,
+    getAiAction: mocks.getAiAction,
+    applySeatMutation: mocks.applySeatMutation,
     setMultiplayerMode: mocks.setMultiplayerMode,
     dispose: vi.fn(),
   })),
@@ -96,6 +134,8 @@ beforeEach(() => {
   mockGetViewerSnapshot.mockClear();
   mockInitializeGame.mockClear();
   mockSetMultiplayerMode.mockClear();
+  mockGetState.mockClear();
+  mockGetAiAction.mockClear();
 });
 
 afterEach(() => {
@@ -220,6 +260,53 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
     expect(mockSetMultiplayerMode).toHaveBeenCalledWith(true);
+  });
+
+  it("drives AI seats through simultaneous mulligan prompts", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: {
+          type: "Ai",
+          data: { difficulty: "Medium", deck: { type: "Random" } },
+        },
+      },
+    });
+
+    mockGetState
+      .mockResolvedValueOnce({
+        waiting_for: {
+          type: "MulliganDecision",
+          data: {
+            pending: [
+              { player: 0, mulligan_count: 0 },
+              { player: 1, mulligan_count: 0 },
+            ],
+            free_first_mulligan: false,
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        waiting_for: { type: "Priority", data: { player: 0 } },
+      })
+      .mockResolvedValueOnce({
+        waiting_for: { type: "Priority", data: { player: 0 } },
+      });
+    mockGetAiAction.mockResolvedValueOnce({
+      type: "MulliganDecision",
+      data: { choice: { type: "Keep" } },
+    });
+
+    await adapter.initializeGame();
+
+    expect(mockGetAiAction).toHaveBeenCalledWith("Medium", 1);
+    expect(mockSubmitAction).toHaveBeenCalledWith(
+      { type: "MulliganDecision", data: { choice: { type: "Keep" } } },
+      1,
+    );
   });
 
   it("issues unique tokens per guest and includes them in per-seat game_setup", async () => {

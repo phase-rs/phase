@@ -1,6 +1,7 @@
 //! CR 111.1 + CR 111.10 + CR 111.4: Debug-only catalog of pre-defined token
 //! presets. Loaded from `crates/engine/data/known-tokens.toml` (committed
-//! phase-native source generated from mtgish dumps by the `tokens-gen` bin).
+//! phase-native source generated from MTGJSON set token data by the
+//! `tokens-gen` bin).
 //!
 //! The catalog is a fixed engine resource — versioned with code, embedded via
 //! `include_str!`. Frontend reads it through a single WASM export and renders
@@ -12,6 +13,9 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::card::TokenImageRef;
+use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::TokenCharacteristics;
 
 /// CR 111.10: Stable identifier for predefined-ability artifact tokens. Each
@@ -98,6 +102,35 @@ pub struct TokenPreset {
     pub category: TokenCategory,
     pub fidelity: PresetFidelity,
     pub body: TokenCharacteristics,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_card_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_card_refs: Vec<TokenSourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub set_code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub set_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collector_number: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub type_line: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenSourceRef {
+    pub card_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scryfall_oracle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scryfall_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -127,6 +160,104 @@ static PRESETS: LazyLock<Vec<TokenPreset>> = LazyLock::new(|| {
 /// then id for stable display order.
 pub fn known_token_presets() -> &'static [TokenPreset] {
     &PRESETS
+}
+
+pub fn known_token_preset_by_id(id: &str) -> Option<&'static TokenPreset> {
+    known_token_presets().iter().find(|preset| preset.id == id)
+}
+
+pub fn find_exact_token_ref(
+    state: &GameState,
+    source_id: ObjectId,
+    body: &TokenCharacteristics,
+) -> Option<TokenImageRef> {
+    let source = state.objects.get(&source_id);
+    let related_ids = source
+        .map(|obj| obj.source_related_token_ids.as_slice())
+        .unwrap_or(&[]);
+    let source_oracle =
+        source.and_then(|obj| obj.printed_ref.as_ref().map(|r| r.oracle_id.as_str()));
+    let source_face = source.and_then(|obj| obj.printed_ref.as_ref().map(|r| r.face_name.as_str()));
+    let source_name = source
+        .map(|obj| obj.name.as_str())
+        .or_else(|| state.lki_cache.get(&source_id).map(|lki| lki.name.as_str()));
+
+    if related_ids.is_empty() && source_oracle.is_none() && source_name.is_none() {
+        return None;
+    }
+
+    if !related_ids.is_empty() {
+        let mut matches = known_token_presets()
+            .iter()
+            .filter(|preset| related_ids.iter().any(|id| id == &preset.id));
+
+        let first = matches.next()?;
+        if matches.next().is_none() {
+            return first.token_image_ref.clone();
+        }
+
+        let mut matches = known_token_presets().iter().filter(|preset| {
+            related_ids.iter().any(|id| id == &preset.id) && token_body_matches(&preset.body, body)
+        });
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        return first.token_image_ref.clone();
+    }
+
+    let mut matches = known_token_presets().iter().filter(|preset| {
+        if !token_body_matches(&preset.body, body) {
+            return false;
+        }
+        if let Some(oracle_id) = source_oracle {
+            return preset.source_card_refs.iter().any(|source_ref| {
+                source_ref.scryfall_oracle_id.as_deref() == Some(oracle_id)
+                    && source_face.is_none_or(|face| {
+                        source_ref
+                            .face_name
+                            .as_deref()
+                            .is_none_or(|candidate| candidate == face)
+                    })
+            });
+        }
+        if let Some(name) = source_name {
+            return preset
+                .source_card_names
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(name));
+        }
+        false
+    });
+
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    first.token_image_ref.clone()
+}
+
+fn token_body_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
+    a.display_name == b.display_name
+        && a.power == b.power
+        && a.toughness == b.toughness
+        && sorted_debug(&a.core_types) == sorted_debug(&b.core_types)
+        && sorted_strings(&a.subtypes) == sorted_strings(&b.subtypes)
+        && sorted_debug(&a.supertypes) == sorted_debug(&b.supertypes)
+        && sorted_debug(&a.colors) == sorted_debug(&b.colors)
+        && sorted_debug(&a.keywords) == sorted_debug(&b.keywords)
+}
+
+fn sorted_strings(values: &[String]) -> Vec<&str> {
+    let mut out: Vec<&str> = values.iter().map(String::as_str).collect();
+    out.sort_unstable();
+    out
+}
+
+fn sorted_debug<T: std::fmt::Debug>(values: &[T]) -> Vec<String> {
+    let mut out: Vec<String> = values.iter().map(|value| format!("{value:?}")).collect();
+    out.sort_unstable();
+    out
 }
 
 #[cfg(test)]

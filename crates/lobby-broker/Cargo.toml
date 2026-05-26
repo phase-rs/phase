@@ -1,0 +1,20 @@
+[package]
+name = "lobby-broker"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+# WASM-safe matchmaking-broker core (functional-core / imperative-shell).
+# Deliberately has NO tokio, NO axum, NO SystemTime::now(), NO rand: time and
+# randomness are injected via `BrokerEnv` so the same logic runs in the native
+# phase-server shell and a Cloudflare Durable Object (WASM) shell.
+#
+# Depends on the typed engine config leaf types (FormatConfig, MatchConfig,
+# DeckData, GameFormat) per plan decision B1. The WASM-size B-gate measured a
+# config-only stub at 404 KB raw / 364 KB wasm-opt'd — LTO strips GameState /
+# parser / database, so a `phase-config` split is NOT required.
+[dependencies]
+engine = { path = "../engine" }
+serde = { workspace = true }
+serde_json = { version = "1", features = ["raw_value"] }
+tracing = { workspace = true }

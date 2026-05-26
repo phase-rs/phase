@@ -10,7 +10,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::{Keyword, ProtectionTarget};
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::statics::{BlockExceptionKind, StaticMode};
@@ -240,6 +240,16 @@ pub fn place_attacking_alongside(
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;
 
+    // CR 508.1c: Attack restrictions make the declaration illegal if disobeyed.
+    if let Some(max) = max_attackers_each_combat(state) {
+        if attacker_ids.len() as u32 > max {
+            return Err(format!(
+                "No more than {} creature(s) can attack each combat",
+                max
+            ));
+        }
+    }
+
     for &id in attacker_ids {
         let obj = state
             .objects
@@ -287,12 +297,32 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
                 return Err(format!("{:?} has Defender", id));
             }
         }
+        // CR 508.1 + CR 101.2 + CR 109.5: Intrinsic CantAttack statics live ON the
+        // attacker; remote CantAttack statics (e.g. Angelic Arbiter restricting
+        // opponents' creatures via an `affected` filter) live elsewhere and are
+        // resolved through the shared `check_static_ability` building block, which
+        // matches `def.affected` against this attacker and applies any
+        // per-affected-player gate.
         if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
             matches!(
                 sd.mode,
                 StaticMode::CantAttack | StaticMode::CantAttackOrBlock
             )
-        }) {
+        }) || crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CantAttack,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(id),
+                ..Default::default()
+            },
+        ) || crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CantAttackOrBlock,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(id),
+                ..Default::default()
+            },
+        ) {
             return Err(format!("{:?} can't attack", id));
         }
 
@@ -309,6 +339,15 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
     }
 
     Ok(())
+}
+
+fn max_attackers_each_combat(state: &GameState) -> Option<u32> {
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(_, def)| match def.mode {
+            StaticMode::MaxAttackersEachCombat { max } => Some(max),
+            _ => None,
+        })
+        .min()
 }
 
 /// Iterate every battlefield `StaticDefinition` whose mode is a block-restriction
@@ -382,6 +421,26 @@ pub fn validate_blockers_for_player(
     player: PlayerId,
     assignments: &[(ObjectId, ObjectId)],
 ) -> Result<(), String> {
+    // CR 509.1b: Block restrictions make the declaration illegal if disobeyed.
+    if let Some(max) = max_blockers_each_combat(state) {
+        let already_declared = state
+            .combat
+            .as_ref()
+            .map(|combat| combat.blocker_to_attacker.keys().count())
+            .unwrap_or(0);
+        let newly_declared = assignments
+            .iter()
+            .map(|(blocker_id, _)| *blocker_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if (already_declared + newly_declared) as u32 > max {
+            return Err(format!(
+                "No more than {} creature(s) can block each combat",
+                max
+            ));
+        }
+    }
+
     // Detect duplicate (blocker, attacker) pairs — the Vec-based blocker_to_attacker
     // no longer prevents this implicitly like the old HashMap<ObjectId, ObjectId> did.
     {
@@ -519,43 +578,17 @@ pub fn validate_blockers_for_player(
             }
         }
 
-        // CR 702.16e: Protection — a creature with protection can't be blocked by
-        // creatures with the specified quality.
+        // CR 702.16f: Protection — an attacking creature with protection can't
+        // be blocked by creatures with the stated quality.
         for kw in &attacker.keywords {
-            match kw {
-                Keyword::Protection(ProtectionTarget::Color(color))
-                    if blocker.color.contains(color) =>
-                {
+            if let Keyword::Protection(target) = kw {
+                if crate::game::keywords::source_matches_protection_target(
+                    target, attacker, blocker,
+                ) {
                     return Err(format!(
-                        "{:?} cannot block {:?} (protection from {:?})",
-                        blocker_id, attacker_id, color
+                        "{blocker_id:?} cannot block {attacker_id:?} (protection)",
                     ));
                 }
-                Keyword::Protection(ProtectionTarget::Multicolored) if blocker.color.len() > 1 => {
-                    return Err(format!(
-                        "{:?} cannot block {:?} (protection from multicolored)",
-                        blocker_id, attacker_id
-                    ));
-                }
-                // CR 702.16: ChosenColor resolves from the source permanent's chosen_attributes
-                Keyword::Protection(ProtectionTarget::ChosenColor) => {
-                    if let Some(color) = attacker.chosen_color() {
-                        if blocker.color.contains(&color) {
-                            return Err(format!(
-                                "{:?} cannot block {:?} (protection from chosen color {:?})",
-                                blocker_id, attacker_id, color
-                            ));
-                        }
-                    }
-                }
-                // CR 702.16j: Protection from everything — blocked by no creature.
-                Keyword::Protection(ProtectionTarget::Everything) => {
-                    return Err(format!(
-                        "{:?} cannot block {:?} (protection from everything)",
-                        blocker_id, attacker_id
-                    ));
-                }
-                _ => {}
             }
         }
 
@@ -675,35 +708,20 @@ pub fn validate_blockers_for_player(
         }
     }
 
-    // CR 702.111b: Menace — must be blocked by two or more creatures or not at all.
+    // CR 702.111b (Menace) + CR 509.1b ("can't be blocked except by N or more
+    // creatures"): an attacker that is blocked at all must be blocked by at least
+    // its required number of creatures — "or not at all." `blockers_per_attacker`
+    // only holds attackers with >= 1 assigned blocker, so iterating it enforces
+    // the "or not at all" clause for free. `min_blockers_required` is the single
+    // authority that unifies the menace floor (2) with any MinBlockers floor and
+    // is the same value surfaced to the UI via `block_requirements`.
     for (attacker_id, blockers) in &blockers_per_attacker {
-        if let Some(attacker) = state.objects.get(attacker_id) {
-            if attacker.has_keyword(&Keyword::Menace) && blockers.len() < 2 {
-                return Err(format!(
-                    "{:?} has menace and must be blocked by 2+ creatures",
-                    attacker_id
-                ));
-            }
-        }
-    }
-
-    // CR 509.1b: "can't be blocked except by N or more creatures" — a minimum-
-    // blocker count restriction (the generalization of Menace, CR 702.111b).
-    // Independent of the Menace gate above: a creature that is both Menace and
-    // MinBlockers { min } correctly requires >= max(2, min) blockers.
-    for (attacker_id, blockers) in &blockers_per_attacker {
-        for (_src, sd) in block_restriction_statics_against(state, *attacker_id) {
-            if let StaticMode::CantBeBlockedExceptBy {
-                kind: BlockExceptionKind::MinBlockers { min },
-            } = &sd.mode
-            {
-                if (blockers.len() as u32) < *min {
-                    return Err(format!(
-                        "{:?} can't be blocked except by {}+ creatures",
-                        attacker_id, min
-                    ));
-                }
-            }
+        let required = min_blockers_required(state, *attacker_id);
+        if (blockers.len() as u32) < required {
+            return Err(format!(
+                "{:?} must be blocked by {} or more creatures",
+                attacker_id, required
+            ));
         }
     }
 
@@ -1569,6 +1587,15 @@ pub fn declare_blockers_for_player(
     Ok(())
 }
 
+fn max_blockers_each_combat(state: &GameState) -> Option<u32> {
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(_, def)| match def.mode {
+            StaticMode::MaxBlockersEachCombat { max } => Some(max),
+            _ => None,
+        })
+        .min()
+}
+
 /// CR 509.1h + CR 702.49a: Returns ObjectIds of attackers that were never blocked.
 /// Per CR 509.1h, a creature remains blocked for the rest of combat even if all
 /// blockers are removed. This function checks the `blocked` flag set at blocker
@@ -1635,6 +1662,25 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                         StaticMode::CantAttack | StaticMode::CantAttackOrBlock
                     )
                 })
+                // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
+                // (Angelic Arbiter restricting opponents' creatures) resolved via
+                // the shared `check_static_ability` building block.
+                && !crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CantAttack,
+                    &crate::game::static_abilities::StaticCheckContext {
+                        target_id: Some(*id),
+                        ..Default::default()
+                    },
+                )
+                && !crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CantAttackOrBlock,
+                    &crate::game::static_abilities::StaticCheckContext {
+                        target_id: Some(*id),
+                        ..Default::default()
+                    },
+                )
                 // CR 302.6: delegate to the single authority for summoning
                 // sickness — folds in Haste at query time without duplicating
                 // the flag/keyword logic here.
@@ -1679,14 +1725,17 @@ pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
             // CR 509.1a: Mirror turns.rs:1394-1396 — player-scoped block targets.
             let valid_block_targets = get_valid_block_targets_for_player(state, player);
             let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+            let block_requirements = block_requirements_for_player(state, player);
             if let crate::types::game_state::WaitingFor::DeclareBlockers {
                 valid_blocker_ids: ids,
                 valid_block_targets: targets,
+                block_requirements: reqs,
                 ..
             } = &mut state.waiting_for
             {
                 *ids = valid_blocker_ids;
                 *targets = valid_block_targets;
+                *reqs = block_requirements;
             }
         }
         _ => {}
@@ -1818,28 +1867,10 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         }
     }
     for kw in &attacker.keywords {
-        match kw {
-            Keyword::Protection(ProtectionTarget::Color(color))
-                if blocker.color.contains(color) =>
-            {
+        if let Keyword::Protection(target) = kw {
+            if crate::game::keywords::source_matches_protection_target(target, attacker, blocker) {
                 return false;
             }
-            Keyword::Protection(ProtectionTarget::Multicolored) if blocker.color.len() > 1 => {
-                return false;
-            }
-            // CR 702.16: ChosenColor resolves from the source permanent's chosen_attributes
-            Keyword::Protection(ProtectionTarget::ChosenColor) => {
-                if let Some(color) = attacker.chosen_color() {
-                    if blocker.color.contains(&color) {
-                        return false;
-                    }
-                }
-            }
-            // CR 702.16j: Protection from everything — blocked by no creature.
-            Keyword::Protection(ProtectionTarget::Everything) => {
-                return false;
-            }
-            _ => {}
         }
     }
     if attacker.has_keyword(&Keyword::Flying)
@@ -1945,6 +1976,60 @@ pub fn get_valid_block_targets_for_player(
                 .objects
                 .get(blocker_id)
                 .is_some_and(|blocker| blocker.controller == player)
+        })
+        .collect()
+}
+
+/// CR 702.111b (Menace) + CR 509.1b ("can't be blocked except by N or more
+/// creatures"): the minimum number of creatures that must block this attacker
+/// *if it is blocked at all*. Menace imposes a floor of 2; each applicable
+/// `MinBlockers { min }` static imposes a floor of `min`; a creature with both
+/// requires `max(2, min)`. Returns 1 when no such restriction applies (the
+/// trivial case — blocking is then unconstrained in count).
+///
+/// This is the single authority for the requirement: `validate_blocks` enforces
+/// it and `block_requirements_for_player` surfaces it to the UI, so the count a
+/// player sees can never disagree with the count the engine enforces.
+pub fn min_blockers_required(state: &GameState, attacker_id: ObjectId) -> u32 {
+    let mut min = 1;
+    if state
+        .objects
+        .get(&attacker_id)
+        .is_some_and(|attacker| attacker.has_keyword(&Keyword::Menace))
+    {
+        min = min.max(2);
+    }
+    for (_src, sd) in block_restriction_statics_against(state, attacker_id) {
+        if let StaticMode::CantBeBlockedExceptBy {
+            kind: BlockExceptionKind::MinBlockers { min: n },
+        } = &sd.mode
+        {
+            min = min.max(*n);
+        }
+    }
+    min
+}
+
+/// For one defending player, the per-attacker minimum-blocker requirement for
+/// every attacker attacking them that needs more than one blocker. Attackers
+/// with the trivial requirement of 1 are omitted so the map carries only the
+/// cases the UI needs to surface (menace / "N or more creatures"). Mirrors the
+/// shape of `get_valid_block_targets_for_player` for the `DeclareBlockers` state.
+pub fn block_requirements_for_player(
+    state: &GameState,
+    player: PlayerId,
+) -> HashMap<ObjectId, u32> {
+    let combat = match state.combat.as_ref() {
+        Some(c) => c,
+        None => return HashMap::new(),
+    };
+    combat
+        .attackers
+        .iter()
+        .filter(|a| a.defending_player == player)
+        .filter_map(|a| {
+            let required = min_blockers_required(state, a.object_id);
+            (required > 1).then_some((a.object_id, required))
         })
         .collect()
 }
@@ -2166,6 +2251,24 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                             )
                         },
                     )
+                    // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
+                    // (Angelic Arbiter) resolved via `check_static_ability`.
+                    && !crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CantAttack,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(*id),
+                            ..Default::default()
+                        },
+                    )
+                    && !crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CantAttackOrBlock,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(*id),
+                            ..Default::default()
+                        },
+                    )
                     && (obj.has_keyword(&Keyword::Haste)
                         || obj.entered_battlefield_turn.is_some_and(|etb| etb < turn))
             })
@@ -2177,8 +2280,10 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::StaticDefinition;
     use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
 
     fn setup() -> GameState {
@@ -2215,6 +2320,67 @@ mod tests {
         let mut state = setup();
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
         assert!(validate_attackers(&state, &[id]).is_ok());
+    }
+
+    /// CR 508.1 + CR 109.5: Angelic Arbiter — "Each opponent who cast a spell this
+    /// turn can't attack with creatures." The remote CantAttack static (with
+    /// `affected = opponents' creatures`) must be enforced in combat, gated on the
+    /// attacking creature's controller having cast a spell THIS turn. This
+    /// discriminates the prior misparse (affected = SelfRef, which never restricted
+    /// opponents' creatures, so the post-cast assertion would fail).
+    #[test]
+    fn angelic_arbiter_attack_lock_only_after_opponent_casts() {
+        let mut state = setup();
+        // Opponent-controlled (PlayerId(1)) Angelic Arbiter clause on battlefield.
+        let arbiter = create_creature(&mut state, PlayerId(1), "Angelic Arbiter", 5, 6);
+        let def = parse_static_line(
+            "Each opponent who cast a spell this turn can't attack with creatures.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        state
+            .objects
+            .get_mut(&arbiter)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        // Player 0 (the Arbiter-controller's opponent, and the active player) has an
+        // attack-ready creature.
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // Player 0 has NOT cast a spell this turn -> creature is a valid attacker.
+        // On main (SelfRef misparse) this also passes; the discriminator is below.
+        assert!(
+            get_valid_attacker_ids(&state).contains(&attacker),
+            "creature must be a legal attacker before its controller casts a spell"
+        );
+        assert!(validate_attackers(&state, &[attacker]).is_ok());
+
+        // Record a spell cast by player 0 this turn.
+        let spell = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Some Spell".to_string(),
+            crate::types::zones::Zone::Stack,
+        );
+        let spell_obj = state.objects.get(&spell).unwrap().clone();
+        crate::game::restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(0),
+            &spell_obj,
+            crate::types::game_state::CastingVariant::Normal,
+        );
+
+        // Now the remote CantAttack prohibition applies -> creature is excluded and
+        // declaration is illegal. On main this assertion FAILS (SelfRef never
+        // restricts opponents' creatures).
+        assert!(
+            !get_valid_attacker_ids(&state).contains(&attacker),
+            "after its controller casts a spell, the creature can't attack"
+        );
+        assert!(validate_attackers(&state, &[attacker]).is_err());
     }
 
     #[test]
@@ -3276,6 +3442,35 @@ mod tests {
         assert!(validate_blockers(&state, &[(green_blocker, attacker)]).is_ok());
     }
 
+    #[test]
+    fn protection_from_artifacts_prevents_artifact_creature_blocking() {
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::ProtectionTarget;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Protected Attacker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::CardType(
+                "artifacts".to_string(),
+            )));
+
+        let artifact_blocker = create_creature(&mut state, PlayerId(1), "Artifact Blocker", 1, 1);
+        state
+            .objects
+            .get_mut(&artifact_blocker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        assert!(!can_block_pair(&state, artifact_blocker, attacker));
+        assert!(validate_blockers(&state, &[(artifact_blocker, attacker)]).is_err());
+    }
+
     // --- Fear tests ---
 
     #[test]
@@ -3452,6 +3647,48 @@ mod tests {
 
         // Blocking two attackers should succeed with ExtraBlockers { count: Some(1) }
         assert!(validate_blockers(&state, &[(blocker, attacker1), (blocker, attacker2)]).is_ok());
+    }
+
+    #[test]
+    fn max_blockers_each_combat_counts_previous_defending_players() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        let attacker1 = create_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        let attacker2 = create_creature(&mut state, PlayerId(0), "Bear B", 2, 2);
+        let blocker1 = create_creature(&mut state, PlayerId(1), "Guard A", 1, 1);
+        let blocker2 = create_creature(&mut state, PlayerId(2), "Guard B", 1, 1);
+        let arbiter_card_id = CardId(state.next_object_id);
+        let arbiter = create_object(
+            &mut state,
+            arbiter_card_id,
+            PlayerId(0),
+            "Silent Arbiter".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&arbiter)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MaxBlockersEachCombat {
+                max: 1,
+            }));
+
+        let mut combat = CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(attacker1, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker2, PlayerId(2)),
+            ],
+            blockers_declared_by: vec![PlayerId(1)],
+            ..Default::default()
+        };
+        combat.blocker_to_attacker.insert(blocker1, vec![attacker1]);
+        state.combat = Some(combat);
+
+        assert!(
+            validate_blockers_for_player(&state, PlayerId(2), &[(blocker2, attacker2)]).is_err()
+        );
     }
 
     #[test]

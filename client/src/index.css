@@ -392,6 +392,116 @@ body {
   clip-path: polygon(0 0, 100% 0, 100% calc(100% - 4px), 50% 100%, 0 calc(100% - 4px));
 }
 
+.summoning-sickness-underwater {
+  position: absolute;
+  z-index: 11;
+  pointer-events: none;
+  border-radius: 9999px;
+  clip-path: ellipse(50% 50% at 50% 50%);
+  opacity: 0.54;
+  mix-blend-mode: screen;
+  background:
+    radial-gradient(ellipse at 52% 44%, rgba(234, 255, 245, 0.52), rgba(124, 236, 255, 0.2) 38%, transparent 72%),
+    repeating-radial-gradient(ellipse at 46% 48%, rgba(231, 255, 247, 0.38) 0 1px, transparent 2px 9px);
+  filter: blur(0.12px);
+  animation: summoning-sickness-underwater 3.4s ease-in-out infinite;
+}
+
+.summoning-sickness-underwater::before {
+  content: "";
+  position: absolute;
+  inset: -18%;
+  border-radius: inherit;
+  background:
+    repeating-linear-gradient(
+      168deg,
+      transparent 0 7px,
+      rgba(225, 255, 248, 0.26) 8px 10px,
+      transparent 11px 17px
+    ),
+    repeating-linear-gradient(
+      24deg,
+      transparent 0 10px,
+      rgba(126, 232, 255, 0.12) 11px 12px,
+      transparent 13px 22px
+    );
+  transform: translateX(-6%) skewY(-8deg);
+  animation: summoning-sickness-ripples 4.8s linear infinite;
+}
+
+.summoning-sickness-underwater::after {
+  content: "";
+  position: absolute;
+  inset: 7%;
+  border: 1px solid rgba(230, 255, 250, 0.34);
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 0 5px rgba(116, 232, 255, 0.08),
+    0 0 10px rgba(224, 255, 247, 0.22);
+  transform: scale(1.01);
+  animation: summoning-sickness-outer-ring 3.8s ease-in-out infinite;
+}
+
+.summoning-sickness-underwater--fullCard {
+  top: 18%;
+  left: 10%;
+  width: 80%;
+  height: 32%;
+}
+
+.summoning-sickness-underwater--artCrop {
+  inset: 8% 10%;
+}
+
+@keyframes summoning-sickness-underwater {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+
+  50% {
+    transform: translate(1px, -1px) scale(1.03);
+  }
+
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+}
+
+@keyframes summoning-sickness-ripples {
+  0% {
+    transform: translateX(-10%) skewY(-9deg);
+  }
+
+  100% {
+    transform: translateX(10%) skewY(-7deg);
+  }
+}
+
+@keyframes summoning-sickness-outer-ring {
+  0% {
+    opacity: 0.72;
+    transform: scale(0.98);
+  }
+
+  50% {
+    opacity: 0.94;
+    transform: scale(1.04);
+  }
+
+  100% {
+    opacity: 0.72;
+    transform: scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .summoning-sickness-underwater,
+  .summoning-sickness-underwater::before,
+  .summoning-sickness-underwater::after {
+    animation: none;
+  }
+}
+
 /* Debug layout bounds — toggled via Ctrl+Shift+D */
 .debug-bounds [data-debug-label] {
   outline: 2px solid color-mix(in srgb, currentColor 60%, transparent);

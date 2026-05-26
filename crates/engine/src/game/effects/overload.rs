@@ -294,7 +294,7 @@ mod tests {
     fn counter_preserved_unchanged() {
         let mut def = leaf(Effect::Counter {
             target: creature_filter(),
-            source_static: None,
+            source_rider: None,
         });
         transform_ability_def(&mut def);
         assert!(matches!(*def.effect, Effect::Counter { .. }));

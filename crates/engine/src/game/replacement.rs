@@ -387,6 +387,41 @@ fn damage_modification_for_rid(
         .clone()
 }
 
+/// Look up the `ShieldKind` of the matched replacement (object-hosted or pending
+/// registry), using the same `rid.source == ObjectId(0)` sentinel discriminator
+/// as `damage_modification_for_rid`.
+fn shield_kind_for_rid(state: &GameState, rid: ReplacementId) -> Option<ShieldKind> {
+    if rid.source == ObjectId(0) {
+        return state
+            .pending_damage_replacements
+            .get(rid.index)
+            .map(|repl| repl.shield_kind);
+    }
+    state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        .map(|repl| repl.shield_kind)
+}
+
+/// CR 614.9: Read back the captured chosen-object recipient stashed in the
+/// matched replacement's `redirect_target` field (set at resolution time for
+/// `DamageRedirectTarget::ChosenObjectTarget` — "to target creature").
+fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Option<ObjectId> {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    };
+    match repl.and_then(|r| r.redirect_target.as_ref()) {
+        Some(TargetFilter::SpecificObject { id }) => Some(*id),
+        _ => None,
+    }
+}
+
 /// CR 614.1a: Apply damage modification or prevention from the replacement definition.
 fn damage_done_applier(
     event: ProposedEvent,
@@ -429,11 +464,96 @@ fn damage_done_applier(
                 }
                 // CR 614.1a: Flat override — replace event amount with `value`.
                 DamageModification::SetTo { value } => value,
+                // CR 614.1a: Life floor — cap damage so target player's life
+                // stays at or above `minimum`. For a player target, computes
+                // `max(0, life_total - minimum)`. For creature targets, no-ops
+                // (non-player targets have no life total to floor).
+                DamageModification::LifeFloor { minimum } => {
+                    if let TargetRef::Player(pid) = target {
+                        let life = state
+                            .players
+                            .iter()
+                            .find(|p| p.id == pid)
+                            .map(|p| p.life)
+                            .unwrap_or(0);
+                        if life < minimum {
+                            amount
+                        } else {
+                            let max_damage = life.saturating_sub(minimum).max(0) as u32;
+                            amount.min(max_damage)
+                        }
+                    } else {
+                        amount
+                    }
+                }
             };
+            // CR 614.5: A one-shot effect-created amount replacement (Desperate
+            // Gambit) gets a single opportunity, then is consumed. Continuous
+            // statics (Furnace of Rath) keep `ShieldKind::None` and are never
+            // consumed here — they re-apply to every damage event.
+            if let Some(ShieldKind::DamageReplacementOneShot) = shield_kind_for_rid(state, rid) {
+                consume_prevention_shield(state, rid, None);
+            }
             return ApplyResult::Modified(ProposedEvent::Damage {
                 source_id,
                 target,
                 amount: new_amount,
+                is_combat,
+                applied,
+            });
+        }
+        return ApplyResult::Modified(event);
+    }
+
+    // Branch 1b: CR 614.9 — one-shot redirection shield. Replace the damage
+    // event's recipient with the redirection target, then consume the shield.
+    if let Some(ShieldKind::Redirection { recipient }) = shield_kind_for_rid(state, rid) {
+        if let ProposedEvent::Damage {
+            source_id,
+            target,
+            amount,
+            is_combat,
+            applied,
+        } = event
+        {
+            // CR 614.7a: A source that would deal 0 damage deals no damage at
+            // all — there is no damage event to redirect. Pass through and do
+            // not consume the shield (no opportunity was spent).
+            if amount == 0 {
+                return ApplyResult::Modified(ProposedEvent::Damage {
+                    source_id,
+                    target,
+                    amount,
+                    is_combat,
+                    applied,
+                });
+            }
+
+            let chosen = redirect_chosen_object_for_rid(state, rid);
+            let new_recipient =
+                super::effects::create_damage_replacement::resolve_redirect_recipient(
+                    state, recipient, rid.source, chosen,
+                )
+                .filter(|new_target| {
+                    super::effects::create_damage_replacement::redirect_recipient_is_legal(
+                        state, new_target,
+                    )
+                });
+
+            // CR 614.5: The one-shot opportunity is spent on this event whether
+            // or not the redirection succeeds — consume the shield in both the
+            // success and the "does nothing" (illegal recipient per CR 614.9)
+            // outcomes.
+            consume_prevention_shield(state, rid, None);
+
+            // CR 614.9: A legal recipient takes the damage instead; an illegal
+            // one (left the battlefield, no longer a battle/creature/planeswalker,
+            // or a player who left the game) makes the redirection do nothing,
+            // so the damage stays on the original recipient.
+            return ApplyResult::Modified(ProposedEvent::Damage {
+                source_id,
+                target: new_recipient.unwrap_or(target),
+                amount,
                 is_combat,
                 applied,
             });
@@ -2011,8 +2131,7 @@ fn is_prevention_disabled(state: &GameState, proposed: &ProposedEvent) -> bool {
                 )
             }
         },
-        GameRestriction::CastOnlyFromZones { .. } => false,
-        GameRestriction::CantCastSpells { .. } => false,
+        GameRestriction::ProhibitActivity { .. } => false,
     })
 }
 
@@ -2075,6 +2194,7 @@ fn matches_damage_target_filter(
         match scope {
             DamageTargetPlayerScope::Any => true,
             DamageTargetPlayerScope::Opponent => player != repl_controller,
+            DamageTargetPlayerScope::Controller => player == repl_controller,
             DamageTargetPlayerScope::Specific(specific) => player == *specific,
         }
     }
@@ -2412,6 +2532,28 @@ fn evaluate_replacement_condition(
             }
             _ => false,
         },
+        // CR 614.1d: "if you control [N or more] [filter]" — replacement applies only
+        // while the controller has at least `minimum` permanents matching `filter` on
+        // the battlefield. minimum=1 covers the singular "a [type]" form (Worship);
+        // higher values cover "N or more [type]" forms (Lair of the Hydra, etc.).
+        //
+        // Source-exclusion is handled by `FilterProp::Another` injected by the parser
+        // when the Oracle text says "other" (e.g. "two or more other lands"). When the
+        // text does NOT say "other" (e.g. Worship's "if you control a creature"), the
+        // source MUST count toward its own condition — relevant when the source itself
+        // satisfies the filter (e.g. Worship animated into a creature). Do not add a
+        // hardcoded `o.id != source_id` here; it would silently override the filter.
+        ReplacementCondition::IfControlsMatching { minimum, filter } => {
+            let ctx = FilterContext::from_source_with_controller(source_id, controller);
+            let matching_count = state
+                .objects
+                .values()
+                .filter(|o| {
+                    o.zone == Zone::Battlefield && matches_target_filter(state, o.id, filter, &ctx)
+                })
+                .count();
+            matching_count >= *minimum as usize
+        }
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.
@@ -5246,6 +5388,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(999),
             controller: owner_controller,
+            attach_to: None,
         }
     }
 
@@ -5459,6 +5602,129 @@ mod tests {
             None,
             &dummy_begin_turn_event(),
         ));
+    }
+
+    /// CR 614.1d: `IfControlsMatching` with `minimum: 1` and a "creature" filter
+    /// must count the source itself when the source satisfies the filter and the
+    /// Oracle text does NOT say "other" (no `FilterProp::Another`). Models
+    /// Worship's "if you control a creature" once Worship has been animated into
+    /// a creature — the condition is self-satisfying and the replacement still
+    /// applies. Regression guard: a previous revision hardcoded
+    /// `o.id != source_id`, which silently broke this case.
+    #[test]
+    fn if_controls_matching_counts_self_when_filter_lacks_another() {
+        use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let source = ObjectId(10);
+        let mut state = test_state_with_object(source, Zone::Battlefield, Vec::new());
+        // Animate the source into a creature — the only creature on the battlefield.
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let cond = ReplacementCondition::IfControlsMatching {
+            minimum: 1,
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        };
+
+        assert!(
+            evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &dummy_begin_turn_event(),
+            ),
+            "source itself must count toward 'if you control a creature' when no \
+             FilterProp::Another is present (Worship-when-animated case)"
+        );
+    }
+
+    /// CR 614.1d: `IfControlsMatching` with `FilterProp::Another` in the filter
+    /// must NOT count the source — exclusion is filter-driven, not hardcoded.
+    /// Models Lair of the Hydra's "if you control two or more other lands": the
+    /// land itself, plus exactly one other land, must NOT satisfy `minimum: 2`.
+    #[test]
+    fn if_controls_matching_excludes_self_via_another_prop() {
+        use crate::types::ability::{
+            ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+
+        let source = ObjectId(10);
+        let other_land = ObjectId(11);
+        let mut state = test_state_with_object(source, Zone::Battlefield, Vec::new());
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let mut other = GameObject::new(
+            other_land,
+            CardId(2),
+            PlayerId(0),
+            "Other Land".to_string(),
+            Zone::Battlefield,
+        );
+        other.card_types.core_types.push(CoreType::Land);
+        state.objects.insert(other_land, other);
+        state.battlefield.push_back(other_land);
+
+        let cond = ReplacementCondition::IfControlsMatching {
+            minimum: 2,
+            filter: TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                type_filters: vec![TypeFilter::Land],
+                properties: vec![FilterProp::Another],
+            }),
+        };
+
+        // With only one OTHER land, condition is false (source excluded by Another).
+        assert!(
+            !evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &dummy_begin_turn_event(),
+            ),
+            "FilterProp::Another must exclude the source from the count"
+        );
+
+        // Add a second other land — now condition is true.
+        let third = ObjectId(12);
+        let mut third_obj = GameObject::new(
+            third,
+            CardId(3),
+            PlayerId(0),
+            "Third Land".to_string(),
+            Zone::Battlefield,
+        );
+        third_obj.card_types.core_types.push(CoreType::Land);
+        state.objects.insert(third, third_obj);
+        state.battlefield.push_back(third);
+
+        assert!(
+            evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                source,
+                &state,
+                None,
+                &dummy_begin_turn_event(),
+            ),
+            "two other lands satisfy `minimum: 2` with Another excluding source"
+        );
     }
 
     #[test]
@@ -5969,6 +6235,66 @@ mod tests {
         match result {
             ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
                 assert_eq!(amount, 0);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_does_not_increase_damage() {
+        let repl = damage_repl(DamageModification::LifeFloor { minimum: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 10;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(2), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 2);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_caps_damage_that_would_go_below_floor() {
+        let repl = damage_repl(DamageModification::LifeFloor { minimum: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 5;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(10), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 4);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_does_not_apply_when_already_below_floor() {
+        let repl = damage_repl(DamageModification::LifeFloor { minimum: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 0;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(3), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 3);
             }
             other => panic!("Expected Modified Damage, got {other:?}"),
         }
@@ -7185,6 +7511,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
+            attach_to: None,
         };
         let repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
@@ -7211,6 +7538,7 @@ mod tests {
             sacrifice_at: None,
             source_id: chatterfang,
             controller: PlayerId(0),
+            attach_to: None,
         };
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -7281,6 +7609,7 @@ mod tests {
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
+                attach_to: None,
             }
         }
 

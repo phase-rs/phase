@@ -1,24 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
-import { isValidWebSocketUrl } from "../../services/serverDetection";
+import {
+  SERVER_PRESETS,
+  isValidWebSocketUrl,
+} from "../../services/serverDetection";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { menuButtonClass } from "../menu/buttonStyles";
-
-interface ServerPreset {
-  label: string;
-  url: string;
-  hint?: string;
-}
-
-/**
- * Canonical regions. Kept as a static list rather than fetched because the
- * set moves slowly and the cost of a client update is lower than the cost of
- * a runtime dependency on a region manifest endpoint.
- */
-const PRESETS: ServerPreset[] = [
-  { label: "US (default)", url: "wss://us.phase-rs.dev/ws" },
-];
+import { ServerFlag } from "./ServerFlag";
 
 interface ServerPickerProps {
   onClose: () => void;
@@ -30,9 +20,10 @@ interface ServerPickerProps {
 type ConnTestState = "idle" | "testing" | "ok" | "fail";
 
 export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
+  const { t } = useTranslation("multiplayer");
   const currentUrl = useMultiplayerStore((s) => s.serverAddress);
   const [customUrl, setCustomUrl] = useState(
-    PRESETS.some((p) => p.url === currentUrl) ? "" : currentUrl,
+    SERVER_PRESETS.some((p) => p.url === currentUrl) ? "" : currentUrl,
   );
   const [error, setError] = useState<string | null>(null);
   const [connTest, setConnTest] = useState<ConnTestState>("idle");
@@ -87,7 +78,7 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
   const applyUrl = (url: string) => {
     const trimmed = url.trim();
     if (!isValidWebSocketUrl(trimmed)) {
-      setError("URL must start with ws:// or wss://");
+      setError(t("serverPicker.urlError"));
       return;
     }
     if (trimmed !== currentUrl) {
@@ -106,13 +97,13 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
         transition={{ duration: 0.15 }}
         className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md"
       >
-        <h2 className="text-base font-semibold text-white">Server</h2>
+        <h2 className="text-base font-semibold text-white">{t("serverPicker.title")}</h2>
         <p className="mt-1 text-xs text-slate-400">
-          Pick a region, or connect to a self-hosted instance.
+          {t("serverPicker.subtitle")}
         </p>
 
         <div className="mt-4 flex flex-col gap-2">
-          {PRESETS.map((preset) => {
+          {SERVER_PRESETS.map((preset) => {
             const isActive = preset.url === currentUrl;
             return (
               <button
@@ -126,7 +117,13 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
                     : "border-white/10 bg-black/18 text-gray-200 hover:border-white/18 hover:bg-white/6")
                 }
               >
-                <span className="font-medium">{preset.label}</span>
+                <span className="flex items-center gap-2 font-medium">
+                  <ServerFlag
+                    flag={preset.flag}
+                    className="h-3.5 w-auto rounded-[2px] shadow-sm ring-1 ring-black/20"
+                  />
+                  {preset.label}
+                </span>
                 <span className="font-mono text-[10px] text-slate-500">
                   {preset.url.replace(/^wss?:\/\//, "")}
                 </span>
@@ -151,16 +148,16 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
                 : "border-white/10 bg-black/18 text-gray-200 hover:border-white/18 hover:bg-white/6")
             }
           >
-            <span className="font-medium">None (P2P only)</span>
+            <span className="font-medium">{t("serverPicker.noneLabel")}</span>
             <span className="font-mono text-[10px] text-slate-500">
-              direct codes
+              {t("serverPicker.directCodes")}
             </span>
           </button>
         </div>
 
         <div className="mt-4 border-t border-white/8 pt-4">
           <label className="block text-[0.6rem] uppercase tracking-[0.22em] text-slate-500">
-            Self-hosted
+            {t("serverPicker.selfHosted")}
           </label>
           <form
             onSubmit={(e) => {
@@ -177,7 +174,7 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
                 setError(null);
                 setConnTest("idle");
               }}
-              placeholder="wss://your-server.example/ws"
+              placeholder={t("serverPicker.customUrlPlaceholder")}
               className="flex-1 rounded-[14px] bg-black/18 px-3 py-1.5 font-mono text-xs text-white placeholder-gray-600 outline-none ring-1 ring-white/10 focus:ring-white/20"
             />
             <button
@@ -190,7 +187,7 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
                 disabled: !customUrl.trim() || connTest === "testing",
               })}
             >
-              Test
+              {t("serverPicker.test")}
             </button>
             <button
               type="submit"
@@ -201,20 +198,20 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
                 disabled: !customUrl.trim(),
               })}
             >
-              Use
+              {t("serverPicker.use")}
             </button>
           </form>
           {error && (
             <p className="mt-2 text-xs text-rose-300">{error}</p>
           )}
           {connTest === "ok" && (
-            <p className="mt-2 text-xs text-emerald-300">Connected</p>
+            <p className="mt-2 text-xs text-emerald-300">{t("serverPicker.connected")}</p>
           )}
           {connTest === "fail" && (
-            <p className="mt-2 text-xs text-rose-300">Connection failed</p>
+            <p className="mt-2 text-xs text-rose-300">{t("serverPicker.connectionFailed")}</p>
           )}
           {connTest === "testing" && (
-            <p className="mt-2 text-xs text-slate-400">Testing…</p>
+            <p className="mt-2 text-xs text-slate-400">{t("serverPicker.testing")}</p>
           )}
         </div>
 
@@ -224,7 +221,7 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
             onClick={onClose}
             className={menuButtonClass({ tone: "neutral", size: "sm" })}
           >
-            Close
+            {t("common:actions.close")}
           </button>
         </div>
       </motion.div>

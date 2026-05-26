@@ -328,14 +328,49 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::UnlessBounceChoice { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
+        // CR 608.2d: SearchPartitionChoice requires EXACTLY primary_count cards —
+        // an empty selection is illegal. Deterministically take the first
+        // primary_count of the found set for the battlefield (rest auto-route).
+        WaitingFor::SearchPartitionChoice {
+            cards,
+            primary_count,
+            ..
+        } => Some(GameAction::SelectCards {
+            cards: cards
+                .iter()
+                .take(*primary_count as usize)
+                .copied()
+                .collect(),
+        }),
         WaitingFor::OutsideGameChoice { choices, count, .. } => {
-            Some(GameAction::ChooseOutsideGameCards {
-                sideboard_indices: choices
-                    .iter()
-                    .flat_map(|choice| (0..choice.entry.count).map(move |_| choice.sideboard_index))
-                    .take(*count)
-                    .collect(),
-            })
+            // CR 400.11 + CR 406.3: Take the first `count` available picks
+            // across the unified sideboard + face-up-exile pool. Sideboard
+            // entries can be picked up to their remaining `count`; face-up
+            // exile entries are unique objects (count fixed at 1) per the
+            // resolver. The selection wire format is one discriminated
+            // `OutsideGameSelection` per pick.
+            use engine::types::actions::OutsideGameSelection;
+            use engine::types::game_state::OutsideGameChoiceSource;
+            let selections: Vec<OutsideGameSelection> = choices
+                .iter()
+                .flat_map(|choice| {
+                    let count = choice.count as usize;
+                    (0..count).map(move |_| match &choice.source {
+                        OutsideGameChoiceSource::Sideboard {
+                            sideboard_index, ..
+                        } => OutsideGameSelection::Sideboard {
+                            sideboard_index: *sideboard_index,
+                        },
+                        OutsideGameChoiceSource::FaceUpExile { object_id } => {
+                            OutsideGameSelection::FaceUpExile {
+                                object_id: *object_id,
+                            }
+                        }
+                    })
+                })
+                .take(*count)
+                .collect();
+            Some(GameAction::ChooseOutsideGameCards { selections })
         }
 
         // Sylvan Library-style choices: topdeck the required cards rather than
@@ -370,6 +405,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
+
+        // Disjunctive activation costs: default to the first payable branch.
+        WaitingFor::ActivationCostOneOfChoice {
+            player,
+            costs,
+            pending_cast,
+        } => costs
+            .iter()
+            .position(|cost| cost.is_payable(state, *player, pending_cast.object_id))
+            .map(|index| GameAction::ChooseActivationCostBranch { index }),
         // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
         // the choice (let the effect resolve), mirroring `UnlessPayment`'s
         // pessimistic-default policy.
@@ -607,12 +652,18 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
-        // Copy retarget: keep current targets.
+        // Copy retarget: keep current targets when present; freshly cast
+        // prepare/paradigm copies start empty, so choose the first legal target.
         WaitingFor::CopyRetarget { target_slots, .. } => {
-            let targets: Vec<_> = target_slots.iter().map(|s| s.current.clone()).collect();
-            Some(GameAction::RetargetSpell {
-                new_targets: targets,
-            })
+            let targets: Option<Vec<_>> = target_slots
+                .iter()
+                .map(|slot| {
+                    slot.current
+                        .clone()
+                        .or_else(|| slot.legal_alternatives.first().cloned())
+                })
+                .collect();
+            targets.map(|new_targets| GameAction::RetargetSpell { new_targets })
         }
 
         // Assign combat damage: all damage to first blocker or zero.
@@ -677,11 +728,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                 ManaChoicePrompt::SingleColor { options } => {
                     options.first().map(|&color| GameAction::ChooseManaColor {
                         choice: ManaChoice::SingleColor(color),
+                        count: 1,
                     })
                 }
                 ManaChoicePrompt::Combination { options } => {
                     options.first().map(|combo| GameAction::ChooseManaColor {
                         choice: ManaChoice::Combination(combo.clone()),
+                        count: 1,
                     })
                 }
                 ManaChoicePrompt::AnyCombination { count, options } => {
@@ -694,6 +747,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                     ];
                     Some(GameAction::ChooseManaColor {
                         choice: ManaChoice::Combination(combo),
+                        count: 1,
                     })
                 }
             }
@@ -765,6 +819,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::BeholdForCost { .. }
         | WaitingFor::TapCreaturesForSpellCost { .. }
         | WaitingFor::ExileForCost { .. }
+        | WaitingFor::RemoveCounterForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. } => {
             // These are all pending-cast states — the has_pending_cast guard
@@ -1167,16 +1222,13 @@ pub(crate) fn deterministic_choice(
             .iter()
             .map(|&id| (id, evaluate_card_value(state, id)))
             .collect();
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let graveyard_count = scored.len().div_ceil(2);
-        let to_graveyard: Vec<_> = scored
-            .iter()
-            .take(graveyard_count)
-            .map(|(id, _)| *id)
-            .collect();
-        return Some(GameAction::SelectCards {
-            cards: to_graveyard,
-        });
+        // CR 701.25a: the action is the ordered keep-on-top set; cards left out
+        // are milled. Keep the higher-value half on top (best drawn first) and
+        // let the worse half fall into the graveyard.
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let keep_count = scored.len() / 2;
+        let top_cards: Vec<_> = scored.iter().take(keep_count).map(|(id, _)| *id).collect();
+        return Some(GameAction::SelectCards { cards: top_cards });
     }
 
     if let WaitingFor::RevealChoice { cards, .. } = &state.waiting_for {
@@ -1264,10 +1316,14 @@ pub(crate) fn deterministic_choice(
             .iter()
             .map(|&id| (id, evaluate_card_value(state, id)))
             .collect();
-        let is_opponent_chooser = state
-            .players
-            .iter()
-            .any(|p| p.id == *player && p.id != state.priority_player);
+        // The search optimizes for `ai_player`, so a choice made by any other
+        // player is an opponent's (they pick the highest-value cards for
+        // themselves; the AI picks the lowest when choosing for itself).
+        // Compare against `ai_player`, not `state.priority_player` — under a
+        // turn-control effect (CR 723, e.g. Mindslaver) the latter is the
+        // controller (the authorized submitter), not the chooser, which would
+        // misclassify the controlled player's choice.
+        let is_opponent_chooser = *player != ai_player;
         if is_opponent_chooser {
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         } else {
@@ -2040,6 +2096,7 @@ mod tests {
             reveal: false,
             up_to: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
+            split: None,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -2208,6 +2265,7 @@ mod tests {
                 m.insert(blocker, vec![attacker]);
                 m
             },
+            block_requirements: HashMap::new(),
         };
 
         for difficulty in [
@@ -2299,6 +2357,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            split: None,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);

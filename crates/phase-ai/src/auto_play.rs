@@ -17,6 +17,7 @@ const MAX_AI_ACTIONS_PER_SEQUENCE: usize = 200;
 /// Result of a single AI action: the action taken and the resulting events.
 pub struct AiActionResult {
     pub action: GameAction,
+    pub state: GameState,
     pub events: Vec<GameEvent>,
     pub log_entries: Vec<GameLogEntry>,
 }
@@ -83,6 +84,7 @@ pub fn run_ai_actions(
             Ok(result) => {
                 results.push(AiActionResult {
                     action,
+                    state: state.clone(),
                     events: result.events,
                     log_entries: result.log_entries,
                 });

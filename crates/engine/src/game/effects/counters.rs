@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    CounterTransferMode, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityTag, CounterTransferMode, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
@@ -323,6 +324,7 @@ pub fn resolve_add(
     if let Some(distribution) = &ability.distribution {
         for (target, count) in distribution {
             if let crate::types::ability::TargetRef::Object(obj_id) = target {
+                let event_start = events.len();
                 add_counter_with_replacement(
                     state,
                     ability.controller,
@@ -331,11 +333,19 @@ pub fn resolve_add(
                     *count,
                     events,
                 );
+                emit_evolved_event_for_counter_addition(
+                    ability,
+                    events,
+                    event_start,
+                    *obj_id,
+                    &counter_type,
+                );
             }
         }
     } else {
         let targets = resolve_defined_or_targets(state, ability);
         for obj_id in targets {
+            let event_start = events.len();
             add_counter_with_replacement(
                 state,
                 ability.controller,
@@ -343,6 +353,13 @@ pub fn resolve_add(
                 counter_type.clone(),
                 counter_num,
                 events,
+            );
+            emit_evolved_event_for_counter_addition(
+                ability,
+                events,
+                event_start,
+                obj_id,
+                &counter_type,
             );
         }
     }
@@ -353,6 +370,33 @@ pub fn resolve_add(
     });
 
     Ok(())
+}
+
+fn emit_evolved_event_for_counter_addition(
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    object_id: ObjectId,
+    counter_type: &CounterType,
+) {
+    if ability.context.ability_tag != Some(AbilityTag::Evolve)
+        || *counter_type != CounterType::Plus1Plus1
+    {
+        return;
+    }
+    let evolved = events[event_start..].iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::CounterAdded {
+                object_id: added_to,
+                counter_type: CounterType::Plus1Plus1,
+                count
+            } if *added_to == object_id && *count > 0
+        )
+    });
+    if evolved {
+        events.push(GameEvent::Evolved { object_id });
+    }
 }
 
 /// CR 122.1: Place counters on all battlefield objects matching a filter (no targeting).
@@ -539,6 +583,20 @@ fn resolve_defined_or_targets(
                 .filter_map(|target| match target {
                     TargetRef::Object(id) => Some(id),
                     TargetRef::Player(_) => None,
+                })
+                .collect();
+        }
+    }
+
+    if let Effect::MultiplyCounter { target, .. } = &ability.effect {
+        if ability.targets.is_empty() {
+            let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+            let ctx = crate::game::filter::FilterContext::from_ability(ability);
+            return state
+                .battlefield_phased_in_ids()
+                .into_iter()
+                .filter(|id| {
+                    crate::game::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
                 })
                 .collect();
         }
@@ -839,7 +897,8 @@ pub fn resolve_remove(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::ability::{ControllerRef, QuantityExpr, TargetFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -851,6 +910,16 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    fn mark_creature(state: &mut GameState, object_id: ObjectId) {
+        state
+            .objects
+            .get_mut(&object_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
     }
 
     #[test]
@@ -1060,6 +1129,66 @@ mod tests {
         assert_eq!(state.counter_added_this_turn[0].count, 2);
     }
 
+    #[test]
+    fn multiply_counter_with_no_explicit_targets_expands_filter() {
+        let mut state = GameState::new_two_player(42);
+        let creature_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hydra".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Elf".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [creature_a, creature_b, opponent_creature] {
+            mark_creature(&mut state, id);
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Plus1Plus1, 2);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::MultiplyCounter {
+                counter_type: CounterType::Plus1Plus1,
+                multiplier: 2,
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert_eq!(
+            state.objects[&creature_a].counters[&CounterType::Plus1Plus1],
+            4
+        );
+        assert_eq!(
+            state.objects[&creature_b].counters[&CounterType::Plus1Plus1],
+            4
+        );
+        assert_eq!(
+            state.objects[&opponent_creature].counters[&CounterType::Plus1Plus1],
+            2
+        );
+    }
+
     /// Regression test: SelfRef PutCounter (Ajani's Pridemate trigger) must apply the counter
     /// to the source object even when ability.targets is empty.
     #[test]
@@ -1247,6 +1376,8 @@ mod tests {
                 name: "Essence Channeler".to_string(),
                 power: Some(5),
                 toughness: Some(4),
+                base_power: Some(5),
+                base_toughness: Some(4),
                 mana_value: 2,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

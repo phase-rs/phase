@@ -1228,6 +1228,7 @@ impl GameRunner {
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
+            WaitingFor::SearchPartitionChoice { .. } => "SearchPartitionChoice",
             WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
@@ -1276,6 +1277,7 @@ impl GameRunner {
             WaitingFor::DiscardForCost { .. } => "DiscardForCost",
             WaitingFor::SacrificeForCost { .. } => "SacrificeForCost",
             WaitingFor::ReturnToHandForCost { .. } => "ReturnToHandForCost",
+            WaitingFor::RemoveCounterForCost { .. } => "RemoveCounterForCost",
             WaitingFor::BeholdForCost { .. } => "BeholdForCost",
             WaitingFor::TapCreaturesForSpellCost { .. } => "TapCreaturesForSpellCost",
             WaitingFor::TapCreaturesForManaAbility { .. } => "TapCreaturesForManaAbility",
@@ -1327,6 +1329,7 @@ impl GameRunner {
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
+            WaitingFor::ActivationCostOneOfChoice { .. } => "ActivationCostOneOfChoice",
         }
     }
 

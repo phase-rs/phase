@@ -30,7 +30,7 @@ export function isManaObjectAction(action: GameAction, object: GameObject | unde
 }
 
 /**
- * An action that consumes the source card as a cost and therefore must NOT be
+ * An action with meaningful one-shot consequences that must NOT be
  * auto-dispatched on a single tap — the player must confirm via the choice
  * modal even when it is the only legal action.
  *
@@ -38,17 +38,20 @@ export function isManaObjectAction(action: GameAction, object: GameObject | unde
  * silently destroys a card the player may have intended to play. The same is
  * true of any hand-zone activated ability that discards itself (Channel).
  *
- * The card-consuming judgment is made by the engine and exposed as
- * `ability.consumes_source` (AbilityDefinition::consumes_source) — the frontend
- * never inspects the cost tree. Benign repeatable abilities ({T}: Scry 1,
- * pingers, mana dorks) have `consumes_source === false` and continue to
- * auto-dispatch on a single tap. `PlayLand` / `CastSpell*` / keyword
- * activations are not `ActivateAbility` and so are never gated.
+ * Card-consuming judgment is made by the engine and exposed as
+ * `ability.consumes_source` (AbilityDefinition::consumes_source); the frontend
+ * never inspects the cost tree. Prepared-copy casting is also gated here
+ * because casting the copy unprepares the permanent, so a lone prepared action
+ * needs an explicit "Cast <spell>" affordance instead of a silent click.
+ *
+ * Benign repeatable abilities ({T}: Scry 1, pingers, mana dorks) have
+ * `consumes_source === false` and continue to auto-dispatch on a single tap.
  */
 export function requiresConfirmation(
   action: GameAction,
   object: GameObject | undefined,
 ): boolean {
+  if (action.type === "CastPreparedCopy") return true;
   if (action.type !== "ActivateAbility") return false;
   return object?.abilities?.[action.data.ability_index]?.consumes_source === true;
 }
@@ -58,11 +61,11 @@ export function requiresConfirmation(
  * lone action auto-dispatch, or must the choice modal be shown?"
  *
  * Returns the action to auto-dispatch, or `null` if the choice modal must be
- * shown (either there is not exactly one action, or the one action consumes
- * the source card and so needs explicit player confirmation — see
- * requiresConfirmation). Every interaction call site delegates here; the
- * decision is never re-implemented inline. Issue #506: the bug existed because
- * this branch was duplicated across five call sites.
+ * shown (either there is not exactly one action, or the one action needs
+ * explicit player confirmation — see requiresConfirmation). Every interaction
+ * call site delegates here; the decision is never re-implemented inline. Issue
+ * #506: the bug existed because this branch was duplicated across five call
+ * sites.
  */
 export function resolveSingleActionDispatch(
   actions: GameAction[],

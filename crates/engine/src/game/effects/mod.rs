@@ -5,14 +5,14 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CostPaidObjectSnapshot, Effect,
-    EffectError, EffectKind, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink,
-    TargetFilter, TargetRef,
+    EffectError, EffectKind, EffectOutcomeSignal, FilterProp, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, SharedQuality,
+    SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoMayChoice, DayNight, GameState, LKISnapshot, MayTriggerAutoChoiceKey, PendingContinuation,
-    WaitingFor, ZoneChangeRecord,
+    AutoMayChoice, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
+    MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -50,6 +50,7 @@ pub mod control_next_turn;
 pub mod copy_spell;
 pub mod counter;
 pub mod counters;
+pub mod create_damage_replacement;
 pub mod create_emblem;
 pub mod deal_damage;
 pub mod delayed_trigger;
@@ -62,6 +63,7 @@ pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
+pub mod endure;
 pub mod energy;
 pub mod exchange_control;
 pub mod exile_from_top_until;
@@ -75,6 +77,7 @@ pub mod force_block;
 pub mod gain_control;
 pub mod gift_delivery;
 pub mod goad;
+pub mod grant_extra_loyalty_activations;
 pub mod grant_permission;
 pub mod incubate;
 pub mod investigate;
@@ -208,6 +211,15 @@ pub(crate) fn matches_player_scope(
                     }
                     PlayerFilter::OpponentGainedLife => {
                         p.id != controller && p.life_gained_this_turn > 0
+                    }
+                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
+                    // damage this turn (`damage_dealt_this_turn` ledger).
+                    PlayerFilter::OpponentDealtCombatDamage => {
+                        p.id != controller
+                            && state.damage_dealt_this_turn.iter().any(|r| {
+                                r.is_combat
+                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
+                            })
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -682,6 +694,11 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         name: record.name.clone(),
         power: record.power,
         toughness: record.toughness,
+        // CR 208.4b + CR 613.4b: Carry the layer-7b base values from the
+        // zone-change snapshot so a later `PtComparison { scope: Base }`
+        // evaluation on this LKI reads the base, not the current, value.
+        base_power: record.base_power,
+        base_toughness: record.base_toughness,
         mana_value: record.mana_value,
         controller: record.controller,
         owner: record.owner,
@@ -731,6 +748,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
+            | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::TriggerTargetSelection { .. }
             | WaitingFor::NamedChoice { .. }
@@ -836,15 +854,7 @@ pub(super) fn resolve_optional_effect_decision(
 /// rather than dropped. Predicate helper, not rule-implementing code.
 fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
     match condition {
-        // CR 118.12 optional-cost branch — voluntary performed signal.
-        AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => true,
-        // CR 101.3 + CR 118.12 mandatory-cost branch — mandatory success
-        // signal. Same per-iteration scope lifecycle as `IfYouDo`: meaningful
-        // only inside the surrounding scoped iteration; cannot be evaluated
-        // while a player choice is suspended; must stay inside the scoped
-        // template under `detach_after_player_scope_local_chain`. Refurbished
-        // Familiar / Aclazotz, Deepest Betrayal route through this arm.
-        AbilityCondition::IfCurrentScopeSucceeded => true,
+        AbilityCondition::EffectOutcome { .. } => true,
         AbilityCondition::Not { condition } => condition_depends_on_effect_performed(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(condition_depends_on_effect_performed)
@@ -855,10 +865,12 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
 
 fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> bool {
     match ability.condition {
-        Some(AbilityCondition::Not { ref condition }) => matches!(
-            condition.as_ref(),
-            AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes
-        ),
+        Some(AbilityCondition::Not { ref condition })
+            if condition.is_optional_effect_performed() =>
+        {
+            true
+        }
+        Some(AbilityCondition::Not { .. }) => false,
         // CR 609.3: An `IfYouDo` sub-ability is a valid decline branch when it
         // carries an alternative for the "you didn't" case — either as an
         // explicit `else_ability` ("If you do X. Otherwise Y.") OR as a nested
@@ -868,16 +880,15 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
         // Selecting the `IfYouDo` head here lets `resolve_ability_chain`'s
         // condition-false path descend into the `Not(IfYouDo)` tail so the
         // Insect token is still created when the optional pay is declined.
-        Some(AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes) => {
+        Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        }) => {
             ability.else_ability.is_some()
                 || ability.sub_ability.as_ref().is_some_and(|s| {
                     matches!(
                         &s.condition,
                         Some(AbilityCondition::Not { condition })
-                            if matches!(
-                                condition.as_ref(),
-                                AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes
-                            )
+                            if condition.is_optional_effect_performed()
                     )
                 })
         }
@@ -902,6 +913,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
         | Some(
             AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::EventOutcomeWon
             | AbilityCondition::WhenYouDo
             | AbilityCondition::CastFromZone { .. }
             | AbilityCondition::CastDuringPhase { .. }
@@ -921,6 +933,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::SourceMatchesFilter { .. }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
             | AbilityCondition::ControllerControlsMatching { .. }
+            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
             | AbilityCondition::IsYourTurn
             | AbilityCondition::WasStartingPlayer { .. }
             | AbilityCondition::SpellCastWithVariantThisTurn { .. }
@@ -933,12 +946,9 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::NthResolutionThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            // CR 101.3 + CR 608.2c: The mandatory-impossible decline-tail
-            // condition has its own dispatch path in `evaluate_condition`
-            // (reads `!state.cost_payment_failed_flag`) and is not an
-            // optional-decline branch. Declining an optional effect does not
-            // select an `IfCurrentScopeSucceeded`-gated sub-ability.
-            | AbilityCondition::IfCurrentScopeSucceeded,
+            | AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::CurrentScopeSucceeded,
+            },
         ) => false,
     }
 }
@@ -1034,6 +1044,211 @@ fn split_player_scope_chain(
     (scoped, tail)
 }
 
+/// CR 608.2e: Collect cross-player equalization quantity references from a
+/// `QuantityExpr`. These are the refs whose value would shift as an APNAP
+/// fan-out mutates the board — `ControlledByEachPlayer` (battlefield extremum)
+/// and `HandSize { AllPlayers }` (hand extremum). The per-player `left` operand
+/// of a `Difference` is intentionally NOT collected: it must re-resolve per
+/// iterating player.
+fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a QuantityRef>) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if matches!(
+                qty,
+                QuantityRef::ControlledByEachPlayer { .. }
+                    | QuantityRef::HandSize {
+                        player: PlayerScope::AllPlayers { .. }
+                    }
+            ) {
+                out.push(qty);
+            }
+        }
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => collect_clause_minimum_refs(inner, out),
+        QuantityExpr::Sum { exprs } => {
+            for e in exprs {
+                collect_clause_minimum_refs(e, out);
+            }
+        }
+        QuantityExpr::Difference { left, right } => {
+            collect_clause_minimum_refs(left, out);
+            collect_clause_minimum_refs(right, out);
+        }
+    }
+}
+
+/// CR 608.2e (§8): Capture this `player_scope` link's equalization extrema
+/// against the board as it stands NOW — before the APNAP fan-out begins. The
+/// snapshot is stored on `state.clause_minimum_snapshot` and consulted by the
+/// `ControlledByEachPlayer` / `HandSize { AllPlayers }` resolver arms so every
+/// player in the fan-out sees the same pre-clause minimum.
+///
+/// Always overwrites `state.clause_minimum_snapshot` — to `Some` when the
+/// clause carries a cross-player extremum, to `None` otherwise. This makes
+/// every `player_scope` link entry a fresh per-link reset point, so clause N+1
+/// (whose `after_scope` recursion re-enters the driver) never inherits clause
+/// N's frozen value. It must NOT be cleared on the interactive-pause path:
+/// when clause N pauses mid-fan-out, the remaining clause-N players resume via
+/// `pending_continuation` as bare single-scoped effects that do NOT re-enter
+/// this driver, so they depend on the snapshot persisting. The depth-0
+/// chain-entry clear in `resolve_ability_chain` disposes of any residual
+/// snapshot once the whole resolution ends.
+///
+/// The snapshot field is cleared to `None` as the very first step here, before
+/// any ref is resolved. This makes the live-resolve below genuinely happen with
+/// no stale snapshot in `state` — clause N+1's capture starts from a clean
+/// slate and never reads clause N's frozen value, so each ref evaluates live
+/// exactly once here against the clause's pre-clause board. The safety is
+/// structural rather than relying on the three cards' clauses using
+/// pairwise-distinct `QuantityRef` keys.
+fn capture_clause_minimum_snapshot(state: &mut GameState, scoped_template: &ResolvedAbility) {
+    // CR 608.2e: values are locked when the clause starts resolving, so each
+    // clause must capture against its own pre-clause board.
+    //
+    // Per-link reset: clear any previous clause's snapshot before resolving so
+    // the live-resolve below sees a clean slate and a stale value is never
+    // consulted, even when clause N+1 shares a `QuantityRef` key with clause N.
+    //
+    // The unconditional clear is LOAD-BEARING for clause-independence within a
+    // single Balance resolution: clause N's snapshot may legitimately still be
+    // present here (clause N's `after_scope` recursion intentionally leaves it
+    // for `apply()` to dispose of), and we must NOT inherit it into clause
+    // N+1's capture. This also relies on the single-cell invariant documented
+    // on `ClauseMinimumSnapshot` — any previous snapshot is consumed here by
+    // being overwritten, which is sound only because no nested player-scope
+    // ability-chain resolution occurs during a clause's fan-out (see the
+    // type's doc-comment). If that invariant is ever broken in the future,
+    // the field must become a Vec stack and this unconditional clear must
+    // become a stack push.
+    state.clause_minimum_snapshot = None;
+    let mut exprs = Vec::new();
+    collect_ability_quantity_exprs(scoped_template, &mut exprs);
+    let mut refs: Vec<&QuantityRef> = Vec::new();
+    for expr in exprs {
+        collect_clause_minimum_refs(expr, &mut refs);
+    }
+    if refs.is_empty() {
+        return;
+    }
+    let mut snapshot = ClauseMinimumSnapshot::default();
+    for qty in refs {
+        let value = crate::game::quantity::resolve_quantity_with_targets(
+            state,
+            &QuantityExpr::Ref { qty: qty.clone() },
+            scoped_template,
+        );
+        snapshot.insert(qty.clone(), value);
+    }
+    state.clause_minimum_snapshot = Some(snapshot);
+}
+
+fn collect_ability_quantity_exprs<'a>(
+    ability: &'a ResolvedAbility,
+    out: &mut Vec<&'a QuantityExpr>,
+) {
+    let mut current = Some(ability);
+    while let Some(node) = current {
+        collect_effect_quantity_exprs(&node.effect, out);
+        current = node.sub_ability.as_deref();
+    }
+}
+
+/// The dynamic quantity expressions of an effect, if it carries any whose
+/// equalization extrema must be clause-snapshot.
+fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a QuantityExpr>) {
+    match effect {
+        Effect::ChangeSpeed { amount, .. }
+        | Effect::DealDamage { amount, .. }
+        | Effect::Draw { count: amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. }
+        | Effect::AddCounter { count: amount, .. }
+        | Effect::Sacrifice { count: amount, .. }
+        | Effect::Mill { count: amount, .. }
+        | Effect::Scry { count: amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
+        | Effect::Dig { count: amount, .. }
+        | Effect::Surveil { count: amount, .. }
+        | Effect::Discard { count: amount, .. }
+        | Effect::SearchLibrary { count: amount, .. }
+        | Effect::SearchOutsideGame { count: amount, .. }
+        | Effect::ExileTop { count: amount, .. }
+        | Effect::CopyTokenOf { count: amount, .. }
+        | Effect::PutCounter { count: amount, .. }
+        | Effect::PutCounterAll { count: amount, .. }
+        | Effect::AddPendingETBCounters { count: amount, .. }
+        | Effect::FlipCoins { count: amount, .. }
+        | Effect::Seek { count: amount, .. }
+        | Effect::SetLifeTotal { amount, .. }
+        | Effect::Manifest { count: amount, .. }
+        | Effect::GivePlayerCounter { count: amount, .. }
+        | Effect::GainEnergy { amount, .. }
+        | Effect::Discover {
+            mana_value_limit: amount,
+        }
+        | Effect::PutAtLibraryPosition { count: amount, .. }
+        | Effect::GrantExtraLoyaltyActivations { amount, .. }
+        | Effect::SkipNextTurn { count: amount, .. }
+        | Effect::SkipNextStep { count: amount, .. }
+        | Effect::Incubate { count: amount, .. }
+        | Effect::Amass { count: amount, .. }
+        | Effect::Monstrosity { count: amount, .. }
+        | Effect::Bolster { count: amount, .. }
+        | Effect::Adapt { count: amount, .. } => out.push(amount),
+        Effect::Token {
+            count,
+            enter_with_counters,
+            ..
+        } => {
+            out.push(count);
+            for (_, count) in enter_with_counters {
+                out.push(count);
+            }
+        }
+        Effect::Conjure { cards, .. } => {
+            for card in cards {
+                out.push(&card.count);
+            }
+        }
+        Effect::ChooseDrawnThisTurnPayOrTopdeck {
+            count,
+            life_payment,
+            ..
+        } => {
+            out.push(count);
+            out.push(life_payment);
+        }
+        Effect::PreventDamage { amount_dynamic, .. }
+        | Effect::RevealHand {
+            count: amount_dynamic,
+            ..
+        }
+        | Effect::BounceAll {
+            count: amount_dynamic,
+            ..
+        } => {
+            if let Some(amount) = amount_dynamic {
+                out.push(amount);
+            }
+        }
+        Effect::MoveCounters {
+            count: Some(count), ..
+        } => out.push(count),
+        Effect::ExileFromTopUntil {
+            until: crate::types::ability::UntilCondition::CumulativeThreshold { threshold, .. },
+            ..
+        } => out.push(threshold),
+        _ => {}
+    }
+}
+
 /// CR 601.2c: Extract SharesQuality filter properties from an effect's target filter.
 /// Returns the typed qualities that require group validation.
 fn extract_shares_quality_props(
@@ -1103,10 +1318,11 @@ pub fn resolve_effect(
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
-        Effect::Goad { .. } => goad::resolve(state, ability, events),
+        Effect::Goad { .. } | Effect::GoadAll { .. } => goad::resolve(state, ability, events),
         Effect::Detain { .. } => detain::resolve(state, ability, events),
         Effect::ExchangeControl { .. } => exchange_control::resolve(state, ability, events),
         Effect::Attach { .. } => attach::resolve(state, ability, events),
+        Effect::UnattachAll { .. } => attach::resolve_unattach_all(state, ability, events),
         Effect::ControlNextTurn { .. } => control_next_turn::resolve(state, ability, events),
         Effect::Surveil { .. } => surveil::resolve(state, ability, events),
         Effect::Fight { .. } => fight::resolve(state, ability, events),
@@ -1189,6 +1405,9 @@ pub fn resolve_effect(
         Effect::PayCost { .. } => pay::resolve(state, ability, events),
         Effect::CastFromZone { .. } => cast_from_zone::resolve(state, ability, events),
         Effect::PreventDamage { .. } => prevent_damage::resolve(state, ability, events),
+        Effect::CreateDamageReplacement { .. } => {
+            create_damage_replacement::resolve(state, ability, events)
+        }
         Effect::LoseTheGame => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => roll_die::resolve(state, ability, events),
@@ -1250,15 +1469,19 @@ pub fn resolve_effect(
         Effect::Manifest { .. } => manifest::resolve(state, ability, events),
         Effect::ManifestDread => manifest_dread::resolve(state, ability, events),
         Effect::ExtraTurn { .. } => extra_turn::resolve(state, ability, events),
+        Effect::GrantExtraLoyaltyActivations { .. } => {
+            grant_extra_loyalty_activations::resolve(state, ability, events)
+        }
         Effect::SkipNextStep { .. } => skip_next_step::resolve(state, ability, events),
         Effect::SkipNextTurn { .. } => skip_next_turn::resolve(state, ability, events),
         Effect::Double { .. } => double::resolve(state, ability, events),
         Effect::RuntimeHandled { .. } => Ok(()), // Handled by dedicated engine path
         Effect::Learn => learn::resolve(state, ability, events),
         Effect::BlightEffect { .. } => blight::resolve(state, ability, events),
-        Effect::Forage | Effect::Endure { .. } => {
-            // These keyword actions are recognized by the parser but not yet implemented.
-            // They're no-ops at runtime but count as supported for coverage.
+        Effect::Endure { .. } => endure::resolve(state, ability, events),
+        Effect::Forage => {
+            // This keyword action is recognized by the parser but not yet implemented.
+            // It's a no-op at runtime but counts as supported for coverage.
             Ok(())
         }
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
@@ -1309,7 +1532,7 @@ pub fn is_known_effect(effect: &Effect) -> bool {
 /// what makes compound exile (Suspend Aggression's
 /// "Exile target nonland permanent and the top card of your library ...
 /// for each of those cards") expose both exiled objects to the grant.
-fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
+pub(crate) fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
     ability
         .sub_ability
         .as_deref()
@@ -1451,8 +1674,19 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
     )
 }
 
-fn affected_objects_from_events(effect: &Effect, events: &[GameEvent]) -> Vec<ObjectId> {
+fn affected_objects_from_events(
+    effect: &Effect,
+    events: &[GameEvent],
+    fallback_targets: &[TargetRef],
+) -> Vec<ObjectId> {
     match effect {
+        Effect::GainControl { .. } => fallback_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events
             .iter()
             .filter_map(|event| match event {
@@ -1577,6 +1811,60 @@ fn effect_refs_parent_target(effect: &Effect) -> bool {
     effect_target_filter(effect).is_some_and(filter_refs_parent_target)
 }
 
+/// Every object-target filter slot of an effect that may carry a parent-ref,
+/// INCLUDING slots `target_filter()` hides. Single source of truth for which
+/// slots a member-driven loop inspects for rebinding.
+///
+/// `target_filter()` surfaces exactly one slot, and for some effects it is not
+/// the parent-ref-bearing one:
+///  * `Effect::CopyTokenOf` surfaces the token *owner*, not the copy *source*,
+///    when the source is a context ref (CR 707.2) — Second Harvest's "for each
+///    token you control, create a token that's a copy of that permanent" needs
+///    its `target` (copy source) inspected. The arm fires ONLY when the source
+///    is a context ref (`source_filter: None && target.is_context_ref()`), which
+///    is exactly when `target_filter()` returns `owner` instead of `target`, so
+///    `target` is never double-counted.
+///  * `Effect::Token` surfaces a *targetable* `attach_to` (the single-target
+///    "attached to target creature" host) but hides a *context-ref* `attach_to`
+///    (`ParentTarget`), surfacing `owner` instead. The arm fires ONLY when
+///    `attach_to.is_context_ref()` — exactly when `target_filter()` returns
+///    `owner` rather than `attach_to` — so the filter is never double-counted.
+///    Asinine Antics' "for each opponent creature, create a Cursed Role attached
+///    to that creature" rebinds through this hidden `ParentTarget` slot.
+///  * `Effect::Attach` surfaces `target` but hides `attachment`; the arm fires
+///    only when `attachment.is_context_ref()`, mirroring the guards above (a
+///    non-context-ref `attachment` can never be a parent-ref, so excluding it
+///    cannot change the gate result).
+///
+/// NOTE: the `_ => {}` arm means "no hidden object slot beyond `target_filter()`".
+/// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
+/// an arm here, or its for-each parent-ref form won't rebind.
+fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
+    let mut slots: Vec<&TargetFilter> = effect_target_filter(effect).into_iter().collect();
+    match effect {
+        Effect::CopyTokenOf {
+            target,
+            source_filter: None,
+            ..
+        } if target.is_context_ref() => slots.push(target),
+        Effect::Token {
+            attach_to: Some(f), ..
+        } if f.is_context_ref() => slots.push(f),
+        Effect::Attach { attachment, .. } if attachment.is_context_ref() => slots.push(attachment),
+        _ => {}
+    }
+    slots
+}
+
+/// True if any object-target slot of the effect references the per-iteration
+/// object via a parent context ref. Member-driven `repeat_for: ObjectCount`
+/// loops use this to decide whether to rebind the parent target each iteration.
+fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
+    effect_parent_ref_slots(effect)
+        .iter()
+        .any(|f| filter_refs_parent_target(f))
+}
+
 /// Recurse into compound filters so a wrapped `ParentTargetController` is
 /// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
 fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
@@ -1691,6 +1979,18 @@ pub(crate) fn resolve_player_for_context_ref(
     // into a sub-ability with empty targets, so a sub Draw whose filter is
     // `Controller` would otherwise pick up the parent's Player target.
     if !target_filter.is_context_ref() {
+        if let Some(player) = ability.targets.iter().find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            _ => None,
+        }) {
+            return player;
+        }
+    }
+    // CR 608.2c: A chained player anaphor can use `ParentTarget` when the
+    // parent target was itself a player ("that library" after "target player's
+    // library"). Object-target uses of `ParentTarget` continue through the
+    // object/controller resolution paths below.
+    if matches!(target_filter, TargetFilter::ParentTarget) {
         if let Some(player) = ability.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),
             _ => None,
@@ -1873,6 +2173,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Reveal { target, .. }
         | Effect::Fight { target, .. }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Transform { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::CopyTokenOf { target, .. }
@@ -1886,6 +2187,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::PutOnTopOrBottom { target, .. }
         | Effect::ChangeTargets { target, .. }
         | Effect::ExtraTurn { target, .. }
+        | Effect::GrantExtraLoyaltyActivations { target, .. }
         | Effect::Double { target, .. }
         // CR 608.2k + CR 603.7c: "that player" sub-effects carry an event-context
         // target (TriggeringPlayer/DefendingPlayer/etc.) that auto-resolves from
@@ -2070,6 +2372,12 @@ pub fn resolve_ability_chain(
         state.last_effect_amount = None;
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
+        // CR 608.2e: The clause-local equalization snapshot is resolution-
+        // scoped. It is overwritten per `player_scope` link within a chain
+        // (and survives the interactive `EffectZoneChoice` drain, which
+        // resumes at depth 1), so clearing it only at depth-0 chain entry
+        // disposes of any residue without disturbing an in-flight Balance.
+        state.clause_minimum_snapshot = None;
         // CR 603.7: Chain-local tracked-set identity — resets per top-level
         // ability resolution so compound zone changes within one chain
         // coalesce into a single tracked set, while unrelated resolutions
@@ -2253,6 +2561,13 @@ fn resolve_chain_body(
 
         let initial_waiting_for = state.waiting_for.clone();
         let mut paused = false;
+        // CR 608.2e: each clause's equalization minimum is fixed when that
+        // clause begins; the snapshot is per `player_scope` link, captured
+        // before fan-out (the board is now exactly the clause's pre-clause
+        // state) and cleared when the link completes — so clause N+1 re-enters
+        // the driver with the field `None` and re-captures against the
+        // post-clause-N board. See §8 of the Balance plan.
+        capture_clause_minimum_snapshot(state, &scoped_template);
         for (i, pid) in matching_players.iter().enumerate() {
             let mut scoped = scoped_template.clone();
             // CR 608.2c + CR 101.3: Each scoped iteration is a fresh
@@ -2294,6 +2609,13 @@ fn resolve_chain_body(
                     }
                     tail = Some(Box::new(remaining_scoped));
                 }
+                // CR 608.2e: do NOT clear the clause snapshot here — the
+                // remaining clause-N players resume via `pending_continuation`
+                // as bare single-scoped effects (no `player_scope`, so they do
+                // not re-enter this driver to re-capture) and must see the same
+                // frozen extremum. The next `player_scope` link's
+                // `capture_clause_minimum_snapshot` overwrites it; `apply()`
+                // disposes of any residue once resolution ends.
                 if tail.is_some() {
                     append_to_pending_continuation(state, tail);
                 }
@@ -2315,7 +2637,11 @@ fn resolve_chain_body(
         }
         let affected_ids = if next_sub_needs_tracked_set(ability) || after_scope_needs_linked_exile
         {
-            affected_objects_from_events(&scoped_template.effect, scoped_events)
+            affected_objects_from_events(
+                &scoped_template.effect,
+                scoped_events,
+                &scoped_template.targets,
+            )
         } else {
             Vec::new()
         };
@@ -2334,6 +2660,11 @@ fn resolve_chain_body(
             publish_tracked_set(state, affected_ids);
         }
         if !paused {
+            // CR 608.2e: this `player_scope` clause has completed. Clear its
+            // frozen values before running any following instruction; if the
+            // tail is another `player_scope` clause, that recursive entry will
+            // capture its own fresh snapshot against the post-this-clause board.
+            state.clause_minimum_snapshot = None;
             if let Some(after_scope) = after_scope {
                 resolve_ability_chain(state, &after_scope, events, depth + 1)?;
             }
@@ -2808,50 +3139,85 @@ fn resolve_chain_body(
                 source_id: ability.source_id,
             });
         } else {
-            // CR 609.3: Execute the effect N times when repeat_for is set.
+            // CR 603.7 + CR 608.2c + CR 109.5: Per-iteration parent-target
+            // rebinding. When the body references the iterated object via a
+            // context ref (`ParentTarget` / `ParentTargetController`), each
+            // iteration must bind to a distinct member so the per-iteration
+            // subject is the i-th object — not always `effective.targets[0]`.
+            //
+            // Two member sources:
+            //  * `TrackedSetSize` — a set populated by a prior chain effect
+            //    (Winds of Abandon: each exiled creature's controller searches
+            //    their own library).
+            //  * `ObjectCount { filter }` — "For each [object], <verb> that
+            //    object" with no prior set (Second Harvest copies each token you
+            //    control; Cleansing destroys each land; Cut the Tethers bounces
+            //    each token). Snapshot the matching objects at loop start (CR
+            //    608.2) so objects created/affected mid-loop don't enter the
+            //    iteration — e.g., the copies Second Harvest creates are not
+            //    themselves copied.
+            //
+            // The `ObjectCount` member set is resolved against `effective` (the
+            // event-context-resolved ability) and DRIVES the iteration count, so
+            // count and bound objects come from one snapshot and cannot diverge —
+            // including the empty case (0 members ⇒ 0 iterations). The
+            // `TrackedSetSize` path keeps the existing quantity-driven count.
+            let mut member_driven = false;
+            let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> =
+                match &ability.repeat_for {
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize,
+                    }) if effect_refs_parent_target(&effective.effect) => state
+                        .chain_tracked_set_id
+                        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                        .unwrap_or_default(),
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    }) if effect_iterates_over_parent_target(&effective.effect) => {
+                        member_driven = true;
+                        // Same resolver as `QuantityRef::ObjectCount`'s count, on
+                        // the same `effective` ability, so members and count match
+                        // (including `OtherThanTriggerObject` handling).
+                        let ctx = filter::FilterContext::from_ability(effective);
+                        crate::game::quantity::object_count_matching_ids(
+                            state,
+                            filter,
+                            &ctx,
+                            effective.source_id,
+                        )
+                    }
+                    _ => Vec::new(),
+                };
+
+            // CR 609.3 + CR 608.2: Execute the effect N times when repeat_for is
+            // set. A `member_driven` ObjectCount loop takes its count from the
+            // snapshotted members (resolved against `effective`), keeping count and
+            // bindings in lockstep even when the set is empty.
             // CR 107.3a: Variable("X") must resolve via resolve_quantity_with_targets
             // so that ability.chosen_x (the paid X value) is passed through. The
             // plain resolve_quantity path passes chosen_x=None, causing X to always
             // resolve to 0 and the loop to never execute (Torment of Hailfire bug).
-            let iterations = if let Some(ref qty) = ability.repeat_for {
+            let iterations = if member_driven {
+                iter_tracked_members.len()
+            } else if let Some(ref qty) = ability.repeat_for {
                 crate::game::quantity::resolve_quantity_with_targets(state, qty, ability).max(0)
                     as usize
             } else {
                 1
             };
 
-            // CR 603.7 + CR 608.2c + CR 109.5: Per-iteration parent-target
-            // rebinding for tracked-set iterations. When `repeat_for ==
-            // TrackedSetSize` and the effect references the parent target via
-            // a context-ref filter (e.g., `ParentTargetController`,
-            // `ParentTarget`), each iteration must bind to a different member
-            // of the tracked set so the per-iteration acting subject is the
-            // i-th tracked object's controller (Winds of Abandon, where each
-            // exiled creature's controller searches their own library).
-            //
-            // Without this rebind, every iteration sees `effective.targets[0]`
-            // — the first exiled creature only — and only that creature's
-            // controller would search.
-            let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> = if matches!(
-                ability.repeat_for,
-                Some(crate::types::ability::QuantityExpr::Ref {
-                    qty: crate::types::ability::QuantityRef::TrackedSetSize
-                })
-            )
-                && effect_refs_parent_target(&effective.effect)
-            {
-                state
-                    .chain_tracked_set_id
-                    .and_then(|id| state.tracked_object_sets.get(&id).cloned())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
             let initial_waiting_for = state.waiting_for.clone();
             let mut iteration = 0usize;
             while iteration < iterations {
-                // Snapshot per-iteration ability with parent-target rebinding when applicable.
+                // Snapshot per-iteration ability with parent-target rebinding when
+                // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
+                // member-driven card has exactly ONE parent-ref object slot. Second
+                // Harvest's copy source, and Asinine Antics' `attach_to: ParentTarget`
+                // (whose `owner: Controller` is a player ref, not an object slot, and
+                // whose `effective.targets` is empty) each push exactly one
+                // `TargetRef::Object(member)`. The `Effect::Attach`-under-for-each
+                // case (two sequential object slots) has zero reachable card
+                // consumers and is deferred — see `effect_parent_ref_slots`.
                 let mut iter_ability;
                 let iter_effective: &ResolvedAbility =
                     if let Some(member) = iter_tracked_members.get(iteration) {
@@ -2951,7 +3317,11 @@ fn resolve_chain_body(
     //     creatures" after a mass counter instruction means the permanents that
     //     actually received counters.
     if next_sub_needs_tracked_set(ability) {
-        let affected_ids = affected_objects_from_events(&ability.effect, &events[events_before..]);
+        let affected_ids = affected_objects_from_events(
+            &ability.effect,
+            &events[events_before..],
+            &ability.targets,
+        );
         publish_tracked_set(state, affected_ids);
     }
 
@@ -3369,7 +3739,7 @@ fn resolve_chain_body(
 /// Returns whether the condition is met. Handles all `AbilityCondition` variants as
 /// pure boolean evaluators — callers are responsible for any terminal control flow
 /// (e.g., "Instead" overrides that early-return in the sub-ability context).
-fn evaluate_condition(
+pub(crate) fn evaluate_condition(
     condition: &AbilityCondition,
     state: &GameState,
     ability: &ResolvedAbility,
@@ -3391,19 +3761,22 @@ fn evaluate_condition(
                 .context
                 .additional_cost_paid_matches(*variant, kicker_cost.as_ref(), *min_count)
         }
-        AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
-            ability.context.optional_effect_performed && !state.cost_payment_failed_flag
-        }
-        // CR 101.3 + CR 608.2c: "For each opponent who can't ..." — the
-        // mandatory-parent counterpart to `IfYouDo`. Reads
-        // `cost_payment_failed_flag` at gate time. Flag is reset per scope
-        // iteration at effects/mod.rs (the player-scope driver loop) and set
-        // by mandatory-impossible handlers (discard.rs:162, sacrifice.rs:205,
-        // change_zone.rs:469) during the iteration. At sub_ability dispatch
-        // time (synchronous descent path, OR resumption path via
-        // drain_pending_continuation), the flag reflects exactly this
-        // iteration's mandatory-success bit.
-        AbilityCondition::IfCurrentScopeSucceeded => !state.cost_payment_failed_flag,
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        } => ability.context.optional_effect_performed && !state.cost_payment_failed_flag,
+        // CR 101.3 + CR 608.2c: "For each opponent who can't ..." reads the
+        // current player-scope iteration's mandatory-success bit. The flag is
+        // reset per scope iteration and set by mandatory-impossible handlers
+        // during that iteration.
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::CurrentScopeSucceeded,
+        } => !state.cost_payment_failed_flag,
+        AbilityCondition::EventOutcomeWon => state
+            .current_trigger_event
+            .as_ref()
+            .map_or(ability.context.optional_effect_performed, |event| {
+                event_outcome_was_won_by_controller(event, ability.controller)
+            }),
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
         // the resolution" of the parent. For a cost-payment parent
@@ -3650,6 +4023,13 @@ fn evaluate_condition(
                     && crate::game::filter::matches_target_filter(state, o.id, filter, &ctx)
             })
         }
+        // CR 601.2 + CR 608.2c: "if you controlled a [filter] as you cast this
+        // spell" reads the casting snapshot, not the resolution-time battlefield.
+        AbilityCondition::ControllerControlledMatchingAsCast { filter } => ability
+            .context
+            .controller_controlled_as_cast
+            .iter()
+            .any(|snapshot_filter| snapshot_filter == filter),
         // CR 608.2c: "If it's your turn" — check active player against the
         // scoped player during each-player iteration, otherwise the controller.
         AbilityCondition::IsYourTurn => {
@@ -3731,6 +4111,23 @@ fn evaluate_condition(
             .objects
             .get(&ability.source_id)
             .is_some_and(|obj| !obj.has_keyword(keyword)),
+    }
+}
+
+fn event_outcome_was_won_by_controller(event: &GameEvent, controller: PlayerId) -> bool {
+    match event {
+        GameEvent::Clash {
+            controller: clash_controller,
+            opponent,
+            result,
+            ..
+        } => match result {
+            crate::types::events::ClashResult::Won => *clash_controller == controller,
+            crate::types::events::ClashResult::Lost => *opponent == controller,
+            crate::types::events::ClashResult::Tied => false,
+        },
+        GameEvent::CoinFlipped { player_id, won } => *player_id == controller && *won,
+        _ => false,
     }
 }
 
@@ -3980,7 +4377,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission,
+        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Comparator,
         ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, FilterProp,
         GainLifePlayer, ManaSpendPermission, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
         QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef,
@@ -3991,8 +4388,8 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, ExileLink, ExileLinkKind, LinkedExileSnapshot, MayTriggerAutoChoiceKey,
-        MayTriggerOrigin,
+        AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LinkedExileSnapshot,
+        MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
@@ -5039,6 +5436,58 @@ mod tests {
     }
 
     #[test]
+    fn counter_spell_damage_rider_hits_countered_spell_controller() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Target Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let damage = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::ParentTargetController,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                source_rider: None,
+            },
+            vec![TargetRef::Object(spell)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(damage);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.players[1].life, 18);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCountered { object_id, .. } if *object_id == spell)));
+    }
+
+    #[test]
     fn sacrifice_effect_context_feeds_non_interactive_downstream_quantities() {
         let mut state = GameState::new_two_player(42);
         let victim = create_object(
@@ -5255,6 +5704,8 @@ mod tests {
                 name: "Sacrificed".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
                 mana_value: 5,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -7063,6 +7514,7 @@ mod tests {
                 reveal: false,
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(9000),
@@ -7104,6 +7556,95 @@ mod tests {
         assert_eq!(pending.next_iteration, 1);
         assert_eq!(pending.total_iterations, 2);
         assert_eq!(pending.tracked_members, vec![creature_a, creature_b]);
+    }
+
+    /// Issue #687 + CR 707.2 + CR 608.2: "For each token you control, create a
+    /// token that's a copy of that permanent" (Second Harvest) copies each
+    /// DISTINCT token you control — not the spell itself. The copy source is
+    /// `ParentTarget` and the loop is `repeat_for: ObjectCount`; each iteration
+    /// must rebind `ParentTarget` to the i-th controlled token. Before the
+    /// ObjectCount rebind, `ParentTarget` was unbound and `CopyTokenOf` fell back
+    /// to the source object, producing degenerate copies of Second Harvest.
+    #[test]
+    fn second_harvest_copies_each_controlled_token_not_the_source() {
+        let mut state = GameState::new_two_player(42);
+
+        let bear = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let wolf = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [bear, wolf] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.is_token = true;
+            obj.controller = PlayerId(0);
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+
+        // The resolving Second Harvest spell — the (wrong) fallback copy source
+        // the bug produced copies of.
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Second Harvest".to_string(),
+            Zone::Stack,
+        );
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "For each token you control, create a token that's a copy of that permanent.",
+            AbilityKind::Spell,
+        );
+        let ability =
+            crate::game::ability_utils::build_resolved_from_def(&def, source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Count tokens on the battlefield by name. `last_created_token_ids` is
+        // overwritten per `CopyTokenOf` call, so inspect the battlefield directly.
+        // CR 608.2: the set is snapshotted before any copy enters, so exactly one
+        // copy is made per pre-existing controlled token (the new copies are not
+        // themselves copied) — leaving 2 Bears + 2 Wolves (each original plus its
+        // copy) and, critically, zero copies of Second Harvest itself.
+        let mut token_names: Vec<String> = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.is_token)
+            .map(|obj| obj.name.clone())
+            .collect();
+        token_names.sort();
+        assert_eq!(
+            token_names,
+            vec![
+                "Bear".to_string(),
+                "Bear".to_string(),
+                "Wolf".to_string(),
+                "Wolf".to_string()
+            ],
+            "each controlled token gets one copy; nothing copies Second Harvest itself"
+        );
+
+        // CR 111.2: every resulting token (originals and copies) is under the
+        // caster's control — the copies don't leak to another player.
+        for obj in state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.is_token)
+        {
+            assert_eq!(obj.controller, PlayerId(0), "copies enter under the caster");
+        }
     }
 
     /// CR 609.3 + CR 109.5: End-to-end iteration resumption — overloaded Winds
@@ -7186,6 +7727,7 @@ mod tests {
                 reveal: false,
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(9000),
@@ -7467,6 +8009,7 @@ mod tests {
                 reveal: false,
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(9000),
@@ -7613,6 +8156,7 @@ mod tests {
             reveal: false,
             up_to: true,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
         };
 
         // Build a Draw ability (synchronous, no waiting_for change) with a
@@ -7790,6 +8334,97 @@ mod tests {
         );
     }
 
+    // Repro for Discord #781 (Wheel of Fortune): "Each player discards their hand,
+    // then draws seven cards." EVERY player must discard their own hand and draw 7
+    // — not just the spell's controller. Mirrors the parsed AST exactly:
+    // Discard{player_scope: All, count: HandSize(Controller)} with a chained
+    // Draw{player_scope: All, count: 7}. If the opponent fails to discard, they
+    // would end with 2 (kept) + 7 (drawn) = 9 cards, not 7.
+    #[test]
+    fn wheel_of_fortune_each_player_discards_hand_then_draws_seven() {
+        let mut state = GameState::new_two_player(42);
+
+        // Each player: 2 cards in hand, 8 in library (enough to draw 7).
+        for i in 0..2 {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("P0 Hand {i}"),
+                Zone::Hand,
+            );
+            create_object(
+                &mut state,
+                CardId(200 + i),
+                PlayerId(1),
+                format!("P1 Hand {i}"),
+                Zone::Hand,
+            );
+        }
+        for i in 0..8 {
+            create_object(
+                &mut state,
+                CardId(300 + i),
+                PlayerId(0),
+                format!("P0 Lib {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(400 + i),
+                PlayerId(1),
+                format!("P1 Lib {i}"),
+                Zone::Library,
+            );
+        }
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 7 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+
+        let mut wheel = ResolvedAbility::new(
+            Effect::Discard {
+                // Post-fix AST: "their hand" under an each-player scope binds to
+                // the iterated player (ScopedPlayer), not the caster (#781).
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        wheel.player_scope = Some(PlayerFilter::All);
+        wheel.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &wheel, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            7,
+            "controller discards their hand then draws 7"
+        );
+        assert_eq!(
+            state.players[1].hand.len(),
+            7,
+            "OPPONENT must also discard their hand then draw 7 (#781)"
+        );
+    }
+
     #[test]
     fn evelyn_chain_exiles_each_players_top_card_with_collection_counter_and_permission() {
         let mut state = GameState::new_two_player(42);
@@ -7851,6 +8486,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             evelyn,
@@ -7929,6 +8565,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             source,
@@ -8918,6 +9555,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -9002,6 +9640,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn per_opponent_cant_discard_consequence_draws_for_zero_count_players() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(2),
+            "Discard Me".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Draw Me".to_string(),
+            Zone::Library,
+        );
+
+        let mut discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        discard.player_scope = Some(PlayerFilter::Opponent);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::OriginalController,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::Opponent);
+        draw.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        });
+        discard.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &discard, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "P0 draws once for P1, the opponent who could not discard"
+        );
+        assert_eq!(
+            state.players[2].hand.len(),
+            0,
+            "P2 discarded their only card and should not add a draw"
+        );
+    }
+
     /// CR 608.2c + CR 109.5: `player_actions_this_way` clears at depth=0
     /// chain entry — does NOT leak across unrelated top-level resolutions.
     #[test]
@@ -9038,13 +9741,33 @@ mod tests {
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
-        // Shuffle emits no ZoneChanged events; the accumulator must be EMPTY
-        // (cleared at depth=0 entry, not extended by stale state).
+        // Stale state (SearchedLibrary) must be cleared at depth=0 entry.
+        // Shuffle now emits PlayerPerformedAction { ShuffledLibrary } which is
+        // correctly accumulated "this way" — only the pre-polluted stale
+        // actions must be gone.
+        let stale_action = crate::types::events::PlayerActionKind::SearchedLibrary;
         assert!(
-            state.player_actions_this_way.is_empty(),
-            "depth=0 chain entry must clear player_actions_this_way; \
+            !state
+                .player_actions_this_way
+                .contains(&(PlayerId(0), stale_action)),
+            "depth=0 chain entry must clear stale player_actions_this_way; \
              leaking across top-level resolutions would cause spurious counts \
              in 'opponent who [verbed] this way' references on subsequent spells"
+        );
+        assert!(
+            !state
+                .player_actions_this_way
+                .contains(&(PlayerId(1), stale_action)),
+            "stale P1 SearchedLibrary must also be cleared"
+        );
+        // The shuffle action itself IS expected in the accumulator — it
+        // happened "this way" during the current resolution.
+        let shuffle_action = crate::types::events::PlayerActionKind::ShuffledLibrary;
+        assert!(
+            state
+                .player_actions_this_way
+                .contains(&(PlayerId(0), shuffle_action)),
+            "ShuffledLibrary from current resolution must be accumulated"
         );
     }
 
@@ -9324,6 +10047,47 @@ mod tests {
         let cond = AbilityCondition::additional_cost_paid_any();
         assert!(!evaluate_condition(&cond, &state, &ability));
         ability.context.additional_cost_paid = true;
+        assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
+    /// CR 701.30d + CR 608.2c: "if you won" on a triggered clash ability reads
+    /// the triggering clash result for the ability controller, not the unrelated
+    /// `IfYouDo` flag used by optional costs in the same effect chain.
+    #[test]
+    fn event_outcome_won_reads_clash_result_for_ability_controller() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.context.optional_effect_performed = false;
+        let cond = AbilityCondition::EventOutcomeWon;
+
+        state.current_trigger_event = Some(GameEvent::Clash {
+            controller: PlayerId(1),
+            opponent: PlayerId(0),
+            controller_mana_value: Some(1),
+            opponent_mana_value: Some(3),
+            result: crate::types::events::ClashResult::Lost,
+        });
+        assert!(evaluate_condition(&cond, &state, &ability));
+
+        state.current_trigger_event = Some(GameEvent::Clash {
+            controller: PlayerId(1),
+            opponent: PlayerId(0),
+            controller_mana_value: Some(3),
+            opponent_mana_value: Some(1),
+            result: crate::types::events::ClashResult::Won,
+        });
+        assert!(!evaluate_condition(&cond, &state, &ability));
+
+        state.current_trigger_event = None;
+        ability.context.optional_effect_performed = true;
         assert!(evaluate_condition(&cond, &state, &ability));
     }
 
@@ -9630,6 +10394,40 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_controller_controlled_as_cast_reads_spell_context_snapshot() {
+        let state = GameState::new_two_player(42);
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Faerie".to_string())
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+        );
+        let condition = AbilityCondition::ControllerControlledMatchingAsCast {
+            filter: filter.clone(),
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .context(SpellContext {
+            controller_controlled_as_cast: vec![filter],
+            ..SpellContext::default()
+        });
+
+        assert!(evaluate_condition(&condition, &state, &ability));
+
+        ability.context.controller_controlled_as_cast.clear();
+        assert!(!evaluate_condition(&condition, &state, &ability));
+    }
+
+    #[test]
     fn evaluate_condition_and_one_false() {
         let state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
@@ -9758,6 +10556,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             ObjectId(100),
@@ -10132,7 +10931,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
 
         let mut ability = ResolvedAbility::new(
             Effect::Discard {
@@ -10238,7 +11037,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
 
         let mut ability = ResolvedAbility::new(
             Effect::Discard {
@@ -10341,7 +11140,7 @@ mod tests {
             source_id,
             PlayerId(0),
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
                 cost: crate::types::ability::PaymentCost::AbilityCost {
@@ -10431,7 +11230,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
 
         let mut ability = ResolvedAbility::new(
             Effect::Discard {

@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -64,6 +66,7 @@ export function PlayerArea({
   battlefieldView,
   hud,
 }: PlayerAreaProps) {
+  const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const isCompactHeight = useIsCompactHeight();
 
@@ -220,7 +223,7 @@ export function PlayerArea({
       {isEliminated && (
         <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
           <span className="rounded-lg bg-red-900/80 px-4 py-2 text-lg font-bold text-red-200">
-            Eliminated
+            {t("player.eliminated")}
           </span>
         </div>
       )}
@@ -234,7 +237,7 @@ export function PlayerArea({
           <div className="absolute inset-0 z-20 bg-sky-500/25 mix-blend-screen pointer-events-none" />
           <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
             <span className="rounded-lg bg-indigo-900/80 px-4 py-2 text-lg font-bold text-indigo-200">
-              Phased Out
+              {t("player.phasedOut")}
             </span>
           </div>
         </>

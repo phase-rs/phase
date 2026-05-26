@@ -272,34 +272,37 @@ pub fn resolve(
     // the upper-bound expression and propagate the may-pick-fewer flag to
     // SearchChoice. Plain `QuantityExpr` means a mandatory count; wrapped
     // in `UpTo` means "any number of" / "up to N" — searcher picks 0..=count.
-    let (filter, count, reveal, target_player, up_to, selection_constraint) = match &ability.effect
-    {
-        Effect::SearchLibrary {
-            filter,
-            count,
-            reveal,
-            target_player,
-            selection_constraint,
-        } => {
-            let (inner, up_to) = count.peel_up_to();
-            (
-                filter.clone(),
-                resolve_quantity_with_targets(state, inner, ability).max(0) as usize,
-                *reveal,
-                target_player.clone(),
-                up_to,
-                selection_constraint.clone(),
-            )
-        }
-        _ => (
-            TargetFilter::Any,
-            1,
-            false,
-            None,
-            false,
-            SearchSelectionConstraint::None,
-        ),
-    };
+    let (filter, count, reveal, target_player, up_to, selection_constraint, split) =
+        match &ability.effect {
+            Effect::SearchLibrary {
+                filter,
+                count,
+                reveal,
+                target_player,
+                selection_constraint,
+                split,
+            } => {
+                let (inner, up_to) = count.peel_up_to();
+                (
+                    filter.clone(),
+                    resolve_quantity_with_targets(state, inner, ability).max(0) as usize,
+                    *reveal,
+                    target_player.clone(),
+                    up_to,
+                    selection_constraint.clone(),
+                    split.clone(),
+                )
+            }
+            _ => (
+                TargetFilter::Any,
+                1,
+                false,
+                None,
+                false,
+                SearchSelectionConstraint::None,
+                None,
+            ),
+        };
 
     // CR 701.23a: Determine the library owner and the searcher.
     //   - Library owner: the player whose library is searched (driven by
@@ -363,6 +366,9 @@ pub fn resolve(
         reveal,
         up_to,
         constraint: selection_constraint,
+        // CR 701.23a + CR 608.2c: Carry the cultivate-class split metadata so the
+        // SearchChoice-completion handler can partition the found set.
+        split,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -392,6 +398,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -408,6 +415,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -681,6 +689,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -769,6 +778,7 @@ mod tests {
                 reveal: true,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -956,6 +966,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -989,6 +1000,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -1084,6 +1096,7 @@ mod tests {
                 reveal: true,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -1327,6 +1340,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -1371,6 +1385,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -1411,6 +1426,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(100),
@@ -1476,6 +1492,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(9999),
@@ -1534,6 +1551,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             ObjectId(9998),
@@ -1587,6 +1605,7 @@ mod tests {
                 reveal: false,
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![TargetRef::Object(destroyed)],
             ObjectId(9997),
@@ -1639,6 +1658,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 )),
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(9996),

@@ -303,18 +303,17 @@ fn compute_standings(session: &DraftSession) -> Vec<StandingEntry> {
         .seats
         .iter()
         .enumerate()
-        .filter(|(_, s)| matches!(s, DraftSeat::Human { .. }))
         .map(|(i, seat)| {
             let pid = match seat {
                 DraftSeat::Human { player_id, .. } => *player_id,
-                DraftSeat::Bot { .. } => unreachable!(),
+                DraftSeat::Bot { .. } => PlayerId(i as u8),
             };
             let record = session.match_records.get(&pid);
             StandingEntry {
                 seat_index: i as u8,
                 display_name: match seat {
                     DraftSeat::Human { display_name, .. } => display_name.clone(),
-                    DraftSeat::Bot { .. } => unreachable!(),
+                    DraftSeat::Bot { name } => name.clone(),
                 },
                 match_wins: record.map_or(0, |r| r.match_wins),
                 match_losses: record.map_or(0, |r| r.match_losses),
@@ -366,22 +365,15 @@ fn compute_pairing_views(session: &DraftSession) -> Vec<PairingView> {
                 .cloned()
                 .unwrap_or((0, "Unknown".to_string()));
 
-            // Determine winner seat from the match status + records
-            let winner_seat = if p.status == PairingStatus::Complete {
-                let r0 = session.match_records.get(&p.players[0]);
-                let r1 = session.match_records.get(&p.players[1]);
-                let w0 = r0.map_or(0, |r| r.match_wins);
-                let w1 = r1.map_or(0, |r| r.match_wins);
-                if w0 > w1 {
+            let winner_seat = p.result_winner(&session.match_records).and_then(|winner| {
+                if winner == p.players[0] {
                     Some(seat_a)
-                } else if w1 > w0 {
+                } else if winner == p.players[1] {
                     Some(seat_b)
                 } else {
-                    None // draw or equal
+                    None
                 }
-            } else {
-                None
-            };
+            });
 
             PairingView {
                 round: p.round,
@@ -742,12 +734,18 @@ mod tests {
         )
         .unwrap();
 
-        // Report seat 0 wins
+        let winner_pid = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == "r1-t0")
+            .unwrap()
+            .players[0];
+
         session::apply(
             &mut session,
             DraftAction::ReportMatchResult {
                 match_id: "r1-t0".to_string(),
-                winner_seat: Some(0),
+                winner_seat: Some(winner_pid.0),
             },
             None,
         )
@@ -756,15 +754,42 @@ mod tests {
         let view = filter_for_player(&session, 0);
         assert!(!view.standings.is_empty());
 
-        // Player 0 should have match_wins = 1
-        let p0_standing = view.standings.iter().find(|s| s.seat_index == 0).unwrap();
-        assert_eq!(p0_standing.match_wins, 1);
-        assert_eq!(p0_standing.match_losses, 0);
+        let winner_standing = view
+            .standings
+            .iter()
+            .find(|s| s.seat_index == winner_pid.0)
+            .unwrap();
+        assert_eq!(winner_standing.match_wins, 1);
+        assert_eq!(winner_standing.match_losses, 0);
 
         // Standings should be sorted by match_wins descending
         for window in view.standings.windows(2) {
             assert!(window[0].match_wins >= window[1].match_wins);
         }
+    }
+
+    #[test]
+    fn view_standings_include_bot_seats() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+        session.seats[7] = DraftSeat::Bot {
+            name: "Bot 7".to_string(),
+        };
+
+        session::apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let view = filter_for_player(&session, 0);
+        let bot_standing = view
+            .standings
+            .iter()
+            .find(|standing| standing.seat_index == 7)
+            .unwrap();
+        assert_eq!(bot_standing.display_name, "Bot 7");
     }
 
     #[test]
@@ -803,6 +828,90 @@ mod tests {
             assert_eq!(pv.status, PairingStatus::Pending);
             assert!(pv.winner_seat.is_none());
         }
+    }
+
+    #[test]
+    fn view_pairing_winner_seat_uses_pairing_result() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+
+        session::apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == "r1-t0")
+            .unwrap()
+            .clone();
+
+        session::apply(
+            &mut session,
+            DraftAction::ReportMatchResult {
+                match_id: pairing.match_id.clone(),
+                winner_seat: Some(pairing.players[1].0),
+            },
+            None,
+        )
+        .unwrap();
+
+        let view = filter_for_player(&session, 0);
+        let pairing_view = view
+            .pairings
+            .iter()
+            .find(|p| p.match_id == pairing.match_id)
+            .unwrap();
+        assert_eq!(pairing_view.winner_seat, Some(pairing.players[1].0));
+    }
+
+    #[test]
+    fn view_pairing_winner_seat_infers_legacy_completed_result() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+
+        session::apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == "r1-t0")
+            .unwrap()
+            .clone();
+
+        session
+            .pairings
+            .iter_mut()
+            .find(|p| p.match_id == pairing.match_id)
+            .unwrap()
+            .status = PairingStatus::Complete;
+        session.match_records.insert(
+            pairing.players[1],
+            DraftMatchRecord {
+                player: pairing.players[1],
+                wins: 1,
+                losses: 0,
+                draws: 0,
+                match_wins: 1,
+                match_losses: 0,
+            },
+        );
+
+        let view = filter_for_player(&session, 0);
+        let pairing_view = view
+            .pairings
+            .iter()
+            .find(|p| p.match_id == pairing.match_id)
+            .unwrap();
+        assert_eq!(pairing_view.winner_seat, Some(pairing.players[1].0));
     }
 
     #[test]

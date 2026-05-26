@@ -192,6 +192,11 @@ pub fn source_matches_protection_target(
         // CR 702.16j: "Protection from everything" — protection from each object
         // regardless of the source's characteristic values.
         ProtectionTarget::Everything => true,
+        // CR 702.16a + CR 202.3: Filter-based protection — the source matches if
+        // it satisfies every FilterProp in the typed filter. Only supports
+        // object-intrinsic properties (Cmc, HasColor, PowerLE/GE, etc.) that can
+        // be evaluated from the source alone without game state.
+        ProtectionTarget::Filter(filter) => source_matches_protection_filter(source, filter),
     }
 }
 
@@ -217,6 +222,36 @@ pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
         "multicolored" => source.color.len() > 1,
         _ => false,
     }
+}
+
+/// CR 702.16a + CR 202.3: Evaluate a filter-based protection predicate against
+/// a source object. Tests every `FilterProp` in the typed filter's properties
+/// (conjunction — all must match). Only supports object-intrinsic properties
+/// that can be resolved from the source alone without game state access.
+///
+fn source_matches_protection_filter(
+    source: &GameObject,
+    filter: &crate::types::ability::TargetFilter,
+) -> bool {
+    use crate::types::ability::{FilterProp, QuantityExpr, TargetFilter};
+
+    let TargetFilter::Typed(typed) = filter else {
+        return false;
+    };
+    // All FilterProp predicates must match (conjunction).
+    typed.properties.iter().all(|prop| match prop {
+        // CR 202.3: Mana value comparison — only Fixed thresholds are valid
+        // in protection text (no dynamic quantity refs like SelfManaValue).
+        FilterProp::Cmc { comparator, value } => {
+            let QuantityExpr::Fixed { value: threshold } = value else {
+                return false;
+            };
+            comparator.evaluate(source.mana_cost.mana_value() as i32, *threshold)
+        }
+        // Future: other intrinsic properties (HasColor, PowerLE/GE, etc.)
+        // can be added here as the class of filter-based protection grows.
+        _ => false,
+    })
 }
 
 /// Batch parse keyword strings into typed Keyword values.
@@ -655,6 +690,107 @@ mod tests {
             .push(crate::types::card_type::CoreType::Instant);
 
         assert!(protection_prevents_from(&protected, &source));
+    }
+
+    /// CR 702.16a + CR 202.3: Protection from mana value 3 or less prevents
+    /// interaction from sources with mana value <= 3 and allows sources with
+    /// mana value > 3.
+    #[test]
+    fn protection_from_mana_value_filter() {
+        use crate::types::ability::{
+            Comparator, FilterProp, QuantityExpr, TargetFilter, TypedFilter,
+        };
+
+        let mut protected = make_obj();
+        protected
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Filter(
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }])),
+            )));
+
+        // Source with mana value 2 (≤ 3) — should be prevented
+        let mut source_low = make_obj();
+        source_low.mana_cost = ManaCost::Cost {
+            generic: 2,
+            shards: vec![],
+        };
+        assert!(
+            protection_prevents_from(&protected, &source_low),
+            "MV 2 source should be prevented by protection from MV 3 or less"
+        );
+
+        // Source with mana value 3 (≤ 3) — should be prevented
+        let mut source_exact = make_obj();
+        source_exact.mana_cost = ManaCost::Cost {
+            generic: 3,
+            shards: vec![],
+        };
+        assert!(
+            protection_prevents_from(&protected, &source_exact),
+            "MV 3 source should be prevented by protection from MV 3 or less"
+        );
+
+        // Source with mana value 4 (> 3) — should NOT be prevented
+        let mut source_high = make_obj();
+        source_high.mana_cost = ManaCost::Cost {
+            generic: 4,
+            shards: vec![],
+        };
+        assert!(
+            !protection_prevents_from(&protected, &source_high),
+            "MV 4 source should NOT be prevented by protection from MV 3 or less"
+        );
+
+        // Source with mana value 0 (≤ 3) — should be prevented (tokens, lands)
+        let source_zero = make_obj();
+        assert!(
+            protection_prevents_from(&protected, &source_zero),
+            "MV 0 source should be prevented by protection from MV 3 or less"
+        );
+    }
+
+    /// CR 702.16a + CR 202.3: Protection from mana value 3 or greater prevents
+    /// interaction from sources with mana value >= 3.
+    #[test]
+    fn protection_from_mana_value_greater() {
+        use crate::types::ability::{
+            Comparator, FilterProp, QuantityExpr, TargetFilter, TypedFilter,
+        };
+
+        let mut protected = make_obj();
+        protected
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Filter(
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }])),
+            )));
+
+        // Source with mana value 2 (< 3) — should NOT be prevented
+        let mut source_low = make_obj();
+        source_low.mana_cost = ManaCost::Cost {
+            generic: 2,
+            shards: vec![],
+        };
+        assert!(
+            !protection_prevents_from(&protected, &source_low),
+            "MV 2 source should NOT be prevented by protection from MV 3 or greater"
+        );
+
+        // Source with mana value 4 (≥ 3) — should be prevented
+        let mut source_high = make_obj();
+        source_high.mana_cost = ManaCost::Cost {
+            generic: 4,
+            shards: vec![],
+        };
+        assert!(
+            protection_prevents_from(&protected, &source_high),
+            "MV 4 source should be prevented by protection from MV 3 or greater"
+        );
     }
 
     #[test]

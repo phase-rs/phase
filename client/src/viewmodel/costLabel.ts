@@ -187,6 +187,8 @@ export function formatCost(cost: SerializedCost): string {
       return `Collect evidence ${cost.amount ?? 0}`;
     case "Composite":
       return (cost.costs ?? []).map(formatCost).join(", ");
+    case "OneOf":
+      return (cost.costs ?? []).map(formatCost).join(" or ");
     default:
       return "Activate";
   }
@@ -291,6 +293,13 @@ export function abilityChoiceLabel(
   if (action.type === "CastSpell") {
     return { label: `Cast ${object.name}` };
   }
+  if (action.type === "CastPreparedCopy") {
+    const spellName = object.back_face?.name ?? "prepared spell";
+    return {
+      label: `Cast ${spellName}`,
+      description: `Cast a copy of ${spellName}. ${object.name} becomes unprepared.`,
+    };
+  }
   if (action.type === "Foretell") {
     const foretellKeyword = object.keywords.find(
       (k): k is { Foretell: ManaCost } => typeof k === "object" && "Foretell" in k,
@@ -350,7 +359,7 @@ export function abilityChoiceLabel(
 }
 
 /** Format a SerializedAbilityCost (same shape as SerializedCost but from the AdditionalCost type). */
-function formatAbilityCost(cost: SerializedAbilityCost): string {
+export function formatAbilityCost(cost: SerializedAbilityCost): string {
   return formatCost(cost);
 }
 

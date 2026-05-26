@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 
 import type { GameAction, GameObject } from "../../adapter/types.ts";
@@ -101,6 +102,7 @@ function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
 }
 
 export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride }: PermanentCardProps) {
+  const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
@@ -293,7 +295,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       "ring-2 ring-emerald-300/70 shadow-[0_0_10px_3px_rgba(74,222,128,0.35)]";
   } else if (isValidTarget) {
     glowClass =
-      "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]";
+      "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]";
   } else if (isActivatable) {
     glowClass =
       "ring-2 ring-cyan-400 shadow-[0_0_14px_4px_rgba(34,211,238,0.55)]";
@@ -305,11 +307,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       "ring-2 ring-white shadow-[0_0_8px_2px_rgba(255,255,255,0.6)]";
   }
 
-  const sicknessFilter = hasSummoningSickness ? "saturate(50%)" : undefined;
-  const sicknessGlow = hasSummoningSickness
-    ? "0 0 6px 1px rgba(255,255,255,0.3)"
-    : undefined;
-
   // CR 702.26: Per-permanent phasing — phased-out permanents stay on the
   // battlefield but are treated as though they don't exist (CR 702.26d). We
   // surface this with the same sky-blue "ethereal plane" tint used for
@@ -317,6 +314,16 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   // card stays readable. Player-area phasing is rendered separately on
   // PlayerArea; both can be active independently.
   const isPhasedOut = obj.phase_status?.status === "PhasedOut";
+
+  // CR 707.2: A token-copy of a real card (Twinflame, Helm of the Host, or a
+  // debug `CreateTokenCopy`) is `is_token` yet keeps `display_source = "Card"`,
+  // so it renders pixel-identical to the printed permanent. Flag it so the
+  // board carries a "Copy" badge — generic tokens (Treasure, Goblin) already
+  // read as tokens via their distinct generic-token art and are excluded.
+  // CR 708.2: a face-down permanent has no characteristics other than those
+  // its face-down rule grants, so never surface "Copy" on it — that would leak
+  // that it's a token-copy (matches the `!face_down` guard on the keyword strip).
+  const isCopy = obj.is_token === true && obj.display_source !== "Token" && !obj.face_down;
 
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
@@ -449,11 +456,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       data-object-id={objectId}
       data-card-hover
       layoutId={`permanent-${objectId}`}
-      className="relative inline-flex w-fit cursor-pointer rounded-lg self-end select-none"
+      className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"
       style={{
         zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : hoveredObjectId === objectId ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
-        filter: sicknessFilter,
-        boxShadow: sicknessGlow,
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:
@@ -514,7 +519,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
       {/* Main card — art crop or full card based on preference */}
       {useArtCrop ? (
-        <div className={`relative z-10 rounded-lg ${glowClass}`}>
+        <div className="relative z-10 rounded-lg">
           <ArtCropCard objectId={objectId} />
           {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
               matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
@@ -527,8 +532,8 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         </div>
       ) : (
         <>
-          <div className={`relative z-10 rounded-lg overflow-hidden ${glowClass}`}>
-            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
+          <div className="relative z-10 rounded-lg overflow-hidden">
+            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
               <KeywordStrip
@@ -589,7 +594,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           {isUnderAttack && (
             <div
               className="absolute left-1 top-1 z-20 flex items-center gap-0.5 rounded bg-red-700/85 px-1 py-0.5 text-[10px] font-bold text-white shadow"
-              title={`Attacked by ${incomingAttackerCount} creature${incomingAttackerCount === 1 ? "" : "s"}`}
+              title={t("permanent.underAttack", { count: incomingAttackerCount })}
             >
               <span aria-hidden>⚔</span>
               {incomingAttackerCount > 1 && <span>×{incomingAttackerCount}</span>}
@@ -614,6 +619,41 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         </>
       )}
 
+      {hasSummoningSickness && (
+        <SummoningSicknessOverlay variant={useArtCrop ? "artCrop" : "fullCard"} />
+      )}
+
+      {glowClass && (
+        <div
+          aria-hidden
+          data-card-affordance-highlight="true"
+          className={`pointer-events-none absolute inset-[-3px] z-30 rounded-xl ${glowClass}`}
+        />
+      )}
+
+      {isValidTarget && (
+        <div
+          className={`pointer-events-none absolute ${isUnderAttack ? "left-1 top-7" : "left-1 top-1"} z-40 rounded bg-lime-300 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-black ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
+        >
+          {t("permanent.target")}
+        </div>
+      )}
+
+      {/* CR 707.2: "Copy" badge for token-copies of real cards — these are
+          pixel-identical to the printed permanent, so without this tag there's
+          no way to tell a copy apart from the original on the board. Hidden
+          while the card is a valid target (the lime "Target" tag owns the
+          corner during targeting) and shifted down under attack to clear the
+          ⚔ badge — same coordination the Target tag uses. */}
+      {isCopy && !isValidTarget && (
+        <div
+          className={`pointer-events-none absolute left-1 ${isUnderAttack ? "top-7" : "top-1"} z-20 rounded bg-indigo-600/90 px-1 py-0.5 text-[9px] font-black uppercase leading-none tracking-wide text-white ring-1 ring-black/60 shadow-[0_1px_4px_rgba(0,0,0,0.6)]`}
+          title={t("permanent.copyTooltip")}
+        >
+          {t("permanent.copy")}
+        </div>
+      )}
+
       {/* Debug-panel preview highlight — fuchsia neon ring + animated pulse.
           Triggered when an ObjectSelect option in the debug panel is hovered
           (`debugHighlightedObjectId` state). Deliberately loud and visually
@@ -627,6 +667,16 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         />
       )}
     </motion.div>
+  );
+});
+
+const SummoningSicknessOverlay = memo(function SummoningSicknessOverlay({ variant }: { variant: "artCrop" | "fullCard" }) {
+  return (
+    <div
+      aria-hidden
+      data-summoning-sickness-underwater="true"
+      className={`summoning-sickness-underwater summoning-sickness-underwater--${variant}`}
+    />
   );
 });
 
@@ -699,7 +749,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       {useArtCrop ? (
         <ArtCropCard objectId={objectId} />
       ) : (
-        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
+        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
       )}
     </div>
   );

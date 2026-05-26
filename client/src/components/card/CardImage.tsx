@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
+import type { TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 
@@ -15,6 +17,7 @@ interface CardImageProps {
   colors?: string[];
   isToken?: boolean;
   tokenFilters?: TokenSearchFilters;
+  tokenImageRef?: TokenImageRef | null;
   faceDown?: boolean;
   /**
    * Canonical lookup id from `printed_ref.oracle_id` (battlefield call sites).
@@ -40,16 +43,19 @@ export function CardImage({
   colors,
   isToken = false,
   tokenFilters,
+  tokenImageRef,
   faceDown = false,
   oracleId,
   faceName,
   oracleText,
 }: CardImageProps) {
+  const { t } = useTranslation("game");
   const { src, isLoading } = useCardImage(faceDown ? "" : cardName, {
     size,
     faceIndex,
     isToken: faceDown ? false : isToken,
     tokenFilters: faceDown ? undefined : tokenFilters,
+    tokenImageRef: faceDown ? undefined : tokenImageRef,
     oracleId: faceDown ? undefined : oracleId,
     faceName: faceDown ? undefined : faceName,
   });
@@ -69,7 +75,7 @@ export function CardImage({
       <div
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
         style={borderStyle ?? { border: "1px solid #4b5563" }}
-        aria-label={`Loading ${cardName}`}
+        aria-label={t("card.loading", { name: cardName })}
       />
     );
   }
@@ -93,7 +99,7 @@ export function CardImage({
   }
 
   const renderedSrc = faceDown ? CARD_BACK_URL : (src ?? "");
-  const renderedAlt = faceDown ? "Face-down card" : cardName;
+  const renderedAlt = faceDown ? t("card.faceDownName") : cardName;
 
   return (
     <div className="relative inline-block w-fit select-none">
@@ -108,7 +114,7 @@ export function CardImage({
       {unimplementedMechanics && unimplementedMechanics.length > 0 && (
         <span
           className="absolute top-0.5 left-0.5 bg-amber-500 text-black text-[8px] font-bold rounded-sm px-0.5 leading-tight"
-          title={`Unimplemented: ${unimplementedMechanics.join(", ")}`}
+          title={t("card.unimplemented", { mechanics: unimplementedMechanics.join(", ") })}
         >
           !
         </span>

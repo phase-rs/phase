@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
+import { usePreferencesStore } from "../../stores/preferencesStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PreferencesModal } from "../settings/PreferencesModal";
+import { LanguageFlag } from "../ui/LanguageFlag";
 import { FullscreenButton } from "./FullscreenButton";
 import { VolumeControl } from "./VolumeControl";
 
@@ -52,6 +55,8 @@ export function ScreenChrome({
   settingsOpen,
   onSettingsOpenChange,
 }: ScreenChromeProps) {
+  const { t } = useTranslation();
+  const language = usePreferencesStore((s) => s.language);
   const [internalShowSettings, setInternalShowSettings] = useState(false);
   const isSettingsControlled = settingsOpen !== undefined;
   const showSettings = isSettingsControlled ? settingsOpen : internalShowSettings;
@@ -78,8 +83,8 @@ export function ScreenChrome({
             whileHover={{ y: -1 }}
             whileTap={{ scale: 0.98 }}
             onClick={onBack}
-            aria-label="Back"
-            title="Back"
+            aria-label={t("chrome.back")}
+            title={t("chrome.back")}
           >
             <BackIcon />
           </motion.button>
@@ -100,8 +105,23 @@ export function ScreenChrome({
           whileHover={{ y: -1 }}
           whileTap={{ scale: 0.98 }}
           onClick={() => setShowSettings(true)}
-          aria-label="Settings"
-          title="Settings"
+          aria-label={t("chrome.languageSettings", { lang: language.toUpperCase() })}
+          title={t("chrome.languageTitle", { lang: language.toUpperCase() })}
+        >
+          <LanguageFlag lng={language} className="h-4 w-6 rounded-sm" />
+        </motion.button>
+        <motion.button
+          className={menuButtonClass({
+            tone: "neutral",
+            size: "sm",
+            className:
+              "h-11 min-w-11 rounded-[16px] px-3 py-0 text-white/46 hover:text-white/72",
+          })}
+          whileHover={{ y: -1 }}
+          whileTap={{ scale: 0.98 }}
+          onClick={() => setShowSettings(true)}
+          aria-label={t("chrome.settings")}
+          title={t("chrome.settings")}
         >
           <SettingsIcon />
         </motion.button>
