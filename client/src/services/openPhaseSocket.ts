@@ -1,4 +1,8 @@
-import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
+import {
+  MIN_SUPPORTED_SERVER_PROTOCOL,
+  PROTOCOL_VERSION,
+  type ServerInfo,
+} from "../adapter/ws-adapter";
 
 /**
  * Result of a successful handshake with `phase-server`. Wraps the live
@@ -182,16 +186,23 @@ export function openPhaseSocket(
         mode: data.mode,
       };
 
-      if (info.protocolVersion !== PROTOCOL_VERSION) {
+      // Accept any server in [MIN_SUPPORTED_SERVER_PROTOCOL, PROTOCOL_VERSION].
+      // Mirrors the phase-server hello-gate range (crates/phase-server/src/main.rs)
+      // so a freshly-built client can connect to a not-yet-redeployed lobby
+      // broker during rollout. The error message distinguishes "server older,
+      // wait for redeploy" from "server newer, your client is out of date" so
+      // operators triaging logs can tell the two cases apart at a glance.
+      if (
+        info.protocolVersion < MIN_SUPPORTED_SERVER_PROTOCOL ||
+        info.protocolVersion > PROTOCOL_VERSION
+      ) {
+        const reason =
+          info.protocolVersion < MIN_SUPPORTED_SERVER_PROTOCOL
+            ? `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${MIN_SUPPORTED_SERVER_PROTOCOL}). Please wait for the lobby to finish rolling out.`
+            : `Server protocol version ${info.protocolVersion} is newer than this client (${PROTOCOL_VERSION}). Please refresh to update.`;
         settle(() => {
           ws.close();
-          reject(
-            new HandshakeError(
-              "protocol_mismatch",
-              `Server protocol version ${info.protocolVersion} does not match client ${PROTOCOL_VERSION}. Please refresh.`,
-              info,
-            ),
-          );
+          reject(new HandshakeError("protocol_mismatch", reason, info));
         });
         return;
       }
