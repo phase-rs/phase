@@ -363,23 +363,32 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     if let Some((condition, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
             value(AbilityCondition::WhenYouDo, tag("when you do, ")),
-            value(AbilityCondition::IfAPlayerDoes, tag("if a player does, ")),
-            value(AbilityCondition::IfAPlayerDoes, tag("if they do, ")),
-            value(AbilityCondition::IfYouDo, tag("if that player does, ")),
-            value(AbilityCondition::IfYouDo, tag("if the player does, ")),
+            value(
+                AbilityCondition::effect_performed(),
+                tag("if a player does, "),
+            ),
+            value(AbilityCondition::effect_performed(), tag("if they do, ")),
+            value(
+                AbilityCondition::effect_performed(),
+                tag("if that player does, "),
+            ),
+            value(
+                AbilityCondition::effect_performed(),
+                tag("if the player does, "),
+            ),
             value(
                 AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::IfYouDo),
+                    condition: Box::new(AbilityCondition::effect_performed()),
                 },
                 tag("if that player doesn't, "),
             ),
             value(
                 AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::IfYouDo),
+                    condition: Box::new(AbilityCondition::effect_performed()),
                 },
                 tag("if the player doesn't, "),
             ),
-            value(AbilityCondition::IfYouDo, tag("if you do, ")),
+            value(AbilityCondition::effect_performed(), tag("if you do, ")),
         ))
         .parse(input)
     }) {
@@ -2244,7 +2253,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
         if rest.trim().is_empty() {
             return Some(AbilityCondition::Or {
                 conditions: vec![
-                    AbilityCondition::IfYouDo,
+                    AbilityCondition::effect_performed(),
                     static_condition_to_ability_condition(&condition, ctx)?,
                 ],
             });
@@ -2264,7 +2273,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
             .parse(lower.as_str())
             .is_ok()
     {
-        return Some(AbilityCondition::IfYouDo);
+        return Some(AbilityCondition::EventOutcomeWon);
     }
 
     if alt((
@@ -2277,7 +2286,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     .is_ok()
     {
         return Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::IfYouDo),
+            condition: Box::new(AbilityCondition::effect_performed()),
         });
     }
 
@@ -3304,13 +3313,13 @@ mod tests {
     }
 
     #[test]
-    fn leading_you_win_maps_to_if_you_do_for_clash() {
+    fn leading_you_win_maps_to_event_outcome_won() {
         let (condition, body) = strip_leading_general_conditional(
             "If you win, put a +1/+1 counter on this creature.",
             &mut ParseContext::default(),
         );
         assert_eq!(body, "put a +1/+1 counter on this creature.");
-        assert_eq!(condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(condition, Some(AbilityCondition::EventOutcomeWon));
     }
 
     #[test]
@@ -3323,7 +3332,7 @@ mod tests {
         assert_eq!(
             condition,
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::IfYouDo)
+                condition: Box::new(AbilityCondition::effect_performed())
             })
         );
     }

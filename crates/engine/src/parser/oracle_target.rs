@@ -106,6 +106,10 @@ pub(crate) fn parse_word_bounded<'a>(
     }
 }
 
+fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    parse_word_bounded(input, "cards").or_else(|_| parse_word_bounded(input, "card"))
+}
+
 /// Parse an event-context possessive reference from Oracle text.
 /// These resolve from the triggering event, not from player targeting.
 /// Must be checked BEFORE standard `parse_target` for trigger-based effects.
@@ -768,13 +772,13 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         let has_type_card =
             if let Ok((after_type, _)) = nom_target::parse_type_filter_word(type_start) {
                 let after_type = after_type.trim_start();
-                after_type.starts_with("card") || after_type.is_empty()
+                parse_card_or_cards_word(after_type).is_ok() || after_type.is_empty()
             } else {
                 false
             };
 
         // Also check bare "card"/"cards" (e.g., "the enchanted card")
-        let is_bare_card = type_start.starts_with("card");
+        let is_bare_card = parse_card_or_cards_word(type_start).is_ok();
 
         if has_type_card || is_bare_card {
             // Find end of "card"/"cards"
@@ -785,14 +789,9 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             } else {
                 type_start
             };
-            let rest_after_card =
-                if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("cards").parse(card_start) {
-                    r
-                } else if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("card").parse(card_start) {
-                    r
-                } else {
-                    card_start
-                };
+            let rest_after_card = parse_card_or_cards_word(card_start)
+                .map(|(r, _)| r)
+                .unwrap_or(card_start);
             let consumed = lower.len() - rest_after_card.len();
             return (TargetFilter::ParentTarget, &text[consumed..]);
         }
@@ -4050,35 +4049,38 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
     };
 
     // Optional type word before "card"/"cards": "creature card", "instant card", etc.
-    let after_type = if let Ok((rest, _)) = nom_target::parse_type_filter_word(after_number) {
-        let trimmed = rest.trim_start();
-        // Only consume if followed by "card"/"cards" (not standalone)
-        if trimmed.starts_with("card") {
-            trimmed
+    // CR 109.2a: "creature card" and similar descriptions restrict which
+    // cards qualify in the stated zone, so preserve the type word instead of
+    // only consuming it.
+    let (after_type, type_filter) =
+        if let Ok((rest, tf)) = nom_target::parse_type_filter_word(after_number) {
+            let trimmed = rest.trim_start();
+            // Only consume if followed by "card"/"cards" (not standalone)
+            if parse_card_or_cards_word(trimmed).is_ok() {
+                let captured = if matches!(tf, TypeFilter::Card) {
+                    None
+                } else {
+                    Some(tf)
+                };
+                (trimmed, captured)
+            } else {
+                (after_number, None)
+            }
         } else {
-            after_number
-        }
-    } else {
-        after_number
-    };
+            (after_number, None)
+        };
 
     // Required "card"/"cards" — may be followed by " of [zone]" or be standalone
-    let (after_card, card_is_terminal) =
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(after_type) {
-            let trimmed = rest.trim_start();
-            (
-                rest,
-                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
-            )
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(after_type) {
-            let trimmed = rest.trim_start();
-            (
-                rest,
-                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
-            )
-        } else {
-            return None;
-        };
+    let (after_card, card_is_terminal) = if let Ok((rest, _)) = parse_card_or_cards_word(after_type)
+    {
+        let trimmed = rest.trim_start();
+        (
+            rest,
+            trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
+        )
+    } else {
+        return None;
+    };
 
     // Standalone "the top [N] cards" — default to your library
     if card_is_terminal {
@@ -4086,10 +4088,10 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
         return Some((
             TargetFilter::Typed(TypedFilter {
                 controller: Some(ControllerRef::You),
+                type_filters: type_filter.into_iter().collect(),
                 properties: vec![FilterProp::InZone {
                     zone: Zone::Library,
                 }],
-                ..Default::default()
             }),
             &text[consumed..],
         ));
@@ -4141,7 +4143,8 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
             return None;
         };
 
-    // Required zone word
+    // Required zone word.
+    let type_filters_vec: Vec<TypeFilter> = type_filter.into_iter().collect();
     for &(zone_word, zone_plural, ref zone) in zone_words {
         for word in [zone_word, zone_plural] {
             if let Ok((zone_rest, _)) = tag::<_, _, OracleError<'_>>(word).parse(after_possessive) {
@@ -4149,8 +4152,8 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
                 return Some((
                     TargetFilter::Typed(TypedFilter {
                         controller,
+                        type_filters: type_filters_vec.clone(),
                         properties: vec![FilterProp::InZone { zone: *zone }],
-                        ..Default::default()
                     }),
                     &text[consumed..],
                 ));
@@ -5801,6 +5804,91 @@ mod tests {
                 zone: Zone::Graveyard
             }]))
         );
+    }
+
+    /// Issue #586: Mistmoon Griffin needs "top creature card of your graveyard"
+    /// to keep the creature filter, not become any card in the graveyard.
+    #[test]
+    fn target_top_creature_card_of_your_graveyard_keeps_type_filter() {
+        let (f, rest) = parse_target("the top creature card of your graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_instant_card_of_target_opponents_library_keeps_type_filter() {
+        let (f, rest) = parse_target("the top instant card of target opponent's library");
+        // The targeted player is resolved at runtime, not encoded here.
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Library
+                }
+            ]))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_card_no_type_word_has_empty_type_filters() {
+        // No type word before "card" means no type filter is captured.
+        let (f, rest) = parse_target("the top card of your library");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Library
+                }],
+                ..Default::default()
+            })
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_creature_cards_plural_keeps_type_filter() {
+        // Plural "cards" must thread the same filter as the singular path.
+        let (f, rest) = parse_target("the top three creature cards of your library");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Library
+                    }])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_subtype_card_of_zone_captures_subtype() {
+        // Subtype words should be preserved as filters too.
+        let (f, rest) = parse_target("the top spirit card of your graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Spirit".to_string())
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }])
+            )
+        );
+        assert_eq!(rest.trim(), "");
     }
 
     #[test]

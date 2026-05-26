@@ -300,11 +300,20 @@ export class DraftPodGuestAdapter {
       case "Deckbuilding":
         if (this._status !== "deckbuilding") this.setStatus("deckbuilding");
         break;
+      case "Pairing":
+      case "RoundComplete":
+        break;
       case "MatchInProgress":
         if (this._status !== "matchInProgress") this.setStatus("matchInProgress");
         break;
       case "Complete":
         if (this._status !== "complete") this.setStatus("complete");
+        break;
+      case "Lobby":
+        if (this._status !== "lobby") this.setStatus("lobby");
+        break;
+      case "Paused":
+      case "Abandoned":
         break;
     }
   }

@@ -271,6 +271,58 @@ fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
     )
 }
 
+/// CR 704.5a/704.5b/704.5c/704.6c: Whether a player-loss SBA would currently
+/// eliminate at least one non-eliminated player. This is intentionally narrower
+/// than running the full SBA loop: callers that are only trying to avoid waiting
+/// on a dead player during a non-priority continuation should not trigger
+/// unrelated SBA choice prompts such as commander-zone or legend-rule choices.
+pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
+    let life_loss = state.players.iter().any(|player| {
+        // CR 704.5a: A player with 0 or less life loses the game.
+        !player.is_eliminated
+            && !player.is_phased_out()
+            && player.life <= 0
+            && !player_has_cant_lose(state, player.id)
+    });
+    if life_loss {
+        return true;
+    }
+
+    let drew_from_empty = state.players.iter().any(|player| {
+        // CR 704.5b: A player who attempted to draw from an empty library loses
+        // the game the next time state-based actions are checked.
+        !player.is_eliminated
+            && player.drew_from_empty_library
+            && !player_has_cant_lose(state, player.id)
+    });
+    if drew_from_empty {
+        return true;
+    }
+
+    let poison_loss = state.players.iter().any(|player| {
+        // CR 704.5c: A player with ten or more poison counters loses the game.
+        !player.is_eliminated
+            && player.poison_counters >= 10
+            && !player_has_cant_lose(state, player.id)
+    });
+    if poison_loss {
+        return true;
+    }
+
+    let threshold = match state.format_config.commander_damage_threshold {
+        Some(threshold) => threshold as u32,
+        None => return false,
+    };
+
+    state.commander_damage.iter().any(|entry| {
+        // CR 704.6c: In Commander, a player dealt 21+ combat damage by the same
+        // commander over the course of the game loses.
+        entry.damage >= threshold
+            && !state.eliminated_players.contains(&entry.player)
+            && !player_has_cant_lose(state, entry.player)
+    })
+}
+
 /// Check if a static ability from `source_controller` with the given `affected` filter
 /// applies to `player_id`.
 fn static_affects_player(

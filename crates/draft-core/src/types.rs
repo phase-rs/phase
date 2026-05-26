@@ -269,6 +269,8 @@ pub enum DraftAction {
     /// Casual mode: host replaces a human seat with a bot.
     ReplaceSeatWithBot {
         seat: u8,
+        #[serde(default)]
+        name: Option<String>,
     },
 }
 
@@ -321,6 +323,12 @@ pub enum DraftError {
     ValidationFailed { errors: Vec<LimitedDeckError> },
     #[error("pairing not found: {match_id}")]
     PairingNotFound { match_id: String },
+    #[error("pairing {match_id} is not in current round {current_round}")]
+    PairingNotInCurrentRound { match_id: String, current_round: u8 },
+    #[error("single-elimination match {match_id} requires a winner")]
+    MatchWinnerRequired { match_id: String },
+    #[error("seat {seat} is not in pairing {match_id}")]
+    SeatNotInPairing { seat: u8, match_id: String },
     #[error("{format:?} requires {required} seats, got {actual}")]
     UnsupportedTournamentSize {
         format: TournamentFormat,
@@ -397,6 +405,33 @@ pub struct DraftPairing {
     pub players: [PlayerId; 2],
     pub match_id: String,
     pub status: PairingStatus,
+    #[serde(default)]
+    pub winner: Option<PlayerId>,
+}
+
+impl DraftPairing {
+    pub fn result_winner(&self, records: &HashMap<PlayerId, DraftMatchRecord>) -> Option<PlayerId> {
+        self.winner
+            .or_else(|| self.infer_winner_from_records(records))
+    }
+
+    fn infer_winner_from_records(
+        &self,
+        records: &HashMap<PlayerId, DraftMatchRecord>,
+    ) -> Option<PlayerId> {
+        if self.status != PairingStatus::Complete {
+            return None;
+        }
+
+        let w0 = records.get(&self.players[0]).map_or(0, |r| r.match_wins);
+        let w1 = records.get(&self.players[1]).map_or(0, |r| r.match_wins);
+
+        match w0.cmp(&w1) {
+            std::cmp::Ordering::Greater => Some(self.players[0]),
+            std::cmp::Ordering::Less => Some(self.players[1]),
+            std::cmp::Ordering::Equal => None,
+        }
+    }
 }
 
 /// The full state of a draft session.

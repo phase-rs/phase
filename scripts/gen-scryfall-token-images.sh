@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/scryfall-fetch.sh"
+
 DATA_DIR="data/scryfall"
 CARDS_FILE="$DATA_DIR/default-cards.json"
 OUTPUT="client/public/scryfall-token-images.json"
@@ -10,9 +13,7 @@ echo "=== Scryfall Token Image Generation ==="
 if [ ! -f "$CARDS_FILE" ]; then
   echo "Downloading Scryfall default-cards bulk data..."
   mkdir -p "$DATA_DIR"
-  DOWNLOAD_URI=$(curl -s "https://api.scryfall.com/bulk-data" \
-    | jq -r '.data[] | select(.type == "default_cards") | .download_uri')
-  curl -L -o "$CARDS_FILE" "$DOWNLOAD_URI"
+  scryfall_fetch_bulk default_cards "$CARDS_FILE"
   echo "Downloaded $CARDS_FILE."
 fi
 

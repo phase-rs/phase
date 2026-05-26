@@ -7158,7 +7158,23 @@ pub fn handle_activate_ability(
                 ));
             }
         }
-        let unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+        let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+        super::ability_utils::filter_modes_by_target_legality(
+            state,
+            source_id,
+            player,
+            &ability_def.mode_abilities,
+            &modal,
+            &mut unavailable_modes,
+        );
+        // CR 700.2a: The controller chooses modes while activating a modal
+        // ability. If every mode is illegal due to unavailable selections or
+        // unsatisfied targeting requirements, the ability cannot be activated.
+        if unavailable_modes.len() >= modal.mode_count {
+            return Err(EngineError::ActionNotAllowed(
+                "No legal modes available for activated ability".to_string(),
+            ));
+        }
         // CR 700.2a / CR 700.2e: `AbilityModeChoice.player` is threaded
         // downstream as the activated ability's controller (cost payment,
         // stack `controller`, target selection — see `engine_modes.rs`), so
@@ -13555,6 +13571,61 @@ mod tests {
             event,
             GameEvent::AbilityActivated { source_id, .. } if *source_id == source
         )));
+    }
+
+    #[test]
+    fn activated_modal_with_no_legal_target_modes_rejects_activation() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(0),
+            "Modal Pinger".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "modal placeholder".to_string(),
+                    description: None,
+                },
+            )
+            .with_modal(
+                crate::types::ability::ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 1,
+                    mode_descriptions: vec!["Deal 1 damage to target creature.".to_string()],
+                    ..Default::default()
+                },
+                vec![AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::Opponent),
+                            properties: vec![],
+                        }),
+                        damage_source: None,
+                    },
+                )],
+            ),
+        );
+
+        let mut events = Vec::new();
+        let result = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
+
+        assert!(matches!(
+            result,
+            Err(EngineError::ActionNotAllowed(message))
+                if message == "No legal modes available for activated ability"
+        ));
+        assert!(events.is_empty());
+        assert!(state.stack.is_empty());
     }
 
     #[test]

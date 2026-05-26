@@ -39,7 +39,9 @@
     "overrideResult": "Sovrascrivi risultato",
     "versusPair": "{{a}} v {{b}}",
     "kickReplace": "Espelli + sostituisci",
-    "replaceWithBot": "Sostituisci {{name}} con un bot"
+    "replaceWithBot": "Sostituisci {{name}} con un bot",
+    "endDraft": "Termina draft",
+    "endDraftConfirm": "Terminare questo draft per tutti? L'azione non puo essere annullata."
   },
   "manaCurve": {
     "title": "Curva del mana"
@@ -60,7 +62,8 @@
     "botDifficulty": "Difficoltà bot",
     "chooseSet": "Scegli un set",
     "noPools": "Nessun pool di draft disponibile. Esegui prima la pipeline dei dati di draft.",
-    "setIconAlt": "Icona set {{name}}"
+    "setIconAlt": "Icona set {{name}}",
+    "loadFailed": "Impossibile caricare i set"
   },
   "pack": {
     "confirmPick": "Conferma scelta",

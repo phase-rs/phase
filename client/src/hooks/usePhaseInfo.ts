@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { Phase } from "../adapter/types.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { usePlayerId } from "./usePlayerId.ts";
@@ -74,29 +76,25 @@ const COMBAT_PHASES = new Set<Phase>([
   "EndCombat",
 ]);
 
-const NEXT_PHASE_LABELS: Partial<Record<Phase, string>> = {
+// Maps the current phase to the next one the "advance" button moves to. The
+// display name is translated via `phaseName.<Phase>`; this stays an enum map so
+// the label routes through i18n rather than carrying hardcoded English.
+const NEXT_PHASE: Partial<Record<Phase, Phase>> = {
   Untap: "Upkeep",
   Upkeep: "Draw",
-  Draw: "Main Phase 1",
-  PreCombatMain: "Begin Combat",
-  BeginCombat: "Declare Attackers",
-  DeclareAttackers: "Declare Blockers",
-  DeclareBlockers: "Combat Damage",
-  CombatDamage: "End Combat",
-  EndCombat: "Main Phase 2",
-  PostCombatMain: "End Step",
+  Draw: "PreCombatMain",
+  PreCombatMain: "BeginCombat",
+  BeginCombat: "DeclareAttackers",
+  DeclareAttackers: "DeclareBlockers",
+  DeclareBlockers: "CombatDamage",
+  CombatDamage: "EndCombat",
+  EndCombat: "PostCombatMain",
+  PostCombatMain: "End",
   End: "Cleanup",
 };
 
-function getAdvanceLabel(phase: Phase, hasStackItems: boolean, isMyTurn: boolean): string {
-  if (hasStackItems) return "Resolve";
-  if (!isMyTurn) return "Pass Priority";
-
-  const nextPhaseLabel = NEXT_PHASE_LABELS[phase];
-  return nextPhaseLabel ? `To ${nextPhaseLabel}` : "Pass Priority";
-}
-
 export function usePhaseInfo(): PhaseInfo {
+  const { t } = useTranslation("game");
   const phase = useGameStore((s) => s.gameState?.phase ?? "Untap");
   const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
   const activePlayer = useGameStore((s) => s.gameState?.active_player ?? 0);
@@ -106,8 +104,18 @@ export function usePhaseInfo(): PhaseInfo {
   const displayKey = PHASE_TO_DISPLAY[phase];
   const currentOrder = DISPLAY_ORDER[displayKey];
   const isCombatPhase = COMBAT_PHASES.has(phase);
-  const advanceLabel = getAdvanceLabel(phase, stackLength > 0, isMyTurn);
-  const nextPhaseLabel = NEXT_PHASE_LABELS[phase] ?? null;
+
+  const nextPhase = NEXT_PHASE[phase];
+  const nextPhaseLabel = nextPhase ? t(`phaseName.${nextPhase}`) : null;
+
+  let advanceLabel: string;
+  if (stackLength > 0) {
+    advanceLabel = t("advance.resolve");
+  } else if (!isMyTurn || !nextPhaseLabel) {
+    advanceLabel = t("advance.passPriority");
+  } else {
+    advanceLabel = t("advance.toPhase", { phase: nextPhaseLabel });
+  }
 
   return {
     displayKey,

@@ -8,6 +8,8 @@
   "preview": {
     "holdCtrlBack": "Mantén Ctrl para la cara trasera",
     "holdCtrlFront": "Mantén Ctrl para la cara frontal",
+    "holdCtrlFlip": "Mantén Ctrl para girar",
+    "flip": "Girar",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",
@@ -307,7 +309,9 @@
     "statHand": "Mano",
     "statCreatures": "Criaturas",
     "statLands": "Tierras",
-    "statOther": "Otros"
+    "statOther": "Otros",
+    "compactHud": "HUD de oponente compacto. Contrae cada oponente a una sola fila fina (nombre + vidas); toca un oponente para enfocar todo su campo de batalla.",
+    "expandHud": "Expandir HUD de oponente. Muestra la mano y el desglose del campo de batalla de cada oponente."
   },
   "combat": {
     "attackAll": "Atacar a todos",
@@ -380,7 +384,9 @@
     "nounTarget": "objetivo",
     "confirmTap": "Confirmar giro ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conservar objetivos actuales",
-    "skip": "Omitir"
+    "skip": "Omitir",
+    "chooseNewTarget": "Elige el nuevo objetivo del hechizo",
+    "chooseNewTargetForSpell": "Elige un nuevo objetivo para {{spell}}"
   },
   "log": {
     "title": "Registro de la partida",
@@ -1237,6 +1243,12 @@
     "no": "No",
     "dontAskAgain": "No volver a preguntar en esta partida"
   },
+  "topOrBottom": {
+    "cardFallback": "Card",
+    "title": "Put {{name}} on top or bottom of library",
+    "top": "Top of library",
+    "bottom": "Bottom of library"
+  },
   "permanentTypeSlot": {
     "eyebrow": "Tipo de permanente",
     "title": "Elegir ranura de tipo",
@@ -1247,6 +1259,9 @@
     "proliferateSubtitle": "Elige cualquier número de permanentes y jugadores con contadores. Cada objetivo elegido recibe un contador más de cada tipo que ya tenga.",
     "chooseObjectsTitle": "Elegir permanentes",
     "chooseObjectsSubtitle": "Elige cualquier número de permanentes. Pagas un coste por cada uno elegido.",
+    "selectAll": "Todos",
+    "selectNone": "Ninguno",
+    "selectMine": "Mi lado",
     "confirm": "Confirmar"
   },
   "replacement": {
@@ -1260,7 +1275,8 @@
     "scopeSingle": "Elige un nuevo objetivo para el hechizo",
     "scopeMulti": "Elige nuevos objetivos para el hechizo",
     "subtitle": "{{scope}}. Actual: {{current}}",
-    "confirm": "Confirmar"
+    "confirm": "Confirmar",
+    "badgeNewTarget": "Nuevo objetivo"
   },
   "separatePiles": {
     "chooserName": "Jugador {{number}}",
@@ -1321,5 +1337,27 @@
     "subtitleLabel": "Elige una etiqueta para {{name}}",
     "subtitleVoteRemaining": "Emite un voto ({{count}} restantes)",
     "subtitleVote": "Emite tu voto"
+  },
+  "advance": {
+    "resolve": "Resolver",
+    "passPriority": "Pasar prioridad",
+    "toPhase": "A {{phase}}"
+  },
+  "outsideGame": {
+    "fromExile": "Desde el exilio",
+    "fromSideboard": "Desde el banquillo"
+  },
+  "phaseName": {
+    "Upkeep": "Mantenimiento",
+    "Draw": "Robar",
+    "PreCombatMain": "Fase principal 1",
+    "BeginCombat": "Inicio del combate",
+    "DeclareAttackers": "Declarar atacantes",
+    "DeclareBlockers": "Declarar bloqueadores",
+    "CombatDamage": "Daño de combate",
+    "EndCombat": "Fin del combate",
+    "PostCombatMain": "Fase principal 2",
+    "End": "Paso final",
+    "Cleanup": "Limpieza"
   }
 }

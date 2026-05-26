@@ -108,6 +108,8 @@ function normalizePodConfig(config: PodConfig): PodConfig {
   return config;
 }
 
+let resumeHostedPodPromise: Promise<void> | null = null;
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
@@ -188,46 +190,68 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     },
 
     resumeHostedPod: async () => {
-      const meta = loadActiveDraftPod();
-      if (!meta) {
-        set({ configError: "No draft pod to resume" });
-        return;
+      if (resumeHostedPodPromise) {
+        return resumeHostedPodPromise;
       }
 
-      const persisted = await loadDraftHostSession(meta.id);
-      if (!persisted) {
-        clearActiveDraftPod();
-        set({ configError: "Saved draft pod was not found" });
-        return;
-      }
+      resumeHostedPodPromise = (async () => {
+        const meta = loadActiveDraftPod();
+        if (!meta) {
+          set({ configError: "No draft pod to resume" });
+          return;
+        }
 
-      set({
-        config: {
-          setCode: "",
-          setName: "Draft Pod",
+        const activeDraft = useMultiplayerDraftStore.getState();
+        if (
+          activeDraft.role === "host" &&
+          activeDraft.phase !== "idle" &&
+          activeDraft.phase !== "error" &&
+          activeDraft.roomCode === meta.roomCode
+        ) {
+          return;
+        }
+
+        const persisted = await loadDraftHostSession(meta.id);
+        if (!persisted) {
+          clearActiveDraftPod();
+          set({ configError: "Saved draft pod was not found" });
+          return;
+        }
+
+        set({
+          config: {
+            setCode: "",
+            setName: "Draft Pod",
+            kind: persisted.kind,
+            podSize: persisted.podSize,
+            tournamentFormat: persisted.tournamentFormat,
+            podPolicy: persisted.podPolicy,
+          },
+          hostDisplayName: persisted.hostDisplayName,
+          setPoolJson: persisted.setPoolJson,
+          loadingPool: false,
+          configError: null,
+        });
+
+        const hostConfig: DraftPodHostConfig = {
+          setPoolJson: persisted.setPoolJson,
           kind: persisted.kind,
           podSize: persisted.podSize,
+          hostDisplayName: persisted.hostDisplayName,
           tournamentFormat: persisted.tournamentFormat,
           podPolicy: persisted.podPolicy,
-        },
-        hostDisplayName: persisted.hostDisplayName,
-        setPoolJson: persisted.setPoolJson,
-        loadingPool: false,
-        configError: null,
-      });
+          persistenceId: persisted.persistenceId,
+          preferredRoomCode: persisted.roomCode || undefined,
+        };
 
-      const hostConfig: DraftPodHostConfig = {
-        setPoolJson: persisted.setPoolJson,
-        kind: persisted.kind,
-        podSize: persisted.podSize,
-        hostDisplayName: persisted.hostDisplayName,
-        tournamentFormat: persisted.tournamentFormat,
-        podPolicy: persisted.podPolicy,
-        persistenceId: persisted.persistenceId,
-        preferredRoomCode: persisted.roomCode || undefined,
-      };
+        await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+      })();
 
-      await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+      try {
+        await resumeHostedPodPromise;
+      } finally {
+        resumeHostedPodPromise = null;
+      }
     },
 
     joinPod: async () => {

@@ -20,7 +20,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // .destination(Battlefield); valid_card filtering and the power/toughness
         // intervening-if (CR 603.4) are handled downstream by
         // zone_change_clause_matches / check_trigger_condition respectively.
-        TriggerMode::ChangesZone | TriggerMode::Evolved => match_changes_zone,
+        TriggerMode::ChangesZone | TriggerMode::Evolve => match_changes_zone,
+        TriggerMode::Evolved => match_evolved,
         TriggerMode::ChangesZoneAll => match_changes_zone_all,
         TriggerMode::DamageDone
         | TriggerMode::DamageDoneOnce
@@ -95,6 +96,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::BecomeMonarch => match_become_monarch,
         TriggerMode::RolledDie | TriggerMode::RolledDieOnce => match_rolled_die,
         TriggerMode::FlippedCoin => match_flipped_coin,
+        TriggerMode::Clashed => match_clash,
         TriggerMode::RingTemptsYou => match_ring_tempts_you,
         TriggerMode::DungeonCompleted => match_dungeon_completed,
         TriggerMode::RoomEntered => match_room_entered,
@@ -145,7 +147,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::PlaneswalkedFrom
         | TriggerMode::PlaneswalkedTo
         | TriggerMode::ChaosEnsues
-        | TriggerMode::Clashed
         | TriggerMode::Copied
         | TriggerMode::ConjureAll
         | TriggerMode::Vote
@@ -313,6 +314,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 705: Coin flipping triggers
     r.insert(TriggerMode::FlippedCoin, match_flipped_coin);
 
+    // CR 701.30: Clash trigger
+    r.insert(TriggerMode::Clashed, match_clash);
+
     // CR 701.54: Ring tempts you trigger
     r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
 
@@ -361,6 +365,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Exerted,
         // TriggerMode::Crewed — moved to real matcher below
         // TriggerMode::Saddled — moved to real matcher below
+        // TriggerMode::Evolve — moved to real matcher below
         // TriggerMode::Evolved — moved to real matcher below
         TriggerMode::Enlisted,
         TriggerMode::Adapt,
@@ -372,7 +377,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::PlaneswalkedFrom,
         TriggerMode::PlaneswalkedTo,
         TriggerMode::ChaosEnsues,
-        TriggerMode::Clashed,
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
         TriggerMode::Vote,
@@ -406,7 +410,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // .destination(Battlefield); valid_card filtering and the power/toughness
     // intervening-if (CR 603.4) are handled downstream by
     // zone_change_clause_matches / check_trigger_condition respectively.
-    r.insert(TriggerMode::Evolved, match_changes_zone);
+    r.insert(TriggerMode::Evolve, match_changes_zone);
+    // CR 702.100b: "Whenever [a creature] evolves" fires only when the
+    // evolve ability's resolution actually put one or more +1/+1 counters on it.
+    r.insert(TriggerMode::Evolved, match_evolved);
 
     // CR 702.122d: Crew trigger matchers
     r.insert(TriggerMode::Crewed, match_vehicle_crewed);
@@ -1116,24 +1123,7 @@ fn attack_target_matches(
     source_id: ObjectId,
 ) -> bool {
     if let Some(filter) = trigger.attack_target_filter.as_ref() {
-        let type_matches = matches!(
-            (filter, target),
-            (
-                crate::types::triggers::AttackTargetFilter::Player,
-                crate::game::combat::AttackTarget::Player(_)
-            ) | (
-                crate::types::triggers::AttackTargetFilter::Planeswalker,
-                crate::game::combat::AttackTarget::Planeswalker(_)
-            ) | (
-                crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
-                crate::game::combat::AttackTarget::Player(_)
-                    | crate::game::combat::AttackTarget::Planeswalker(_)
-            ) | (
-                crate::types::triggers::AttackTargetFilter::Battle,
-                crate::game::combat::AttackTarget::Battle(_)
-            )
-        );
-        if !type_matches {
+        if !attack_target_type_matches(target, filter) {
             return false;
         }
     }
@@ -1147,7 +1137,30 @@ fn attack_target_matches(
     }
 }
 
-fn attack_target_defending_player(
+pub(super) fn attack_target_type_matches(
+    target: crate::game::combat::AttackTarget,
+    filter: &crate::types::triggers::AttackTargetFilter,
+) -> bool {
+    matches!(
+        (filter, target),
+        (
+            crate::types::triggers::AttackTargetFilter::Player,
+            crate::game::combat::AttackTarget::Player(_)
+        ) | (
+            crate::types::triggers::AttackTargetFilter::Planeswalker,
+            crate::game::combat::AttackTarget::Planeswalker(_)
+        ) | (
+            crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
+            crate::game::combat::AttackTarget::Player(_)
+                | crate::game::combat::AttackTarget::Planeswalker(_)
+        ) | (
+            crate::types::triggers::AttackTargetFilter::Battle,
+            crate::game::combat::AttackTarget::Battle(_)
+        )
+    )
+}
+
+pub(super) fn attack_target_defending_player(
     state: &GameState,
     target: crate::game::combat::AttackTarget,
     fallback_defending_player: PlayerId,
@@ -1298,6 +1311,19 @@ pub(super) fn match_counter_added(
             }
         }
         true
+    } else {
+        false
+    }
+}
+
+pub(super) fn match_evolved(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::Evolved { object_id } = event {
+        valid_card_matches(trigger, state, *object_id, source_id)
     } else {
         false
     }
@@ -2361,11 +2387,26 @@ pub(super) fn match_you_attack(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    let GameEvent::AttackersDeclared { attacker_ids, .. } = event else {
-        return false;
+    !matching_you_attack_pairs(event, trigger, source_id, state).is_empty()
+}
+
+pub(super) fn matching_you_attack_pairs(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Vec<(ObjectId, crate::game::combat::AttackTarget)> {
+    let GameEvent::AttackersDeclared {
+        attacker_ids,
+        defending_player,
+        attacks,
+        ..
+    } = event
+    else {
+        return Vec::new();
     };
     if attacker_ids.is_empty() {
-        return false;
+        return Vec::new();
     }
     // CR 506.2: the active player is the attacking player; all attackers in
     // a single AttackersDeclared batch share one controller.
@@ -2373,29 +2414,55 @@ pub(super) fn match_you_attack(
         .iter()
         .find_map(|id| state.objects.get(id).map(|o| o.controller))
     else {
-        return false;
+        return Vec::new();
     };
     // CR 603.2c: the player-scope gate (valid_target). No filter ⇒ legacy
     // "attackers controlled by the trigger's source controller" semantics.
-    let player_ok = if trigger.valid_target.is_some() {
-        valid_player_matches(trigger, state, attacking_player, source_id)
-    } else {
-        let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-        Some(attacking_player) == source_controller
+    let player_ok = match trigger.valid_target.as_ref() {
+        // Parser legacy for "one or more creatures attack a player": the
+        // attacked-player type is represented as `TargetFilter::Player`, not
+        // as attacking-player scope. The per-attack target filter below handles
+        // it, so keep the attacking-player gate permissive here.
+        Some(TargetFilter::Player) => true,
+        Some(_) => valid_player_matches(trigger, state, attacking_player, source_id),
+        None => {
+            let source_controller = state.objects.get(&source_id).map(|o| o.controller);
+            Some(attacking_player) == source_controller
+        }
     };
     if !player_ok {
-        return false;
+        return Vec::new();
     }
 
-    // CR 508.1 + CR 603.2c: the attacker-type gate (valid_card). "Attack with one
-    // or more <TYPE>" fires iff at least one attacker in the batch matches the
-    // type filter. No filter ⇒ any attacker (current behavior preserved).
-    match &trigger.valid_card {
-        None => true,
-        Some(filter) => attacker_ids
-            .iter()
-            .any(|id| target_filter_matches_object(state, *id, filter, source_id)),
-    }
+    attacker_ids
+        .iter()
+        .filter_map(|id| {
+            if trigger
+                .valid_card
+                .as_ref()
+                .is_some_and(|filter| !target_filter_matches_object(state, *id, filter, source_id))
+            {
+                return None;
+            }
+            let target = attacks
+                .iter()
+                .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
+                .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+            if trigger
+                .attack_target_filter
+                .as_ref()
+                .is_some_and(|filter| !attack_target_type_matches(target, filter))
+            {
+                return None;
+            }
+            if matches!(trigger.valid_target, Some(TargetFilter::Player))
+                && !matches!(target, crate::game::combat::AttackTarget::Player(_))
+            {
+                return None;
+            }
+            Some((*id, target))
+        })
+        .collect()
 }
 
 /// CR 725.1: Matches when a player becomes the monarch.
@@ -2475,6 +2542,29 @@ pub(super) fn match_ring_tempts_you(
         *player_id == source_controller
     } else {
         false
+    }
+}
+
+/// CR 701.30b-c: Match clash events.
+/// Fires when a clash occurs and either clashing player matches `valid_target`.
+/// "Whenever you clash" sets `valid_target = Controller`; a generic "whenever
+/// a player clashes" leaves `valid_target` unset to match any clash.
+pub(super) fn match_clash(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match event {
+        GameEvent::Clash {
+            controller,
+            opponent,
+            ..
+        } => {
+            valid_player_matches(trigger, state, *controller, source_id)
+                || valid_player_matches(trigger, state, *opponent, source_id)
+        }
+        _ => false,
     }
 }
 
@@ -7740,6 +7830,48 @@ mod tests {
         assert!(
             match_changes_zone(&opp_milled_event, &trigger, source, &state),
             "trigger must fire when an opponent's creature card is milled"
+        );
+    }
+
+    /// CR 701.30b-c: match_clash fires when the controller of the trigger
+    /// source is either player participating in the clash.
+    #[test]
+    fn clash_trigger_fires_for_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Entangling Trap".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Clashed);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        // Controller (P0) initiates the clash — fires.
+        let event = GameEvent::Clash {
+            controller: PlayerId(0),
+            opponent: PlayerId(1),
+            controller_mana_value: None,
+            opponent_mana_value: None,
+            result: crate::types::events::ClashResult::Won,
+        };
+        assert!(
+            match_clash(&event, &trigger, source, &state),
+            "clash trigger must fire for controller"
+        );
+
+        // Controller (P0) is the chosen opponent and still clashes — fires.
+        let event2 = GameEvent::Clash {
+            controller: PlayerId(1),
+            opponent: PlayerId(0),
+            controller_mana_value: None,
+            opponent_mana_value: None,
+            result: crate::types::events::ClashResult::Won,
+        };
+        assert!(
+            match_clash(&event2, &trigger, source, &state),
+            "clash trigger must fire when controller is the opponent participant"
         );
     }
 
