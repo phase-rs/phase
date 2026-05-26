@@ -4017,7 +4017,7 @@ pub(super) fn begin_pending_trigger_target_selection(
         return Ok(None);
     };
 
-    // CR 700.2a: Modal trigger — prompt for mode selection before stack.
+    // CR 700.2b: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
             let modal = modal_choice_for_player(
@@ -4037,7 +4037,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &mut unavailable_modes,
             );
 
-            // CR 700.2d: All modes unavailable (previously chosen OR no legal
+            // CR 700.2b: All modes unavailable (previously chosen OR no legal
             // targets) — ability cannot be put on the stack. Clear pending
             // trigger and skip.
             if unavailable_modes.len() >= modal.mode_count {
@@ -11781,7 +11781,7 @@ mod trigger_target_tests {
         // Call the private function via the engine path.
         let result = begin_pending_trigger_target_selection(&mut state).unwrap();
 
-        // CR 700.2: All modes exhausted — no AbilityModeChoice produced.
+        // CR 700.2b: All modes exhausted — no AbilityModeChoice produced.
         assert!(result.is_none());
         // Pending trigger should be cleared.
         assert!(state.pending_trigger.is_none());

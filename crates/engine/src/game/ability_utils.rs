@@ -365,12 +365,12 @@ pub fn compute_unavailable_modes(
     unavailable
 }
 
-/// CR 700.2d: Extends `unavailable_modes` with mode indices whose targeting
-/// requirements cannot be satisfied on the current board. For each mode not
-/// already marked unavailable, builds the resolved ability for that single mode,
-/// computes its target slots, and checks whether a legal target assignment
-/// exists. Modes that require targets but have no legal assignment are appended
-/// to `unavailable_modes`.
+/// CR 700.2a-b + CR 700.2f: Extends `unavailable_modes` with mode indices
+/// whose targeting requirements cannot be satisfied on the current board. For
+/// each mode not already marked unavailable, builds the resolved ability for
+/// that single mode, computes its target slots, and checks whether a legal
+/// target assignment exists. Modes that require targets but have no legal
+/// assignment are appended to `unavailable_modes`.
 ///
 /// This prevents the softlock where a player (or AI) selects a mode with no
 /// legal targets, causing `pending_trigger` to be consumed and then the
@@ -3375,10 +3375,11 @@ pub fn validate_modal_indices(
                 "Duplicate mode index {idx}"
             )));
         }
-        // CR 700.2: Reject modes already chosen per NoRepeatThisTurn/NoRepeatThisGame.
+        // CR 700.2a-b: Reject modes unavailable due to prior selections or
+        // unsatisfied targeting requirements.
         if unavailable_modes.contains(&idx) {
             return Err(EngineError::InvalidAction(format!(
-                "Mode index {idx} is unavailable (already chosen)"
+                "Mode index {idx} is unavailable"
             )));
         }
     }
