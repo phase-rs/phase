@@ -6,13 +6,13 @@
 //! the highest-frequency are mapped here; the long tail fails strict and
 //! shows up in the report.
 
-use engine::types::ability::{DamageKindFilter, TriggerConstraint};
+use engine::types::ability::{CounterTriggerFilter, DamageKindFilter, TriggerConstraint};
 use engine::types::triggers::TriggerMode;
 use engine::types::{Phase, TargetFilter, TriggerDefinition, TypedFilter, Zone};
 
 use crate::convert::filter::{
     cards_in_graveyard_to_filter, cards_to_filter, convert as convert_permanents,
-    players_to_controller, spells_to_filter,
+    counter_type_to_engine, players_to_controller, spells_to_filter,
 };
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{CardsInHand, Comparison, GameNumber, Players, Trigger};
@@ -295,6 +295,71 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
         Trigger::WhenAPermanentExploitsAPermanent(source, _target) => {
             TriggerDefinition::new(TriggerMode::Exploited)
                 .valid_card(convert_permanents(source)?)
+        }
+
+        // CR 122.6 + CR 603.2: "Whenever [one or more] counter[s] [of type X]
+        // are put on [permanents]" triggers. Engine `match_counter_added` fires on
+        // `GameEvent::CounterAdded` for both `CounterAdded` (single-counter Oracle
+        // phrasing) and `CounterAddedAll` (batched "one or more" Oracle phrasing).
+        // `CounterTriggerFilter` narrows by counter type when the variant carries one.
+        // Player-scoped variants (`WhenAPlayer*`) have no player-filter axis in
+        // `match_counter_added` today; strict-fail preserves rules correctness.
+        Trigger::WhenACounterIsPutOnAPermanent(permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .valid_card(convert_permanents(permanents)?)
+        }
+        Trigger::WhenACounterOfTypeIsPutOnAPermanent(ct, permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: counter_type_to_engine(ct)?,
+                    threshold: None,
+                })
+                .valid_card(convert_permanents(permanents)?)
+        }
+        Trigger::WhenAnyNumberOfCountersArePutOnAPermanent(permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAddedAll)
+                .valid_card(convert_permanents(permanents)?)
+        }
+        Trigger::WhenAnyNumberOfCountersOfTypeArePutOnAPermanent(ct, permanents)
+        | Trigger::WhenAnyNumberOfCountersOfTypeArePutOnAnyNumberOfPermanents(ct, permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAddedAll)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: counter_type_to_engine(ct)?,
+                    threshold: None,
+                })
+                .valid_card(convert_permanents(permanents)?)
+        }
+        // CR 122.6 + CR 603.2 + CR 603.10: "for the first time each turn" variant
+        // adds a per-turn frequency gate via `TriggerConstraint::OncePerTurn`.
+        Trigger::WhenAnyNumberOfCountersArePutOnAPermanentForTheFirstTimeEachTurn(permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAddedAll)
+                .valid_card(convert_permanents(permanents)?)
+                .constraint(TriggerConstraint::OncePerTurn)
+        }
+        Trigger::WhenAnyNumberOfCountersOfTypeArePutOnAPermanentForTheFirstTimeEachTurn(
+            ct,
+            permanents,
+        ) => {
+            TriggerDefinition::new(TriggerMode::CounterAddedAll)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: counter_type_to_engine(ct)?,
+                    threshold: None,
+                })
+                .valid_card(convert_permanents(permanents)?)
+                .constraint(TriggerConstraint::OncePerTurn)
+        }
+        // CR 122.6: Player-scoped counter-put triggers ("whenever YOU put counters…").
+        // Engine `match_counter_added` tracks no actor; silently firing on any putter
+        // would be rules-incorrect. Strict-fail until the engine gains a player-filter
+        // axis on counter-put events.
+        Trigger::WhenAPlayerPutsACounterOnAPermanent(..)
+        | Trigger::WhenAPlayerPutsACounterOfTypeOnAPermanent(..)
+        | Trigger::WhenAPlayerPutsAnyNumberOfCountersOfTypeOnAPermanent(..)
+        | Trigger::WhenAPlayerPutsAnyNumberOfGenericCountersOnAPermanent(..) => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "match_counter_added",
+                needed_variant: "player-filter axis on counter-put trigger".into(),
+            });
         }
 
         // CR 701.9: Discard triggers — "when [players] discards [cards]". Engine
