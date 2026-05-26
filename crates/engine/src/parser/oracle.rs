@@ -177,6 +177,41 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
     parsed
 }
 
+// CR 100.2a / CR 717.1d / CR 903.5b: Deck-construction overrides like
+// "A deck can have any number of cards named X." (Tempest Hawk, Rat Colony,
+// Relentless Rats, Persistent Petitioners, Shadowborn Apostle, etc.) are
+// deck-construction metadata, not in-game abilities. They have no runtime
+// effect to resolve. CR 107.1c defines "any number of" — the recognizer
+// matches this exact phrase shape to avoid false-positives against
+// legitimate "up to N cards named ..." patterns (e.g. Seven Dwarves).
+fn parse_deck_can_have_any_number_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    use nom::bytes::complete::take_while;
+    let (input, _) = tag("a deck can have any number of cards named ").parse(input)?;
+    let (input, subject) = take_while(|c: char| {
+        c.is_alphanumeric() || c == ' ' || c == '\'' || c == ',' || c == '-' || c == '~'
+    })
+    .parse(input)?;
+    if subject.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
+}
+
+/// Recognizer for "A deck can have any number of cards named X." —
+/// deck-construction text consumed silently by the parser so it does not
+/// fall through to `Effect::Unimplemented { name: "static_structure", .. }`.
+pub(crate) fn is_deck_construction_any_number_sentence(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    let parsed = all_consuming(parse_deck_can_have_any_number_sentence)
+        .parse(lower.as_str())
+        .is_ok();
+    parsed
+}
+
 /// Whether Oracle text explicitly permits this card to be a commander.
 pub fn oracle_text_allows_commander(oracle_text: &str, card_name: &str) -> bool {
     let normalized = normalize_card_name_refs(oracle_text, card_name);
@@ -773,7 +808,10 @@ fn is_spell_resolution_instruction_line(
     let loyalty_snap = ctx.diagnostics.len();
     let is_loyalty = try_parse_loyalty_line(line, ctx).is_some();
     ctx.diagnostics.truncate(loyalty_snap);
-    if is_commander_permission_sentence(line) || is_loyalty {
+    if is_commander_permission_sentence(line)
+        || is_deck_construction_any_number_sentence(line)
+        || is_loyalty
+    {
         return false;
     }
 
@@ -1651,6 +1689,11 @@ pub(crate) fn parse_oracle_ir(
         }
 
         if is_commander_permission_sentence(&line) {
+            i += 1;
+            continue;
+        }
+
+        if is_deck_construction_any_number_sentence(&line) {
             i += 1;
             continue;
         }
@@ -4930,6 +4973,88 @@ mod tests {
         assert!(r.replacements.is_empty());
     }
 
+    // CR 100.2a / CR 717.1d / CR 903.5b: "A deck can have any number of cards
+    // named X." is deck-construction metadata, not an in-game ability. The
+    // recognizer must accept the raw card name, the engine's normalized
+    // self-reference "~", and reject "up to N" patterns (Seven Dwarves).
+    #[test]
+    fn deck_construction_any_number_sentence_positive_cases() {
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Tempest Hawk."
+        ));
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Relentless Rats."
+        ));
+        // After normalize_self_refs_for_static rewrites the card name to "~".
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named ~."
+        ));
+        // Trailing period is optional.
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Tempest Hawk"
+        ));
+    }
+
+    #[test]
+    fn deck_construction_any_number_sentence_negative_cases() {
+        // Wrong determiner — must be "A deck", not "Your deck".
+        assert!(!is_deck_construction_any_number_sentence(
+            "Your deck can have any number of cards named X."
+        ));
+        // "Up to seven" is a different deck-construction pattern (Seven Dwarves).
+        // It must NOT be silently consumed by this recognizer.
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have up to seven cards named Seven Dwarves."
+        ));
+        // Unrelated static lines must not match.
+        assert!(!is_deck_construction_any_number_sentence(
+            "Creatures you control get +1/+1."
+        ));
+        // Empty subject after the "named " prefix.
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named ."
+        ));
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named"
+        ));
+    }
+
+    #[test]
+    fn tempest_hawk_oracle_text_produces_no_unimplemented_static() {
+        // Full Oracle text fixture for Tempest Hawk — the bug surface from
+        // GitHub issue #1074. Before the fix, the "A deck can have any number
+        // of cards named Tempest Hawk." line fell through to
+        // Effect::Unimplemented { name: "static_structure", .. }. After the
+        // fix, it must be silently consumed.
+        let r = parse(
+            "Flying\n\
+             Whenever this creature deals combat damage to a player, you may search your library for a card named Tempest Hawk, reveal it, put it into your hand, then shuffle.\n\
+             A deck can have any number of cards named Tempest Hawk.",
+            "Tempest Hawk",
+            &[Keyword::Flying],
+            &["Creature"],
+            &["Bird"],
+        );
+
+        // No ability should be Unimplemented with name "static_structure".
+        let static_unimplemented: Vec<&AbilityDefinition> = r
+            .abilities
+            .iter()
+            .filter(|a| {
+                matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name == "static_structure"
+                )
+            })
+            .collect();
+        assert!(
+            static_unimplemented.is_empty(),
+            "deck-construction line must be silently consumed, but produced \
+             {} static_structure Unimplemented entries: {:#?}",
+            static_unimplemented.len(),
+            static_unimplemented
+        );
+    }
     #[test]
     fn oracle_text_allows_commander_uses_commander_permission_parser() {
         assert!(oracle_text_allows_commander(
