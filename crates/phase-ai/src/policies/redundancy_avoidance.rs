@@ -522,12 +522,27 @@ fn resolved_candidate_targets(
 }
 
 /// ETB-self-undo bounce: the cast spell's immediate ETB trigger returns a
-/// creature to its owner's hand, but the only legal returnee on the
-/// battlefield is the source object itself (Whitemane Lion ruling: "If you
-/// don't control any other creature, you must return it") OR the candidate
-/// set is empty (the trigger fizzles entirely). In both cases the cast does
-/// not stick — the source either re-enters the caster's hand or contributes
-/// no on-resolution value beyond a vanilla body that didn't enter.
+/// creature to its owner's hand, but no other creature the AI controls is
+/// a legal target. The trigger either fizzles (if zero legal targets exist
+/// at resolution) or is forced to pick the source itself (Whitemane Lion
+/// ruling: "If you don't control any other creature, you must return it").
+/// Either way the cast does not stick — the source re-enters the caster's
+/// hand or contributes no on-resolution value beyond a vanilla body that
+/// didn't enter.
+///
+/// Why one branch suffices: this predicate is gated to
+/// `EffectOrigin::CastImmediateEtbTrigger`, which means the source is being
+/// evaluated *pre-cast* — still in hand, not yet on the battlefield.
+/// `resolved_candidate_targets` queries `state.battlefield`, so the source
+/// is never in the candidate set at cast-time. The "every candidate IS the
+/// source" subcase is therefore unreachable at this evaluation point — the
+/// `candidates.is_empty()` check is the correct and complete signal:
+///   * Empty candidates pre-cast => no other creature controlled => when the
+///     ETB resolves after the Lion enters, the Lion will be the only legal
+///     target (or there will be none, if the source died/left). Either way
+///     the cast is a no-op loop.
+///   * Non-empty candidates pre-cast => at least one creature other than the
+///     source is on the battlefield => legitimate target exists, no penalty.
 ///
 /// Categorical scope:
 ///   - Only fires when `origin == EffectOrigin::CastImmediateEtbTrigger`.
@@ -540,10 +555,9 @@ fn resolved_candidate_targets(
 ///     `Some(Zone::Hand)`). Library/Exile destinations are not handled by
 ///     this predicate.
 ///
-/// Returns `(BOUNCE_SELF_UNDO_DELTA, KIND_BOUNCE_SELF_UNDO, count)` on a
-/// confirmed self-undo; `None` otherwise. The `count` fact is 0 when the
-/// trigger fizzles and 1 when the source is the only legal return target —
-/// enough signal in traces to distinguish the two pathological subcases.
+/// Returns `(BOUNCE_SELF_UNDO_DELTA, KIND_BOUNCE_SELF_UNDO, 0)` on a
+/// confirmed self-undo; `None` otherwise. The `count` fact is 0 (no other
+/// legal targets at cast-time) — sufficient signal for trace attribution.
 fn bounce_self_undo_redundancy(
     state: &GameState,
     source_id: ObjectId,
@@ -554,22 +568,14 @@ fn bounce_self_undo_redundancy(
         return None;
     }
     let candidates = resolved_candidate_targets(state, source_id, target);
-    // CR 608.2b: if the candidate set is empty, the trigger has no legal
-    // target — the targeted ability is removed from the stack at resolution
-    // and does nothing. Penalise: the AI is paying mana for a trigger that
-    // fizzles.
+    // CR 608.2b: if no other creature the AI controls is a legal target,
+    // the trigger either fizzles (zero legal targets remain at resolution)
+    // or is forced to return the source itself (Whitemane Lion ruling). Both
+    // produce the same loop pathology; both are detected here by the
+    // empty-set check at cast-time, since the source is still in hand and
+    // cannot itself appear in the battlefield-queried candidate set.
     if candidates.is_empty() {
         return Some((BOUNCE_SELF_UNDO_DELTA, KIND_BOUNCE_SELF_UNDO, 0));
-    }
-    // Whitemane-Lion / Stonecloaker case: every candidate IS the source.
-    // The trigger must pick the source itself, bouncing the spell-just-cast
-    // back to hand. Net effect: spend mana, gain nothing, prime the loop.
-    if candidates.iter().all(|&id| id == source_id) {
-        return Some((
-            BOUNCE_SELF_UNDO_DELTA,
-            KIND_BOUNCE_SELF_UNDO,
-            candidates.len() as i64,
-        ));
     }
     None
 }
@@ -1382,22 +1388,20 @@ mod tests {
 
     #[test]
     fn whitemane_lion_self_undo_etb_penalised() {
-        // AI controls only the Lion (after it resolves it would be alone),
-        // so the "creature you control" ETB bounce has exactly one legal
-        // target: the Lion itself. Confirmed self-undo loop.
+        // AI is evaluating a cast of Whitemane Lion from hand. The AI
+        // currently controls no other creatures, so the "creature you
+        // control" ETB bounce will, after the Lion resolves, either fizzle
+        // or be forced to return the Lion itself (per the Lion ruling).
+        // Either way: self-undo loop. The Lion stays in hand for this
+        // test — `resolved_candidate_targets` queries the battlefield at
+        // cast-time and returns an empty set, which is the exact signal
+        // `bounce_self_undo_redundancy` keys off of.
         let mut state = GameState::new_two_player(0);
         let (obj_id, card_id) = make_etb_bouncer_in_hand(
             &mut state,
             "Whitemane Lion",
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
         );
-        // Simulate the on-resolution battlefield: the Lion is the sole
-        // creature the AI controls. (CastFacts walks `trigger_definitions`
-        // on the hand object; the candidate target set is computed against
-        // the current battlefield, so we add the source there too to
-        // emulate the post-ETB-resolution state.)
-        state.battlefield.push_back(obj_id);
-        state.objects.get_mut(&obj_id).unwrap().zone = Zone::Battlefield;
 
         let config = AiConfig::default();
         let ai_ctx = AiContext::empty(&config.weights);
@@ -1416,17 +1420,18 @@ mod tests {
 
     #[test]
     fn etb_bounce_with_other_creature_not_penalised() {
-        // AI controls the Lion AND another creature — the ETB bounce has a
-        // legitimate target other than itself, so it is NOT self-undoing.
+        // AI is casting Whitemane Lion from hand AND already controls
+        // another creature on the battlefield. The ETB bounce has a
+        // legitimate target other than the Lion itself, so it is NOT
+        // self-undoing — the candidate set is non-empty at cast-time.
         let mut state = GameState::new_two_player(0);
         let (obj_id, card_id) = make_etb_bouncer_in_hand(
             &mut state,
             "Whitemane Lion",
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
         );
-        state.battlefield.push_back(obj_id);
-        state.objects.get_mut(&obj_id).unwrap().zone = Zone::Battlefield;
-        // Add a second creature the AI controls.
+        // The other creature lives on the battlefield as the legitimate
+        // bounce target. `make_creature_with_ability` places it there.
         let _other = make_creature_with_ability(
             &mut state,
             "Other Creature",
@@ -1521,8 +1526,12 @@ mod tests {
         // `Some(Zone::Hand)` are self-undo loops, because only those land the
         // source back where it can be immediately re-cast. A bounce to library
         // is a different category (top-of-library setup, e.g., Crystal Shard
-        // variants) — `bounce_self_undo_redundancy` must NOT fire here even
-        // when the only legal target is the source itself.
+        // variants) — `bounce_self_undo_redundancy` must NOT fire here.
+        // Mirrors the Whitemane-Lion geometry (bouncer in hand, no other
+        // creatures controlled): if the destination-axis short-circuit in
+        // the `Effect::Bounce` match arm is missing, the predicate would
+        // emit a penalty via the empty-candidates branch and this test
+        // would fail.
         let mut state = GameState::new_two_player(0);
         let (obj_id, card_id) = make_etb_bouncer_in_hand_with_destination(
             &mut state,
@@ -1530,12 +1539,6 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             Some(Zone::Library),
         );
-        // Mirror the self-undo battlefield shape: the bouncer is the only
-        // creature controlled. Whitemane-Lion test geometry — if the
-        // destination-axis short-circuit is missing, this test will go
-        // negative and fail.
-        state.battlefield.push_back(obj_id);
-        state.objects.get_mut(&obj_id).unwrap().zone = Zone::Battlefield;
 
         let config = AiConfig::default();
         let ai_ctx = AiContext::empty(&config.weights);
