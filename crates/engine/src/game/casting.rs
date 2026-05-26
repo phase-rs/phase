@@ -10484,6 +10484,136 @@ mod tests {
         );
     }
 
+    /// CR 107.3i regression for issue #897 (Kessig Wolf Run): the activated
+    /// pump ability "{X}{R}{G}, {T}: Target creature gets +X/+0 and gains
+    /// trample until end of turn." used to lose its +X/+0 modification during
+    /// parsing because the dynamic-PT helper required a "where X is …"
+    /// clause. The fix defaults X to `QuantityRef::CostXPaid` when no binding
+    /// clause is present, mirroring `parse_cost_x_become_pt_prefix` for the
+    /// animation case. This test drives the full activation pipeline through
+    /// the parser-produced ability and asserts the resolved target ends up
+    /// 5/2 with trample for X=3.
+    #[test]
+    fn kessig_wolf_run_x_pump_grants_dynamic_power_and_trample() {
+        use super::super::engine::apply_as_current;
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle::parse_oracle_text;
+
+        let mut state = setup_game_at_main_phase();
+        let controller = PlayerId(0);
+
+        // Vanilla 2/2 creature to be the pump target.
+        let target = create_object(
+            &mut state,
+            CardId(8970),
+            controller,
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Kessig Wolf Run with both abilities parsed from Oracle text.
+        let kessig = create_object(
+            &mut state,
+            CardId(8971),
+            controller,
+            "Kessig Wolf Run".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kessig).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+            let parsed = parse_oracle_text(
+                "{T}: Add {C}.\n{X}{R}{G}, {T}: Target creature gets +X/+0 and gains trample until end of turn.",
+                "Kessig Wolf Run",
+                &[],
+                &[String::from("Land")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+
+        // Locate the X-cost pump ability by shape — it is the activated
+        // ability whose effect is `GenericEffect`, not the mana ability.
+        let pump_ability_index = state.objects[&kessig]
+            .abilities
+            .iter()
+            .position(|a| matches!(*a.effect, Effect::GenericEffect { .. }))
+            .expect("Kessig Wolf Run must parse a GenericEffect pump ability");
+        // Sanity: the mana ability still exists (the parser didn't collapse them).
+        assert!(
+            state.objects[&kessig]
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::Mana { .. })),
+            "the {{T}}: Add {{C}} mana ability must still be present"
+        );
+
+        // Pool {R}{G}{1} so X=3 is payable after {R}{G}.
+        add_mana(&mut state, controller, ManaType::Red, 1);
+        add_mana(&mut state, controller, ManaType::Green, 1);
+        add_mana(&mut state, controller, ManaType::Colorless, 3);
+
+        // Activate.
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: kessig,
+                ability_index: pump_ability_index,
+            },
+        )
+        .expect("activating the X-cost pump must succeed");
+
+        // The flow visits TargetSelection (creature target) then ChooseXValue.
+        if matches!(state.waiting_for, WaitingFor::TargetSelection { .. }) {
+            apply_as_current(
+                &mut state,
+                GameAction::SelectTargets {
+                    targets: vec![crate::types::ability::TargetRef::Object(target)],
+                },
+            )
+            .expect("selecting the 2/2 as target must succeed");
+        }
+
+        match state.waiting_for {
+            WaitingFor::ChooseXValue { .. } => {}
+            ref other => panic!("expected ChooseXValue after target selection, got {other:?}"),
+        }
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 })
+            .expect("committing X=3 must succeed");
+
+        // Resolve the activated ability on the stack.
+        assert_eq!(state.stack.len(), 1, "pump ability must be on the stack");
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        // Layer 7c/7e: base power 2 + dynamic power CostXPaid(=3) = 5.
+        evaluate_layers(&mut state);
+        let resolved = &state.objects[&target];
+        assert_eq!(
+            resolved.power,
+            Some(5),
+            "target must be 5 power (2 base + 3 from CostXPaid)"
+        );
+        assert_eq!(
+            resolved.toughness,
+            Some(2),
+            "target's toughness must be unchanged (the +0 leg emits no modification)"
+        );
+        assert!(
+            crate::game::keywords::has_keyword(&state.objects[&target], &Keyword::Trample),
+            "target must have Trample from the pump's static_abilities, got {:?}",
+            state.objects[&target].keywords
+        );
+    }
+
     #[test]
     fn x_cost_activated_minimum_above_payable_max_rejects_before_choose_x() {
         use super::super::engine::apply_as_current;
