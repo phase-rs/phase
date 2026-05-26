@@ -177,13 +177,13 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
     parsed
 }
 
-// CR 100.2a / CR 717.1d / CR 903.5b: Deck-construction overrides like
-// "A deck can have any number of cards named X." (Tempest Hawk, Rat Colony,
-// Relentless Rats, Persistent Petitioners, Shadowborn Apostle, etc.) are
-// deck-construction metadata, not in-game abilities. They have no runtime
-// effect to resolve. CR 107.1c defines "any number of" — the recognizer
-// matches this exact phrase shape to avoid false-positives against
-// legitimate "up to N cards named ..." patterns (e.g. Seven Dwarves).
+// CR 100.2a / CR 903.5b: Deck-construction overrides like "A deck can have
+// any number of cards named X." (Tempest Hawk, Rat Colony, Relentless Rats,
+// Persistent Petitioners, Shadowborn Apostle, etc.) are deck-construction
+// metadata that override CR 100.2a's four-of limit and the CR 903.5b
+// Commander singleton rule. They have no runtime effect to resolve. The
+// recognizer matches this exact phrase shape to avoid false-positives
+// against legitimate "up to N cards named ..." patterns (e.g. Seven Dwarves).
 fn parse_deck_can_have_any_number_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     use nom::bytes::complete::take_while;
     let (input, _) = tag("a deck can have any number of cards named ").parse(input)?;
@@ -4973,10 +4973,10 @@ mod tests {
         assert!(r.replacements.is_empty());
     }
 
-    // CR 100.2a / CR 717.1d / CR 903.5b: "A deck can have any number of cards
-    // named X." is deck-construction metadata, not an in-game ability. The
-    // recognizer must accept the raw card name, the engine's normalized
-    // self-reference "~", and reject "up to N" patterns (Seven Dwarves).
+    // CR 100.2a / CR 903.5b: "A deck can have any number of cards named X."
+    // is deck-construction metadata, not an in-game ability. The recognizer
+    // must accept the raw card name, the engine's normalized self-reference
+    // "~", and reject "up to N" patterns (Seven Dwarves).
     #[test]
     fn deck_construction_any_number_sentence_positive_cases() {
         assert!(is_deck_construction_any_number_sentence(

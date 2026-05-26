@@ -8674,10 +8674,11 @@ mod tests {
         }
     }
 
-    // CR 120 (damage), CR 510.1 (combat damage step), CR 603.6c
-    // (combat-damage triggers), CR 701.23a/b/d (search library /
-    // fail-to-find), CR 100.2a / CR 717.1d / CR 903.5b (deck-construction
-    // overrides — verified silently consumed by Step 1's parser fix).
+    // CR 120 (damage), CR 510.1 (combat damage step), CR 510.3a
+    // (combat-damage triggers go on the stack), CR 701.23a/b/d (search
+    // library / fail-to-find), CR 701.24 (shuffle), CR 100.2a /
+    // CR 903.5b (deck-construction overrides — verified silently consumed
+    // by Step 1's parser fix).
     //
     // Tempest Hawk's combat-damage trigger:
     //   "Whenever this creature deals combat damage to a player, you may
@@ -8871,7 +8872,7 @@ mod tests {
                     ..
                 }
             )),
-            "library must be shuffled at end of the trigger chain (CR 701.19)"
+            "library must be shuffled at end of the trigger chain (CR 701.24)"
         );
     }
 
