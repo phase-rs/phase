@@ -4163,17 +4163,16 @@ fn try_parse_put_on_top_or_bottom(
     })
     .is_some()
     {
-        let Some(target_text) = tp
+        let target_text = tp
+            // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
             .strip_suffix("'s owner puts it on the top or bottom of their library")
             .or_else(|| {
+                // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
                 tp.strip_suffix(
                     "'s owner puts it on their choice of the top or bottom of their library",
                 )
             })
-            .map(|pair| pair.original)
-        else {
-            return None;
-        };
+            .map(|pair| pair.original)?;
         let (filter, remainder) = parse_target(target_text);
         if !remainder.trim().is_empty() {
             ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
@@ -4199,20 +4198,20 @@ fn try_parse_put_on_top_or_bottom(
     })
     .is_some()
     {
-        let Some(target_text) = tp
+        let target_text = tp
+            // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
             .strip_prefix("the owner of ")
             .and_then(|pair| {
+                // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
                 pair.strip_suffix(" puts it on the top or bottom of their library")
                     .or_else(|| {
+                        // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
                         pair.strip_suffix(
                             " puts it on their choice of the top or bottom of their library",
                         )
                     })
             })
-            .map(|pair| pair.original)
-        else {
-            return None;
-        };
+            .map(|pair| pair.original)?;
         let (filter, remainder) = parse_target(target_text);
         if !remainder.trim().is_empty() {
             ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
