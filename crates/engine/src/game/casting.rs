@@ -10571,26 +10571,31 @@ mod tests {
         )
         .expect("activating the X-cost pump must succeed");
 
-        // The flow visits TargetSelection (creature target) then ChooseXValue.
-        if matches!(state.waiting_for, WaitingFor::TargetSelection { .. }) {
-            apply_as_current(
-                &mut state,
-                GameAction::SelectTargets {
-                    targets: vec![crate::types::ability::TargetRef::Object(target)],
-                },
-            )
-            .expect("selecting the 2/2 as target must succeed");
-        }
-
-        match state.waiting_for {
-            WaitingFor::ChooseXValue { .. } => {}
-            ref other => panic!("expected ChooseXValue after target selection, got {other:?}"),
-        }
+        // The {X} sub-cost forces ChooseXValue first — before mana payment,
+        // tap, or target selection. Hard-assert the state so a regression in
+        // the activation state machine fails loudly instead of being silently
+        // skipped by an `if matches!` guard.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "expected ChooseXValue after activating the X-cost pump, got {:?}",
+            state.waiting_for
+        );
         apply_as_current(&mut state, GameAction::ChooseX { value: 3 })
             .expect("committing X=3 must succeed");
 
-        // Resolve the activated ability on the stack.
-        assert_eq!(state.stack.len(), 1, "pump ability must be on the stack");
+        // After X is chosen, the engine finalizes the {X}{R}{G}+{T} cost and
+        // populates the target slot. With exactly one legal creature target
+        // on the battlefield, single-target auto-selection fills the slot
+        // and the ability lands on the stack directly — TargetSelection is
+        // not entered. If a future change disables auto-selection here, this
+        // assertion fires loudly so the test can be updated explicitly
+        // instead of silently falling through.
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "pump ability must be on the stack after ChooseX; got waiting_for={:?}",
+            state.waiting_for
+        );
         let mut events = Vec::new();
         stack::resolve_top(&mut state, &mut events);
 
