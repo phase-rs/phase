@@ -4388,37 +4388,6 @@ fn resolve_exile_top_where_x_binding(after_lib: &str, initial_count: QuantityExp
     initial_count
 }
 
-/// CR 107.3i + CR 202.3: Walk `And`/`Or` compositions and delegate to
-/// `super::apply_where_x_to_filter` on every `Typed` leg so a counter-spell
-/// filter shaped like `And { StackSpell, Typed { Cmc(X) } }` (Spellstutter
-/// Sprite's "counter target spell with mana value X or less, where X is …")
-/// has its literal X resolved to the trailing defining expression. The shared
-/// helper only recurses through `Typed`/`AnyOf`; this composition-aware
-/// wrapper closes the gap without duplicating the substitution pass.
-fn apply_where_x_through_composition(
-    filter: TargetFilter,
-    where_x_expression: Option<&str>,
-) -> TargetFilter {
-    if where_x_expression.is_none() {
-        return filter;
-    }
-    match filter {
-        TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters
-                .into_iter()
-                .map(|f| apply_where_x_through_composition(f, where_x_expression))
-                .collect(),
-        },
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters
-                .into_iter()
-                .map(|f| apply_where_x_through_composition(f, where_x_expression))
-                .collect(),
-        },
-        other => super::apply_where_x_to_filter(other, where_x_expression),
-    }
-}
-
 pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     // CR 701.6 + CR 405.1: "Counter all/each [filter] spells/abilities"
     // mass-counter precheck. Mirrors the `parse_destroy_ast` precheck +
@@ -4502,17 +4471,10 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     let (target, _rem) = parse_target(without_where_tp.original);
     #[cfg(debug_assertions)]
     assert_no_compound_remainder(_rem, text);
-    let target = if nom_primitives::scan_contains(rest, "spell") {
-        super::constrain_filter_to_stack(target)
-    } else {
-        target
-    };
-    // `parse_target("... spell with mana value X or less")` returns
-    // `And { StackSpell, Typed { Cmc(X) } }`, and `constrain_filter_to_stack`
-    // preserves that shape. `apply_where_x_to_filter` from `oracle_effect/mod`
-    // recurses through `Typed` / `AnyOf` only, so walk the `And` / `Or`
-    // composition here and apply the binding to each typed leg.
-    let target = apply_where_x_through_composition(target, where_x_expression.as_deref());
+    // `parse_target("... spell with mana value X or less")` already scopes
+    // the spell phrase to the stack through the shared target parser. Keep this
+    // path on that building block and only apply the trailing X definition.
+    let target = super::apply_where_x_to_filter(target, where_x_expression.as_deref());
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
     let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
     Some(ZoneCounterImperativeAst::Counter {
@@ -6763,10 +6725,16 @@ mod tests {
             .properties
             .iter()
             .find_map(|p| match p {
-                FilterProp::Cmc { value, .. } => Some(value),
+                FilterProp::Cmc { comparator, value } => Some((comparator, value)),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("expected a Cmc bound in the typed leg, got {typed:?}"));
+        assert_eq!(
+            *cmc.0,
+            crate::types::ability::Comparator::LE,
+            "Spellstutter's 'or less' clause must parse as a <= mana-value bound"
+        );
+        let cmc = cmc.1;
         let QuantityExpr::Ref { qty } = cmc else {
             panic!("expected the Cmc bound to be a dynamic Ref, got {cmc:?}");
         };

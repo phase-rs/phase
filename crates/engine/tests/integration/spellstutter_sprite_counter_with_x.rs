@@ -132,7 +132,7 @@ fn push_instant_on_stack(
 #[test]
 fn spellstutter_filter_carries_dynamic_faerie_count() {
     use engine::types::ability::{
-        ControllerRef, FilterProp, QuantityExpr, QuantityRef, TypeFilter,
+        Comparator, ControllerRef, FilterProp, QuantityExpr, QuantityRef, TypeFilter,
     };
 
     let Some(db) = load_db() else {
@@ -156,10 +156,16 @@ fn spellstutter_filter_carries_dynamic_faerie_count() {
         .properties
         .iter()
         .find_map(|p| match p {
-            FilterProp::Cmc { value, .. } => Some(value),
+            FilterProp::Cmc { comparator, value } => Some((comparator, value)),
             _ => None,
         })
         .expect("expected a Cmc property on Spellstutter's filter");
+    assert_eq!(
+        *cmc.0,
+        Comparator::LE,
+        "Spellstutter's 'or less' clause must parse as a <= mana-value bound"
+    );
+    let cmc = cmc.1;
     let QuantityExpr::Ref { qty } = cmc else {
         panic!("expected a dynamic Ref bound, got {cmc:?}");
     };

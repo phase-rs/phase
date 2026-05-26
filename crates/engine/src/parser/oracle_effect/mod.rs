@@ -16577,9 +16577,9 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
 /// card with mana value X or less ..., where X is 1 plus the sacrificed
 /// creature's mana value").
 ///
-/// Walks the typed-filter property list, recursing through `AnyOf` nesting so
-/// composite "mana value N or M" bounds are covered. Non-`Cmc` props and
-/// non-typed filters pass through unchanged.
+/// Walks typed-filter property lists and target-filter compositions, recursing
+/// through `AnyOf` nesting so composite "mana value N or M" bounds are
+/// covered. Non-`Cmc` props and non-typed filters pass through unchanged.
 pub(super) fn apply_where_x_to_filter(
     filter: TargetFilter,
     where_x_expression: Option<&str>,
@@ -16596,6 +16596,21 @@ pub(super) fn apply_where_x_to_filter(
                 .collect();
             TargetFilter::Typed(typed)
         }
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| apply_where_x_to_filter(filter, where_x_expression))
+                .collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| apply_where_x_to_filter(filter, where_x_expression))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)),
+        },
         other => other,
     }
 }
