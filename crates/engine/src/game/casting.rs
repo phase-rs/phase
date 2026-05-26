@@ -7800,7 +7800,7 @@ fn is_blocked_from_casting_from_zone(
 ///   prohibits activation of opponent-controlled artifacts' activated abilities.
 /// - Pithing Needle (`source_filter=HasChosenName, exemption=ManaAbilities`): prohibits
 ///   activation of named-card sources except their mana abilities.
-fn is_blocked_by_cant_be_activated(
+pub(super) fn is_blocked_by_cant_be_activated(
     state: &GameState,
     caster: PlayerId,
     activating_source_id: ObjectId,
@@ -7942,7 +7942,7 @@ fn is_blocked_by_cant_cast_during(state: &GameState, caster: PlayerId) -> bool {
 /// bypass the prohibition. City of Solitude emits `ActivationExemption::None`
 /// per its 2009-10-01 ruling ("This stops players from activating mana
 /// abilities") — mana abilities are NOT exempt for that card.
-fn is_blocked_by_cant_activate_during(
+pub(super) fn is_blocked_by_cant_activate_during(
     state: &GameState,
     activator: PlayerId,
     activating_ability: &AbilityDefinition,

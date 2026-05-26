@@ -402,6 +402,24 @@ pub fn activate_mana_ability(
             required_zone
         )));
     }
+    // CR 602.5: enforce activation prohibitions at the executor, not just at
+    // legal-action filtering — a buggy or hostile client may submit
+    // `GameAction::ActivateAbility` directly. The mana-ability fast path must
+    // honor the same static-ability gates that `casting::handle_activate_ability`
+    // applies on the non-mana path, so City of Solitude (CantActivateDuring with
+    // exemption: None) and any future CantBeActivated with exemption: None block
+    // mana activations as the rules require.
+    if super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+        ));
+    }
+    if super::casting::is_blocked_by_cant_activate_during(state, player, ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities can't be activated during this turn (CR 602.5 + CR 117.1b)"
+                .to_string(),
+        ));
+    }
     super::restrictions::check_activation_restrictions(
         state,
         player,
@@ -6817,5 +6835,80 @@ mod tests {
                 "Food Chain mana must carry the Creature spell-type restriction"
             );
         }
+    }
+
+    /// CR 602.5: the mana-ability executor must reject submissions that violate
+    /// an active `CantActivateDuring` static, not only the legal-action filter.
+    /// Discriminating end-to-end test against the City of Solitude class: a
+    /// hostile/buggy client submitting `activate_mana_ability` directly must
+    /// receive `EngineError::ActionNotAllowed`.
+    #[test]
+    fn city_of_solitude_rejects_mana_ability_at_executor() {
+        use crate::types::statics::{ActivationExemption, CastingProhibitionCondition};
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        state.active_player = p0;
+        state.phase = Phase::PreCombatMain;
+
+        // P0 controls a City of Solitude analogue (AllPlayers / NotDuringAffectedPlayersTurn
+        // / exemption: None — per the 2009-10-01 ruling).
+        let prohibitor = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "City of Solitude".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prohibitor)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantActivateDuring {
+                who: ProhibitionScope::AllPlayers,
+                when: CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+                exemption: ActivationExemption::None,
+            }));
+
+        // P1 controls a Forest-like permanent with a tap-for-green mana ability.
+        let forest = create_object(
+            &mut state,
+            CardId(2),
+            p1,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let mana_ability = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+            contribution: ManaContribution::Base,
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&forest).unwrap().abilities)
+            .push(mana_ability.clone());
+
+        // On P0's turn, P1 attempts to activate the mana ability directly through
+        // the executor. The CR 602.5 gate at the top of `activate_mana_ability`
+        // must reject before any cost is paid or mana is produced.
+        let mut events = Vec::new();
+        let err = activate_mana_ability(
+            &mut state,
+            forest,
+            p1,
+            0,
+            &mana_ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .expect_err("City of Solitude must reject P1's mana ability at the executor on P0's turn");
+        assert!(
+            matches!(err, EngineError::ActionNotAllowed(_)),
+            "expected ActionNotAllowed, got {err:?}"
+        );
+        // No mana was produced and the ability source was not tapped.
+        assert_eq!(state.players[1].mana_pool.total(), 0);
+        assert!(!state.objects.get(&forest).unwrap().tapped);
+        assert!(events.is_empty());
     }
 }

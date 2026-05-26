@@ -6380,11 +6380,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't cast spells during")
                     || effective_lower.contains("can cast spells only during")
             }
-            // CR 602.5 + CR 117.1b: City of Solitude class. Both "cast spells and
-            // activate abilities" and bare "activate abilities" phrasings.
+            // CR 602.5 + CR 117.1b: City of Solitude class — "activate abilities
+            // only during" covers both bare and "and activate abilities" phrasings.
             StaticMode::CantActivateDuring { .. } => {
                 effective_lower.contains("activate abilities only during")
-                    || effective_lower.contains("and activate abilities only during")
             }
             StaticMode::PerTurnCastLimit { .. } => {
                 effective_lower.contains("can't cast more than")
