@@ -195,7 +195,9 @@ jobs:
 
       - name: Set cache keys
         id: cache-keys
-        run: echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
+          echo "day=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: Cache MTGJSON data
         id: mtgjson-cache
@@ -204,6 +206,17 @@ jobs:
           path: data/mtgjson
           key: mtgjson-${{ steps.cache-keys.outputs.week }}
           restore-keys: mtgjson-
+
+      # Daily key with NO restore-keys: the gen-scryfall-*.sh scripts skip the
+      # download when the file already exists, so a stale restore-key hit would
+      # pin them to old data forever. Exact-key-only means a new day misses,
+      # the scripts re-fetch, and same-day deploys reuse the fetch — cutting
+      # Scryfall API load (and the Cloudflare-throttle flakiness it causes).
+      - name: Cache Scryfall bulk data
+        uses: actions/cache@v4
+        with:
+          path: data/scryfall
+          key: scryfall-${{ steps.cache-keys.outputs.day }}
 
       - name: Download MTGJSON data
         if: steps.mtgjson-cache.outputs.cache-hit != 'true'
