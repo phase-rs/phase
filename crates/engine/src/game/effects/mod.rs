@@ -3194,8 +3194,9 @@ fn resolve_chain_body(
             // retarget pause re-stashes a single-iteration resume ability that the
             // drain driver feeds back through this code. Without the guard, every
             // resumed iteration would re-add the bonus and the loop would explode
-            // into runaway copies (CR 614.6 — the replacement applies to the copy
-            // event once, not to each individual copy).
+            // into runaway copies (CR 614.5 — a replacement effect doesn't invoke
+            // itself repeatedly; it gets only one opportunity to affect an event,
+            // so the bonus applies to the copy event once, not per individual copy).
             let iterations = if matches!(ability.effect, Effect::CopySpell { .. })
                 && ability.copy_count_status.is_pending()
             {
@@ -3254,9 +3255,11 @@ fn resolve_chain_body(
                         // owns iteration accounting via `next_iteration`.
                         let mut resume_ability = effective.clone();
                         resume_ability.repeat_for = None;
-                        // CR 614.6: the copy-count replacement bonus is already
+                        // CR 614.5: the copy-count replacement bonus is already
                         // folded into `total_iterations`; mark the resume so the
-                        // CopySpell count hook does not re-add it per resumed copy.
+                        // CopySpell count hook does not re-add it per resumed copy
+                        // (a replacement effect gets only one opportunity to affect
+                        // an event, so it must not re-fire on each resumed copy).
                         resume_ability.copy_count_status =
                             crate::types::ability::CopyCountStatus::Finalized;
                         state.pending_repeat_iteration =

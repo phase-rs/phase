@@ -10764,8 +10764,10 @@ pub enum KeywordAction {
 ///
 /// A `CopySpell` of a targeted spell pauses on `CopyRetarget` per copy; the
 /// drain driver then resumes the next iteration with a single-iteration ability.
-/// The bonus must apply to the copy *event* once (CR 614.6), not per copy, so a
-/// resumed iteration is marked `Finalized` and the count hook skips it.
+/// The bonus must apply to the copy *event* once (CR 614.5 — a replacement
+/// effect doesn't invoke itself repeatedly; it gets only one opportunity to
+/// affect an event), not per copy, so a resumed iteration is marked `Finalized`
+/// and the count hook skips it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CopyCountStatus {
     /// Initial resolution — copy-count replacements not yet applied.
@@ -10848,12 +10850,14 @@ pub struct ResolvedAbility {
     /// Stack-copy restriction from "This ability can't be copied."
     #[serde(default, skip_serializing_if = "is_false")]
     pub cant_be_copied: bool,
-    /// CR 707.10 + CR 614.1a: `Finalized` on a `repeat_for` iteration that the
-    /// drain driver resumes after a per-copy pause, so the "copy an additional
-    /// time" replacement bonus (Twinning Staff) is folded into the iteration
-    /// count exactly once — at the initial resolution — and never re-applied on
-    /// each resumed iteration (which would explode into runaway copies). Only
-    /// read by the `CopySpell` count hook in `effects::resolve_effect`.
+    /// CR 707.10 + CR 614.1a + CR 614.5: `Finalized` on a `repeat_for` iteration
+    /// that the drain driver resumes after a per-copy pause, so the "copy an
+    /// additional time" replacement bonus (Twinning Staff) is folded into the
+    /// iteration count exactly once — at the initial resolution — and never
+    /// re-applied on each resumed iteration (CR 614.5: a replacement effect gets
+    /// only one opportunity to affect an event; re-applying would explode into
+    /// runaway copies). Only read by the `CopySpell` count hook in
+    /// `effects::resolve_effect`.
     #[serde(default, skip_serializing_if = "CopyCountStatus::is_pending")]
     pub copy_count_status: CopyCountStatus,
     /// When true, moved/created objects from this effect are forwarded to the sub_ability.
