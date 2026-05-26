@@ -1,5 +1,6 @@
 import type { Phase } from "../../adapter/types";
 import { useId, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
@@ -97,67 +98,42 @@ const COMBAT_PHASES: Phase[] = [
   "EndCombat",
 ];
 
-const PHASE_DETAILS: Record<Phase, { label: string; description: string }> = {
-  Untap: {
-    label: "Untap step",
-    description: "Your tapped permanents untap here.",
-  },
-  Upkeep: {
-    label: "Upkeep step",
-    description: "Upkeep triggers and recurring costs happen here.",
-  },
-  Draw: {
-    label: "Draw step",
-    description: "You draw for turn here.",
-  },
-  PreCombatMain: {
-    label: "First main phase",
-    description: "Play lands and cast spells before combat.",
-  },
-  BeginCombat: {
-    label: "Beginning of combat step",
-    description: "Last priority window before attackers are chosen.",
-  },
-  DeclareAttackers: {
-    label: "Declare attackers step",
-    description: "The attacking player chooses attackers.",
-  },
-  DeclareBlockers: {
-    label: "Declare blockers step",
-    description: "Defending players choose blockers.",
-  },
-  CombatDamage: {
-    label: "Combat damage step",
-    description: "Creatures assign and deal combat damage.",
-  },
-  EndCombat: {
-    label: "End of combat step",
-    description: "Last combat priority window after damage.",
-  },
-  PostCombatMain: {
-    label: "Second main phase",
-    description: "Play lands or cast spells after combat.",
-  },
-  End: {
-    label: "End step",
-    description: "End-step triggers and end-of-turn actions happen here.",
-  },
-  Cleanup: {
-    label: "Cleanup step",
-    description: "Damage wears off and maximum hand size is checked.",
-  },
+// i18n key suffix per phase, used to look up the localized label/description
+// from the `phaseStop` group in game.json (e.g. `phaseStop.untapLabel`).
+const PHASE_KEY: Record<Phase, string> = {
+  Untap: "untap",
+  Upkeep: "upkeep",
+  Draw: "draw",
+  PreCombatMain: "preCombatMain",
+  BeginCombat: "beginCombat",
+  DeclareAttackers: "declareAttackers",
+  DeclareBlockers: "declareBlockers",
+  CombatDamage: "combatDamage",
+  EndCombat: "endCombat",
+  PostCombatMain: "postCombatMain",
+  End: "end",
+  Cleanup: "cleanup",
 };
 
-function getPhaseTooltip(phase: Phase, hasStop: boolean, isActive: boolean): string {
-  const details = PHASE_DETAILS[phase];
-  const stopText = hasStop
-    ? "Stop set: click to remove this auto-pass stop."
-    : "No stop set: click to pause auto-pass here.";
-  const activeText = isActive ? " Current phase." : "";
-  return `Phase stop: ${details.label}. ${details.description} ${stopText}${activeText}`;
+type PhaseTranslate = ReturnType<typeof useTranslation>["t"];
+
+function getPhaseTooltip(
+  t: PhaseTranslate,
+  phase: Phase,
+  hasStop: boolean,
+  isActive: boolean,
+): string {
+  const key = PHASE_KEY[phase];
+  return t("phaseStop.tooltip", {
+    label: t(`phaseStop.${key}Label`),
+    description: t(`phaseStop.${key}Description`),
+    stopText: hasStop ? t("phaseStop.tooltipStopSet") : t("phaseStop.tooltipNoStop"),
+    activeText: isActive ? ` ${t("phaseStop.tooltipCurrentPhase")}` : "",
+  });
 }
 
 function PhaseDot({ phase }: { phase: Phase }) {
+  const { t } = useTranslation("game");
   const tooltipId = useId();
   const currentPhase = useGameStore((s) => s.gameState?.phase);
   const phaseStops = usePreferencesStore((s) => s.phaseStops);
@@ -165,7 +141,7 @@ function PhaseDot({ phase }: { phase: Phase }) {
 
   const isActive = phase === currentPhase;
   const hasStop = phaseStops.includes(phase);
-  const tooltip = getPhaseTooltip(phase, hasStop, isActive);
+  const tooltip = getPhaseTooltip(t, phase, hasStop, isActive);
 
   const togglePhase = () => {
     if (hasStop) {

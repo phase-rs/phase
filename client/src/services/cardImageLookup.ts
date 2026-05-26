@@ -91,3 +91,22 @@ export function tokenFiltersForObject(obj: GameObject): TokenSearchFilters {
       (obj.token_rules_text?.length ?? 0) > 0,
   };
 }
+
+/**
+ * Maps a battlefield/stack `GameObject` to the props `CardImage` needs to render
+ * it — resolving MDFC faces, token search filters, and token image refs. Shared
+ * by every choice modal that renders object choices as card images.
+ */
+export function objectImageProps(obj: GameObject) {
+  const { name, faceIndex, oracleId, faceName } = cardImageLookup(obj);
+  const isToken = obj.display_source === "Token";
+  return {
+    cardName: name,
+    faceIndex,
+    oracleId,
+    faceName,
+    isToken,
+    tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
+    tokenImageRef: isToken ? obj.token_image_ref : undefined,
+  };
+}

@@ -103,8 +103,18 @@ expression: "&ir"
               "properties": []
             },
             "count": {
-              "type": "Fixed",
-              "value": 1
+              "type": "Ref",
+              "qty": {
+                "type": "ObjectCount",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Permanent"
+                  ],
+                  "controller": null,
+                  "properties": []
+                }
+              }
             }
           },
           "cost": null,

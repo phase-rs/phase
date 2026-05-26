@@ -765,6 +765,50 @@ mod tests {
     }
 
     #[test]
+    fn parent_target_controller_scope_uses_damage_event_source_controller() {
+        let mut state = GameState::new_two_player(42);
+        let damage_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Damage Source".to_string(),
+            Zone::Stack,
+        );
+        let own = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mine".to_string(),
+            Zone::Battlefield,
+        );
+        let source_controller_permanent = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Theirs".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: damage_source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        });
+        let ability = make_scoped_sacrifice_ability(ControllerRef::ParentTargetController, vec![]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&own));
+        assert!(!state.battlefield.contains(&source_controller_permanent));
+        assert!(state.players[1]
+            .graveyard
+            .contains(&source_controller_permanent));
+        assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
     fn scoped_player_scope_uses_trigger_event_player() {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(1);

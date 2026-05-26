@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
@@ -42,16 +44,16 @@ const ATTACHMENT_W_PX = 220;
  * eyebrow text without forcing callers to assemble it.
  */
 export function AttachmentsDialog({ isOpen, onClose, host, attachmentIds }: Props) {
+  const { t } = useTranslation("game");
   const hostName = useHostName(host);
 
   if (!isOpen) return null;
 
-  const eyebrow = host.type === "player" ? "Enchantments on Player" : "Attached to";
+  const eyebrow = host.type === "player"
+    ? t("attachments.enchantmentsOnPlayer")
+    : t("attachments.attachedTo");
   const title = hostName;
-  const subtitle =
-    attachmentIds.length === 1
-      ? "1 attached permanent"
-      : `${attachmentIds.length} attached permanents`;
+  const subtitle = t("attachments.attachedCount", { count: attachmentIds.length });
 
   return (
     <DialogShell
@@ -72,9 +74,10 @@ export function AttachmentsDialog({ isOpen, onClose, host, attachmentIds }: Prop
 }
 
 function useHostName(host: AttachmentHost): string {
+  const { t } = useTranslation("game");
   const objectName = useGameStore((s) =>
-    host.type === "object" ? s.gameState?.objects[host.objectId]?.name ?? "Unknown" : "",
+    host.type === "object" ? s.gameState?.objects[host.objectId]?.name ?? null : null,
   );
-  if (host.type === "object") return objectName;
+  if (host.type === "object") return objectName ?? t("attachments.unknownHost");
   return getPlayerDisplayName(host.playerId, host.playerId);
 }

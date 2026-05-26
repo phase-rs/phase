@@ -165,7 +165,7 @@ track_tmp "$OUTPUT_TMP"
 track_tmp "$NAMES_OUTPUT_TMP"
 run_tool_with_recovery \
   "$OUTPUT_TMP" \
-  "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP"
+  "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP" --sidecar-dir "$OUTPUT_DIR"
 # Cheap presence guard only. The full JSON/object/non-empty/integrity
 # validation is done by card-data-validate below (CardDatabase::from_export),
 # which is strictly stronger than a jq shape check — so an extra jq parse of

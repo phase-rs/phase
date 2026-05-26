@@ -524,6 +524,30 @@ pub fn check_static_ability(
             continue;
         }
 
+        // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated
+        // against the affected object's controller (the player whose creature/spell
+        // is restricted), distinct from the source-relative `condition` gate above.
+        // Used by "each opponent who [did X] this turn can't [Y]" prohibitions
+        // (Angelic Arbiter's attack clause).
+        if let Some(ref cond) = def.per_player_condition {
+            let affected_player = context
+                .target_id
+                .and_then(|id| state.objects.get(&id))
+                .map(|o| o.controller)
+                .or(context.player_id);
+            match affected_player {
+                Some(p) => {
+                    if !crate::game::restrictions::evaluate_condition(state, p, obj.id, cond) {
+                        continue;
+                    }
+                }
+                // No affected player in context -> cannot evaluate a per-player
+                // gate; fail closed (skip this static) so an under-specified query
+                // never over-applies the prohibition.
+                None => continue,
+            }
+        }
+
         return true;
     }
 

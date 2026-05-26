@@ -1217,7 +1217,8 @@ fn apply_segment_optionality(
                 });
             }
             if ability.condition.is_none() {
-                ability.condition = Some(engine::types::ability::AbilityCondition::IfYouDo);
+                ability.condition =
+                    Some(engine::types::ability::AbilityCondition::effect_performed());
             }
             let payment_cost = ability_cost_to_payment_cost(&cost)?;
             let mut parent = AbilityDefinition::new(
@@ -1366,7 +1367,7 @@ pub(crate) fn build_ability_from_actions(
                 });
             }
             let mut body = build_ability_chain(kind, None, effects)?;
-            body.condition = Some(engine::types::ability::AbilityCondition::IfYouDo);
+            body.condition = Some(engine::types::ability::AbilityCondition::effect_performed());
             let payment_cost = ability_cost_to_payment_cost(&extra_cost)?;
             let mut parent = AbilityDefinition::new(
                 kind,

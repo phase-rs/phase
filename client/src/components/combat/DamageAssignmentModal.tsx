@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
@@ -9,6 +10,7 @@ import { gameButtonClass } from "../ui/buttonStyles.ts";
 type AssignCombatDamage = Extract<WaitingFor, { type: "AssignCombatDamage" }>;
 
 export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data"] }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
 
@@ -67,9 +69,9 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
 
   return (
     <ChoiceOverlay
-      title={`Assign ${data.total_damage} Combat Damage`}
-      subtitle={`${getName(data.attacker_id)} — Remaining: ${remaining}`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} label="Assign Damage" />}
+      title={t("combat.assignDamageTitle", { amount: data.total_damage })}
+      subtitle={t("combat.assignDamageSubtitle", { name: getName(data.attacker_id), remaining })}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} label={t("combat.assignDamageButton")} />}
     >
       <div className="mb-4 space-y-3">
         {data.blockers.map((blocker, i) => {
@@ -90,11 +92,11 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
                   </span>
                 )}
                 <span className="text-xs text-gray-500">
-                  lethal: {blocker.lethal_minimum}
+                  {t("combat.lethalLabel", { amount: blocker.lethal_minimum })}
                 </span>
                 {isLethal && (
                   <span className="rounded bg-red-700/80 px-1.5 py-0.5 text-xs font-bold text-red-100">
-                    Lethal
+                    {t("combat.lethalBadge")}
                   </span>
                 )}
               </div>
@@ -124,7 +126,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
         {data.trample != null && (
           <div className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3 ring-1 ring-amber-600/40">
             <span className="text-sm font-medium text-amber-300">
-              {isOverPw ? `Planeswalker (loyalty: ${data.pw_loyalty ?? 0})` : "Defending Player (Trample)"}
+              {isOverPw ? t("combat.planeswalkerLoyalty", { loyalty: data.pw_loyalty ?? 0 }) : t("combat.defendingPlayerTrample")}
             </span>
             <div className="flex items-center gap-2">
               <button
@@ -151,7 +153,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
         {isOverPw && (
           <div className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3 ring-1 ring-purple-600/40">
             <span className="text-sm font-medium text-purple-300">
-              PW Controller (Trample Over PW)
+              {t("combat.pwControllerTrample")}
             </span>
             <div className="flex items-center gap-2">
               <button

@@ -169,6 +169,7 @@ fn stack_with_four_entries() -> (GameState, ObjectId, ObjectId, ObjectId, Object
             trigger_event: None,
             description: None,
             source_name: String::new(),
+            subject_match_count: None,
         },
     });
 

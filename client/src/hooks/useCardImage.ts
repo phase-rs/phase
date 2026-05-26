@@ -7,6 +7,7 @@ import {
   fetchTokenImageUrl,
   findPrintingById,
   getCardPrintings,
+  isCardImageFlipLayoutSync,
   isCardImageRotatedSync,
   resolveFaceIndexSync,
   resolveOracleIdSync,
@@ -53,6 +54,9 @@ interface UseCardImageResult {
   src: string | null;
   isLoading: boolean;
   isRotated: boolean;
+  /** True for Kamigawa-style flip cards (`layout: "flip"`), whose alternate half
+   *  is the same image rotated 180°. The preview uses this to enable Ctrl-spin. */
+  isFlip: boolean;
 }
 
 interface MemoryCacheEntry {
@@ -314,6 +318,7 @@ export function useCardImage(
 
   const [src, setSrc] = useState<string | null>(null);
   const [isRotated, setIsRotated] = useState(false);
+  const [isFlip, setIsFlip] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [, setArtCacheTick] = useState(0);
 
@@ -382,6 +387,7 @@ export function useCardImage(
     if (overrideUrl) {
       setSrc(overrideUrl);
       setIsRotated(isCardImageRotatedSync(resolvedOracleId, cardName));
+      setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
       setIsLoading(false);
       return;
     }
@@ -389,6 +395,7 @@ export function useCardImage(
     if (!cardName && !oracleId) {
       setSrc(null);
       setIsRotated(false);
+      setIsFlip(false);
       setIsLoading(false);
       return;
     }
@@ -418,11 +425,13 @@ export function useCardImage(
         if (!cancelled) {
           setSrc(imageAsset?.src || null);
           setIsRotated(imageAsset?.isRotated ?? false);
+          setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
           setIsLoading(false);
         }
       } catch {
         if (!cancelled) {
           setIsRotated(false);
+          setIsFlip(false);
           setIsLoading(false);
         }
       }
@@ -453,5 +462,5 @@ export function useCardImage(
     size,
   ]);
 
-  return { src, isLoading, isRotated };
+  return { src, isLoading, isRotated, isFlip };
 }

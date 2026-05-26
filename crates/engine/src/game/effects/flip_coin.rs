@@ -506,7 +506,7 @@ mod tests {
                     enter_with_counters: vec![],
                 },
             );
-            def.condition = Some(AbilityCondition::IfYouDo);
+            def.condition = Some(AbilityCondition::effect_performed());
             def
         };
         let mut def = AbilityDefinition::new(

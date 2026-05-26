@@ -553,6 +553,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // correct `affected` filter inherited from the subject.
                     let have_base_pt_continuation =
                         starts_have_base_power_toughness(remainder_trimmed);
+                    let continuous_modifier_conjunct =
+                        starts_you_control_subject_predicate(&before_lower)
+                            && alt((
+                                tag::<_, _, OracleError<'_>>("gain "),
+                                tag("gains "),
+                                tag("have "),
+                                tag("has "),
+                            ))
+                            .parse(remainder_trimmed)
+                            .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -562,7 +572,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || choice_partition_remainder
                         || compound_subject_each
                         || inside_otherwise_body
-                        || have_base_pt_continuation;
+                        || have_base_pt_continuation
+                        || continuous_modifier_conjunct;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -633,6 +644,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         let after_then = &trimmed["then ".len()..];
         let after_then_lower = &trimmed_lower["then ".len()..];
         if starts_clause_text_or_conjugated(after_then)
+            || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
@@ -784,6 +796,31 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
     starts_clause_text_lower(&deconjugated)
 }
 
+fn starts_you_control_subject_predicate(s: &str) -> bool {
+    let Ok((after_subject, subject)) =
+        take_until::<_, _, OracleError<'_>>(" you control ").parse(s)
+    else {
+        return false;
+    };
+    if subject.trim().is_empty() {
+        return false;
+    }
+    let Ok((predicate, _)) = tag::<_, _, OracleError<'_>>(" you control ").parse(after_subject)
+    else {
+        return false;
+    };
+    alt((
+        tag::<_, _, OracleError<'_>>("get "),
+        tag("gets "),
+        tag("gain "),
+        tag("gains "),
+        tag("have "),
+        tag("has "),
+    ))
+    .parse(predicate)
+    .is_ok()
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_clause_text_lower(s: &str) -> bool {
     if starts_multiword_keyword_continuation(s) {
@@ -843,6 +880,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("conjure ")),
         value((), tag("target ")),
         value((), tag("transform ")),
+        value((), tag("unattach ")),
         value((), tag("untap ")),
         value((), tag("you may ")),
         value((), tag("you ")),
@@ -1083,9 +1121,9 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
 /// requirement> ... if able". Returns `Some(prepend)` — the subject text to
 /// seed conjunct 2 with — only when BOTH halves match:
 ///
-/// - `before_and` is a gain-keyword clause (contains the gain verb), and
+/// - `before_and` is a continuous clause (contains a gain/get predicate), and
 /// - `remainder_trimmed` is a recognized standalone combat requirement
-///   ("attack(s) ... if able" / "must be blocked ...").
+///   ("attack(s) ... if able" / "must be blocked ..." / "can block ...").
 ///
 /// The prepend keeps conjunct 2's `affected` correct: for a *targeted* subject
 /// ("target creature ...") it returns the anaphor `"it "` so the chunk loop's
@@ -1098,11 +1136,13 @@ fn combat_requirement_conjunct_prepend(
     remainder_trimmed: &str,
 ) -> Option<String> {
     let remainder_lower = remainder_trimmed.to_ascii_lowercase();
-    if !super::imperative::is_standalone_combat_requirement(&remainder_lower) {
+    if !super::imperative::is_standalone_combat_requirement(&remainder_lower)
+        && !super::subject::is_can_block_extra_predicate(&remainder_lower)
+    {
         return None;
     }
     let before_lower = before_and.to_ascii_lowercase();
-    // Conjunct 1 must be a gain-keyword clause: locate the gain verb.
+    // Conjunct 1 must be a continuous predicate: locate the gain/get verb.
     let subject_text = take_until::<_, _, OracleError<'_>>(" gain")
         .parse(before_lower.as_str())
         .ok()
@@ -1114,6 +1154,20 @@ fn combat_requirement_conjunct_prepend(
             // Map the verb position back onto the original-case slice.
             let subject = before_and[..before_verb.len()].trim();
             (!subject.is_empty()).then_some(subject)
+        })
+        .or_else(|| {
+            take_until::<_, _, OracleError<'_>>(" get")
+                .parse(before_lower.as_str())
+                .ok()
+                .and_then(|(after, before_verb)| {
+                    // Confirm a real " get " / " gets " verb boundary.
+                    alt((tag::<_, _, OracleError<'_>>(" gets "), tag(" get ")))
+                        .parse(after)
+                        .ok()?;
+                    // Map the verb position back onto the original-case slice.
+                    let subject = before_and[..before_verb.len()].trim();
+                    (!subject.is_empty()).then_some(subject)
+                })
         })?;
     // Targeted subject → anaphor; non-targeted set subject → literal subject.
     let subject_lower = subject_text.to_ascii_lowercase();
@@ -2253,6 +2307,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GainControl { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }
@@ -3344,6 +3399,30 @@ mod tests {
     fn comma_then_clause_still_splits() {
         let chunks = clause_texts("draw a card, then discard a card");
         assert_eq!(chunks, vec!["draw a card", "discard a card"]);
+    }
+
+    #[test]
+    fn comma_then_you_control_subject_predicate_splits() {
+        let chunks = clause_texts(
+            "create a 2/2 colorless Robot artifact creature token, then creatures you control get +1/+0 and gain haste until end of turn",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "create a 2/2 colorless Robot artifact creature token",
+                "creatures you control get +1/+0 and gain haste until end of turn",
+            ]
+        );
+    }
+
+    #[test]
+    fn static_modifier_conjunct_does_not_split() {
+        let chunks =
+            clause_texts("creatures you control get +1/+0 and gain haste until end of turn");
+        assert_eq!(
+            chunks,
+            vec!["creatures you control get +1/+0 and gain haste until end of turn"]
+        );
     }
 
     #[test]

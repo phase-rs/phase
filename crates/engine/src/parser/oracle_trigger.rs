@@ -32,10 +32,10 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastVariantPaid,
-    Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp,
-    OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect,
+    FilterProp, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -172,13 +172,50 @@ fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
     .is_ok()
 }
 
-fn trigger_condition_source_zone(condition: &TriggerCondition) -> Option<Zone> {
+/// CR 113.6 + CR 113.6b: Collect every zone the trigger's
+/// source must occupy for the condition to be satisfiable. Returns the
+/// deduplicated union of `SourceInZone { zone }` references across
+/// `And`/`Or` composites, in first-seen declaration order. Mirrors the
+/// static-side analog `oracle_static::collect_source_in_zones`.
+///
+/// Two motivating shapes:
+/// - Single zone (CR 113.6b): a graveyard-functioning trigger with
+///   condition `SourceInZone { Graveyard }` returns `[Graveyard]`.
+/// - Multi-zone disjunction (Eminence ability word per CR 207.2c — e.g.
+///   Edgar Markov, The Ur-Dragon): "if ~ is in the
+///   command zone or on the battlefield" parses to
+///   `Or { [SourceInZone(Command), SourceInZone(Battlefield)] }` and
+///   returns `[Command, Battlefield]`, so the runtime trigger scanner
+///   considers both zones when locating the source.
+///
+/// `Not { SourceInZone(X) }` is deliberately NOT recursed: a "source is
+/// NOT in X" condition would be the opposite signal (the runtime
+/// condition check filters the trigger out in zone X), so adding X to
+/// the scan-zones list would be backwards. No production card currently
+/// constructs that shape — flagged for documentation.
+///
+/// Issue #817 — Edgar Markov: the previous `Option<Zone>` shape only
+/// returned the first zone from `And` composites and ignored `Or`
+/// entirely, so an Eminence trigger's `trigger_zones` stayed at the
+/// `[Battlefield]` `make_base` default and the command-zone source was
+/// never scanned.
+fn trigger_condition_source_zones(condition: &TriggerCondition) -> Vec<Zone> {
+    let mut out: Vec<Zone> = Vec::new();
+    collect_trigger_condition_source_zones(condition, &mut out);
+    out
+}
+
+fn collect_trigger_condition_source_zones(condition: &TriggerCondition, out: &mut Vec<Zone>) {
     match condition {
-        TriggerCondition::SourceInZone { zone } => Some(*zone),
-        TriggerCondition::And { conditions } => {
-            conditions.iter().find_map(trigger_condition_source_zone)
+        TriggerCondition::SourceInZone { zone } if !out.contains(zone) => {
+            out.push(*zone);
         }
-        _ => None,
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            for inner in conditions {
+                collect_trigger_condition_source_zones(inner, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -425,14 +462,18 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
 }
 
 /// CR 109.4 + CR 115.1 + CR 506.2: Detect a trigger condition that introduces
-/// a player target — currently the "you/an opponent/a player attack(s) a player"
-/// family. When this returns true, follow-on possessive references inside the
-/// effect ("that player controls/owns") refer to that introduced player and the
-/// parser pushes a relative-player scope so they emit `ControllerRef::TargetPlayer`.
+/// a player target — currently the "[subject] attack(s) a player" family
+/// (CR 506.2 / CR 508.1a) and the "[subject] deals [combat] damage to a player"
+/// family (CR 120.3). When this returns true, follow-on possessive references
+/// inside the effect ("that player controls/owns") refer to that introduced
+/// player and the parser pushes a relative-player scope so they emit
+/// `ControllerRef::TargetPlayer`.
 ///
-/// Built from composable nom alternatives so adding new condition shapes
-/// (combat-damage-to-a-player, "deals damage to a player", etc.) is a one-line
-/// change to the inner `alt()`.
+/// Built from composable nom alternatives so adding new condition shapes is a
+/// one-line change to the inner `alt()`. The attack/damage scans both accept
+/// any subject prefix (verb-phrase only), so relative-clause subjects like
+/// "one or more Warriors you control" and "a creature you control" match
+/// without needing an explicit-actor variant per subject shape.
 fn condition_introduces_target_player(cond_lower: &str) -> bool {
     use nom::bytes::complete::tag;
     use nom::combinator::value;
@@ -486,6 +527,21 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
                 }
             }
         }
+        // CR 506.2 + CR 508.1a: "[anything] attack[s] a player" — same subject
+        // permissiveness as the damage scan below. Covers cases where the
+        // actor is wrapped in a relative clause that the explicit actor branch
+        // above cannot match, e.g. "one or more Warriors you control attack a
+        // player" (Gornog, the Red Reaper) or "a creature you control attacks
+        // a player". The verb phrase alone is unambiguous in trigger-condition
+        // text — "attack" never appears as a noun before "a player" here.
+        if let Ok((after_verb, ())) = parse_attack_verb(remaining) {
+            if tag::<_, _, OracleError<'_>>("a player")
+                .parse(after_verb)
+                .is_ok()
+            {
+                return true;
+            }
+        }
         // CR 120.3: "[anything] deals [combat] damage to a player" — introduces
         // the damaged player as the target-referring player. The subject can be
         // SelfRef ("~"), equipped creature ("equipped creature"), or any typed
@@ -507,6 +563,38 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
         };
     }
     false
+}
+
+fn condition_introduces_damage_source_controller_player(cond_lower: &str) -> bool {
+    let input = cond_lower.trim_start();
+    let input = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(input)
+    .map(|(rest, _)| rest)
+    .unwrap_or(input);
+    let Ok((rest, source_filter)) = parse_damage_source_subject(input) else {
+        return false;
+    };
+    let TargetFilter::Typed(TypedFilter {
+        controller: Some(ControllerRef::Opponent),
+        ..
+    }) = source_filter
+    else {
+        return false;
+    };
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("deals ").parse(rest) else {
+        return false;
+    };
+    let Ok((after_damage, _)) = parse_damage_predicate_tail(rest) else {
+        return false;
+    };
+
+    matches!(
+        parse_damage_to_qualifier(after_damage),
+        Some(TargetFilter::Controller)
+    )
 }
 
 /// Parse a full trigger line into a TriggerDefinition.
@@ -603,7 +691,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
     // TargetPlayer resolution inside the trigger effect body.
-    if condition_introduces_target_player(&cond_lower) {
+    if condition_introduces_damage_source_controller_player(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+    } else if condition_introduces_target_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
     } else if condition_introduces_scoped_phase_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
@@ -613,8 +703,16 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one");
     let body = if !effect_for_parse.is_empty() {
+        if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
+            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Unsupported monarch turn-began condition".to_string(),
+                    description: Some(effect_for_parse.clone()),
+                },
+            ))))
         // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
-        if let Some(vote_def) =
+        } else if let Some(vote_def) =
             crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
         {
             let mut ability = vote_def;
@@ -765,13 +863,20 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // Preserve original oracle text for coverage/UI annotation.
     def.description = Some(ir.source_text.clone());
 
-    // CR 113.6k: Derive trigger source zone from typed trigger/effect data.
-    if let Some(zone) = def
+    // CR 113.6k: Derive trigger source zones from typed trigger/effect
+    // data. `trigger_condition_source_zones` collects across `And`/`Or`
+    // composites, so an Eminence-style (ability word per CR 207.2c)
+    // "in the command zone or on the battlefield" intervening-if yields
+    // both zones — required for the runtime trigger scanner to locate
+    // Edgar Markov (and any other Eminence card) when its source is in
+    // the command zone (#817).
+    let condition_zones = def
         .condition
         .as_ref()
-        .and_then(trigger_condition_source_zone)
-    {
-        def.trigger_zones = vec![zone];
+        .map(trigger_condition_source_zones)
+        .unwrap_or_default();
+    if !condition_zones.is_empty() {
+        def.trigger_zones = condition_zones;
     } else if matches!(def.valid_card, Some(TargetFilter::SelfRef))
         && def.destination == Some(Zone::Graveyard)
     {
@@ -2335,6 +2440,17 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 "if it's the first combat phase of the turn",
                 TriggerCondition::FirstCombatPhaseOfTurn,
             ),
+            // CR 605.1a + CR 603.4: Bracers-class triggered abilities use
+            // "if it isn't a mana ability" as a leading intervening-if after
+            // the trigger event.
+            (
+                "if it isn't a mana ability",
+                TriggerCondition::ActivatedAbilityIsNonMana,
+            ),
+            (
+                "if it is not a mana ability",
+                TriggerCondition::ActivatedAbilityIsNonMana,
+            ),
         ],
     ) {
         return result;
@@ -2911,12 +3027,52 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         ),
     );
 
-    let (_, (subject, _, qualifier)) = all_consuming(parse_line).parse(lower).ok()?;
-    let mut def = make_base();
-    def.mode = TriggerMode::AbilityActivated;
-    def.valid_target = subject;
-    def.condition = qualifier;
-    Some((TriggerMode::AbilityActivated, def))
+    if let Ok((_, (subject, _, qualifier))) = all_consuming(parse_line).parse(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::AbilityActivated;
+        def.valid_target = subject;
+        def.condition = qualifier;
+        return Some((TriggerMode::AbilityActivated, def));
+    }
+
+    // Passive form: "whenever an ability of [source] is activated"
+    // The source object filter goes into `valid_card` so `match_ability_activated`
+    // can check `valid_card_matches` against the activated ability's source.
+    // CR 605.1a: the following "if it isn't a mana ability" intervening-if is
+    // stripped by `extract_if_condition` and represented as `ActivatedAbilityIsNonMana`.
+    // Cards: Battlemage's Bracers, Illusionist's Bracers.
+    fn parse_attached_to_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+        value(
+            TargetFilter::AttachedTo,
+            (
+                alt((tag("equipped"), tag("enchanted"))),
+                space1,
+                alt((tag("creature"), tag("land"), tag("permanent"))),
+            ),
+        )
+        .parse(input)
+    }
+
+    fn parse_passive_source(input: &str) -> OracleResult<'_, TargetFilter> {
+        preceded(tag("an ability of "), parse_attached_to_subject).parse(input)
+    }
+
+    fn parse_passive_line(input: &str) -> OracleResult<'_, TargetFilter> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            terminated(parse_passive_source, tag(" is activated")),
+        )
+        .parse(input)
+    }
+
+    if let Ok((_, source_filter)) = all_consuming(parse_passive_line).parse(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::AbilityActivated;
+        def.valid_card = Some(source_filter);
+        return Some((TriggerMode::AbilityActivated, def));
+    }
+
+    None
 }
 
 /// CR 702.49: Extract ninjutsu/sneak cost-paid conditions.
@@ -3474,12 +3630,23 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("create "),
         parse_event_word("create"),
     ));
+    let simple_event_verbs = alt((
+        // CR 702.100b + CR 701.44b: SimpleEvent verbs that may appear in
+        // compound triggers (e.g. "~ evolves or dies").
+        parse_event_word("evolves"),
+        parse_event_phrase("evolve "),
+        parse_event_word("explores"),
+        parse_event_phrase("explore "),
+        parse_event_word("exploits"),
+        parse_event_word("mutates"),
+        parse_event_word("transforms"),
+    ));
     let player_actions = alt((
         passive_player_actions,
         sacrifice_discard_actions,
         play_cast_create_actions,
     ));
-    alt((combat_or_zone, player_actions)).parse(input)
+    alt((combat_or_zone, player_actions, simple_event_verbs)).parse(input)
 }
 
 fn parse_bare_shared_event_verb(input: &str) -> OracleResult<'_, ()> {
@@ -3855,6 +4022,9 @@ pub(crate) fn parse_trigger_condition(
 fn execute_references_target_player(effect: &crate::types::ability::Effect) -> bool {
     fn filter_references(filter: &TargetFilter) -> bool {
         match filter {
+            // CR 115.1: Bare `Player` target means the effect explicitly
+            // targets a player (e.g. "target player mills ...").
+            TargetFilter::Player => true,
             TargetFilter::Typed(TypedFilter { controller, .. }) => {
                 matches!(controller, Some(ControllerRef::TargetPlayer))
             }
@@ -4456,6 +4626,18 @@ fn subject_is_opponent(subject: &TargetFilter) -> bool {
     )
 }
 
+fn parse_attachment_self_host(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("~"),
+            tag("this creature"),
+            tag("this permanent"),
+        )),
+    )
+    .parse(input)
+}
+
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
 fn try_parse_event(
     subject: &TargetFilter,
@@ -4908,6 +5090,9 @@ fn try_parse_event(
         Exploits,
         /// CR 701.44b: A permanent "explores" after the explore process completes.
         Explores,
+        /// CR 702.100b: A creature "evolves" when +1/+1 counters are put on it
+        /// as a result of its evolve ability resolving.
+        Evolves,
         Transforms,
         Stations,
         SaddlesOrCrews,
@@ -4974,6 +5159,9 @@ fn try_parse_event(
             // CR 701.44b: "explores" / "explore" — explore trigger
             value(SimpleEvent::Explores, tag("explores")),
             value(SimpleEvent::Explores, tag("explore")),
+            // CR 702.100b: "evolves" / "evolve" — evolve trigger
+            value(SimpleEvent::Evolves, tag("evolves")),
+            value(SimpleEvent::Evolves, tag("evolve")),
             // CR 712.14: "transforms" / "transforms into"
             value(SimpleEvent::Transforms, tag("transforms")),
             // CR 702.184a: "stations ~" — actor-side Station trigger.
@@ -5062,6 +5250,15 @@ fn try_parse_event(
                 def.mode = TriggerMode::Explored;
                 def.valid_card = Some(subject.clone());
             }
+            SimpleEvent::Evolves => {
+                if !remaining.trim().is_empty() {
+                    return None;
+                }
+                // CR 702.100b: "evolves" fires when +1/+1 counters are put on
+                // the creature as a result of its evolve ability resolving.
+                def.mode = TriggerMode::Evolved;
+                def.valid_card = Some(subject.clone());
+            }
             SimpleEvent::Transforms => {
                 def.mode = TriggerMode::Transformed;
                 def.valid_source = Some(subject.clone());
@@ -5114,23 +5311,29 @@ fn try_parse_event(
                 }
             }
             SimpleEvent::BecomesAttached => {
-                // CR 701.3a: "Whenever [this Equipment/Aura] becomes attached to
-                // [a creature / a permanent]" — fires when an Attach or AttachAll
-                // effect resolves and the source is now attached to something.
-                // Non-self subjects need an event payload naming the object that
-                // became attached; EffectResolved only carries the ability source.
-                if !matches!(subject, TargetFilter::SelfRef) {
-                    return None;
-                }
+                // CR 701.3a: Attachment triggers share one data shape:
+                // valid_card = object that became attached, valid_target = host.
                 def.mode = TriggerMode::Attached;
                 def.valid_card = Some(subject.clone());
                 let remaining = remaining.trim();
-                if !remaining.is_empty() {
-                    let (filter, rest) = parse_type_phrase(remaining);
-                    if !rest.trim().is_empty() {
+                if matches!(subject, TargetFilter::SelfRef) {
+                    // Pattern 1: "Whenever ~ becomes attached to [host]"
+                    if !remaining.is_empty() {
+                        let (filter, rest) = parse_type_phrase(remaining);
+                        if !rest.trim().is_empty() {
+                            return None;
+                        }
+                        def.valid_target = Some(filter);
+                    }
+                } else {
+                    // Pattern 2: "Whenever [an Aura] becomes attached to ~"
+                    if all_consuming(parse_attachment_self_host)
+                        .parse(remaining)
+                        .is_err()
+                    {
                         return None;
                     }
-                    def.valid_target = Some(filter);
+                    def.valid_target = Some(TargetFilter::SelfRef);
                 }
             }
         }
@@ -5251,8 +5454,28 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::DungeonCompleted, def));
     }
 
+    // CR 705.2: "Whenever you/a player win(s)/lose(s) a coin flip" — FlippedCoin
+    // with result filter.  Decomposed into three independent axes:
+    //   1. keyword ("whenever" | "when")
+    //   2. player  ("you" → Controller | "a player" → Player)
+    //   3. result  ("win"/"wins" → Won | "lose"/"loses" → Lost)
+    if let Some((target, result)) = parse_coin_flip_result_trigger(lower) {
+        def.mode = TriggerMode::FlippedCoin;
+        def.coin_flip_result = Some(result);
+        def.valid_target = target;
+        return Some((TriggerMode::FlippedCoin, def));
+    }
+
     if let Some(result) = try_parse_die_roll_trigger(lower) {
         return Some(result);
+    }
+
+    // CR 104.3a: "Whenever [player] loses the game" — player-loss trigger.
+    if let Some(valid_target) = parse_loses_game_trigger(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::LosesGame;
+        def.valid_target = valid_target;
+        return Some((TriggerMode::LosesGame, def));
     }
 
     // CR 701.54d: "Whenever the Ring tempts you" / "When the Ring tempts you" —
@@ -5268,6 +5491,60 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::RingTemptsYou, def));
     }
     None
+}
+
+fn parse_coin_flip_result_trigger(lower: &str) -> Option<(Option<TargetFilter>, CoinFlipResult)> {
+    let (_, (_, target, result, _)) = all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        alt((
+            value(Some(TargetFilter::Controller), tag("you ")),
+            value(
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                tag("an opponent "),
+            ),
+            value(Some(TargetFilter::Player), tag("a player ")),
+        )),
+        alt((
+            value(CoinFlipResult::Won, alt((tag("wins"), tag("win")))),
+            value(CoinFlipResult::Lost, alt((tag("loses"), tag("lose")))),
+        )),
+        tag(" a coin flip"),
+    ))
+    .parse(lower)
+    .ok()?;
+    Some((target, result))
+}
+
+fn parse_loses_game_trigger(lower: &str) -> Option<Option<TargetFilter>> {
+    let (_, target) = all_consuming(preceded(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        parse_loses_game_actor,
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(target)
+}
+
+fn parse_loses_game_actor(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    let (rest, (target, third_person)) = alt((
+        value((Some(TargetFilter::Controller), false), tag("you ")),
+        value(
+            (
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                true,
+            ),
+            tag("an opponent "),
+        ),
+        value((Some(TargetFilter::Player), true), tag("a player ")),
+    ))
+    .parse(input)?;
+    let verb = if third_person { "loses" } else { "lose" };
+    let (rest, _) = pair(tag(verb), tag(" the game")).parse(rest)?;
+    Ok((rest, target))
 }
 
 fn try_parse_die_roll_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
@@ -5401,8 +5678,21 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // misclassify the subject.
     let (rest, color) = opt(terminated(nom_primitives::parse_color, tag(" "))).parse(rest)?;
 
+    // CR 109.4: Head noun — "source" (any), a card type, or a negated type
+    // prefix ("noncreature source"). The negated variant uses
+    // `TypeFilter::Non(Box::new(…))` so the runtime filter excludes that type.
     let (rest, head_type) = alt((
-        value(None, tag::<_, _, OracleError<'_>>("source")),
+        value(
+            Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+            (
+                tag::<_, _, OracleError<'_>>("noncreature source"),
+                opt(tag("s")),
+            ),
+        ),
+        value(
+            None,
+            (tag::<_, _, OracleError<'_>>("source"), opt(tag("s"))),
+        ),
         value(Some(TypeFilter::Creature), tag("creature")),
         value(Some(TypeFilter::Artifact), tag("artifact")),
         value(Some(TypeFilter::Enchantment), tag("enchantment")),
@@ -5412,12 +5702,19 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     ))
     .parse(rest)?;
 
-    // Optional " you control" controller scope. Absence → no controller
-    // restriction (matches any source — Phyrexian Obliterator class, deferred).
-    let (rest, controller) = opt(value(
-        ControllerRef::You,
-        tag::<_, _, OracleError<'_>>(" you control"),
-    ))
+    // Optional controller scope. Absence → no controller restriction
+    // (matches any source — Phyrexian Obliterator class, deferred).
+    // CR 109.4: "a source you control" / "a source an opponent controls".
+    let (rest, controller) = opt(alt((
+        value(
+            ControllerRef::You,
+            tag::<_, _, OracleError<'_>>(" you control"),
+        ),
+        value(
+            ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>(" an opponent controls"),
+        ),
+    )))
     .parse(rest)?;
 
     // Require trailing space before the "deals" verb so we don't match
@@ -6647,6 +6944,18 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         def.valid_target = Some(TargetFilter::Controller);
         return Some((TriggerMode::LifeGained, def));
     }
+    // CR 725.1: "Whenever you become the monarch" / "Whenever an opponent becomes
+    // the monarch" — monarch-designation trigger. Decompose into prefix (whenever/when)
+    // + subject (you/opponent/player) + verb (become/becomes) + "the monarch".
+    if let Some((valid_target, after)) = parse_become_monarch_trigger(lower) {
+        if !after.trim().is_empty() {
+            return None;
+        }
+        let mut def = make_base();
+        def.mode = TriggerMode::BecomeMonarch;
+        def.valid_target = valid_target;
+        return Some((TriggerMode::BecomeMonarch, def));
+    }
 
     // "whenever you cast your Nth spell each turn" — must precede generic "you cast a"
     if let Some(result) = try_parse_nth_spell_trigger(lower) {
@@ -6723,11 +7032,11 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // second-person "play a land" form (you — e.g. Fastbond). The optional
     // from-zone tail rides through `parse_type_phrase`, matching the existing
     // cast-spell trigger shape used by Rocco, Street Chef.
-    if let Some((valid_target, after_land_play)) = parse_land_play_trigger_subject(lower) {
+    if let Some((valid_target, qualifier, after_land_play)) = parse_land_play_trigger_subject(lower)
+    {
         let mut def = make_base();
         def.mode = TriggerMode::LandPlayed;
         def.valid_target = valid_target;
-
         let after_land_play = after_land_play.trim_start();
         let clause = terminated(
             take_until::<_, _, OracleError<'_>>(", "),
@@ -6737,10 +7046,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         .map(|(_, before)| before)
         .unwrap_or(after_land_play);
         let (filter, _) = parse_type_phrase(clause);
-        if !matches!(filter, TargetFilter::Any) {
+        if qualifier.is_some() {
+            // CR 305.1: "another land" excludes the source permanent.
+            def.valid_card = Some(add_another_prop(filter));
+        } else if !matches!(filter, TargetFilter::Any) {
             def.valid_card = Some(filter);
         }
-
         return Some((TriggerMode::LandPlayed, def));
     }
 
@@ -7237,34 +7548,36 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::DamageReceived, def));
     }
 
-    // CR 120.1 + CR 120.3: "whenever a source an opponent controls deals damage to you" —
-    // player-targeted damage from an opponent's source. Sets valid_target = Controller
-    // (the player receiving damage is you) and valid_source = Typed(Opponent) (the damage
-    // source is opponent-controlled). match_damage_received checks both.
-    // Cards: Retaliator Griffin, Michiko Konda Truth Seeker, Farsight Mask.
-    if matches!(
-        lower,
-        "whenever a source an opponent controls deals damage to you"
-            | "when a source an opponent controls deals damage to you"
-    ) {
+    // CR 701.30b-c: "whenever you clash" fires when the controller of the
+    // trigger source is either player participating in a clash.
+    // Cards: Entangling Trap, Rebellion of the Flamekin.
+    if all_consuming(preceded(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        value((), (tag("you"), space1, tag("clash"))),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
         let mut def = make_base();
-        def.mode = TriggerMode::DamageReceived;
+        def.mode = TriggerMode::Clashed;
         def.valid_target = Some(TargetFilter::Controller);
-        def.valid_source = Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::Opponent),
-        ));
-        return Some((TriggerMode::DamageReceived, def));
+        return Some((TriggerMode::Clashed, def));
     }
 
-    // CR 120.1: "whenever a source deals damage to you" — any source deals damage to you.
-    if matches!(
-        lower,
-        "whenever a source deals damage to you" | "when a source deals damage to you"
-    ) {
+    // CR 701.30: "whenever a player clashes" — fires for any clashing player.
+    if all_consuming(preceded(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        value(
+            (),
+            (tag("a"), space1, tag("player"), space1, tag("clashes")),
+        ),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
         let mut def = make_base();
-        def.mode = TriggerMode::DamageReceived;
-        def.valid_target = Some(TargetFilter::Controller);
-        return Some((TriggerMode::DamageReceived, def));
+        def.mode = TriggerMode::Clashed;
+        return Some((TriggerMode::Clashed, def));
     }
 
     None
@@ -8901,7 +9214,9 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
 
 /// CR 305.1 + CR 603.2: Parse the subject and land-play verb from
 /// "whenever/when [subject] plays/play a land".
-fn parse_land_play_trigger_subject(lower: &str) -> Option<(Option<TargetFilter>, &str)> {
+fn parse_land_play_trigger_subject(
+    lower: &str,
+) -> Option<(Option<TargetFilter>, Option<FilterProp>, &str)> {
     let (after_prefix, _) = alt((
         tag::<_, _, OracleError<'_>>("whenever "),
         tag::<_, _, OracleError<'_>>("when "),
@@ -8924,13 +9239,68 @@ fn parse_land_play_trigger_subject(lower: &str) -> Option<(Option<TargetFilter>,
     ))
     .parse(after_prefix)
     .ok()?;
-    let (after_land, _) = alt((
-        tag::<_, _, OracleError<'_>>("plays a land"),
-        tag("play a land"),
+    // CR 305.1: Decompose verb ("play"/"plays") and land-qualifier ("another"/"a")
+    // into separate axes to avoid Cartesian-product enumeration.
+    let (after_verb, _) = alt((tag::<_, _, OracleError<'_>>("plays "), tag("play ")))
+        .parse(after_subject)
+        .ok()?;
+    let (after_land, qualifier) = alt((
+        value(
+            Some(FilterProp::Another),
+            tag::<_, _, OracleError<'_>>("another land"),
+        ),
+        value(None, tag("a land")),
     ))
-    .parse(after_subject)
+    .parse(after_verb)
     .ok()?;
-    Some((valid_target, after_land))
+    Some((valid_target, qualifier, after_land))
+}
+
+/// CR 725.1: Parse "whenever/when [subject] become(s) the monarch" trigger.
+///
+/// Decomposes the phrase into three axes via nom combinators:
+/// 1. Prefix: "whenever " / "when "
+/// 2. Subject + verb: "you become" / "an opponent becomes" / "a player becomes"
+/// 3. Object: " the monarch"
+///
+/// Returns `(valid_target, remaining_text)` on success.
+fn parse_become_monarch_trigger(lower: &str) -> Option<(Option<TargetFilter>, &str)> {
+    let (after_prefix, _) = alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag::<_, _, OracleError<'_>>("when "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (after_verb, valid_target) = alt((
+        value(
+            Some(TargetFilter::Controller),
+            tag::<_, _, OracleError<'_>>("you become"),
+        ),
+        value(
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+            tag::<_, _, OracleError<'_>>("an opponent becomes"),
+        ),
+        value(
+            Some(TargetFilter::Player),
+            pair(tag::<_, _, OracleError<'_>>("a player"), tag(" becomes")),
+        ),
+    ))
+    .parse(after_prefix)
+    .ok()?;
+    let (after_monarch, _) = tag::<_, _, OracleError<'_>>(" the monarch")
+        .parse(after_verb)
+        .ok()?;
+    Some((valid_target, after_monarch))
+}
+
+fn parse_monarch_turn_began_condition(lower: &str) -> Option<&str> {
+    let (after_condition, _) =
+        tag::<_, _, OracleError<'_>>("if you were the monarch as the turn began,")
+            .parse(lower)
+            .ok()?;
+    Some(after_condition)
 }
 
 /// CR 700.13: "Whenever [subject] commits a crime" — scoped crime trigger parser.
@@ -9767,6 +10137,84 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Attacks);
     }
 
+    /// CR 107.1 + CR 701.17a: Attack triggers can use the shared fractional
+    /// quantity parser to mill the targeted player's library.
+    #[test]
+    fn trigger_attacks_target_player_mills_half_their_library_rounded_up() {
+        use crate::types::ability::{RoundingMode, ZoneRef};
+
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, target player mills half their library, rounded up.",
+            "Fleet Swallower",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        match execute.effect.as_ref() {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(*target, TargetFilter::Player);
+                assert_eq!(*destination, Zone::Graveyard);
+                assert_eq!(
+                    *count,
+                    QuantityExpr::DivideRounded {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::TargetZoneCardCount {
+                                zone: ZoneRef::Library,
+                            },
+                        }),
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                    },
+                );
+            }
+            other => panic!("Expected Mill, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1 + CR 701.17a: Sibling coverage — "rounded down" variant
+    /// exercises the same fractional quantity parser with the opposite rounding
+    /// mode, ensuring both arms of the `RoundingMode` axis are verified.
+    #[test]
+    fn trigger_attacks_target_player_mills_half_their_library_rounded_down() {
+        use crate::types::ability::{RoundingMode, ZoneRef};
+
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, target player mills half their library, rounded down.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        match execute.effect.as_ref() {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(*target, TargetFilter::Player);
+                assert_eq!(*destination, Zone::Graveyard);
+                assert_eq!(
+                    *count,
+                    QuantityExpr::DivideRounded {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::TargetZoneCardCount {
+                                zone: ZoneRef::Library,
+                            },
+                        }),
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                    },
+                );
+            }
+            other => panic!("Expected Mill, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_attacks_and_isnt_blocked_uses_unblocked_mode_and_combat_duration() {
         let def = parse_trigger_line(
@@ -9895,8 +10343,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trigger_evolves_self() {
+        let def = parse_trigger_line(
+            "Whenever ~ evolves, put a +1/+1 counter on each other creature you control with a +1/+1 counter on it.",
+            "Renegade Krasis",
+        );
+        assert_eq!(def.mode, TriggerMode::Evolved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+    #[test]
+    fn trigger_evolves_creature_you_control() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control evolves, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Evolved);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)
+            ))
+        );
+    }
+    #[test]
+    fn trigger_evolve_plural() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control evolve, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Evolved);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(crate::types::ability::ControllerRef::You)
+            ))
+        );
+    }
     // --- Subject decomposition tests ---
-
     #[test]
     fn trigger_another_creature_you_control_enters() {
         let def = parse_trigger_line(
@@ -10112,6 +10596,70 @@ mod tests {
         // invariant is that it is NOT scoped to Controller (which would silently
         // restrict to the source's controller).
         assert_ne!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // CR 725.1: "become the monarch" trigger tests.
+    #[test]
+    fn trigger_you_become_the_monarch_scopes_to_controller() {
+        // Custodi Lich: "Whenever you become the monarch, target player
+        // sacrifices a creature of their choice."
+        let def = parse_trigger_line(
+            "Whenever you become the monarch, target player sacrifices a creature of their choice.",
+            "Custodi Lich",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+    #[test]
+    fn trigger_opponent_becomes_the_monarch() {
+        // Knights of the Black Rose: "Whenever an opponent becomes the monarch,
+        // if you were the monarch as the turn began, that player loses 2 life."
+        let def = parse_trigger_line(
+            "Whenever an opponent becomes the monarch, that player loses 2 life.",
+            "Knights of the Black Rose",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_monarch_turn_began_condition_stays_unimplemented() {
+        let def = parse_trigger_line(
+            "Whenever an opponent becomes the monarch, if you were the monarch as the turn began, that player loses 2 life and you gain 2 life.",
+            "Knights of the Black Rose",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        let execute = def.execute.expect("trigger should keep an explicit body");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Unimplemented { name, .. }
+                    if name == "Unsupported monarch turn-began condition"
+            ),
+            "unsupported monarch turn-began guard must not parse as unconditional, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn trigger_a_player_becomes_the_monarch() {
+        let def = parse_trigger_line(
+            "Whenever a player becomes the monarch, draw a card.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_become_the_monarch_rejects_partial_suffix() {
+        let def = parse_trigger_line("Whenever you become the monarchy, draw a card.", "Test");
+        assert!(matches!(def.mode, TriggerMode::Unknown(_)));
     }
 
     #[test]
@@ -11894,6 +12442,78 @@ mod tests {
         );
     }
 
+    /// Issue #817 — CR 113.6b + CR 207.2c: Eminence (ability word) triggers
+    /// function in both the command zone and on the battlefield. The "if ~ is
+    /// in the command zone or on the battlefield" intervening-if parses to
+    /// `TriggerCondition::Or { [SourceInZone(Command), SourceInZone(Battlefield)] }`,
+    /// and the trigger's `trigger_zones` MUST list both — otherwise the
+    /// runtime trigger scanner only walks the battlefield and silently
+    /// skips a command-zone Edgar Markov (the original bug).
+    #[test]
+    fn trigger_eminence_command_zone_or_battlefield_extends_trigger_zones() {
+        let def = parse_trigger_line(
+            "Whenever you cast another Vampire spell, if ~ is in the command zone or on the battlefield, create a 1/1 black Vampire creature token.",
+            "Edgar Markov",
+        );
+        assert!(
+            def.trigger_zones.contains(&Zone::Command),
+            "Eminence trigger must scan the command zone, got {:?}",
+            def.trigger_zones,
+        );
+        assert!(
+            def.trigger_zones.contains(&Zone::Battlefield),
+            "Eminence trigger must also scan the battlefield, got {:?}",
+            def.trigger_zones,
+        );
+    }
+
+    /// Issue #817 follow-up: Oloro, Ageless Ascetic exercises the same
+    /// Eminence intervening-if from a different mode path (BeginningOfPhase,
+    /// not SpellCast). Confirms the trigger-zones derivation block runs
+    /// regardless of which `try_parse_*` arm produced the trigger.
+    #[test]
+    fn trigger_eminence_oloro_upkeep_command_zone_or_battlefield() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if ~ is in the command zone or on the battlefield, you gain 1 life.",
+            "Oloro, Ageless Ascetic",
+        );
+        assert!(
+            def.trigger_zones.contains(&Zone::Command),
+            "Oloro Eminence upkeep trigger must scan the command zone, got {:?}",
+            def.trigger_zones,
+        );
+        assert!(
+            def.trigger_zones.contains(&Zone::Battlefield),
+            "Oloro Eminence upkeep trigger must also scan the battlefield, got {:?}",
+            def.trigger_zones,
+        );
+    }
+
+    /// CR 113.6b: A trigger whose intervening-if mentions no zone clause
+    /// at all leaves the `trigger_zones` derivation to fall through to the
+    /// `make_base()` `[Battlefield]` default — Eminence's `Or`-of-zones is
+    /// the only path that adds non-battlefield zones. Locks in that the
+    /// multi-zone refactor doesn't widen the scan for unrelated triggers.
+    #[test]
+    fn trigger_no_zone_condition_defaults_to_battlefield_only() {
+        let def = parse_trigger_line("Whenever you cast a spell, draw a card.", "Test No Zone");
+        assert!(
+            def.trigger_zones.contains(&Zone::Battlefield),
+            "no-zone trigger must default-scan battlefield, got {:?}",
+            def.trigger_zones,
+        );
+        assert!(
+            !def.trigger_zones.contains(&Zone::Command),
+            "no-zone trigger must NOT pick up Command, got {:?}",
+            def.trigger_zones,
+        );
+        assert!(
+            !def.trigger_zones.contains(&Zone::Graveyard),
+            "no-zone trigger must NOT pick up Graveyard, got {:?}",
+            def.trigger_zones,
+        );
+    }
+
     #[test]
     fn trigger_you_cast_another_spell_keeps_another_filter() {
         let def = parse_trigger_line("Whenever you cast another spell, draw a card.", "Test");
@@ -12832,6 +13452,33 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn trigger_city_of_traitors_play_another_land() {
+        // CR 305.1: "When you play another land, sacrifice ~."
+        // The "another" qualifier must produce FilterProp::Another on valid_card
+        // so the trigger does not fire when City of Traitors itself enters.
+        let t = parse_trigger_line(
+            "When you play another land, sacrifice this land.",
+            "City of Traitors",
+        );
+        assert_eq!(t.mode, TriggerMode::LandPlayed);
+        assert_eq!(t.valid_target, Some(TargetFilter::Controller));
+        // valid_card must contain Another
+        let filter = t
+            .valid_card
+            .expect("valid_card must be set for 'another' qualifier");
+        match &filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "expected FilterProp::Another in properties, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed filter with Another, got {:?}", other),
+        }
     }
 
     #[test]
@@ -14172,6 +14819,62 @@ mod tests {
     }
 
     #[test]
+    fn trigger_you_win_a_coin_flip() {
+        // CR 705.2: "Whenever you win a coin flip" fires only on won flips.
+        let def = parse_trigger_line(
+            "Whenever you win a coin flip, draw a card.",
+            "Krark's Thumb",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Won));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_lose_a_coin_flip() {
+        let def = parse_trigger_line(
+            "Whenever you lose a coin flip, target opponent gains 1 life.",
+            "Bad Luck Charm",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Lost));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_a_player_loses_a_coin_flip() {
+        let def = parse_trigger_line(
+            "When a player loses a coin flip, you gain 1 life.",
+            "Tavern Swindler",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Lost));
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_opponent_wins_a_coin_flip() {
+        let def = parse_trigger_line(
+            "Whenever an opponent wins a coin flip, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Won));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_coin_flip_rejects_partial_suffix() {
+        let def = parse_trigger_line("Whenever you win a coin flipper, draw a card.", "Test Card");
+        assert!(matches!(def.mode, TriggerMode::Unknown(_)));
+    }
+
+    #[test]
     fn trigger_ring_tempts_you_whenever() {
         let def = parse_trigger_line(
             "Whenever the Ring tempts you, you may discard your hand.",
@@ -14735,10 +15438,10 @@ mod tests {
         );
 
         let sub_ability = execute.sub_ability.as_ref().expect("If you do sub-ability");
-        assert!(matches!(
-            sub_ability.condition,
-            Some(AbilityCondition::IfYouDo)
-        ));
+        assert!(sub_ability
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed));
         let Effect::GenericEffect {
             static_abilities, ..
         } = sub_ability.effect.as_ref()
@@ -15266,6 +15969,86 @@ mod tests {
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
     }
 
+    #[test]
+    fn trigger_source_opponent_controls_deals_damage_to_you() {
+        let def = parse_trigger_line(
+            "Whenever a source an opponent controls deals damage to you, you may put that many +1/+1 counters on ~.",
+            "Retaliator Griffin",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.damage_amount, None);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_noncreature_source_you_control_deals_damage() {
+        let def = parse_trigger_line(
+            "Whenever a noncreature source you control deals damage, you gain that much life.",
+            "Tamanoa",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.damage_amount, None);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                    .controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(def.valid_target, None);
+    }
+
+    #[test]
+    fn trigger_source_opponent_controls_deals_damage_to_you_michiko() {
+        let def = parse_trigger_line(
+            "Whenever a source an opponent controls deals damage to you, that player sacrifices a permanent.",
+            "Michiko Konda, Truth Seeker",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let execute = def.execute.as_ref().expect("trigger execute");
+        match execute.effect.as_ref() {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::ParentTargetController),
+                    ..
+                }) => assert_eq!(type_filters.as_slice(), [TypeFilter::Permanent]),
+                other => panic!("expected source-controller sacrifice filter, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_noncreature_source_deals_damage_to_player() {
+        let def = parse_trigger_line(
+            "Whenever a noncreature source deals damage to a player, draw a card.",
+            "Test",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(
+                Box::new(TypeFilter::Creature)
+            ))))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
     // ── Work Item 4: Transforms Into Self ─────────────────────────
 
     #[test]
@@ -16511,7 +17294,7 @@ mod tests {
 
         assert_eq!(
             sub.condition,
-            Some(AbilityCondition::IfYouDo),
+            Some(AbilityCondition::effect_performed()),
             "sub-ability must be gated by IfYouDo so it only fires when the player accepted"
         );
         assert!(
@@ -18509,7 +19292,7 @@ mod tests {
         assert_eq!(
             sub.condition,
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::IfYouDo)
+                condition: Box::new(AbilityCondition::effect_performed())
             })
         );
         match &*sub.effect {
@@ -19324,6 +20107,38 @@ mod tests {
         }
     }
 
+    /// CR 109.4 + CR 115.1 + CR 506.2: Gornog's "Whenever one or more Warriors
+    /// you control attack a player, target creature that player controls
+    /// becomes a Coward" introduces the attacked player through a relative-
+    /// clause subject ("Warriors you control") rather than a bare actor. The
+    /// effect's "that player controls" must still resolve to
+    /// `ControllerRef::TargetPlayer` so the UI offers the attacked player's
+    /// creatures, not the trigger controller's. Regression test for #1054 — the
+    /// subject-permissive scan in `condition_introduces_target_player` is the
+    /// fix site.
+    #[test]
+    fn gornog_one_or_more_warriors_attack_uses_target_player_controller() {
+        use crate::types::ability::Effect;
+
+        let def = parse_trigger_line(
+            "Whenever one or more Warriors you control attack a player, target creature that player controls becomes a Coward.",
+            "Gornog, the Red Reaper",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::GenericEffect { target, .. } => match target {
+                Some(TargetFilter::Typed(t)) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::TargetPlayer),
+                    "GenericEffect target should reference the attacked player",
+                ),
+                other => panic!("expected Some(Typed) target filter, got {other:?}"),
+            },
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
     /// Negative scope test — a non-attack-player trigger ("Whenever you draw a
     /// card") MUST NOT push the relative-player scope, so "that player controls"
     /// inside the effect (synthetic but exercising the parser) still defaults to
@@ -19812,6 +20627,8 @@ mod tests {
 /// `parse_trigger_line_with_index_ir` / `lower_trigger_ir` refactor.
 #[cfg(test)]
 mod snapshot_tests {
+    use crate::types::ability::AbilityCondition;
+
     use super::*;
 
     fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
@@ -20173,33 +20990,191 @@ mod snapshot_tests {
         assert!(def.valid_card.is_some());
     }
 
-    /// CR 120.1 + CR 120.3: "Whenever a source an opponent controls deals damage to you"
-    /// scopes the damaged player to Controller and the damage source to Opponent.
-    /// Cards: Retaliator Griffin, Michiko Konda Truth Seeker, Farsight Mask.
+    /// CR 701.3a Pattern 2: "Whenever an Aura becomes attached to ~" —
+    /// the subject is the Aura (not self-ref), the host is the trigger source.
+    /// Cards: Bramble Elemental, Brood Keeper.
     #[test]
-    fn trigger_source_opponent_controls_deals_damage_to_you() {
+    fn trigger_an_aura_becomes_attached_to_self() {
         let def = parse_trigger_line(
-            "Whenever a source an opponent controls deals damage to you, you may put that many +1/+1 counters on ~.",
-            "Retaliator Griffin",
+            "Whenever an Aura becomes attached to ~, create two 1/1 green Saproling creature tokens.",
+            "Bramble Elemental",
         );
-        assert_eq!(def.mode, TriggerMode::DamageReceived);
-        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
-        // valid_source must be Typed with Opponent controller
-        let Some(TargetFilter::Typed(tf)) = &def.valid_source else {
-            panic!("expected opponent-scoped valid_source, got {:?}", def.valid_source);
+        assert_eq!(def.mode, TriggerMode::Attached);
+        let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+            panic!("expected typed Aura filter, got {:?}", def.valid_card);
         };
-        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(
+            tf.type_filters
+                .contains(&crate::types::ability::TypeFilter::Subtype(
+                    "Aura".to_string()
+                )),
+            "filter must restrict to Aura subtype, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::SelfRef));
     }
 
-    /// CR 120.1: "Whenever a source deals damage to you" with no source controller filter.
+    /// CR 701.3a Pattern 2: Brood Keeper uses the same phrase.
     #[test]
-    fn trigger_a_source_deals_damage_to_you_no_filter() {
+    fn trigger_an_aura_becomes_attached_to_self_brood_keeper() {
         let def = parse_trigger_line(
-            "Whenever a source deals damage to you, draw a card.",
-            "Farsight Mask",
+            "Whenever an Aura becomes attached to ~, create a 2/2 red Dragon creature token with flying. It has \"{R}: This creature gets +1/+0 until end of turn.\"",
+            "Brood Keeper",
         );
-        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert_eq!(def.mode, TriggerMode::Attached);
+        assert!(def.valid_card.is_some(), "Aura filter must be set");
+        assert_eq!(def.valid_target, Some(TargetFilter::SelfRef));
+    }
+
+    /// CR 104.3a: "Whenever a player loses the game" — Withengar Unbound,
+    /// Ramses Assassin Lord, Blood Tyrant. The explicit player subject is
+    /// represented as a player filter so the trigger's player axis is typed.
+    #[test]
+    fn trigger_a_player_loses_the_game() {
+        let def = parse_trigger_line(
+            "Whenever a player loses the game, put thirteen +1/+1 counters on this creature.",
+            "Withengar Unbound",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::LosesGame,
+            "expected LosesGame mode, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Player),
+            "valid_target must represent the player-loss subject"
+        );
+    }
+
+    /// CR 104.3a: "Whenever an opponent loses the game" — scopes to opponent
+    /// players only via a controller filter.
+    #[test]
+    fn trigger_an_opponent_loses_the_game() {
+        let def = parse_trigger_line(
+            "Whenever an opponent loses the game, you win the game.",
+            "SomeCard",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::LosesGame,
+            "expected LosesGame mode, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            )),
+            "valid_target must restrict to opponents"
+        );
+    }
+
+    /// CR 104.3a: "Whenever you lose the game" uses the same parser family and
+    /// scopes the losing player to the trigger controller.
+    #[test]
+    fn trigger_you_lose_the_game() {
+        let def = parse_trigger_line(
+            "When you lose the game, draw a card.",
+            "Platinum Contraption",
+        );
+        assert_eq!(def.mode, TriggerMode::LosesGame);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
-        assert_eq!(def.valid_source, None);
+    }
+
+    /// CR 701.30b-c: "Whenever you clash" scopes to the trigger controller as
+    /// either player participating in the clash.
+    /// Cards: Entangling Trap, Rebellion of the Flamekin.
+    #[test]
+    fn trigger_you_clash_whenever() {
+        let def = parse_trigger_line(
+            "Whenever you clash, tap target creature an opponent controls. If you won, that creature doesn't untap during its controller's next untap step.",
+            "Entangling Trap",
+        );
+        assert_eq!(def.mode, TriggerMode::Clashed);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let Some(execute) = def.execute.as_deref() else {
+            panic!("expected trigger body");
+        };
+        let Some(tail) = execute.sub_ability.as_deref() else {
+            panic!("expected if-you-won tail");
+        };
+        assert_eq!(tail.condition, Some(AbilityCondition::EventOutcomeWon));
+    }
+
+    /// CR 701.30b-c: "When you clash" accepts the alternate trigger prefix.
+    #[test]
+    fn trigger_you_clash_when_prefix() {
+        let def = parse_trigger_line(
+            "When you clash, you may pay {1}. If you do, create a 3/1 red Elemental Shaman creature token. If you won, that token gains haste until end of turn.",
+            "Rebellion of the Flamekin",
+        );
+        assert_eq!(def.mode, TriggerMode::Clashed);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let Some(pay_cost) = def.execute.as_deref() else {
+            panic!("expected trigger body");
+        };
+        let Some(token) = pay_cost.sub_ability.as_deref() else {
+            panic!("expected if-you-do token tail");
+        };
+        assert_eq!(token.condition, Some(AbilityCondition::effect_performed()));
+        let Some(haste) = token.sub_ability.as_deref() else {
+            panic!("expected if-you-won haste tail");
+        };
+        assert_eq!(haste.condition, Some(AbilityCondition::EventOutcomeWon));
+    }
+
+    /// CR 701.30b-c: "Whenever a player clashes" is not scoped to a specific player.
+    #[test]
+    fn trigger_a_player_clashes() {
+        let def = parse_trigger_line("Whenever a player clashes, draw a card.", "Clash Watcher");
+        assert_eq!(def.mode, TriggerMode::Clashed);
+        assert_eq!(def.valid_target, None);
+    }
+
+    /// CR 602.1 + CR 605.1a: Passive form — "whenever an ability of equipped creature
+    /// is activated" routes to AbilityActivated with valid_card = AttachedTo.
+    /// Cards: Battlemage's Bracers, Illusionist's Bracers.
+    #[test]
+    fn trigger_ability_of_equipped_creature_is_activated_bracers() {
+        let def = parse_trigger_line(
+            "Whenever an ability of equipped creature is activated, if it isn't a mana ability, you may pay {1}. If you do, copy that ability. You may choose new targets for the copy.",
+            "Battlemage's Bracers",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        assert_eq!(def.valid_target, None);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::PayCost { .. })
+        ));
+    }
+
+    /// CR 602.1 + CR 605.1a: Illusionist's Bracers uses the same passive trigger phrase.
+    #[test]
+    fn trigger_ability_of_equipped_creature_is_activated_illusionists() {
+        let def = parse_trigger_line(
+            "Whenever an ability of equipped creature is activated, if it isn't a mana ability, copy that ability. You may choose new targets for the copy.",
+            "Illusionist's Bracers",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::CopySpell { .. })
+        ));
     }
 }

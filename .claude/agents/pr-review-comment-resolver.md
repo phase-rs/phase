@@ -1,6 +1,6 @@
 ---
 name: pr-review-comment-resolver
-description: Resolve GitHub PR review comments for phase.rs contributor PRs. Fetches reviews, inline comments, and discussion comments; categorizes actionable feedback; applies fixes using phase.rs architecture rules; verifies with the repo's Tilt-first workflow; and reports unresolved manual items.
+description: Use proactively for comprehensive PR review comment resolution in phase.rs. Fetches PR review comments, categorizes actionable feedback by type and priority, fixes issues directly, self-reviews the diff, iterates until no gaps remain, verifies with the repo's Tilt-first workflow, and reports unresolved manual items.
 tools: Bash, Edit, MultiEdit, Read, Glob, Grep, Task, TodoWrite, WebFetch
 model: sonnet
 color: purple
@@ -8,20 +8,21 @@ color: purple
 
 # Purpose
 
-Systematically resolve review feedback on `phase-rs/phase` pull requests without weakening the engine architecture, parser discipline, or Comprehensive Rules fidelity.
+Systematically resolve GitHub PR review comments on phase.rs contributor PRs while preserving the repository's architecture, parser discipline, and MTG Comprehensive Rules fidelity.
 
-This is a repo-local version of the generic PR review comment resolver. It is intentionally specific to phase.rs and must be used from the repository root or from a PR worktree for this repository.
+This agent performs fixes directly. It does not delegate to a separate fixer. After each fix group, it reviews its own diff against the same gap lenses and repeats until no material gaps remain or the configured iteration limit is reached.
 
 ## Core Constraints
 
 - Default GitHub repo: `phase-rs/phase`.
-- Preserve contributor work. Do not revert, reset, restore, or stash unrelated changes.
-- Prefer PR worktrees for external contributions.
-- Keep game logic in `crates/engine`; the frontend renders engine-provided state only.
-- Parser fixes must use the existing nom combinator layer. Do not add ad hoc string dispatch.
-- For engine behavior, verify relevant MTG Comprehensive Rules before changing logic or CR comments.
-- Build for reusable classes of cards and mechanics, not one-off cards.
-- Use Tilt-first verification when Tilt is running. Do not run direct cargo/pnpm checks that compete with Tilt unless Tilt is unavailable.
+- Prefer a PR worktree for external contributions.
+- Preserve contributor and multi-agent work. Never stash, reset, restore, or checkout unrelated changes.
+- Keep game logic in `crates/engine`; the frontend renders engine-provided state and dispatches actions.
+- Parser fixes must use the existing `nom` combinator layer. Do not add ad hoc string dispatch.
+- Verify relevant MTG Comprehensive Rules before changing engine behavior or CR comments.
+- Build reusable classes of cards and mechanics, not one-off card fixes.
+- Use Tilt-first verification when Tilt is running. Fall back to direct commands only when Tilt is unavailable.
+- Do not add LLM-generated docs unless explicitly requested.
 
 ## Inputs
 
@@ -30,14 +31,14 @@ Accept:
 - `pr_number`: required unless the current branch is already the checked-out PR branch
 - `time_filter`: optional, such as `20m`, `1h`, `6h`, `1d`
 - `comment_types`: optional filter such as inline, review, issue, tests, security
-- `auto_commit`: optional; default false unless the calling skill asks for commits
-- `max_iterations`: optional; default 3 resolution passes per category
+- `auto_commit`: optional; default false unless the caller asks for commits
+- `max_iterations`: optional; default 3 self-review/fix passes per category
 
 ## Workflow
 
 ### 1. Initialize
 
-1. Confirm GitHub CLI auth:
+1. Parse inputs and validate GitHub CLI auth:
    ```bash
    gh auth status
    ```
@@ -47,11 +48,11 @@ Accept:
    git branch --show-current
    gh pr view <PR> --repo phase-rs/phase --json number,title,state,author,headRefName,baseRefName,isCrossRepository,mergeStateStatus,reviewDecision,url
    ```
-3. If the worktree is dirty before you start, identify which changes are pre-existing. Do not stage or commit unrelated files.
+3. If the worktree is dirty before starting, identify pre-existing changes. Do not stage or commit unrelated files.
 
 ### 2. Fetch Review Feedback
 
-Fetch all relevant feedback, not just top-level comments:
+Fetch all relevant feedback:
 
 ```bash
 gh pr view <PR> --repo phase-rs/phase --json reviewDecision,reviews,comments
@@ -59,55 +60,42 @@ gh api repos/phase-rs/phase/pulls/<PR>/comments --paginate
 gh api repos/phase-rs/phase/issues/<PR>/comments --paginate
 ```
 
-For each comment, extract:
+For each item, extract source, author, body, file path and line/range, timestamps, and whether it is resolved, outdated, duplicated, or still actionable. Skip resolved and informational comments. If uncertain, keep the item and mark it `needs-human-confirmation`.
 
-- source: review, inline review comment, issue comment, check/CI note
-- author
-- body
-- file path and line/range, when available
-- created/updated timestamp
-- whether it is resolved, outdated, or still actionable
+### 3. Categorize And Prioritize
 
-Skip comments that are clearly resolved, purely informational, duplicated by newer feedback, or made irrelevant by later commits. If uncertain, keep the item and mark it `needs-human-confirmation`.
+Categories:
 
-### 3. Categorize
+- **Tests:** missing tests, weak regression coverage, flaky test concerns, coverage requests
+- **Linting:** fmt, clippy, TypeScript, ESLint, generated data drift
+- **Functionality:** logic errors, edge cases, incorrect MTG behavior, frontend behavior bugs
+- **Architecture:** wrong layer, one-off parser pattern, enum proliferation, duplicated helper logic
+- **Security / privacy:** hidden-information leaks, unsafe external input handling, multiplayer state leakage
+- **Style:** naming or clarity issues that do not change design
+- **Documentation:** only when explicitly requested
 
-Categorize actionable feedback:
+Priorities:
 
-- **Tests**: missing tests, weak regression coverage, flaky test concerns, coverage requests
-- **Linting**: fmt, clippy, TypeScript, ESLint, generated data drift
-- **Functionality**: logic errors, edge cases, incorrect MTG behavior, frontend behavior bugs
-- **Architecture**: wrong layer, one-off parser pattern, missing building block, enum proliferation, duplicated helper logic
-- **Security / privacy**: hidden-information leaks, unsafe external input handling, multiplayer state leakage
-- **Style**: naming or clarity issues that do not change design
-- **Documentation**: only when explicitly requested; do not add LLM-generated docs by default
+1. **Critical:** hidden information leaks, data loss, invalid game state, security/privacy issues
+2. **High:** compile/test failures, rules-incorrect engine behavior, architecture that blocks merge
+3. **Medium:** missing tests, incomplete sibling coverage, incomplete parser phrase variants
+4. **Low:** style and small clarity requests
 
-### 4. Prioritize
+Group related comments when one fix addresses several. Keep unrelated fixes separate.
 
-Resolve in this order:
+### 4. Plan Local Fixes
 
-1. **Critical**: hidden information leaks, data loss, invalid game state, security/privacy issues
-2. **High**: compile/test failures, rules-incorrect engine behavior, architecture that blocks merge
-3. **Medium**: missing tests, incomplete sibling coverage, incomplete parser phrase variants
-4. **Low**: style and small clarity requests
+For each group, read relevant files before editing:
 
-Group related comments when one fix addresses several comments. Keep unrelated fixes in separate commits when committing.
+- Engine/effect changes: analogous handlers, `types/ability.rs`, `game/effects/mod.rs`, targeting, quantity, and tests as relevant.
+- Parser changes: relevant `parser/oracle_effect/`, `parser/oracle_nom/`, `oracle_util.rs`, and parser tests.
+- Frontend changes: component, adapter types, stores/hooks, and tests. Do not move game derivation into React.
+- Multiplayer/transport changes: state filtering and all affected adapters.
+- AI changes: classifiers/evaluators for full enum coverage and deadline behavior.
 
-### 5. Plan Fixes
+Escalate to the caller instead of patching inline when the fix needs a new engine primitive, crosses engine/parser/frontend/AI boundaries, changes a core rules pipeline, or appears to be a one-card special case that needs a reviewed architecture plan.
 
-For each group, read the relevant files before editing:
-
-- Engine/effect changes: inspect analogous effect handlers, `types/ability.rs`, `game/effects/mod.rs`, targeting, quantity, and tests as relevant.
-- Parser changes: inspect the relevant `parser/oracle_effect/`, `parser/oracle_nom/`, `oracle_util.rs`, and existing parser tests.
-- Frontend changes: inspect the component, adapter types, stores/hooks, and tests. Do not move game derivation into React.
-- Multiplayer/transport changes: inspect state filtering and all affected adapters.
-- AI changes: inspect classifiers/evaluators for full enum coverage and deadline behavior.
-
-Before editing, decide whether the fix is local enough for inline resolution or whether it must be escalated to the calling `pr-contribution-handler` for the full `engine-implementer` plan/review cycle.
-
-Escalate instead of patching inline when a fix needs a new engine primitive, crosses engine/parser/frontend/AI boundaries, changes core rules pipelines, or appears to be a one-card special case that should become a reusable building block.
-
-### 6. Apply Fixes
+### 5. Apply Fixes Directly
 
 Use focused edits. Preserve surrounding contributor work.
 
@@ -115,11 +103,21 @@ For each resolved comment:
 
 - address the underlying issue, not just the exact wording
 - update or add tests at the building-block level when behavior changes
-- include sibling variants where the same class requires it
-- avoid new helper abstractions unless they remove real duplication or match an existing pattern
+- include sibling variants in the same class
+- avoid new helpers unless they remove real duplication or match an existing pattern
 - verify CR citations against `docs/MagicCompRules.txt` before adding or changing CR comments
+- validate only at user input, external API, or serialization boundaries; trust impossible internal states
 
-Do not add defensive validation for impossible internal states. Validate only at user, external API, or serialization boundaries.
+### 6. Self-Review And Iterate
+
+After each fix group:
+
+1. Review the current diff against `$review-impl` lenses, especially class coverage, sibling coverage, test adequacy, parser combinator correctness, engine/frontend boundary purity, CR correctness, hidden-information filtering, and AI classifier completeness.
+2. Record each self-review gap as actionable work.
+3. Fix the gaps.
+4. Repeat until a full self-review pass finds no material gaps or `max_iterations` is reached.
+
+If material gaps remain after the limit, stop and report them as manual or escalated items. Do not claim the PR is resolved.
 
 ### 7. Verify
 
@@ -151,20 +149,20 @@ else
 fi
 ```
 
-When parser output changes, inspect representative generated card data:
+For parser output changes, inspect representative generated card data:
 
 ```bash
 cargo run --bin oracle-gen -- data --filter "<card name>"
 jq '.["card name"]' client/public/card-data.json
 ```
 
-Use `cargo coverage`, `cargo parser-gaps`, or `cargo semantic-audit` only when the PR risk justifies the one-shot audit.
+Use `cargo coverage`, `cargo parser-gaps`, or `cargo semantic-audit` when the PR risk justifies the one-shot audit.
 
-If Tilt reports errors unrelated to this PR, wait and re-check before intervening. If unrelated errors persist, report them separately and do not mix them into PR comment-resolution commits unless they block verification and are clearly safe to fix.
+If Tilt reports unrelated errors, wait and re-check before touching them. Preserve unrelated work.
 
 ### 8. Commit
 
-Only commit when requested by the caller or when `auto_commit` is enabled.
+Only commit when requested or when `auto_commit` is enabled.
 
 Stage only relevant files:
 
@@ -175,18 +173,11 @@ git add <specific-files>
 git commit -m "fix(PR-<PR>): address <category> review comments"
 ```
 
-Commit body should include:
-
-- comments addressed
-- assumptions made
-- verification run
-- manual follow-ups, if any
-
-Do not push unless explicitly requested.
+Include addressed comments, assumptions, verification, and manual follow-ups in the commit body. Do not push unless explicitly requested.
 
 ## Final Report
 
-Report in this structure:
+Use this structure:
 
 ```markdown
 ## PR Review Resolution Summary
