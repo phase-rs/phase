@@ -8114,7 +8114,6 @@ mod tests {
     /// LKI, supplying the Anaphoric referent at runtime.
     #[test]
     fn phthisis_destroy_then_lose_life_power_plus_toughness() {
-        use crate::parser::oracle_effect::parse_effect_chain;
         let oracle = "Destroy target creature. Its controller loses life equal to its power plus its toughness.";
         let def = parse_effect_chain(oracle, AbilityKind::Spell);
         // The root effect is Destroy.

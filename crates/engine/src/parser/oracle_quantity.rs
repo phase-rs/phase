@@ -623,6 +623,58 @@ fn parse_opponent_dealt_combat_damage_clause(
     .map(|(rest, _)| (rest, ()))
 }
 
+fn anaphoric_power_expr() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Anaphoric,
+        },
+    }
+}
+
+fn anaphoric_toughness_expr() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Toughness {
+            scope: ObjectScope::Anaphoric,
+        },
+    }
+}
+
+fn parse_anaphoric_power_or_toughness_property(
+    input: &str,
+) -> nom::IResult<&str, ObjectProperty, OracleError<'_>> {
+    alt((
+        value(ObjectProperty::Power, tag("its power")),
+        value(ObjectProperty::Toughness, tag("its toughness")),
+    ))
+    .parse(input)
+}
+
+fn parse_anaphoric_power_toughness_sum(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    let (rest, first) = parse_anaphoric_power_or_toughness_property(input)?;
+    let (rest, _) = tag(" plus ").parse(rest)?;
+    let (rest, second) = parse_anaphoric_power_or_toughness_property(rest)?;
+
+    if matches!(
+        (first, second),
+        (ObjectProperty::Power, ObjectProperty::Toughness)
+            | (ObjectProperty::Toughness, ObjectProperty::Power)
+    ) {
+        Ok((
+            rest,
+            QuantityExpr::Sum {
+                exprs: vec![anaphoric_power_expr(), anaphoric_toughness_expr()],
+            },
+        ))
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            rest,
+            nom::error::ErrorKind::Tag,
+        )))
+    }
+}
+
 /// Parse event-context quantity references from Oracle text fragments.
 /// Returns None for unrecognized patterns (caller falls back to Variable).
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
@@ -714,6 +766,15 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         });
     }
 
+    // CR 119.3 + CR 208.1: "its power plus its toughness" / "its toughness
+    // plus its power" — sum of Anaphoric power and toughness refs. Both
+    // operands use Anaphoric scope so the enclosing clause's subject-injection
+    // and the runtime resolver apply identically to the individual "its power"
+    // / "its toughness" single-value forms.
+    if let Ok(("", expr)) = all_consuming(parse_anaphoric_power_toughness_sum).parse(lower) {
+        return Some(expr);
+    }
+
     match lower {
         // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
         "that much" | "that many" | "that many cards" => {
@@ -755,29 +816,6 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
                 qty: QuantityRef::ObjectManaValue {
                     scope: ObjectScope::Anaphoric,
                 },
-            })
-        }
-        // CR 119.3 + CR 208.1: "its power plus its toughness" / "its toughness
-        // plus its power" — sum of Anaphoric power and toughness refs. Both
-        // operands use Anaphoric scope so the enclosing clause's subject-injection
-        // (Source when "~", Target when "itself") and the runtime resolver apply
-        // identically to the individual "its power" / "its toughness" arms above.
-        // Class: Phthisis ("lose life equal to its power plus its toughness").
-        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
-        "its power plus its toughness" | "its toughness plus its power" => {
-            return Some(QuantityExpr::Sum {
-                exprs: vec![
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::Power {
-                            scope: ObjectScope::Anaphoric,
-                        },
-                    },
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::Toughness {
-                            scope: ObjectScope::Anaphoric,
-                        },
-                    },
-                ],
             })
         }
         _ => {}

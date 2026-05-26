@@ -8208,38 +8208,36 @@ mod tests {
             "Should parse 'lose life equal to its power plus its toughness'"
         );
         match result.unwrap() {
-            NumericImperativeAst::LoseLife { amount } => {
-                match amount {
-                    QuantityExpr::Sum { exprs } => {
-                        assert_eq!(exprs.len(), 2, "Sum should have two operands");
-                        assert!(
-                            matches!(
-                                exprs[0],
-                                QuantityExpr::Ref {
-                                    qty: QuantityRef::Power {
-                                        scope: crate::types::ability::ObjectScope::Anaphoric
-                                    }
+            NumericImperativeAst::LoseLife { amount } => match amount {
+                QuantityExpr::Sum { exprs } => {
+                    assert_eq!(exprs.len(), 2, "Sum should have two operands");
+                    assert!(
+                        matches!(
+                            exprs[0],
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::Power {
+                                    scope: crate::types::ability::ObjectScope::Anaphoric
                                 }
-                            ),
-                            "First operand should be Power(Anaphoric), got {:?}",
-                            exprs[0]
-                        );
-                        assert!(
-                            matches!(
-                                exprs[1],
-                                QuantityExpr::Ref {
-                                    qty: QuantityRef::Toughness {
-                                        scope: crate::types::ability::ObjectScope::Anaphoric
-                                    }
+                            }
+                        ),
+                        "First operand should be Power(Anaphoric), got {:?}",
+                        exprs[0]
+                    );
+                    assert!(
+                        matches!(
+                            exprs[1],
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::Toughness {
+                                    scope: crate::types::ability::ObjectScope::Anaphoric
                                 }
-                            ),
-                            "Second operand should be Toughness(Anaphoric), got {:?}",
-                            exprs[1]
-                        );
-                    }
-                    other => panic!("Expected Sum, got {other:?}"),
+                            }
+                        ),
+                        "Second operand should be Toughness(Anaphoric), got {:?}",
+                        exprs[1]
+                    );
                 }
-            }
+                other => panic!("Expected Sum, got {other:?}"),
+            },
             other => panic!("Expected LoseLife, got {other:?}"),
         }
     }
