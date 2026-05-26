@@ -8931,29 +8931,38 @@ mod tests {
 
         advance_to_tempest_hawk_optional_choice(&mut state);
 
-        apply_as_current(
+        let result = apply_as_current(
             &mut state,
             GameAction::DecideOptionalEffect { accept: true },
         )
         .unwrap();
 
+        let mut events = result.events;
+
         // Engine may either (a) skip straight past SearchChoice because no
-        // cards match, or (b) expose an empty/zero SearchChoice that
-        // resolves to SelectCards { cards: vec![] }. Handle both.
+        // cards match, in which case the shuffle event is emitted by the
+        // DecideOptionalEffect call above, or (b) expose an empty/zero
+        // SearchChoice that resolves to SelectCards { cards: vec![] }, in
+        // which case the shuffle event is emitted by SelectCards. Combine
+        // events from both possible paths so the shuffle assertion holds
+        // regardless of which branch the engine takes (CR 701.24 still
+        // applies — the library shuffles even on fail-to-find).
         if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
-            let result =
+            let select_result =
                 apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
-            assert!(
-                result.events.iter().any(|event| matches!(
-                    event,
-                    GameEvent::EffectResolved {
-                        kind: EffectKind::Shuffle,
-                        ..
-                    }
-                )),
-                "library must shuffle even when the search finds nothing"
-            );
+            events.extend(select_result.events);
         }
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "library must shuffle even when the search finds nothing (CR 701.24)"
+        );
 
         assert!(
             state.stack.is_empty(),
