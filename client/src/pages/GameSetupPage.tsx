@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
@@ -69,7 +69,11 @@ export function GameSetupPage() {
   const [playerCount, setPlayerCount] = useState(2);
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
-  const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
+  // We only ever read the active deck's compat (see `selectedCompat` below),
+  // so MyDecks pushes up just that one entry instead of the entire map. Holding
+  // the full map here previously caused a re-render every time *any* deck's
+  // compat scanner result arrived — ~10/sec storm on the deck-select screen.
+  const [selectedCompat, setSelectedCompat] = useState<DeckCompatibilityResult | null>(null);
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
   const [legalAiDeckCount, setLegalAiDeckCount] = useState<number | null>(null);
   const [setupError, setSetupError] = useState<string | null>(() => {
@@ -119,18 +123,27 @@ export function GameSetupPage() {
     setSetupError(null);
   }
 
-  const handleSelectDeck = (name: string) => {
+  // useCallback so the prop identity passed to MyDecks/SavedDeckTile2 stays
+  // stable across this component's re-renders. Without it, every commit here
+  // creates fresh closures, which React 19's profiler explicitly flags on
+  // SavedDeckTile2 as `onTileClick`/`onEditDeck` "Referentially unequal
+  // function closure" — causing all visible deck tiles to re-render on every
+  // parent commit.
+  const handleSelectDeck = useCallback((name: string) => {
     setActiveDeckName(name);
     localStorage.setItem(ACTIVE_DECK_KEY, name);
-  };
+  }, []);
 
-  const handleEditDeck = (name: string) => {
-    const returnTo = `${location.pathname}${location.search}`;
-    const formatParam = selectedFormat ? `&format=${selectedFormat.toLowerCase()}` : "";
-    navigate(
-      `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
-    );
-  };
+  const handleEditDeck = useCallback(
+    (name: string) => {
+      const returnTo = `${location.pathname}${location.search}`;
+      const formatParam = selectedFormat ? `&format=${selectedFormat.toLowerCase()}` : "";
+      navigate(
+        `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
+      );
+    },
+    [location.pathname, location.search, navigate, selectedFormat],
+  );
 
   const handleStartAI = () => {
     if (!activeDeckName || !formatConfig) return;
@@ -159,8 +172,8 @@ export function GameSetupPage() {
     );
   };
 
-  // Sidebar deck preview
-  const selectedCompat = activeDeckName ? compatibilities[activeDeckName] : undefined;
+  // Sidebar deck preview. `selectedCompat` is now state pushed up from MyDecks
+  // (active-deck-only) rather than derived from a full compatibilities map.
   const noDeckSelected = !activeDeckName;
   const deckBlockedForSelectedFormat = selectedCompat?.selected_format_compatible === false;
   const noLegalAiDecks = legalAiDeckCount === 0;
@@ -250,7 +263,7 @@ export function GameSetupPage() {
             onEditDeck={handleEditDeck}
             activeDeckName={activeDeckName}
             bare
-            onCompatibilityUpdate={setCompatibilities}
+            onActiveDeckCompatChange={setSelectedCompat}
           />
 
           {/* Sidebar */}
@@ -467,7 +480,7 @@ export function GameSetupPage() {
                   tone: "emerald",
                   size: "lg",
                   disabled: cannotStartAi,
-                  className: "w-full",
+                  className: "w-full whitespace-nowrap px-6",
                 })}
               >
                 {playerCount > 2

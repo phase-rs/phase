@@ -29,6 +29,36 @@ Do not paraphrase these from memory. Re-read them each time because they are the
    - `gh pr view <PR> --json number,title,state,author,headRefName,headRepository,baseRefName,isCrossRepository,mergeStateStatus,reviewDecision,url`
    - `gh pr checks <PR>` if available
 
+## Prioritize (multi-PR runs and Standard-tier quality gauge)
+
+When given multiple PRs, fetch each PR body before checkout and read its `Tier:` line:
+
+```bash
+gh pr view <N> --json body --jq '.body' | grep -E '^Tier: (Frontier|Standard)'
+```
+
+**Processing order:**
+
+1. `Tier: Frontier` PRs first — higher base quality, faster to merge per `docs/AI-CONTRIBUTOR.md` §0.1.1.
+2. `Tier: Standard` PRs second, but ONLY after the cheap quality gauge below passes.
+3. PRs with no `Tier:` line → treat as Standard, expect the gates to be missing, surface the omission early.
+
+### Standard-tier quality gauge (run before architecture review)
+
+Per `AI-CONTRIBUTOR.md` §0.1.2, a Standard PR must include `## Gate A` (script output) and `## Anchored on` (≥2 `file:line` citations). Verify both mechanically — both are cheap checks that filter out non-conforming PRs without spending architecture-review cycles.
+
+**Gate A verification.** The pasted output of `./scripts/check-parser-combinators.sh` must end with the success line and list zero violations. If violations appear in the pasted output AND the PR was opened anyway, the contributor's model ignored the gate. Hard-reject: close the PR with a comment linking §0.1.2. Do not attempt fixes.
+
+**Anchored-on verification.** For each cited `file:line`, judge:
+
+- Does the path exist on the PR base (or `origin/main`)?
+- Is the cited code in the same module class as the files the PR modifies (parser changes anchor on parser files; effect-handler changes anchor on effect-handler files)?
+- Does the cited code use the same combinator family the new code uses (`alt(...)` extensions anchor on existing `alt(...)` blocks; new trigger patterns anchor on existing `TriggerCondition` arms)?
+
+The judgement is yours (the maintainer or the agent executing the skill) — keep it lightweight, the citations are short. Fabricated, broken, or unrelated citations are a kill-shot signal: the model claimed to anchor on patterns it didn't actually read. Hard-reject; close with a comment naming the specific citation that failed verification.
+
+Standard PRs passing both gauge checks proceed to architecture review like Frontier PRs, but with elevated scrutiny on the patterns the citations claimed to follow.
+
 ## Checkout
 
 Prefer a worktree for contributor PRs. If using the main workspace, first verify the current changes are intentional and do not overwrite or stash them.

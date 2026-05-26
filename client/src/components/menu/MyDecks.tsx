@@ -480,8 +480,14 @@ interface MyDecksProps {
   onEditDeck?: (deckName: string) => void;
   /** When true, render without the MenuPanel wrapper and header (for embedding). */
   bare?: boolean;
-  /** Called whenever compatibility data is updated, so the parent can use it. */
-  onCompatibilityUpdate?: (data: Record<string, DeckCompatibilityResult>) => void;
+  /**
+   * Called when the compatibility result for the currently-active deck changes.
+   * We push only the active deck's compat (not the entire map) so the parent
+   * doesn't re-render once per scanned deck — see GameSetupPage which reads
+   * only `compatibilities[activeDeckName]`. Passing the whole map turned
+   * scanner batch results into a fan-out storm through the parent's render tree.
+   */
+  onActiveDeckCompatChange?: (compat: DeckCompatibilityResult | null) => void;
 }
 
 type MyDecksTab = "decks" | "subscriptions";
@@ -498,7 +504,7 @@ export function MyDecks({
   onCreateDeck,
   onEditDeck,
   bare = false,
-  onCompatibilityUpdate,
+  onActiveDeckCompatChange,
 }: MyDecksProps) {
   const { t } = useTranslation("menu");
   const [activeTab, setActiveTab] = useState<MyDecksTab>("decks");
@@ -601,9 +607,14 @@ export function MyDecks({
     setCoverageStatus(null);
   }, [deckNamesKey, selectedFormatForCompatibility, selectedMatchType]);
 
+  // Push up ONLY the active deck's compat result, not the whole map. Parent
+  // re-renders only when the selected deck's compat actually changes; scanner
+  // updates for non-selected decks no-op at React's useState bail-out (object
+  // refs for other entries are preserved by the spread in setCompatibilities).
   useEffect(() => {
-    onCompatibilityUpdate?.(compatibilities);
-  }, [compatibilities, onCompatibilityUpdate]);
+    const next = activeDeckName ? (compatibilities[activeDeckName] ?? null) : null;
+    onActiveDeckCompatChange?.(next);
+  }, [activeDeckName, compatibilities, onActiveDeckCompatChange]);
 
   const searchedDeckNames = useMemo(() => {
     if (!searchQuery) return deckNames;
