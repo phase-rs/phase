@@ -926,18 +926,12 @@ pub(super) fn parse_subject_application(
     let mut your_opponent_subject = map(
         all_consuming(preceded(
             tag("your "),
-            alt((
-                tag("opponents"),
-                tag::<_, _, OracleError<'_>>("opponent"),
-            )),
+            alt((tag("opponents"), tag::<_, _, OracleError<'_>>("opponent"))),
         )),
         |_| TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
     );
     if let Ok((_, filter)) = your_opponent_subject.parse(lower.as_str()) {
-        return subject_filter_application(
-            filter,
-            false,
-        );
+        return subject_filter_application(filter, false);
     }
     // CR 506.3d: "defending player" as subject — resolves from combat state.
     if lower == "defending player" {
