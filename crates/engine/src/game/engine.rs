@@ -37,6 +37,7 @@ use super::match_flow;
 use super::mulligan;
 use super::planeswalker;
 use super::priority;
+use super::sba;
 use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty, sync_waiting_for,
 };
@@ -158,11 +159,78 @@ pub fn apply(
 }
 
 fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
+    // Safety net (fixes #962): If any player has a lethal condition (life <= 0,
+    // drew from empty library, 10+ poison, or lethal commander damage) but has
+    // not yet been eliminated, run SBAs now. Per CR 704.3, SBAs normally only
+    // fire when a player would receive priority, but skipping them here causes
+    // softlocks where the game waits on a dead player for a non-priority choice.
+    //
+    // This is intentionally conservative: the guard only triggers when there is
+    // genuinely an uneliminated player in a lethal state, so normal continuation
+    // flows (DiscardChoice, EffectZoneChoice, etc.) are unaffected.
+    if has_pending_lethal_player(state) {
+        sba::check_state_based_actions(state, &mut result.events);
+        // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
+        // the next living player). Sync the result.
+        result.waiting_for = state.waiting_for.clone();
+    }
+
     super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         match_flow::handle_game_over_transition(state);
         result.waiting_for = state.waiting_for.clone();
     }
+}
+
+/// Returns `true` if any non-eliminated player satisfies a lethal SBA condition:
+/// - Life total <= 0 (CR 704.5a)
+/// - Drew from an empty library (CR 704.5b)
+/// - 10+ poison counters (CR 704.5c)
+/// - 21+ commander damage from a single commander (CR 704.6c)
+///
+/// This does NOT account for "can't lose the game" effects — that check lives
+/// inside the full SBA pass itself, which is fine: calling `check_state_based_actions`
+/// when no player actually needs elimination is a no-op (the SBA loop exits on the
+/// first iteration with `any_performed == false`).
+fn has_pending_lethal_player(state: &GameState) -> bool {
+    let dominated_by_life = state
+        .players
+        .iter()
+        .any(|p| !p.is_eliminated && !p.is_phased_out() && p.life <= 0);
+    if dominated_by_life {
+        return true;
+    }
+
+    let drew_empty = state
+        .players
+        .iter()
+        .any(|p| !p.is_eliminated && p.drew_from_empty_library);
+    if drew_empty {
+        return true;
+    }
+
+    let poison = state
+        .players
+        .iter()
+        .any(|p| !p.is_eliminated && p.poison_counters >= 10);
+    if poison {
+        return true;
+    }
+
+    if let Some(threshold) = state.format_config.commander_damage_threshold {
+        let cmd_damage = state
+            .commander_damage
+            .iter()
+            .any(|entry| {
+                entry.damage >= threshold as u32
+                    && !state.eliminated_players.contains(&entry.player)
+            });
+        if cmd_damage {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
