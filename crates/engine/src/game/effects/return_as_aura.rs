@@ -11,8 +11,11 @@
 //!    `enchant_filter`. **NOT** `find_legal_targets` — CR 115.1 + CR 303.4f
 //!    treat the Aura's attach choice as a CHOICE, not a target, so hexproof /
 //!    shroud / protection (CR 702.16b) must **not** filter the candidate list.
-//! 3. If no legal target exists, move the returned object to its owner's
-//!    graveyard per CR 303.4g.
+//! 3. If no legal target exists, route a Battlefield → Graveyard
+//!    `ProposedEvent::ZoneChange` through the replacement pipeline per
+//!    CR 303.4g + CR 614.6 + CR 616.1 (so Rest in Peace, regen shields,
+//!    etc. can intercept the LTB exactly as they would for any other
+//!    leaves-the-battlefield event).
 //! 4. If exactly one legal target exists, attach immediately via
 //!    `finalize_attach`.
 //! 5. If multiple legal targets exist, install
@@ -31,6 +34,7 @@
 //! adds, so the grants depend on the removal and apply after it).
 
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
     TargetFilter,
@@ -40,6 +44,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// CR 614.1 + CR 614.12: Resolve a `Effect::ReturnAsAura` sub-effect.
@@ -67,7 +72,13 @@ pub fn resolve(
     // CR 614.1c: Locate the just-returned object. If empty (the preceding
     // ChangeZone was intercepted by a replacement effect or SBA moved the
     // object), emit EffectResolved and return Ok — nothing to attach.
-    let returned_id = match find_returned_object(state) {
+    //
+    // The lookup is keyed on `ability.source_id`: only the host whose
+    // own trigger/spell resolved this effect is a valid return target.
+    // Scanning `last_zone_changed_ids` blindly would collide with other
+    // objects that changed zone in the same resolution step (e.g., tokens
+    // created mid-chain, sibling triggers' bounces).
+    let returned_id = match find_returned_object(state, ability.source_id) {
         Some(id) => id,
         None => {
             events.push(GameEvent::EffectResolved {
@@ -102,8 +113,45 @@ pub fn resolve(
         .collect();
 
     if candidates.is_empty() {
-        // CR 303.4g: No legal object to enchant → owner's graveyard.
-        crate::game::zones::move_to_zone(state, returned_id, Zone::Graveyard, events);
+        // CR 303.4g + CR 614.6 + CR 616.1: No legal object to enchant → owner's
+        // graveyard. Route the Battlefield → Graveyard move through the
+        // replacement pipeline so leaves-the-battlefield replacements
+        // (Rest in Peace → exile, Leyline of the Void → exile, regen shields,
+        // etc.) can intercept the zone change exactly as they would for any
+        // other LTB event.
+        let proposed = ProposedEvent::zone_change(
+            returned_id,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Some(ability.source_id),
+        );
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(ProposedEvent::ZoneChange {
+                object_id,
+                to: dest,
+                ..
+            }) => {
+                crate::game::zones::move_to_zone(state, object_id, dest, events);
+                state.layers_dirty = true;
+            }
+            ReplacementResult::Execute(_) => {
+                // Pipeline preserves the event variant; other variants are
+                // unreachable for a `zone_change`-seeded pipeline.
+            }
+            ReplacementResult::Prevented => {
+                // Move was prevented by a replacement (e.g., regen shield);
+                // CR 704.5n SBA will sweep any residual unattached Aura.
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                // CR 616.1: Multi-replacement player choice — install the
+                // picker and defer EffectResolved. After the player picks,
+                // CR 704.5n SBA sweeps the still-orphaned Aura on the next
+                // pass, yielding the same end state for the rare contested
+                // case (no post-replacement continuation is stashed here).
+                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
+            }
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ReturnAsAura,
             source_id: ability.source_id,
@@ -221,24 +269,25 @@ pub(crate) fn finalize_attach(
     Ok(())
 }
 
-/// Pick the most recently returned battlefield object from
-/// `state.last_zone_changed_ids`. Falls back to `None` when the preceding
-/// `ChangeZone` either consumed no objects or moved them off-battlefield
-/// (replacement intercept). The returned id MUST currently sit in
-/// `Zone::Battlefield` — otherwise we cannot install an Aura on a non-battlefield
-/// host.
-fn find_returned_object(state: &GameState) -> Option<ObjectId> {
+/// Verify that `source_id` is the host that was just returned to the
+/// battlefield by the preceding `ChangeZone` step.
+///
+/// Returns `Some(source_id)` only if `source_id` appears in
+/// `state.last_zone_changed_ids` AND currently sits in `Zone::Battlefield`.
+/// Returns `None` otherwise — either the preceding `ChangeZone` was
+/// intercepted by a replacement effect (Rest in Peace, etc.), or the host has
+/// already left play (SBA, secondary replacement, blink). Looking up by
+/// `source_id` (rather than scanning the list in reverse) prevents collisions
+/// with other objects that changed zone in the same resolution step.
+fn find_returned_object(state: &GameState, source_id: ObjectId) -> Option<ObjectId> {
+    if !state.last_zone_changed_ids.contains(&source_id) {
+        return None;
+    }
     state
-        .last_zone_changed_ids
-        .iter()
-        .rev()
-        .find(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|obj| obj.zone == Zone::Battlefield)
-        })
-        .copied()
+        .objects
+        .get(&source_id)
+        .filter(|obj| obj.zone == Zone::Battlefield)
+        .map(|_| source_id)
 }
 
 #[cfg(test)]
