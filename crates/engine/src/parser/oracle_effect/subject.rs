@@ -920,15 +920,22 @@ pub(super) fn parse_subject_application(
             false,
         );
     }
-    if all_consuming(alt((
-        tag("your opponents"),
-        tag::<_, _, OracleError<'_>>("your opponent"),
-    )))
-    .parse(lower.as_str())
-    .is_ok()
-    {
+    // CR 102.2: In a two-player game, a player's opponent is the other player.
+    // Parse both singular/plural bare subject forms via combinators and require
+    // full consumption so possessive/modal tails don't get coerced.
+    let mut your_opponent_subject = map(
+        all_consuming(preceded(
+            tag("your "),
+            alt((
+                tag("opponents"),
+                tag::<_, _, OracleError<'_>>("opponent"),
+            )),
+        )),
+        |_| TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+    );
+    if let Ok((_, filter)) = your_opponent_subject.parse(lower.as_str()) {
         return subject_filter_application(
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            filter,
             false,
         );
     }
