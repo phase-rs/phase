@@ -484,12 +484,39 @@ fn apply_token_modifications(
                     token.toughness = token.toughness.map(|t| t + *value);
                 }
             }
+            // CR 707.9b: "except its base power and toughness are each equal
+            // to half [X]" (Saw in Half). Dynamic quantity resolved at
+            // creation time and stamped as base P/T.
+            ContinuousModification::SetPowerDynamic { value } => {
+                let controller = state
+                    .objects
+                    .get(&token_id)
+                    .map(|o| o.controller)
+                    .unwrap_or(crate::types::player::PlayerId(0));
+                let val = resolve_quantity(state, value, controller, token_id);
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_power = Some(val);
+                    token.power = Some(val);
+                }
+            }
+            ContinuousModification::SetToughnessDynamic { value } => {
+                let controller = state
+                    .objects
+                    .get(&token_id)
+                    .map(|o| o.controller)
+                    .unwrap_or(crate::types::player::PlayerId(0));
+                let val = resolve_quantity(state, value, controller, token_id);
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_toughness = Some(val);
+                    token.toughness = Some(val);
+                }
+            }
             // CR 707.2 + CR 702 keyword grants flow through `extra_keywords`,
             // not here. Other layered-only modifications (CopyValues,
-            // ChangeController, dynamic P/T, etc.) are intentionally
-            // skipped — their "stamp at copy time" interpretation is
-            // ambiguous, and a future except body needing them should
-            // route through the BecomeCopy layered path instead.
+            // ChangeController, etc.) are intentionally skipped — their
+            // "stamp at copy time" interpretation is ambiguous, and a
+            // future except body needing them should route through the
+            // BecomeCopy layered path instead.
             _ => {}
         }
     }
