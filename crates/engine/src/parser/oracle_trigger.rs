@@ -5210,6 +5210,8 @@ fn try_parse_event(
                 def.mode = TriggerMode::BecomesTarget;
                 def.valid_card = Some(subject.clone());
             }
+            // CR 115.1a + CR 115.1b: "target" spell text defines targeted spells,
+            // and Aura spells are always targeted via enchant.
             SimpleEvent::BecomesTargetSpell { qualifier } => {
                 def.mode = TriggerMode::BecomesTarget;
                 def.valid_card = Some(subject.clone());

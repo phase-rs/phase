@@ -1647,6 +1647,8 @@ pub(super) fn match_becomes_target(
         return false;
     };
 
+    // CR 115.1a + CR 115.1b: Trigger text like "of a spell" and "of an Aura spell"
+    // constrains the targeting source to matching stack spell characteristics.
     if let Some(source_filter) = &trigger.valid_source {
         let Some(targeting_entry) = state
             .stack
