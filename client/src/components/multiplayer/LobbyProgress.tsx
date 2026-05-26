@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 interface LobbyProgressProps {
   joined: number;
@@ -14,6 +15,7 @@ interface LobbyProgressProps {
  * `game_setup` arrives and the in-game UI takes over.
  */
 export function LobbyProgress({ joined, total, roomCode }: LobbyProgressProps) {
+  const { t } = useTranslation("multiplayer");
   const dots = Array.from({ length: total }, (_, i) => i < joined);
   return (
     <div className="fixed inset-0 z-30 flex flex-col items-center justify-center gap-6 bg-black/85 text-white">
@@ -22,7 +24,7 @@ export function LobbyProgress({ joined, total, roomCode }: LobbyProgressProps) {
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
       >
-        Waiting for players…
+        {t("lobbyProgress.waiting")}
       </motion.div>
       <div className="flex items-center gap-3">
         {dots.map((filled, i) => (
@@ -38,7 +40,7 @@ export function LobbyProgress({ joined, total, roomCode }: LobbyProgressProps) {
         ))}
       </div>
       <div className="text-sm text-gray-300">
-        {joined} / {total} players ready
+        {t("lobbyProgress.playersReady", { joined, total })}
       </div>
       {roomCode ? (
         <div className="mt-2 rounded-lg bg-gray-800 px-4 py-2 font-mono text-lg tracking-widest text-cyan-200">

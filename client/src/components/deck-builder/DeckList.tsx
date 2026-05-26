@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { detectAndParseDeck, exportDeck, resolveCommander } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
@@ -7,7 +8,6 @@ import {
   sideboardPolicyForFormat,
   type SideboardPolicy,
 } from "../../services/engineRuntime";
-import { scryfallLegalityKey } from "../../services/scryfall";
 import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 
@@ -38,7 +38,6 @@ interface DeckListProps {
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
   onCardHover?: (cardName: string | null) => void;
-  warnings?: string[];
   format?: string;
   compatibility?: DeckCompatibilityResult | null;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
@@ -47,6 +46,8 @@ interface DeckListProps {
    *  parent (DeckBuilder); MoveList/CardEntryRow stay format-agnostic. */
   onSetAsCommander?: (name: string) => void;
   isCommanderEligible?: (name: string) => boolean;
+  /** Touch path for art selection — forwarded to each row's ✦ badge. */
+  onOpenArtPicker?: (name: string) => void;
 }
 
 
@@ -72,54 +73,20 @@ function totalCards(entries: DeckEntry[]): number {
 }
 
 
-const LEGALITY_STYLES: Record<string, string> = {
-  legal: "bg-emerald-600/70 text-emerald-100",
-  banned: "bg-red-600/70 text-red-100",
-  restricted: "bg-yellow-600/70 text-yellow-100",
-  not_legal: "bg-gray-600/40 text-gray-500",
-};
-
-const FORMAT_BADGE_METADATA = FORMAT_REGISTRY
-  .map((metadata) => {
-    const legalityKey = scryfallLegalityKey(metadata.format);
-    return legalityKey
-      ? {
-          key: legalityKey,
-          label: metadata.short_label,
-          title: metadata.label,
-        }
-      : null;
-  })
-  .filter((entry): entry is { key: string; label: string; title: string } => entry !== null);
-
-function formatLegalityBadges(formatLegality: Record<string, string>) {
-  const knownKeys = new Set(FORMAT_BADGE_METADATA.map((entry) => entry.key));
-  return [
-    ...FORMAT_BADGE_METADATA.filter((entry) => entry.key in formatLegality),
-    ...Object.keys(formatLegality)
-      .filter((key) => !knownKeys.has(key))
-      .sort()
-      .map((key) => ({
-        key,
-        label: key.slice(0, 3).toUpperCase(),
-        title: key,
-      })),
-  ];
-}
-
 export function DeckList({
   deck,
   onRemoveCard,
   onMoveCard,
   onImport,
   onCardHover,
-  warnings = [],
   format,
   compatibility,
   onChooseArt,
   onSetAsCommander,
   isCommanderEligible,
+  onOpenArtPicker,
 }: DeckListProps) {
+  const { t } = useTranslation("deck-builder");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
@@ -162,21 +129,21 @@ export function DeckList({
         return { sideboardTitle: "", sideboardWarning: undefined, hideSideboard: true };
       case "Unlimited":
         return {
-          sideboardTitle: `Sideboard (${sideTotal})`,
+          sideboardTitle: t("deckList.sideboardUnlimited", { count: sideTotal }),
           sideboardWarning: undefined,
           hideSideboard: false,
         };
       case "Limited": {
         const max = sideboardPolicy.data;
         return {
-          sideboardTitle: `Sideboard (${sideTotal}/${max})`,
+          sideboardTitle: t("deckList.sideboardLimited", { count: sideTotal, max }),
           sideboardWarning:
-            sideTotal > max ? `Sideboard exceeds ${max}-card limit` : undefined,
+            sideTotal > max ? t("deckList.sideboardExceeds", { max }) : undefined,
           hideSideboard: false,
         };
       }
     }
-  }, [sideboardPolicy, sideTotal]);
+  }, [sideboardPolicy, sideTotal, t]);
 
   useEffect(() => {
     if (hideSideboard && viewMode === "sideboard") setViewMode("main");
@@ -230,23 +197,23 @@ export function DeckList({
     <div className="flex flex-col">
       <div className="mb-2 flex items-center justify-between gap-2 border-b border-white/8 pb-2">
         <div className="min-w-0">
-          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Current List</div>
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("deckList.currentList")}</div>
         </div>
         <div className="flex shrink-0 gap-1">
           <button
             onClick={() => setShowPasteModal(true)}
             className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6"
-            title="Import deck from text (MTGA or .dck format)"
+            title={t("deckList.importTitle")}
           >
-            Import
+            {t("deckList.import")}
           </button>
           <button
             onClick={() => setShowExportModal(true)}
             disabled={mainTotal === 0}
             className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6 disabled:opacity-40"
-            title="Export deck"
+            title={t("deckList.exportTitle")}
           >
-            Export
+            {t("deckList.export")}
           </button>
           <input
             ref={fileInputRef}
@@ -272,7 +239,7 @@ export function DeckList({
                 : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
             }
           >
-            Main ({mainTotal})
+            {t("deckList.mainTab", { count: mainTotal })}
           </button>
           <button
             onClick={() => setViewMode("sideboard")}
@@ -282,72 +249,19 @@ export function DeckList({
                 : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
             }
           >
-            Sideboard ({sideTotal})
+            {t("deckList.sideboardTab", { count: sideTotal })}
           </button>
         </div>
       ) : (
         <h3 className="mb-2 text-sm font-bold text-white">
-          Main Deck ({mainTotal} cards)
+          {t("deckList.mainDeckHeading", { count: mainTotal })}
         </h3>
       )}
 
-      {/* Warnings */}
-      {warnings.length > 0 && (
-        <div className="mb-2 space-y-0.5">
-          {warnings.map((w) => (
-            <div
-              key={w}
-            className="rounded-xl border border-amber-300/18 bg-amber-400/8 px-2 py-1 text-xs text-amber-200"
-            >
-              {w}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Format legality & coverage */}
-      {compatibility && (compatibility.format_legality || (compatibility.coverage && compatibility.coverage.unsupported_cards.length > 0)) && (
-        <div className="mb-3 space-y-2 border-b border-white/8 pb-3">
-          {compatibility.format_legality && (
-            <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">Format Legality</div>
-              <div className="flex flex-wrap gap-1">
-                {formatLegalityBadges(compatibility.format_legality).map((fmt) => {
-                  const status = compatibility.format_legality?.[fmt.key] ?? "not_legal";
-                  return (
-                    <span
-                      key={fmt.key}
-                      className={`rounded px-1.5 py-0.5 text-[9px] font-semibold leading-tight ${LEGALITY_STYLES[status] ?? LEGALITY_STYLES.not_legal}`}
-                      title={`${fmt.title}: ${status.replace("_", " ")}`}
-                    >
-                      {fmt.label}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {compatibility.coverage && compatibility.coverage.unsupported_cards.length > 0 && (
-            <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">Engine Coverage</div>
-              <div className="flex items-center gap-2">
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-700">
-                  <div
-                    className="h-full rounded-full bg-orange-500"
-                    style={{ width: `${compatibility.coverage.total_unique > 0 ? (compatibility.coverage.supported_unique / compatibility.coverage.total_unique) * 100 : 0}%` }}
-                  />
-                </div>
-                <span
-                  className="shrink-0 text-[10px] text-gray-400"
-                  title={`Unsupported:\n${compatibility.coverage.unsupported_cards.map((c) => `${c.name}: ${c.gaps.join(", ")}`).join("\n")}`}
-                >
-                  {compatibility.coverage.supported_unique}/{compatibility.coverage.total_unique}
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {/* Validation warnings now pin as a banner at the Deck-surface level (so
+          they show in both list and stack views); format legality & engine
+          coverage live in StatsPanel. The per-card unsupported `!` flags remain
+          inline via unsupportedMap below. */}
 
       {/* Main and sideboard share this column; the header toggle (mirroring
           the "Show Browser" pattern) flips between them so the sideboard
@@ -358,7 +272,7 @@ export function DeckList({
           ? (["Creatures", "Spells", "Lands"] as const).map((group) => (
               <MoveList
                 key={group}
-                title={group}
+                title={t(`deckList.group.${group}`)}
                 entries={mainGroups[group]}
                 section="main"
                 onRemove={onRemoveCard}
@@ -368,6 +282,8 @@ export function DeckList({
                 onChooseArt={onChooseArt}
                 onSetAsCommander={onSetAsCommander}
                 isCommanderEligible={isCommanderEligible}
+                density="comfortable"
+                onOpenArtPicker={onOpenArtPicker}
               />
             ))
           : !hideSideboard && (
@@ -380,9 +296,11 @@ export function DeckList({
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
                 alwaysShow
-                emptyHint="Hover a main-deck card and click → to move it here."
+                emptyHint={t("deckList.sideboardEmptyHint")}
                 warning={sideboardWarning}
                 onChooseArt={onChooseArt}
+                density="comfortable"
+                onOpenArtPicker={onOpenArtPicker}
               />
             )}
       </div>
@@ -395,11 +313,11 @@ export function DeckList({
             onClick={() => setShowPasteModal(false)}
           />
           <div className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md">
-            <h3 className="mb-3 text-sm font-bold text-white">Import Deck</h3>
+            <h3 className="mb-3 text-sm font-bold text-white">{t("deckList.importModalTitle")}</h3>
             <textarea
               value={pasteText}
               onChange={(e) => setPasteText(e.target.value)}
-              placeholder="Paste deck list (MTGA or .dck format)..."
+              placeholder={t("deckList.pastePlaceholder")}
               rows={10}
               className="mb-3 w-full rounded-[16px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
               autoFocus
@@ -409,7 +327,7 @@ export function DeckList({
                 onClick={() => fileInputRef.current?.click()}
                 className="rounded-xl border border-white/8 bg-black/18 px-3 py-1.5 text-xs text-gray-300 hover:bg-white/6"
               >
-                From File
+                {t("deckList.fromFile")}
               </button>
               <div className="flex gap-2">
                 <button
@@ -419,14 +337,14 @@ export function DeckList({
                   }}
                   className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
                 >
-                  Cancel
+                  {t("common:actions.cancel")}
                 </button>
                 <button
                   onClick={handlePasteImport}
                   disabled={!pasteText.trim()}
                   className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-40"
                 >
-                  Parse
+                  {t("deckList.parse")}
                 </button>
               </div>
             </div>
@@ -446,7 +364,7 @@ export function DeckList({
           />
           <div className="relative z-10 w-full max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white">Export Deck</h3>
+              <h3 className="text-sm font-bold text-white">{t("deckList.exportModalTitle")}</h3>
               <div className="flex rounded bg-gray-800 p-0.5 text-xs">
                 <button
                   onClick={() => { setExportFormat("dck"); setCopied(false); }}
@@ -475,7 +393,7 @@ export function DeckList({
                 onClick={handleSaveToFile}
                 className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
               >
-                Save to File
+                {t("deckList.saveToFile")}
               </button>
               <div className="flex gap-2">
                 <button
@@ -485,13 +403,13 @@ export function DeckList({
                   }}
                   className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
                 >
-                  Close
+                  {t("common:actions.close")}
                 </button>
                 <button
                   onClick={handleCopyToClipboard}
                   className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
                 >
-                  {copied ? "Copied!" : "Copy"}
+                  {copied ? t("deckList.copied") : t("deckList.copy")}
                 </button>
               </div>
             </div>

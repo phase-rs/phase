@@ -11,7 +11,7 @@ use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
     FilterProp, GainLifePlayer, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, RoundingMode, StaticDefinition, TargetFilter, TypedFilter,
+    QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -21,12 +21,13 @@ use crate::types::statics::StaticMode;
 use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
+use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_chosen_qualifier_subject, parse_continuous_modifications, parse_static_line_multi,
 };
-use super::super::oracle_target::{parse_target, parse_type_phrase};
+use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
     parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
@@ -489,7 +490,17 @@ fn try_parse_can_block_additional(
     let (subject_lower, predicate_lower) =
         nom_primitives::scan_split_at_phrase(&lower, |i| tag("can block ").parse(i))?;
     let subject_text = &text[..subject_lower.len()];
-    let application = parse_subject_application(subject_text.trim(), ctx)?;
+    let application = if subject_text.trim().is_empty() {
+        SubjectApplication {
+            affected: TargetFilter::ParentTarget,
+            target: Some(TargetFilter::ParentTarget),
+            multi_target: None,
+            inherits_parent: true,
+            is_optional: false,
+        }
+    } else {
+        parse_subject_application(subject_text.trim(), ctx)?
+    };
 
     let (_rest, (_, _, _, _, count, duration, _)) = all_consuming((
         tag("can"),
@@ -502,6 +513,11 @@ fn try_parse_can_block_additional(
     ))
     .parse(predicate_lower)
     .ok()?;
+    let duration = if subject_text.trim().is_empty() {
+        duration.or(Some(Duration::UntilEndOfTurn))
+    } else {
+        duration
+    };
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
@@ -520,6 +536,20 @@ fn try_parse_can_block_additional(
         optional: false,
         unless_pay: None,
     })
+}
+
+pub(super) fn is_can_block_extra_predicate(lower: &str) -> bool {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("can"),
+        tag(" "),
+        tag("block"),
+        tag(" "),
+        parse_extra_blockers_count,
+        parse_block_grant_duration,
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
 }
 
 fn parse_extra_blockers_count(input: &str) -> OracleResult<'_, Option<u32>> {
@@ -596,7 +626,7 @@ pub(super) fn parse_subject_application(
         .parse(lower.as_str())
         .is_ok()
     {
-        let (filter, _) = parse_target(&subject["another ".len()..]);
+        let (filter, _) = parse_target_with_ctx(&subject["another ".len()..], ctx);
         let filter = add_another_property(filter);
         return subject_filter_application(filter, true);
     }
@@ -604,7 +634,16 @@ pub(super) fn parse_subject_application(
         .parse(lower.as_str())
         .is_ok()
     {
-        let (filter, _) = parse_target(subject);
+        // CR 109.4 + CR 115.1 + CR 603.2: thread the parse context so that
+        // controller-suffix resolution inside `parse_target` (notably the
+        // "that player controls" relative reference) can see the enclosing
+        // trigger's `relative_player_scope` and emit
+        // `ControllerRef::TargetPlayer` for the attacked / damaged player
+        // instead of falling back to `You`. Without `ctx`, the subject-form
+        // path of "target creature that player controls becomes …" (Gornog,
+        // the Red Reaper) silently bound the target to the trigger
+        // controller's own creatures.
+        let (filter, _) = parse_target_with_ctx(subject, ctx);
         return subject_filter_application(filter, true);
     }
     if tag::<_, _, OracleError<'_>>("up to ")
@@ -613,7 +652,7 @@ pub(super) fn parse_subject_application(
     {
         let (target_text, multi_target) = super::strip_optional_target_prefix(subject);
         if multi_target.is_some() {
-            let (filter, _) = parse_target(target_text);
+            let (filter, _) = parse_target_with_ctx(target_text, ctx);
             let mut application = subject_filter_application(filter, true)?;
             application.multi_target = multi_target;
             return Some(application);
@@ -631,7 +670,7 @@ pub(super) fn parse_subject_application(
             .parse(after_prefix)
             .is_ok()
         {
-            let (filter, _) = parse_target(target_text);
+            let (filter, _) = parse_target_with_ctx(target_text, ctx);
             let mut application = subject_filter_application(filter, true)?;
             application.multi_target = Some(MultiTargetSpec::unlimited(0));
             return Some(application);
@@ -653,7 +692,7 @@ pub(super) fn parse_subject_application(
             {
                 let consumed = lower.len() - after_prefix.len();
                 let target_text = &subject[consumed..];
-                let (filter, _) = parse_target(target_text);
+                let (filter, _) = parse_target_with_ctx(target_text, ctx);
                 let mut application = subject_filter_application(filter, true)?;
                 application.multi_target = Some(MultiTargetSpec::fixed(min, max));
                 return Some(application);
@@ -832,6 +871,11 @@ pub(super) fn parse_subject_application(
                 })
             } else if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
                 TargetFilter::ScopedPlayer
+            } else if matches!(
+                ctx.relative_player_scope,
+                Some(ControllerRef::ParentTargetController)
+            ) {
+                TargetFilter::ParentTargetController
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
@@ -986,8 +1030,21 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 608.2k: Bare pronoun "it" — context-dependent
+    // CR 608.2k: Bare pronoun "it" — context-dependent. In trigger context,
+    // `ctx.subject` identifies the triggering subject. In effect-chain context,
+    // `parent_target_available` records that a previous chunk introduced a real
+    // typed object referent. Standalone clause parsing leaves it false, so
+    // "it connives" remains self-referential instead of inventing ParentTarget.
     if lower == "it" {
+        if ctx.subject.is_none() && ctx.parent_target_available {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: None,
+                multi_target: None,
+                inherits_parent: true,
+                is_optional: false,
+            });
+        }
         return Some(SubjectApplication {
             affected: resolve_it_pronoun(ctx),
             target: None,
@@ -1862,25 +1919,13 @@ fn try_parse_set_life_total(
 ) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();
 
-    // Parse the amount expression
-    let amount = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("half ").parse(lower.as_str())
-    {
-        // "half their starting life total" / "half that player's starting life total"
-        if nom_primitives::scan_contains(rest, "starting life total") {
-            QuantityExpr::DivideRounded {
-                inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::StartingLifeTotal,
-                }),
-                divisor: 2,
-                rounding: RoundingMode::Down,
-            }
-        } else {
+    let amount = if nom_primitives::scan_contains(&lower, "starting life total") {
+        let amount_text = lower.trim().trim_end_matches('.');
+        let (rest, amount) = nom_quantity::parse_quantity(amount_text).ok()?;
+        if !rest.trim().is_empty() {
             return None;
         }
-    } else if nom_primitives::scan_contains(&lower, "starting life total") {
-        QuantityExpr::Ref {
-            qty: QuantityRef::StartingLifeTotal,
-        }
+        amount
     } else if let Some((n, rest)) = parse_number(&lower) {
         // Guard: reject if substantial text remains after the number.
         // "a 3/3 red goblin creature" matches "a" as 1 but the rest
@@ -2633,6 +2678,8 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "have",
     "look",
     "lose",
+    "investigate",
+    "learn",
     // CR 701.40a: Manifest — "its controller manifests the top card of their
     // library" (Reality Shift). Subject-shifted manifest clauses route through
     // the PredicateAst::ImperativeFallback arm in `lower_subject_predicate_ast`.
@@ -2640,7 +2687,9 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "mill",
     "pay",
     "phase",
+    "populate",
     "put",
+    "proliferate",
     "regenerate",
     "reveal",
     "return",
@@ -2783,6 +2832,26 @@ mod tests {
     }
 
     #[test]
+    fn life_total_becomes_half_starting_life_total_rounded_up() {
+        let mut ctx = ParseContext::default();
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "your life total becomes half your starting life total, rounded up",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        let Effect::SetLifeTotal { amount, .. } = &*ability.effect else {
+            panic!("expected SetLifeTotal, got {:?}", ability.effect);
+        };
+        assert!(matches!(
+            amount,
+            QuantityExpr::DivideRounded {
+                rounding: crate::types::ability::RoundingMode::Up,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn have_card_name_become_named_equipment_and_lose_other_abilities() {
         let mut ctx = ParseContext {
             card_name: Some("The Irencrag".to_string()),
@@ -2817,10 +2886,10 @@ mod tests {
         );
 
         let sub_ability = ability.sub_ability.as_ref().expect("If you do sub-ability");
-        assert!(matches!(
-            sub_ability.condition,
-            Some(crate::types::ability::AbilityCondition::IfYouDo)
-        ));
+        assert!(sub_ability
+            .condition
+            .as_ref()
+            .is_some_and(crate::types::ability::AbilityCondition::is_optional_effect_performed));
         let Effect::GenericEffect {
             static_abilities, ..
         } = &*sub_ability.effect
@@ -3167,6 +3236,22 @@ mod tests {
         assert_eq!(result.unwrap().affected, TargetFilter::TriggeringPlayer);
     }
 
+    #[test]
+    fn parse_subject_that_player_trigger_context_honors_parent_target_controller_scope() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            relative_player_scope: Some(ControllerRef::ParentTargetController),
+            ..ParseContext::default()
+        };
+        let result = parse_subject_application("that player", &mut ctx);
+
+        assert!(result.is_some());
+        assert_eq!(
+            result.unwrap().affected,
+            TargetFilter::ParentTargetController
+        );
+    }
+
     // CR 115.1d: "any number of target" subject prefix tests
     #[test]
     fn parse_subject_any_number_of_target_creatures() {
@@ -3202,6 +3287,49 @@ mod tests {
             app.affected
         );
         assert_eq!(app.multi_target, Some(MultiTargetSpec::unlimited(0)),);
+    }
+
+    #[test]
+    fn parse_subject_another_target_honors_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let result =
+            parse_subject_application("another target creature that player controls", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert!(
+            matches!(app.affected, TargetFilter::Typed(ref t)
+                if t.type_filters.contains(&TypeFilter::Creature)
+                && t.controller == Some(ControllerRef::TargetPlayer)
+                && t.properties.iter().any(|prop| matches!(prop, FilterProp::Another))),
+            "should parse another creature controlled by target player, got {:?}",
+            app.affected
+        );
+    }
+
+    #[test]
+    fn parse_subject_up_to_one_target_honors_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let result =
+            parse_subject_application("up to one target creature that player controls", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert!(
+            matches!(app.affected, TargetFilter::Typed(ref t)
+                if t.type_filters.contains(&TypeFilter::Creature)
+                && t.controller == Some(ControllerRef::TargetPlayer)),
+            "should parse creature controlled by target player, got {:?}",
+            app.affected
+        );
+        assert_eq!(
+            app.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
     }
 
     #[test]

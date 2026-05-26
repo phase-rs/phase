@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
@@ -18,37 +20,38 @@ type TributeChoice = Extract<WaitingFor, { type: "TributeChoice" }>;
  * contract — no new action variant needed.
  */
 export function TributeModal() {
+  const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameDispatch();
-  const sourceName = useGameStore(
+  const rawSourceName = useGameStore(
     (s) =>
       waitingFor?.type === "TributeChoice"
-        ? s.gameState?.objects[waitingFor.data.source_id]?.name ?? "Tribute creature"
+        ? s.gameState?.objects[waitingFor.data.source_id]?.name ?? null
         : null,
   );
 
   if (waitingFor?.type !== "TributeChoice") return null;
   if (!canActForWaitingState) return null;
 
+  const sourceName = rawSourceName ?? t("tribute.sourceFallback");
   const data = waitingFor.data as TributeChoice["data"];
   const counters = data.count;
-  const plural = counters === 1 ? "counter" : "counters";
 
   return (
     <ChoiceModal
-      title={`Tribute \u2014 ${sourceName}`}
-      subtitle={`Place ${counters} +1/+1 ${plural} on ${sourceName}?`}
+      title={t("tribute.title", { name: sourceName })}
+      subtitle={t("tribute.subtitle", { count: counters, name: sourceName })}
       options={[
         {
           id: "pay",
-          label: `Pay Tribute`,
-          description: `Put ${counters} +1/+1 ${plural} on ${sourceName}.`,
+          label: t("tribute.payLabel"),
+          description: t("tribute.payDescription", { count: counters, name: sourceName }),
         },
         {
           id: "decline",
-          label: "Decline",
-          description: "Refuse tribute. Triggers \"if tribute wasn't paid\".",
+          label: t("tribute.declineLabel"),
+          description: t("tribute.declineDescription"),
         },
       ]}
       onChoose={(id) =>

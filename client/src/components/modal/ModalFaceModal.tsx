@@ -1,3 +1,6 @@
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
+
 import type { CardType, GameAction, ManaCost, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -22,8 +25,14 @@ export function ModalFaceModal() {
 
 /** A land face is put onto the battlefield (CR 712.12 play-land special action);
  * a spell face is cast onto the stack. The verb shown mirrors that distinction. */
-function faceVerb(cardTypes: CardType | undefined): "Play" | "Cast" {
-  return cardTypes?.core_types.includes("Land") ? "Play" : "Cast";
+function faceLabel(
+  cardTypes: CardType | undefined,
+  name: string,
+  t: TFunction<"game">,
+): string {
+  return cardTypes?.core_types.includes("Land")
+    ? t("modalFace.play", { name })
+    : t("modalFace.cast", { name });
 }
 
 function ModalFaceContent({
@@ -33,6 +42,7 @@ function ModalFaceContent({
   objectId: number;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
+  const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
 
   if (!obj) return null;
@@ -43,27 +53,27 @@ function ModalFaceContent({
     types: obj.card_types as CardType | undefined,
   };
   const back = {
-    name: obj.back_face?.name ?? "Back Face",
+    name: obj.back_face?.name ?? t("modalFace.backFaceFallback"),
     cost: obj.back_face?.mana_cost as ManaCost | undefined,
     types: obj.back_face?.card_types as CardType | undefined,
   };
 
   return (
     <DialogShell
-      eyebrow="Modal DFC"
-      title="Choose a Face"
-      subtitle="Pick which face to play or cast."
+      eyebrow={t("modalFace.eyebrow")}
+      title={t("modalFace.title")}
+      subtitle={t("modalFace.subtitle")}
     >
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
         <FaceButton
           face={front}
-          label="Front"
+          label={t("modalFace.labelFront")}
           accent="hover:ring-cyan-400/30"
           onClick={() => dispatch({ type: "ChooseModalFace", data: { back_face: false } })}
         />
         <FaceButton
           face={back}
-          label="Back"
+          label={t("modalFace.labelBack")}
           accent="hover:ring-amber-400/30"
           onClick={() => dispatch({ type: "ChooseModalFace", data: { back_face: true } })}
         />
@@ -83,6 +93,7 @@ function FaceButton({
   accent: string;
   onClick: () => void;
 }) {
+  const { t } = useTranslation("game");
   const typeLine = face.types ? formatTypeLine(face.types) : "";
   return (
     <button
@@ -91,7 +102,7 @@ function FaceButton({
     >
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold text-white">
-          {faceVerb(face.types)} {face.name}
+          {faceLabel(face.types, face.name, t)}
         </span>
         {face.cost && <ManaCostPips cost={face.cost} size="sm" />}
       </div>

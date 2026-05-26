@@ -22,7 +22,7 @@ vi.mock("../../hooks/useBracketEstimate", () => ({
 }));
 
 vi.mock("../../adapter/wasm-adapter", () => ({
-  getSharedAdapter: () => ({}),
+  getSharedAdapter: () => ({ warmCardDatabase: vi.fn().mockResolvedValue(undefined) }),
 }));
 
 function LocationProbe() {

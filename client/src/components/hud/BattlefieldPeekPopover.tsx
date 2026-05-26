@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -52,6 +53,7 @@ export function BattlefieldPeekPopover({
   isTargeting,
   legalTargetIds,
 }: BattlefieldPeekPopoverProps) {
+  const { t } = useTranslation("game");
   const battlefield = useGameStore((s) => s.gameState?.battlefield);
   const objects = useGameStore((s) => s.gameState?.objects);
   if (!battlefield || !objects) return null;
@@ -101,10 +103,10 @@ export function BattlefieldPeekPopover({
           className="whitespace-nowrap text-center text-[10px] font-semibold uppercase tracking-[0.16em]"
           style={{ color: seatColor }}
         >
-          {opponentName}'s board
+          {t("battlefieldPeek.boardOf", { name: opponentName })}
         </div>
         <div className="mt-1 whitespace-nowrap text-center text-[10px] italic text-slate-400">
-          No nonland permanents
+          {t("battlefieldPeek.noNonlandPermanents")}
         </div>
       </div>
     );
@@ -120,7 +122,7 @@ export function BattlefieldPeekPopover({
         className="mb-2 whitespace-nowrap text-center text-[10px] font-semibold uppercase tracking-[0.18em]"
         style={{ color: seatColor }}
       >
-        {opponentName}'s board
+        {t("battlefieldPeek.boardOf", { name: opponentName })}
       </div>
       <div className="flex flex-wrap justify-center gap-2">
         {visible.map((id) => {
@@ -163,8 +165,8 @@ export function BattlefieldPeekPopover({
           className="mt-2 text-center text-[10px] font-medium italic text-slate-400"
           style={{ color: `${seatColor}aa` }}
         >
-          +{overflowCount} more permanent{overflowCount === 1 ? "" : "s"}
-          {isTargeting ? " (not targetable)" : ""}
+          {t("battlefieldPeek.morePermanents", { count: overflowCount })}
+          {isTargeting ? t("battlefieldPeek.notTargetable") : ""}
         </div>
       )}
     </div>

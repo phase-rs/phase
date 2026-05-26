@@ -1,4 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 interface ConcedeDialogProps {
   isOpen: boolean;
@@ -7,6 +8,7 @@ interface ConcedeDialogProps {
 }
 
 export function ConcedeDialog({ isOpen, onConfirm, onCancel }: ConcedeDialogProps) {
+  const { t } = useTranslation("multiplayer");
   return (
     <AnimatePresence>
       {isOpen && (
@@ -25,22 +27,22 @@ export function ConcedeDialog({ isOpen, onConfirm, onCancel }: ConcedeDialogProp
             exit={{ opacity: 0, scale: 0.9 }}
             transition={{ type: "spring", stiffness: 300, damping: 25 }}
           >
-            <h2 className="mb-2 text-xl font-bold text-white">Concede Game?</h2>
+            <h2 className="mb-2 text-xl font-bold text-white">{t("concedeDialog.title")}</h2>
             <p className="mb-6 text-sm text-gray-400">
-              Your opponent will be declared the winner.
+              {t("concedeDialog.message")}
             </p>
             <div className="flex justify-center gap-3">
               <button
                 onClick={onCancel}
                 className="rounded-lg bg-gray-700 px-5 py-2 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
               >
-                Cancel
+                {t("common:actions.cancel")}
               </button>
               <button
                 onClick={onConfirm}
                 className="rounded-lg bg-red-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-red-500"
               >
-                Concede
+                {t("concedeDialog.concede")}
               </button>
             </div>
           </motion.div>

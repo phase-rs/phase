@@ -1,4 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 interface KickConfirmDialogProps {
   isOpen: boolean;
@@ -18,6 +19,7 @@ export function KickConfirmDialog({
   onConfirm,
   onCancel,
 }: KickConfirmDialogProps) {
+  const { t } = useTranslation("game");
   return (
     <AnimatePresence>
       {isOpen && (
@@ -37,23 +39,23 @@ export function KickConfirmDialog({
             transition={{ type: "spring", stiffness: 300, damping: 25 }}
           >
             <h2 className="mb-2 text-xl font-bold text-white">
-              Kick {playerLabel}?
+              {t("kickDialog.title", { name: playerLabel })}
             </h2>
             <p className="mb-6 text-sm text-gray-400">
-              They will forfeit the game and cannot rejoin.
+              {t("kickDialog.body")}
             </p>
             <div className="flex justify-center gap-3">
               <button
                 onClick={onCancel}
                 className="rounded-lg bg-gray-700 px-5 py-2 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
               >
-                Cancel
+                {t("common:actions.cancel")}
               </button>
               <button
                 onClick={onConfirm}
                 className="rounded-lg bg-red-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-red-500"
               >
-                Kick
+                {t("kickDialog.kick")}
               </button>
             </div>
           </motion.div>

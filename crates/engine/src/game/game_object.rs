@@ -344,6 +344,14 @@ pub struct GameObject {
     /// `base_trigger_definitions`.
     pub base_static_definitions: Arc<Vec<StaticDefinition>>,
     pub base_color: Vec<ManaColor>,
+    /// Display-identity baseline for the layer system. `printed_ref` is the
+    /// Scryfall image pointer (oracle id + displayed face name), NOT a CR 707.2
+    /// copiable characteristic — but it must track the currently displayed
+    /// identity, so it is reset to this baseline each layer pass and overridden
+    /// by copy effects (see `ContinuousModification::CopyValues`). Mirrors the
+    /// `base_name`/`name` pair so a temporary copy's art reverts on expiry.
+    #[serde(default)]
+    pub base_printed_ref: Option<PrintedCardRef>,
     #[serde(default)]
     pub base_characteristics_initialized: bool,
 
@@ -725,6 +733,9 @@ impl GameObject {
         if self.base_color.is_empty() && !self.color.is_empty() {
             self.base_color = self.color.clone();
         }
+        if self.base_printed_ref.is_none() && self.printed_ref.is_some() {
+            self.base_printed_ref = self.printed_ref.clone();
+        }
 
         self.base_characteristics_initialized = true;
     }
@@ -762,6 +773,7 @@ impl GameObject {
             static_definitions: Definitions::default(),
             color: Vec::new(),
             printed_ref: None,
+            base_printed_ref: None,
             token_image_ref: None,
             source_related_token_ids: Vec::new(),
             back_face: None,

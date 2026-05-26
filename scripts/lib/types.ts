@@ -73,21 +73,13 @@ export interface TriageItem {
   extraction_confidence: number;
   source_url: string;
   parser_status: "fully_parsed" | "has_gaps" | "unknown_card" | "no_card";
-  proposed_action:
-    | "create_issue"
-    | "append_to_existing"
-    | "skip"
-    | "skip_existing_closed"
-    | "needs_human_review";
+  // The script never pre-judges duplication. An LLM operator reads the delta and
+  // is the sole arbiter of whether a report duplicates an existing GH issue, so
+  // there is no `append_to_existing` / `skip_existing_closed` machine output.
+  proposed_action: "create_issue" | "skip" | "needs_human_review";
+  // First detected card name, used only as a dashboard grouping/“same card in
+  // multiple threads” key in render.ts — NOT a dedup decision.
   dedup_group: string | null;
-  github_issue?: {
-    number: number;
-    title: string;
-    state: "OPEN" | "CLOSED";
-    url: string;
-    closed_at: string | null;
-    match_kind: "report_id" | "source_url" | "discord_message";
-  };
 }
 
 export interface PublishedThread {

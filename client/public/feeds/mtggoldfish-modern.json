@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-08T00:00:00Z",
+  "updated": "2026-06-09T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -167,7 +167,23 @@
       "main": [
         {
           "count": 4,
+          "name": "Wrenn's Resolve"
+        },
+        {
+          "count": 1,
+          "name": "Commercial District"
+        },
+        {
+          "count": 1,
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 4,
           "name": "Ruby Medallion"
+        },
+        {
+          "count": 2,
+          "name": "Glimpse the Impossible"
         },
         {
           "count": 4,
@@ -179,11 +195,23 @@
         },
         {
           "count": 2,
-          "name": "Wooded Foothills"
+          "name": "Flashback"
         },
         {
-          "count": 2,
-          "name": "Flashback"
+          "count": 4,
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
         },
         {
           "count": 2,
@@ -194,24 +222,36 @@
           "name": "Pyretic Ritual"
         },
         {
-          "count": 2,
-          "name": "Valakut Awakening"
-        },
-        {
-          "count": 2,
-          "name": "Glimpse the Impossible"
+          "count": 3,
+          "name": "Past in Flames"
         },
         {
           "count": 1,
           "name": "Sacred Foundry"
         },
         {
+          "count": 2,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 2,
+          "name": "Wooded Foothills"
+        },
+        {
           "count": 4,
           "name": "Mountain"
         },
         {
-          "count": 4,
-          "name": "Reckless Impulse"
+          "count": 1,
+          "name": "Sunbaked Canyon"
+        },
+        {
+          "count": 2,
+          "name": "Valakut Awakening"
+        },
+        {
+          "count": 3,
+          "name": "Arid Mesa"
         },
         {
           "count": 2,
@@ -219,53 +259,21 @@
         },
         {
           "count": 4,
-          "name": "Wrenn's Resolve"
-        },
-        {
-          "count": 1,
-          "name": "Gemstone Caverns"
-        },
-        {
-          "count": 1,
-          "name": "Commercial District"
-        },
-        {
-          "count": 2,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 1,
-          "name": "Elegant Parlor"
-        },
-        {
-          "count": 3,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 3,
-          "name": "Past in Flames"
-        },
-        {
-          "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 4,
-          "name": "Manamorphose"
-        },
-        {
-          "count": 1,
-          "name": "Sunbaked Canyon"
-        },
-        {
-          "count": 4,
-          "name": "Desperate Ritual"
+          "name": "Reckless Impulse"
         }
       ],
       "sideboard": [
         {
+          "count": 2,
+          "name": "Vexing Bauble"
+        },
+        {
           "count": 1,
-          "name": "Past in Flames"
+          "name": "Empty the Warrens"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
         },
         {
           "count": 4,
@@ -273,23 +281,15 @@
         },
         {
           "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 1,
-          "name": "Empty the Warrens"
-        },
-        {
-          "count": 4,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 2,
-          "name": "Vexing Bauble"
+          "name": "Past in Flames"
         },
         {
           "count": 2,
           "name": "Wear // Tear"
+        },
+        {
+          "count": 4,
+          "name": "Prismatic Ending"
         }
       ]
     },
@@ -1088,141 +1088,138 @@
       ]
     },
     {
-      "name": "Eldrazi Ramp",
+      "name": "Grixis Reanimator",
       "author": "MTGGoldfish",
       "colors": [
-        "R",
-        "G"
+        "B",
+        "U",
+        "R"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Commercial District"
-        },
-        {
-          "count": 4,
-          "name": "Sowing Mycospawn"
-        },
-        {
           "count": 3,
-          "name": "Devourer of Destiny"
-        },
-        {
-          "count": 4,
-          "name": "Kozilek's Command"
-        },
-        {
-          "count": 4,
-          "name": "Malevolent Rumble"
-        },
-        {
-          "count": 4,
-          "name": "Ugin's Labyrinth"
+          "name": "Unearth"
         },
         {
           "count": 1,
-          "name": "Sire of Seven Deaths"
+          "name": "Raucous Theater"
         },
         {
-          "count": 2,
-          "name": "Ugin, Eye of the Storms"
+          "count": 1,
+          "name": "Thundering Falls"
         },
         {
-          "count": 2,
-          "name": "Icetill Explorer"
+          "count": 1,
+          "name": "Undercity Sewers"
         },
         {
           "count": 4,
-          "name": "Talisman of Impulse"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Quarter"
+          "name": "Emperor of Bones"
         },
         {
           "count": 4,
-          "name": "Utopia Sprawl"
+          "name": "Psychic Frog"
         },
         {
           "count": 1,
-          "name": "Bojuka Bog"
-        },
-        {
-          "count": 2,
-          "name": "Ancient Stirrings"
+          "name": "Sink into Stupor"
         },
         {
           "count": 4,
-          "name": "Eldrazi Temple"
-        },
-        {
-          "count": 1,
-          "name": "Cavern of Souls"
+          "name": "Abhorrent Oculus"
         },
         {
           "count": 2,
-          "name": "Stomping Ground"
+          "name": "Quantum Riddler"
         },
         {
           "count": 4,
-          "name": "Wooded Foothills"
+          "name": "Thoughtseize"
         },
         {
           "count": 1,
-          "name": "Sanctum of Ugin"
+          "name": "Scalding Tarn"
         },
         {
-          "count": 2,
-          "name": "Kozilek's Return"
+          "count": 4,
+          "name": "Faithless Looting"
         },
         {
           "count": 1,
-          "name": "World Breaker"
+          "name": "Blood Crypt"
         },
         {
-          "count": 3,
-          "name": "Emrakul, the Promised End"
+          "count": 4,
+          "name": "Polluted Delta"
         },
         {
-          "count": 3,
-          "name": "Forest"
+          "count": 4,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
         },
         {
           "count": 2,
-          "name": "Unholy Heat"
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Archon of Cruelty"
+        },
+        {
+          "count": 4,
+          "name": "Persist"
+        },
+        {
+          "count": 2,
+          "name": "Otherworldly Gaze"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Fade from History"
+          "count": 4,
+          "name": "Consign to Memory"
         },
         {
           "count": 2,
-          "name": "The Stone Brain"
-        },
-        {
-          "count": 3,
           "name": "Vexing Bauble"
         },
         {
           "count": 2,
-          "name": "Trinisphere"
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 3,
+          "name": "Leyline of the Void"
         },
         {
           "count": 2,
-          "name": "Nature's Claim"
+          "name": "Damping Sphere"
         },
         {
           "count": 2,
-          "name": "Blasphemous Act"
-        },
-        {
-          "count": 2,
-          "name": "Grafdigger's Cage"
+          "name": "Mystical Dispute"
         }
       ]
     },
@@ -1370,138 +1367,141 @@
       ]
     },
     {
-      "name": "Grixis Reanimator",
+      "name": "Eldrazi Ramp",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "U",
-        "R"
+        "R",
+        "G"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 1,
+          "name": "Commercial District"
+        },
+        {
+          "count": 4,
+          "name": "Sowing Mycospawn"
+        },
+        {
           "count": 3,
-          "name": "Unearth"
-        },
-        {
-          "count": 1,
-          "name": "Raucous Theater"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Undercity Sewers"
+          "name": "Devourer of Destiny"
         },
         {
           "count": 4,
-          "name": "Emperor of Bones"
+          "name": "Kozilek's Command"
         },
         {
           "count": 4,
-          "name": "Psychic Frog"
+          "name": "Malevolent Rumble"
+        },
+        {
+          "count": 4,
+          "name": "Ugin's Labyrinth"
         },
         {
           "count": 1,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 4,
-          "name": "Abhorrent Oculus"
+          "name": "Sire of Seven Deaths"
         },
         {
           "count": 2,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 4,
-          "name": "Faithless Looting"
-        },
-        {
-          "count": 1,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 4,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 4,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
+          "name": "Ugin, Eye of the Storms"
         },
         {
           "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Swamp"
+          "name": "Icetill Explorer"
         },
         {
           "count": 4,
-          "name": "Archon of Cruelty"
+          "name": "Talisman of Impulse"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Quarter"
         },
         {
           "count": 4,
-          "name": "Persist"
+          "name": "Utopia Sprawl"
+        },
+        {
+          "count": 1,
+          "name": "Bojuka Bog"
         },
         {
           "count": 2,
-          "name": "Otherworldly Gaze"
+          "name": "Ancient Stirrings"
+        },
+        {
+          "count": 4,
+          "name": "Eldrazi Temple"
+        },
+        {
+          "count": 1,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 2,
+          "name": "Stomping Ground"
+        },
+        {
+          "count": 4,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 1,
+          "name": "Sanctum of Ugin"
+        },
+        {
+          "count": 2,
+          "name": "Kozilek's Return"
+        },
+        {
+          "count": 1,
+          "name": "World Breaker"
+        },
+        {
+          "count": 3,
+          "name": "Emrakul, the Promised End"
+        },
+        {
+          "count": 3,
+          "name": "Forest"
+        },
+        {
+          "count": 2,
+          "name": "Unholy Heat"
         }
       ],
       "sideboard": [
         {
-          "count": 4,
-          "name": "Consign to Memory"
+          "count": 2,
+          "name": "Fade from History"
         },
         {
           "count": 2,
+          "name": "The Stone Brain"
+        },
+        {
+          "count": 3,
           "name": "Vexing Bauble"
         },
         {
           "count": 2,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 3,
-          "name": "Leyline of the Void"
+          "name": "Trinisphere"
         },
         {
           "count": 2,
-          "name": "Damping Sphere"
+          "name": "Nature's Claim"
         },
         {
           "count": 2,
-          "name": "Mystical Dispute"
+          "name": "Blasphemous Act"
+        },
+        {
+          "count": 2,
+          "name": "Grafdigger's Cage"
         }
       ]
     }

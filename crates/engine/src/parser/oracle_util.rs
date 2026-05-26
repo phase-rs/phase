@@ -1680,6 +1680,12 @@ pub(crate) fn parse_comparator_prefix(text: &str) -> Option<(Comparator, &str)> 
 /// Parse "N or greater", "N or less", "greater than N", "less than N" into (Comparator, i32).
 /// Handles suffix patterns ("3 or greater") and prefix patterns ("greater than 3").
 pub(crate) fn parse_comparison_suffix(text: &str) -> Option<(Comparator, i32)> {
+    // Bare equality: "is 2" callers pass only the right-hand side.
+    if let Some((n, remainder)) = parse_number(text) {
+        if remainder.trim().is_empty() {
+            return Some((Comparator::EQ, n as i32));
+        }
+    }
     // "N or greater" / "N or more"
     if let Some(rest) = text
         .strip_suffix(" or greater")
@@ -1739,6 +1745,12 @@ mod tests {
 
         assert_eq!(modeled, "Creatures you control are every creature type.");
         assert_eq!(tail, "The same is true for creature spells you control.");
+    }
+
+    #[test]
+    fn parse_comparison_suffix_accepts_bare_equality() {
+        assert_eq!(parse_comparison_suffix("2"), Some((Comparator::EQ, 2)));
+        assert_eq!(parse_comparison_suffix("two"), Some((Comparator::EQ, 2)));
     }
 
     // --- normalize_card_name_refs tests ---

@@ -1,5 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import type { GameAction, GameState, WaitingFor } from "../../adapter/types.ts";
 import {
@@ -10,96 +12,37 @@ import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.t
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 
+type HelpSection = "Flow" | "Shortcuts" | "Recovery";
+
 interface HelpEntry {
-  title: string;
-  body: string;
-  section: "Flow" | "Shortcuts" | "Recovery";
+  id: string;
+  section: HelpSection;
   shortcut?: string;
 }
 
+interface ResolvedHelpEntry extends HelpEntry {
+  title: string;
+  body: string;
+}
+
 const HELP_ENTRIES: HelpEntry[] = [
-  {
-    section: "Flow",
-    title: "Automatic phase skips",
-    body: "Phase skips are automatic. Use stops or Full Control when you want paper-style priority windows.",
-  },
-  {
-    section: "Flow",
-    title: "Phase stops",
-    body: "A stop pauses before that step, similar to saying you may act before combat, before draw, or before the end step in paper.",
-  },
-  {
-    section: "Flow",
-    title: "Full Control",
-    body: "Full Control keeps priority windows from being skipped, including spots where the digital client would normally keep the game moving.",
-    shortcut: "F",
-  },
-  {
-    section: "Flow",
-    title: "Resolve",
-    body: "Resolve means you pass priority so the top spell or ability on the stack can resolve if everyone else also passes.",
-    shortcut: "Space",
-  },
-  {
-    section: "Flow",
-    title: "Pass to End",
-    body: "Pass to End keeps passing priority for the turn unless a choice, stop, or Full Control interrupts.",
-    shortcut: "Enter",
-  },
-  {
-    section: "Flow",
-    title: "Mana payment",
-    body: "During mana payment, you can tap lands manually or press T to tap available lands.",
-    shortcut: "T",
-  },
-  {
-    section: "Flow",
-    title: "Combat declarations",
-    body: "The game asks for attackers and blockers only during the declaration steps. Choose creatures, then confirm the declaration.",
-  },
-  {
-    section: "Shortcuts",
-    title: "Open Help",
-    body: "Open this help sheet.",
-    shortcut: "?",
-  },
-  {
-    section: "Shortcuts",
-    title: "Pass priority",
-    body: "Pass priority or advance through the current priority prompt.",
-    shortcut: "Space",
-  },
-  {
-    section: "Shortcuts",
-    title: "Undo",
-    body: "Undo the last local action that did not reveal hidden information.",
-    shortcut: "Z",
-  },
-  {
-    section: "Shortcuts",
-    title: "Cancel",
-    body: "Cancel the current selection, mana payment, target selection, or auto-pass when available.",
-    shortcut: "Esc",
-  },
-  {
-    section: "Shortcuts",
-    title: "Advanced debug panel",
-    body: "Open the advanced debug panel. Most players should start with Recovery Tools first.",
-    shortcut: "`",
-  },
-  {
-    section: "Recovery",
-    title: "Report or export state",
-    body: "If a card misbehaves, export the current game state so the exact board position can be reproduced.",
-  },
-  {
-    section: "Recovery",
-    title: "Board right-click menu",
-    body: "On desktop, right-click empty board space for the game log, recovery/debug tools, and background settings.",
-  },
+  { section: "Flow", id: "automaticPhaseSkips" },
+  { section: "Flow", id: "phaseStops" },
+  { section: "Flow", id: "fullControl", shortcut: "F" },
+  { section: "Flow", id: "resolve", shortcut: "Space" },
+  { section: "Flow", id: "passToEnd", shortcut: "Enter" },
+  { section: "Flow", id: "manaPayment", shortcut: "T" },
+  { section: "Flow", id: "combatDeclarations" },
+  { section: "Shortcuts", id: "openHelp", shortcut: "?" },
+  { section: "Shortcuts", id: "passPriority", shortcut: "Space" },
+  { section: "Shortcuts", id: "undo", shortcut: "Z" },
+  { section: "Shortcuts", id: "cancel", shortcut: "Esc" },
+  { section: "Shortcuts", id: "advancedDebugPanel", shortcut: "`" },
+  { section: "Recovery", id: "reportOrExportState" },
+  { section: "Recovery", id: "boardRightClickMenu" },
 ];
 
-const SECTION_ORDER: HelpEntry["section"][] = ["Flow", "Shortcuts", "Recovery"];
+const SECTION_ORDER: HelpSection[] = ["Flow", "Shortcuts", "Recovery"];
 
 function actionCount(actions: GameAction[], type: GameAction["type"]): number {
   return actions.filter((action) => action.type === type).length;
@@ -113,6 +56,7 @@ function currentPromptSummary({
   legalActions,
   legalActionsByObject,
   autoPassRecommended,
+  t,
 }: {
   waitingFor: WaitingFor | null;
   gameState: GameState | null;
@@ -121,30 +65,31 @@ function currentPromptSummary({
   legalActions: GameAction[];
   legalActionsByObject: Record<string, GameAction[]>;
   autoPassRecommended: boolean;
+  t: TFunction;
 }): string {
-  if (!waitingFor || !gameState) return "The game is starting or restoring state.";
-  if (waitingFor.type === "GameOver") return "The game is over.";
+  if (!waitingFor || !gameState) return t("help.prompt.starting");
+  if (waitingFor.type === "GameOver") return t("help.prompt.gameOver");
 
   if (waitingFor.type === "MulliganDecision") {
     return waitingFor.data.pending.some((entry) => entry.player === playerId)
-      ? "Choose whether to keep this opening hand or take a mulligan."
-      : "Waiting for another player to decide their opening hand.";
+      ? t("help.prompt.mulliganDecide")
+      : t("help.prompt.mulliganWaitDecide");
   }
 
   if (waitingFor.type === "MulliganBottomCards") {
     return waitingFor.data.pending.some((entry) => entry.player === playerId)
-      ? "Choose cards to put on the bottom after keeping a mulligan hand."
-      : "Waiting for another player to finish their mulligan.";
+      ? t("help.prompt.mulliganBottom")
+      : t("help.prompt.mulliganWaitBottom");
   }
 
   if (waitingFor.type === "OpeningHandBottomCards") {
     return waitingFor.data.pending.some((entry) => entry.player === playerId)
-      ? "Choose a card to put on the bottom before normal mulligans begin."
-      : "Waiting for another player to resolve their opening hand.";
+      ? t("help.prompt.openingHandBottom")
+      : t("help.prompt.openingHandWait");
   }
 
   if (!canActForWaitingState) {
-    return "Waiting for another player to act.";
+    return t("help.prompt.waitOther");
   }
 
   switch (waitingFor.type) {
@@ -153,37 +98,38 @@ function currentPromptSummary({
       const abilityCount = actionCount(legalActions, "ActivateAbility");
       const objectCount = Object.keys(legalActionsByObject).length;
       if (gameState.stack.length > 0) {
-        return "You have priority with something on the stack. Resolve passes priority so the top item can resolve.";
+        return t("help.prompt.priorityStack");
       }
       if (autoPassRecommended) {
-        return "You have priority. The client may auto-pass quiet windows unless a stop or Full Control is on.";
+        return t("help.prompt.priorityAutoPass");
       }
       if (castCount > 0 || abilityCount > 0 || objectCount > 0) {
-        return "You have priority. You can use available cards or pass to keep the turn moving.";
+        return t("help.prompt.priorityActions");
       }
-      return "You have priority. Passing continues to the next step or player.";
+      return t("help.prompt.priorityPass");
     }
     case "ManaPayment":
-      return "Pay mana for the pending spell or ability. Press T to tap available lands.";
+      return t("help.prompt.manaPayment");
     case "TargetSelection":
     case "TriggerTargetSelection":
     case "CopyTargetChoice":
     case "CopyRetarget":
-      return "Choose the highlighted legal target or cancel if the prompt allows it.";
+      return t("help.prompt.targetSelection");
     case "DeclareAttackers":
-      return "Choose attackers, then confirm attackers. You can also attack with none.";
+      return t("help.prompt.declareAttackers");
     case "DeclareBlockers":
-      return "Choose blockers and assign them to attackers, then confirm blockers.";
+      return t("help.prompt.declareBlockers");
     case "ChooseXValue":
-      return "Choose a value for X before continuing with the spell or ability.";
+      return t("help.prompt.chooseXValue");
     case "PayAmountChoice":
-      return "Choose how much of the requested resource to pay.";
+      return t("help.prompt.payAmountChoice");
     default:
-      return "The game is waiting for your choice. Follow the active prompt to continue.";
+      return t("help.prompt.default");
   }
 }
 
 export function HelpSheet() {
+  const { t } = useTranslation();
   const open = useUiStore((s) => s.helpSheetOpen);
   const setOpen = useUiStore((s) => s.setHelpSheetOpen);
   const toggleDebugPanel = useUiStore((s) => s.toggleDebugPanel);
@@ -251,18 +197,24 @@ export function HelpSheet() {
     legalActions,
     legalActionsByObject,
     autoPassRecommended,
+    t,
   });
 
-  const filteredEntries = useMemo(() => {
+  const filteredEntries = useMemo<ResolvedHelpEntry[]>(() => {
+    const resolved = HELP_ENTRIES.map((entry) => ({
+      ...entry,
+      title: t(`help.entries.${entry.id}.title`),
+      body: t(`help.entries.${entry.id}.body`),
+    }));
     const needle = query.trim().toLowerCase();
-    if (!needle) return HELP_ENTRIES;
-    return HELP_ENTRIES.filter((entry) =>
-      [entry.section, entry.title, entry.body, entry.shortcut ?? ""]
+    if (!needle) return resolved;
+    return resolved.filter((entry) =>
+      [t(`help.sections.${entry.section}`), entry.title, entry.body, entry.shortcut ?? ""]
         .join(" ")
         .toLowerCase()
         .includes(needle),
     );
-  }, [query]);
+  }, [query, t]);
 
   const entriesBySection = SECTION_ORDER.map((section) => ({
     section,
@@ -272,17 +224,17 @@ export function HelpSheet() {
   const handleCopyState = () => {
     if (!gameState) return;
     copyGameStateDebugSnapshot(gameState)
-      .then(() => setStatus("Copied game state to clipboard."))
-      .catch(() => setStatus("Could not copy game state."));
+      .then(() => setStatus(t("help.status.copied")))
+      .catch(() => setStatus(t("help.status.copyFailed")));
   };
 
   const handleExportState = () => {
     if (!gameState) return;
     exportGameStateDebugZip(gameState)
-      .then((filename) => setStatus(`Exported ${filename}.`))
+      .then((filename) => setStatus(t("help.status.exported", { filename })))
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setStatus("Could not export game state.");
+        setStatus(t("help.status.exportFailed"));
       });
   };
 
@@ -316,20 +268,20 @@ export function HelpSheet() {
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-cyan-300/80">
-                    Help
+                    {t("help.eyebrow")}
                   </div>
                   <h2 id={titleId} className="mt-1 text-xl font-semibold text-white">
-                    Help & Shortcuts
+                    {t("help.title")}
                   </h2>
                   <p className="mt-1 text-sm text-slate-400">
-                    Digital Magic flow for paper players: stops, priority, passing, and recovery tools.
+                    {t("help.subtitle")}
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => setOpen(false)}
                   className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/5 text-xl leading-none text-slate-300 transition hover:bg-white/10 hover:text-white"
-                  aria-label="Close help"
+                  aria-label={t("help.closeHelp")}
                 >
                   &times;
                 </button>
@@ -338,7 +290,7 @@ export function HelpSheet() {
                 ref={searchRef}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search help or shortcuts"
+                placeholder={t("help.searchPlaceholder")}
                 className="mt-4 h-11 w-full rounded-xl border border-white/10 bg-black/24 px-3 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-400/20"
               />
             </header>
@@ -346,7 +298,7 @@ export function HelpSheet() {
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 lg:px-5">
               <section className="mb-4 rounded-xl border border-cyan-300/20 bg-cyan-400/10 p-4">
                 <div className="text-[0.68rem] font-semibold uppercase tracking-[0.2em] text-cyan-200/80">
-                  What can I do now?
+                  {t("help.whatCanIDo")}
                 </div>
                 <p className="mt-2 text-sm leading-6 text-slate-100">{summary}</p>
               </section>
@@ -355,7 +307,7 @@ export function HelpSheet() {
                 {entriesBySection.map((group) => (
                   <section key={group.section}>
                     <h3 className="mb-2 text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-slate-500">
-                      {group.section}
+                      {t(`help.sections.${group.section}`)}
                     </h3>
                     <div className="overflow-hidden rounded-xl border border-white/10 bg-black/18">
                       {group.entries.map((entry, index) => (
@@ -379,10 +331,10 @@ export function HelpSheet() {
 
               <section className="mt-5 rounded-xl border border-amber-300/20 bg-amber-400/10 p-4">
                 <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-amber-200/80">
-                  Recovery Tools
+                  {t("help.recoveryTitle")}
                 </h3>
                 <p className="mt-2 text-sm leading-6 text-slate-200">
-                  If a card misbehaves, export state first. The advanced debug panel is available when you need to inspect or adjust the game.
+                  {t("help.recoveryDescription")}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
@@ -391,7 +343,7 @@ export function HelpSheet() {
                     onClick={handleCopyState}
                     className="rounded-lg border border-white/10 bg-white/8 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:bg-white/12 disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    Copy State
+                    {t("help.copyState")}
                   </button>
                   <button
                     type="button"
@@ -399,7 +351,7 @@ export function HelpSheet() {
                     onClick={handleExportState}
                     className="rounded-lg border border-white/10 bg-white/8 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:bg-white/12 disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    Export State
+                    {t("help.exportState")}
                   </button>
                   <button
                     type="button"
@@ -409,7 +361,7 @@ export function HelpSheet() {
                     }}
                     className="rounded-lg border border-white/10 bg-white/8 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:bg-white/12"
                   >
-                    Open Advanced Debug
+                    {t("help.openAdvancedDebug")}
                   </button>
                 </div>
                 {status && <p className="mt-2 text-xs text-emerald-300">{status}</p>}

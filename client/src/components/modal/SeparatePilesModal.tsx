@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
@@ -41,6 +42,7 @@ export function SeparatePilesPartitionModal({
 }: {
   data: SeparatePilesPartition["data"];
 }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
@@ -67,17 +69,17 @@ export function SeparatePilesPartitionModal({
   const pileBCount = data.eligible.length - pileA.size;
   // The partitioner (CR 700.3) is the SUBJECT of `data.player`; the chooser
   // is announced so the partitioner understands who decides the outcome.
-  const chooserName = `Player ${data.chooser + 1}`;
+  const chooserName = t("separatePiles.chooserName", { number: data.chooser + 1 });
   const remaining = data.remaining_subjects.length;
   const subtitle = remaining > 0
-    ? `Separate your creatures into two piles. ${chooserName} will choose one. (${remaining} more player${remaining === 1 ? "" : "s"} after you)`
-    : `Separate your creatures into two piles. ${chooserName} will choose one.`;
+    ? t("separatePiles.partitionSubtitleRemaining", { chooser: chooserName, count: remaining })
+    : t("separatePiles.partitionSubtitle", { chooser: chooserName });
 
   if (!objects) return null;
 
   return (
     <ChoiceOverlay
-      title="Separate into Two Piles"
+      title={t("separatePiles.partitionTitle")}
       subtitle={subtitle}
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-5xl"
@@ -85,10 +87,10 @@ export function SeparatePilesPartitionModal({
     >
       <div className="mb-4 flex justify-center gap-6 text-sm text-slate-300">
         <span className="rounded bg-emerald-900/40 px-3 py-1">
-          Pile A: <span className="font-bold text-emerald-300">{pileA.size}</span>
+          {t("separatePiles.pileALabel")} <span className="font-bold text-emerald-300">{pileA.size}</span>
         </span>
         <span className="rounded bg-sky-900/40 px-3 py-1">
-          Pile B: <span className="font-bold text-sky-300">{pileBCount}</span>
+          {t("separatePiles.pileBLabel")} <span className="font-bold text-sky-300">{pileBCount}</span>
         </span>
       </div>
       <div className="mx-auto flex max-w-5xl flex-wrap justify-center gap-3">
@@ -100,7 +102,7 @@ export function SeparatePilesPartitionModal({
             <motion.button
               key={id}
               type="button"
-              aria-label={`${obj.name} — pile ${inA ? "A" : "B"}`}
+              aria-label={t("separatePiles.pileAria", { name: obj.name, pile: inA ? "A" : "B" })}
               className={`relative flex flex-col items-center gap-2 rounded-lg transition ${
                 inA
                   ? "ring-2 ring-emerald-400/80"
@@ -121,7 +123,7 @@ export function SeparatePilesPartitionModal({
                     : "bg-sky-500/70 text-white"
                 }`}
               >
-                Pile {inA ? "A" : "B"}
+                {t("separatePiles.pileBadge", { pile: inA ? "A" : "B" })}
               </span>
             </motion.button>
           );
@@ -146,6 +148,7 @@ export function SeparatePilesChoiceModal({
 }: {
   data: SeparatePilesChoice["data"];
 }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
@@ -157,11 +160,11 @@ export function SeparatePilesChoiceModal({
     dispatch({ type: "ChoosePile", data: { pile: { type: "B" } } });
   }, [dispatch]);
 
-  const subjectName = `Player ${data.current.subject + 1}`;
+  const subjectName = t("separatePiles.chooserName", { number: data.current.subject + 1 });
   const pendingCount = data.pending.length;
   const subtitle = pendingCount > 0
-    ? `Choose one of ${subjectName}'s piles. (${pendingCount} more partition${pendingCount === 1 ? "" : "s"} after this)`
-    : `Choose one of ${subjectName}'s piles.`;
+    ? t("separatePiles.chooseSubtitleRemaining", { subject: subjectName, count: pendingCount })
+    : t("separatePiles.chooseSubtitle", { subject: subjectName });
 
   const renderPile = useCallback(
     (ids: ObjectId[], label: "A" | "B", tone: "emerald" | "sky") => {
@@ -171,11 +174,11 @@ export function SeparatePilesChoiceModal({
       return (
         <div className={`flex flex-1 flex-col gap-3 rounded-lg ${toneBg} p-4 ring-2 ${toneRing}`}>
           <div className={`text-center text-lg font-bold ${toneHeader}`}>
-            Pile {label} ({ids.length})
+            {t("separatePiles.pileHeader", { pile: label, count: ids.length })}
           </div>
           {ids.length === 0 ? (
             <div className="my-6 text-center text-sm italic text-slate-400">
-              (empty)
+              {t("separatePiles.empty")}
             </div>
           ) : (
             <div className="flex flex-wrap justify-center gap-3">
@@ -197,24 +200,24 @@ export function SeparatePilesChoiceModal({
         </div>
       );
     },
-    [objects, hoverProps],
+    [objects, hoverProps, t],
   );
 
   if (!objects) return null;
 
   return (
     <ChoiceOverlay
-      title="Choose a Pile"
+      title={t("separatePiles.chooseTitle")}
       subtitle={subtitle}
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-5xl"
       footer={
         <div className="mx-auto flex w-full max-w-xl gap-3">
           <div className="flex-1">
-            <ConfirmButton onClick={chooseA} label="Choose Pile A" />
+            <ConfirmButton onClick={chooseA} label={t("separatePiles.choosePileA")} />
           </div>
           <div className="flex-1">
-            <ConfirmButton onClick={chooseB} label="Choose Pile B" />
+            <ConfirmButton onClick={chooseB} label={t("separatePiles.choosePileB")} />
           </div>
         </div>
       }

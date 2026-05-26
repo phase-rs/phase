@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import type { PlayerId, WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
@@ -33,9 +34,10 @@ export function BattleProtectorModal() {
 }
 
 function BattleProtectorContent({ data }: { data: BattleProtectorChoice["data"] }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const battleName = useGameStore(
-    (s) => s.gameState?.objects[data.battle_id]?.name ?? "Battle",
+    (s) => s.gameState?.objects[data.battle_id]?.name ?? t("battleProtector.battleFallback"),
   );
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const [selected, setSelected] = useState<PlayerId | null>(null);
@@ -48,8 +50,8 @@ function BattleProtectorContent({ data }: { data: BattleProtectorChoice["data"] 
 
   return (
     <ChoiceOverlay
-      title="Choose a Protector"
-      subtitle={`${battleName} needs a new protector. Choose which opponent will defend it.`}
+      title={t("battleProtector.title")}
+      subtitle={t("battleProtector.subtitle", { name: battleName })}
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-3xl"
       footer={<ConfirmButton onClick={handleConfirm} disabled={selected == null} />}

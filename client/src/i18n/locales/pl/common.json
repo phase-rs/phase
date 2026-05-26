@@ -1,0 +1,208 @@
+{
+  "actions": {
+    "cancel": "Anuluj",
+    "save": "Zapisz",
+    "close": "Zamknij",
+    "closeNamed": "Zamknij {{name}}"
+  },
+  "modal": {
+    "defaultEyebrow": "Narzędzie warsztatu"
+  },
+  "pausedBanner": {
+    "message": "Gra wstrzymana — {{reason}}"
+  },
+  "fullscreen": {
+    "enter": "Włącz pełny ekran",
+    "exit": "Wyłącz pełny ekran"
+  },
+  "buildBadge": {
+    "downloading": "pobieranie… {{progress}}%",
+    "checking": "sprawdzanie…",
+    "updating": "aktualizowanie…",
+    "updatePending": "aktualizacja oczekuje po zakończeniu gry",
+    "cards": "karty {{age}} ({{commit}})",
+    "cardDataTitle": "Dane kart wygenerowane {{date}} z {{commit}}",
+    "checkForUpdates": "Sprawdź aktualizacje",
+    "updaterDebugInfo": "Informacje debugowania aktualizatora",
+    "updaterIssue": "Problem z aktualizatorem: {{error}}",
+    "updateIssue": "problem z aktualizacją",
+    "updated": "zaktualizowano"
+  },
+  "gameMenu": {
+    "menu": "Menu gry",
+    "sandboxTools": "Narzędzia piaskownicy",
+    "sandboxToolsTitle": "Narzędzia piaskownicy — skonfiguruj dowolny stan pola bitwy (`)",
+    "resume": "Wznów",
+    "settings": "Ustawienia",
+    "helpShortcuts": "Pomoc i skróty",
+    "showAiHand": "Pokaż rękę AI",
+    "hideAiHand": "Ukryj rękę AI",
+    "concede": "Poddaj się",
+    "backToDraft": "Wróć do draftu",
+    "mainMenu": "Menu główne",
+    "cards": "karty {{commit}}",
+    "cardDataTitle": "Dane kart: {{date}}"
+  },
+  "volume": {
+    "mute": "Wycisz",
+    "unmute": "Wyłącz wyciszenie",
+    "volume": "Głośność"
+  },
+  "hostControl": {
+    "seatHost": "Gospodarz",
+    "seatPlayer": "Gracz",
+    "seatOpen": "Wolne",
+    "seatAi": "AI ({{difficulty}})",
+    "waiting": "Oczekiwanie…",
+    "seatLabel": "Miejsce {{id}}",
+    "addAi": "Dodaj AI",
+    "remove": "Usuń",
+    "human": "Człowiek",
+    "kick": "Wyrzuć",
+    "replaceAi": "Zastąp przez AI",
+    "random": "Losowo",
+    "connecting": "Łączenie…",
+    "cancelHosting": "Anuluj hostowanie",
+    "kickConfirm": "Wyrzucić gracza {{name}} z pokoju?",
+    "replaceConfirm": "Zastąpić gracza {{name}} przez AI? Spowoduje to usunięcie go z pokoju.",
+    "fallbackPlayerName": "Gracz {{number}}",
+    "seatsOccupied": "{{occupied}}/{{total}} miejsc zajętych",
+    "startGame": "Rozpocznij grę",
+    "startNow": "Rozpocznij teraz",
+    "fillWithAi": "Wypełnij przez AI"
+  },
+  "grantDebug": {
+    "heading": "Piaskownica: uprawnienia debugowania",
+    "description": "Przyznaj innym graczom możliwość wykonywania akcji debugowania. Ich akcje są rejestrowane publicznie.",
+    "playerLabel": "Gracz {{number}}",
+    "revoke": "ODBIERZ",
+    "grant": "PRZYZNAJ"
+  },
+  "help": {
+    "eyebrow": "Pomoc",
+    "title": "Pomoc i skróty",
+    "subtitle": "Cyfrowy przebieg Magic dla graczy papierowych: zatrzymania, priorytet, pasowanie i narzędzia naprawcze.",
+    "closeHelp": "Zamknij pomoc",
+    "searchPlaceholder": "Szukaj w pomocy lub skrótach",
+    "whatCanIDo": "Co mogę teraz zrobić?",
+    "recoveryTitle": "Narzędzia naprawcze",
+    "recoveryDescription": "Jeśli karta zachowuje się nieprawidłowo, najpierw wyeksportuj stan. Zaawansowany panel debugowania jest dostępny, gdy musisz sprawdzić lub dostosować grę.",
+    "copyState": "Kopiuj stan",
+    "exportState": "Eksportuj stan",
+    "openAdvancedDebug": "Otwórz zaawansowane debugowanie",
+    "sections": {
+      "Flow": "Przebieg",
+      "Shortcuts": "Skróty",
+      "Recovery": "Naprawa"
+    },
+    "status": {
+      "copied": "Skopiowano stan gry do schowka.",
+      "copyFailed": "Nie można skopiować stanu gry.",
+      "exported": "Wyeksportowano {{filename}}.",
+      "exportFailed": "Nie można wyeksportować stanu gry."
+    },
+    "prompt": {
+      "starting": "Gra się rozpoczyna lub przywraca stan.",
+      "gameOver": "Gra zakończona.",
+      "mulliganDecide": "Zdecyduj, czy zatrzymać tę rękę początkową, czy wykonać mulligan.",
+      "mulliganWaitDecide": "Oczekiwanie, aż inny gracz zdecyduje o swojej ręce początkowej.",
+      "mulliganBottom": "Wybierz karty do umieszczenia na spodzie po zatrzymaniu ręki po mulliganie.",
+      "mulliganWaitBottom": "Oczekiwanie, aż inny gracz zakończy swój mulligan.",
+      "openingHandBottom": "Wybierz kartę do umieszczenia na spodzie, zanim rozpoczną się normalne mulligany.",
+      "openingHandWait": "Oczekiwanie, aż inny gracz rozstrzygnie swoją rękę początkową.",
+      "waitOther": "Oczekiwanie na ruch innego gracza.",
+      "priorityStack": "Masz priorytet, gdy coś jest na stosie. Rozstrzygnięcie pasuje priorytet, aby górny element mógł się rozstrzygnąć.",
+      "priorityAutoPass": "Masz priorytet. Klient może automatycznie pasować spokojne okna, chyba że włączone jest zatrzymanie lub Pełna kontrola.",
+      "priorityActions": "Masz priorytet. Możesz użyć dostępnych kart lub spasować, aby kontynuować turę.",
+      "priorityPass": "Masz priorytet. Pasowanie przechodzi do następnego kroku lub gracza.",
+      "manaPayment": "Zapłać manę za oczekujący czar lub zdolność. Naciśnij T, aby przekręcić dostępne ziemie.",
+      "targetSelection": "Wybierz podświetlony legalny cel lub anuluj, jeśli komunikat na to pozwala.",
+      "declareAttackers": "Wybierz atakujących, a następnie potwierdź atakujących. Możesz też zaatakować bez żadnych.",
+      "declareBlockers": "Wybierz blokujących i przypisz ich do atakujących, a następnie potwierdź blokujących.",
+      "chooseXValue": "Wybierz wartość X przed kontynuowaniem czaru lub zdolności.",
+      "payAmountChoice": "Wybierz, ile z żądanego zasobu zapłacić.",
+      "default": "Gra czeka na twój wybór. Postępuj zgodnie z aktywnym komunikatem, aby kontynuować."
+    },
+    "entries": {
+      "automaticPhaseSkips": {
+        "title": "Automatyczne pomijanie faz",
+        "body": "Pomijanie faz jest automatyczne. Użyj zatrzymań lub Pełnej kontroli, gdy chcesz uzyskać okna priorytetu w stylu papierowym."
+      },
+      "phaseStops": {
+        "title": "Zatrzymania faz",
+        "body": "Zatrzymanie wstrzymuje grę przed danym krokiem, podobnie jak deklaracja, że możesz zagrać przed walką, przed dobraniem lub przed krokiem końcowym w papierze."
+      },
+      "fullControl": {
+        "title": "Pełna kontrola",
+        "body": "Pełna kontrola zapobiega pomijaniu okien priorytetu, w tym miejsc, w których cyfrowy klient normalnie kontynuowałby grę."
+      },
+      "resolve": {
+        "title": "Rozstrzygnij",
+        "body": "Rozstrzygnięcie oznacza, że pasujesz priorytet, aby górny czar lub zdolność na stosie mogły się rozstrzygnąć, jeśli wszyscy inni również spasują."
+      },
+      "passToEnd": {
+        "title": "Pasuj do końca",
+        "body": "Pasowanie do końca pasuje priorytet przez całą turę, chyba że przerwie je wybór, zatrzymanie lub Pełna kontrola."
+      },
+      "manaPayment": {
+        "title": "Płatność many",
+        "body": "Podczas płatności many możesz ręcznie przekręcać ziemie lub nacisnąć T, aby przekręcić dostępne ziemie."
+      },
+      "combatDeclarations": {
+        "title": "Deklaracje walki",
+        "body": "Gra prosi o atakujących i blokujących tylko podczas kroków deklaracji. Wybierz stwory, a następnie potwierdź deklarację."
+      },
+      "openHelp": {
+        "title": "Otwórz pomoc",
+        "body": "Otwórz ten arkusz pomocy."
+      },
+      "passPriority": {
+        "title": "Pasuj priorytet",
+        "body": "Pasuj priorytet lub przejdź przez bieżący komunikat priorytetu."
+      },
+      "undo": {
+        "title": "Cofnij",
+        "body": "Cofnij ostatnią lokalną akcję, która nie ujawniła ukrytych informacji."
+      },
+      "cancel": {
+        "title": "Anuluj",
+        "body": "Anuluj bieżący wybór, płatność many, wybór celu lub automatyczne pasowanie, gdy jest dostępne."
+      },
+      "advancedDebugPanel": {
+        "title": "Zaawansowany panel debugowania",
+        "body": "Otwórz zaawansowany panel debugowania. Większość graczy powinna najpierw zacząć od Narzędzi naprawczych."
+      },
+      "reportOrExportState": {
+        "title": "Zgłoś lub wyeksportuj stan",
+        "body": "Jeśli karta zachowuje się nieprawidłowo, wyeksportuj bieżący stan gry, aby można było odtworzyć dokładną pozycję na polu bitwy."
+      },
+      "boardRightClickMenu": {
+        "title": "Menu pola bitwy pod prawym przyciskiem myszy",
+        "body": "Na komputerze kliknij prawym przyciskiem myszy puste miejsce na polu bitwy, aby uzyskać dziennik gry, narzędzia naprawcze/debugowania i ustawienia tła."
+      }
+    },
+    "flowNudge": {
+      "message": "Pomijanie faz jest automatyczne. Użyj zatrzymań lub Pełnej kontroli, gdy chcesz uzyskać okna priorytetu w stylu papierowym.",
+      "dismiss": "Odrzuć",
+      "learnFlow": "Poznaj przebieg"
+    },
+    "sandboxNudge": {
+      "message": "Skonfiguruj dowolny stan pola bitwy za pomocą <tools>Narzędzi piaskownicy</tools> — dodawaj karty i żetony, zmieniaj życie i znaczniki, kopiuj trwałe permanenty lub przeskakuj fazy. Otwórz je w dowolnej chwili klawiszem <key>`</key>.",
+      "dismiss": "Odrzuć",
+      "open": "Otwórz Narzędzia piaskownicy"
+    }
+  },
+  "splash": {
+    "ready": "Gotowe",
+    "loading": "Ładowanie..."
+  },
+  "turnBanner": {
+    "turn": "Tura {{number}}"
+  },
+  "chrome": {
+    "back": "Wstecz",
+    "settings": "Ustawienia",
+    "languageSettings": "Język ({{lang}}) — otwórz ustawienia",
+    "languageTitle": "Język: {{lang}}"
+  }
+}

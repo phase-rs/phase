@@ -59,7 +59,8 @@ expression: "&lowered"
           "target_prompt": null,
           "sorcery_speed": false,
           "condition": {
-            "type": "IfYouDo"
+            "type": "EffectOutcome",
+            "signal": "OptionalEffectPerformed"
           },
           "optional_targeting": false,
           "optional": false,
