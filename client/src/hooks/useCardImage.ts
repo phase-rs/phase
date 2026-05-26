@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   fetchCardImageAsset,
@@ -71,10 +71,38 @@ const strategyCacheMap = new Map<string, PrintingEntry>();
 const printingsCacheMap = new Map<string, PrintingEntry[]>();
 const strategyInflight = new Set<string>();
 const artCacheEvents = new EventTarget();
+/**
+ * Oracle IDs we've already checked and found to have no printings in
+ * `scryfall-printings.json`. Without this negative cache, every render of a
+ * deck tile whose representative card is missing from the printings catalog
+ * (tokens, name mismatches, newly-released cards not yet in the cached JSON)
+ * spin-loops: cache miss → background fetch returns [] → dispatch update
+ * event → tile re-renders → cache still missing → fetch again, forever. The
+ * empty-result case must short-circuit subsequent calls just like a positive
+ * cache hit does. Profile recording confirmed 30+ tiles updating per commit
+ * across 670 commits — one missing oracleId per tile is enough to stall the
+ * deck-select screen.
+ */
+const printingsNegativeCache = new Set<string>();
+
+/**
+ * Oracle IDs where `printings.length > 0` but `applyChain` returned `null` —
+ * the card has printings, but none match the user's current art-chain
+ * preferences (e.g., user prefers borderless but no borderless exists).
+ * Without this set, render-time misses on `strategyCacheMap` re-trigger
+ * `resolveStrategyInBackground` → cached fetch returns instantly → dispatch
+ * `update` event → `setArtCacheTick(+1)` → re-render → re-fetch loop at
+ * ~70 Hz. Distinct from `printingsNegativeCache` which covers
+ * `printings.length === 0` (no printings at all). Cleared together when art
+ * preferences change.
+ */
+const strategyNoWinnerCache = new Set<string>();
 
 registerStrategyCacheClearFn(() => {
   strategyCacheMap.clear();
   strategyInflight.clear();
+  printingsNegativeCache.clear();
+  strategyNoWinnerCache.clear();
 });
 
 function applyChainEntry(
@@ -112,6 +140,10 @@ function applyChain(chain: ArtChainEntry[], printings: PrintingEntry[], source?:
 
 function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): void {
   if (strategyInflight.has(oracleId)) return;
+  if (printingsNegativeCache.has(oracleId)) return;
+  // Already determined the chain produces no winner for this oracleId; refetching
+  // would land back here and dispatch another update event, looping the consumer.
+  if (strategyNoWinnerCache.has(oracleId)) return;
   strategyInflight.add(oracleId);
 
   getCardPrintings(oracleId).then((printings) => {
@@ -120,10 +152,16 @@ function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): 
       const winner = applyChain(chain, printings);
       if (winner) {
         strategyCacheMap.set(oracleId, winner);
+      } else {
+        // Printings exist but the chain matched nothing — remember that so the
+        // next render's strategyCacheMap miss does not re-enter the fetch loop.
+        strategyNoWinnerCache.add(oracleId);
       }
+    } else {
+      printingsNegativeCache.add(oracleId);
     }
     strategyInflight.delete(oracleId);
-    artCacheEvents.dispatchEvent(new Event("update"));
+    artCacheEvents.dispatchEvent(new CustomEvent("update", { detail: oracleId }));
   }).catch(() => {
     strategyInflight.delete(oracleId);
   });
@@ -131,14 +169,17 @@ function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): 
 
 function loadPrintingsInBackground(oracleId: string): void {
   if (strategyInflight.has(oracleId)) return;
+  if (printingsNegativeCache.has(oracleId)) return;
   strategyInflight.add(oracleId);
 
   getCardPrintings(oracleId).then((printings) => {
     if (printings.length > 0) {
       printingsCacheMap.set(oracleId, printings);
+    } else {
+      printingsNegativeCache.add(oracleId);
     }
     strategyInflight.delete(oracleId);
-    artCacheEvents.dispatchEvent(new Event("update"));
+    artCacheEvents.dispatchEvent(new CustomEvent("update", { detail: oracleId }));
   }).catch(() => {
     strategyInflight.delete(oracleId);
   });
@@ -155,11 +196,14 @@ function resolveOverrideUrl(
     const entry = findPrintingById(cached, scryfallId);
     return entry ? resolvePrintingImageUrl(entry, faceIndex, size) : null;
   }
+  if (printingsNegativeCache.has(oracleId)) return null;
 
   getCardPrintings(oracleId).then((printings) => {
     if (printings.length > 0) {
       printingsCacheMap.set(oracleId, printings);
-      artCacheEvents.dispatchEvent(new Event("update"));
+      artCacheEvents.dispatchEvent(new CustomEvent("update", { detail: oracleId }));
+    } else {
+      printingsNegativeCache.add(oracleId);
     }
   }).catch(() => {});
 
@@ -322,13 +366,32 @@ export function useCardImage(
   const [isLoading, setIsLoading] = useState(true);
   const [, setArtCacheTick] = useState(0);
 
+  const resolvedOracleId = oracleId || resolveOracleIdSync(cardName) || "";
+
+  // Scope the cache subscription to this hook's oracleId so a background
+  // printings fetch for card A doesn't force re-renders on every other deck
+  // tile mounted with `useCardImage`. With ~100 deck tiles on the deck-select
+  // screen and ~200 lazy printings fetches, an unscoped bus produced ~20,000
+  // re-renders (heap snapshot Heap-20260526T075828 — the sawtooth that peaked
+  // the tab at 500 MB). The ref keeps the subscription stable (mounted once
+  // like the original) so we don't race a re-subscribe against the first
+  // dispatch; the per-oracleId filter happens inside the handler.
+  const oracleIdRef = useRef(resolvedOracleId);
+  oracleIdRef.current = resolvedOracleId;
   useEffect(() => {
-    const handler = () => setArtCacheTick((t) => t + 1);
+    const handler = (e: Event) => {
+      const target = oracleIdRef.current;
+      if (!target) return;
+      const detail = (e as CustomEvent<string>).detail;
+      // Be tolerant of any plain `Event` dispatch (no detail) — treat as a
+      // global invalidation match. All in-tree dispatchers send a CustomEvent
+      // with detail; this is defensive against future callers.
+      if (detail && detail !== target) return;
+      setArtCacheTick((t) => t + 1);
+    };
     artCacheEvents.addEventListener("update", handler);
     return () => artCacheEvents.removeEventListener("update", handler);
   }, []);
-
-  const resolvedOracleId = oracleId || resolveOracleIdSync(cardName) || "";
 
   // The printings/art-strategy path indexes faces numerically, but for a
   // DFC/MDFC the reliable signal is the engine's `faceName` (an MDFC cast as its
