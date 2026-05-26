@@ -5566,6 +5566,39 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         keywords: Vec<Keyword>,
     },
+    /// CR 614.1 + CR 614.12 + CR 303.4 + CR 303.4a + CR 303.4g + CR 613.1d +
+    /// CR 613.1f + CR 113.10 + CR 702.5a + CR 604.1 + CR 611.2a + CR 400.7:
+    /// Return-as-Aura sub-effect. After the host object has been returned to
+    /// the battlefield by a preceding `Effect::ChangeZone`, this effect
+    /// installs the continuous "It's an Aura enchantment with enchant <X>"
+    /// modification on the just-returned object (CR 613.1d sets card type to
+    /// Enchantment, removes the Creature subtype set, adds the Aura subtype,
+    /// CR 702.5a adds the Enchant keyword with the parsed filter, and any
+    /// granted abilities/triggers/static abilities/keywords from the inner
+    /// quoted body apply via Layer 6 per CR 613.1f / CR 113.10), then chooses
+    /// a legal target per CR 303.4 + CR 303.4a and attaches the host to it.
+    /// If no legal object exists, the host is put into its owner's graveyard
+    /// per CR 303.4g. The continuous effect lasts `Duration::UntilHostLeavesPlay`
+    /// per CR 611.2a + CR 400.7 because a new object on re-entry is not the
+    /// same object and the prior continuous effect implicitly ends.
+    ///
+    /// Class members: Old-Growth Troll (KHM), Bronzehide Lion (THB),
+    /// Harold and Bob, First Numens (FIN-precon).
+    ReturnAsAura {
+        /// CR 303.4a + CR 702.5a: The enchant filter parsed from
+        /// "enchant <X>" (e.g., `Forest you control`, `creature you control`).
+        #[serde(default = "default_target_filter_any")]
+        enchant_filter: TargetFilter,
+        /// CR 113.10 + CR 604.1: Granted abilities/triggers/static abilities/
+        /// keywords from the inner quoted body. If the source Oracle text also
+        /// said "~ loses all other abilities" (Harold-shape) or had a
+        /// pre-split "and it loses all other abilities" sibling
+        /// (Bronzehide-shape, folded at IR layer), `RemoveAllAbilities` is at
+        /// `grants[0]` and is dependency-ordered before grants by Layer 6
+        /// (CR 613.7c).
+        #[serde(default)]
+        grants: Vec<ContinuousModification>,
+    },
     /// Records that a player bent an element this turn and emits the corresponding event.
     RegisterBending {
         kind: BendingType,
@@ -7270,6 +7303,10 @@ impl Effect {
             | Effect::PayCost { .. }
             | Effect::GrantCastingPermission { .. }
             | Effect::RegisterBending { .. }
+            // CR 303.4 + CR 115.1: ReturnAsAura attaches to a CHOICE (not a
+            // target) picked at resolution time via
+            // `WaitingFor::ReturnAsAuraTarget`. No stack-push target slot.
+            | Effect::ReturnAsAura { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::GainEnergy { .. }
@@ -7405,6 +7442,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::DoublePTAll { .. } => "DoublePTAll",
         Effect::MoveCounters { .. } => "MoveCounters",
         Effect::Animate { .. } => "Animate",
+        Effect::ReturnAsAura { .. } => "ReturnAsAura",
         Effect::RegisterBending { .. } => "RegisterBending",
         Effect::GenericEffect { .. } => "Effect",
         Effect::Cleanup { .. } => "Cleanup",
@@ -7582,6 +7620,7 @@ pub enum EffectKind {
     DoublePTAll,
     MoveCounters,
     Animate,
+    ReturnAsAura,
     RegisterBending,
     GenericEffect,
     Cleanup,
@@ -7758,6 +7797,7 @@ impl From<&Effect> for EffectKind {
             Effect::DoublePTAll { .. } => EffectKind::DoublePTAll,
             Effect::MoveCounters { .. } => EffectKind::MoveCounters,
             Effect::Animate { .. } => EffectKind::Animate,
+            Effect::ReturnAsAura { .. } => EffectKind::ReturnAsAura,
             Effect::RegisterBending { .. } => EffectKind::RegisterBending,
             Effect::GenericEffect { .. } => EffectKind::GenericEffect,
             Effect::Cleanup { .. } => EffectKind::Cleanup,

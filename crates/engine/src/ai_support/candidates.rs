@@ -303,6 +303,26 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                     .collect()
             }
         }
+        // CR 303.4 + CR 303.4g + CR 115.1: Return-as-Aura attach pick — emit
+        // exactly one candidate per legal target. The engine guarantees
+        // `legal_targets` is non-empty when this `WaitingFor` is set, so no
+        // `None` arm is needed.
+        WaitingFor::ReturnAsAuraTarget {
+            player,
+            legal_targets,
+            ..
+        } => legal_targets
+            .iter()
+            .map(|&target_id| {
+                candidate(
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target_id)),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::DiscoverChoice { player, .. } => vec![
             candidate(
                 GameAction::DiscoverChoice {
@@ -2019,6 +2039,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         WaitingFor::ReplacementChoice { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
+        | WaitingFor::ReturnAsAuraTarget { .. }
         | WaitingFor::DiscoverChoice { .. }
         | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::RepeatDecision { .. }

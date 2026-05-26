@@ -2433,6 +2433,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
         | Effect::ChooseOneOf { .. }
+        // CR 614.12 + CR 303.4: Return-as-Aura is its own emitted sub-effect
+        // following a `ChangeZone`; it is not a lookback-transparent clause
+        // for the Dig-from-among continuation search.
+        | Effect::ReturnAsAura { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }

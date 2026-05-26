@@ -2305,7 +2305,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Conjure { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::ChooseOneOf { .. } => {}
+        | Effect::ChooseOneOf { .. }
+        | Effect::ReturnAsAura { .. } => {}
     }
     d
 }

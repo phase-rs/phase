@@ -3551,6 +3551,15 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     if matches!(effect, Effect::PairWith { .. }) {
         return None;
     }
+    // CR 115.1 + CR 303.4f + CR 303.4g: An Aura's enchanted permanent is a
+    // CHOICE, not a target — Old-Growth Troll / Bronzehide Lion / Harold and
+    // Bob's return-as-Aura sub-effect contains no "target" word in Oracle
+    // text. The pick happens at resolution time via
+    // `WaitingFor::ReturnAsAuraTarget` (built without hexproof / protection
+    // filtering per CR 702.16b's targeting scope).
+    if matches!(effect, Effect::ReturnAsAura { .. }) {
+        return None;
+    }
     // CR 115.1: ChangeZone from private zones (hand/library) uses resolution-time
     // selection, not stack-push-time targeting.
     if let Effect::ChangeZone { origin, target, .. } = effect {

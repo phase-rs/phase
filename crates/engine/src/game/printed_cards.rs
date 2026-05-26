@@ -750,6 +750,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::CreateDamageReplacement { .. }
+        // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
+        // ContinuousModifications, never conjured card names.
+        | Effect::ReturnAsAura { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }

@@ -369,6 +369,7 @@
     "chooseNewTargetForCopy": "Wähle ein neues Ziel für die Kopie",
     "chooseTargetForCopy": "Wähle ein Ziel für die Kopie",
     "chooseCreatureToExplore": "Wähle, welche Kreatur als Nächstes erkundet",
+    "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",

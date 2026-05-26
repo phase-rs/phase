@@ -25,6 +25,10 @@ export function TargetingOverlay() {
   const isCopyRetarget = waitingFor?.type === "CopyRetarget";
   const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.target_slots.every((slot) => slot.current != null);
   const isExploreChoice = waitingFor?.type === "ExploreChoice";
+  // CR 303.4 + CR 303.4g + CR 115.1: Return-as-Aura attach pick. Picker is a
+  // CHOICE (not a target), but the action shape mirrors ExploreChoice
+  // (`GameAction::ChooseTarget` with the chosen ObjectId).
+  const isReturnAsAuraTarget = waitingFor?.type === "ReturnAsAuraTarget";
   // CR 115.7: Single-target retargets (Bolt Bend, Redirect) are picked on the
   // board through this overlay; multi-target retargets keep the dialog.
   const isRetargetChoice = waitingFor?.type === "RetargetChoice" && waitingFor.data.scope.type === "Single";
@@ -46,6 +50,8 @@ export function TargetingOverlay() {
     : waitingFor?.type === "TargetSelection"
       ? waitingFor.data.pending_cast?.object_id
       : waitingFor?.type === "ExploreChoice"
+        ? waitingFor.data.source_id
+      : waitingFor?.type === "ReturnAsAuraTarget"
         ? waitingFor.data.source_id
       : waitingFor?.type === "TapCreaturesForManaAbility"
         ? (waitingFor.data.pending_mana_ability as { source_id?: number } | undefined)?.source_id
@@ -92,7 +98,7 @@ export function TargetingOverlay() {
     return () => clearSelectedCards();
   }, [clearSelectedCards, isTapCreatureChoice]);
 
-  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isRetargetChoice && !isTapCreatureChoice) return null;
+  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isReturnAsAuraTarget && !isRetargetChoice && !isTapCreatureChoice) return null;
 
   // Only show targeting UI for the human player
   if (!canActForWaitingState) return null;
@@ -131,6 +137,8 @@ export function TargetingOverlay() {
                   })()
               : isExploreChoice
                 ? t("targeting.chooseCreatureToExplore")
+              : isReturnAsAuraTarget
+                ? t("targeting.chooseReturnAsAuraTarget")
               : isRetargetChoice
                 ? (retargetSpellName
                     ? t("targeting.chooseNewTargetForSpell", { spell: retargetSpellName })
