@@ -37,10 +37,10 @@ use super::match_flow;
 use super::mulligan;
 use super::planeswalker;
 use super::priority;
-use super::sba;
 use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty, sync_waiting_for,
 };
+use super::sba;
 use super::triggers;
 use super::turn_control;
 use super::turns;
@@ -218,13 +218,9 @@ fn has_pending_lethal_player(state: &GameState) -> bool {
     }
 
     if let Some(threshold) = state.format_config.commander_damage_threshold {
-        let cmd_damage = state
-            .commander_damage
-            .iter()
-            .any(|entry| {
-                entry.damage >= threshold as u32
-                    && !state.eliminated_players.contains(&entry.player)
-            });
+        let cmd_damage = state.commander_damage.iter().any(|entry| {
+            entry.damage >= threshold as u32 && !state.eliminated_players.contains(&entry.player)
+        });
         if cmd_damage {
             return true;
         }
