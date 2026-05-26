@@ -611,33 +611,43 @@ pub(crate) fn count_trigger_subjects_in_batch(
         Some(f) if !matches!(f, TargetFilter::SelfRef) => f,
         _ => return None,
     };
-    let count = events
-        .iter()
-        .flat_map(trigger_event_subject_ids)
-        .filter(|&id| target_filter_matches_object(state, id, filter, source_id))
-        .count();
-    Some(count as u32)
+    let count = events.iter().fold(0u32, |acc, event| {
+        acc.saturating_add(count_matching_trigger_event_subjects(
+            state, source_id, filter, event,
+        ))
+    });
+    Some(count)
 }
 
-/// CR 603.2c: Subject `ObjectId`s carried by a single `GameEvent` for trigger filter
-/// matching. Grows by event family as new "one or more <FILTER> <verb>"
-/// patterns land. Variants without an object subject return an empty iterator.
-fn trigger_event_subject_ids(event: &GameEvent) -> Box<dyn Iterator<Item = ObjectId> + '_> {
+/// CR 603.2c: Count object subjects carried by a single `GameEvent` for
+/// trigger filter matching. Grows by event family as new "one or more
+/// <FILTER> <verb>" patterns land. Variants without an object subject count 0.
+fn count_matching_trigger_event_subjects(
+    state: &GameState,
+    source_id: ObjectId,
+    filter: &TargetFilter,
+    event: &GameEvent,
+) -> u32 {
+    let matches = |id| target_filter_matches_object(state, id, filter, source_id);
+    let count_slice =
+        |ids: &[ObjectId]| usize_to_u32_saturating(ids.iter().filter(|id| matches(**id)).count());
+    let count_one = |id| u32::from(matches(id));
     match event {
-        GameEvent::AttackersDeclared { attacker_ids, .. } => Box::new(attacker_ids.iter().copied()),
-        GameEvent::ZoneChanged { object_id, .. } => Box::new(std::iter::once(*object_id)),
-        GameEvent::Discarded { object_id, .. } => Box::new(std::iter::once(*object_id)),
-        GameEvent::SpellCast { object_id, .. } => Box::new(std::iter::once(*object_id)),
-        GameEvent::TokenCreated { object_id, .. } => Box::new(std::iter::once(*object_id)),
-        GameEvent::CreatureDestroyed { object_id } => Box::new(std::iter::once(*object_id)),
-        GameEvent::PermanentSacrificed { object_id, .. } => Box::new(std::iter::once(*object_id)),
-        GameEvent::PermanentTapped { object_id, .. } => Box::new(std::iter::once(*object_id)),
-        GameEvent::PermanentUntapped { object_id } => Box::new(std::iter::once(*object_id)),
+        GameEvent::AttackersDeclared { attacker_ids, .. } => count_slice(attacker_ids),
+        GameEvent::ZoneChanged { object_id, .. }
+        | GameEvent::Discarded { object_id, .. }
+        | GameEvent::SpellCast { object_id, .. }
+        | GameEvent::TokenCreated { object_id, .. }
+        | GameEvent::CreatureDestroyed { object_id }
+        | GameEvent::Evolved { object_id }
+        | GameEvent::PermanentSacrificed { object_id, .. }
+        | GameEvent::PermanentTapped { object_id, .. }
+        | GameEvent::PermanentUntapped { object_id } => count_one(*object_id),
         // CR 120.3: Damage dealt to an object yields the damaged object as
         // subject. Damage dealt to a player has no object subject.
         GameEvent::DamageDealt { target, .. } => match target {
-            crate::types::ability::TargetRef::Object(id) => Box::new(std::iter::once(*id)),
-            crate::types::ability::TargetRef::Player(_) => Box::new(std::iter::empty()),
+            TargetRef::Object(id) => count_one(*id),
+            TargetRef::Player(_) => 0,
         },
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
@@ -724,8 +734,12 @@ fn trigger_event_subject_ids(event: &GameEvent) -> Box<dyn Iterator<Item = Objec
         | GameEvent::CascadeMissed { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
-        | GameEvent::DebugPermissionRevoked { .. } => Box::new(std::iter::empty()),
+        | GameEvent::DebugPermissionRevoked { .. } => 0,
     }
+}
+
+fn usize_to_u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 // ---------------------------------------------------------------------------
