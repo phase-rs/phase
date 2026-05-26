@@ -142,7 +142,7 @@ function CardPreviewInner({
   const defaultFaceIndex = faceIndex ?? (isTransformed ? 1 : 0);
   // Battlefield path: route through oracle_id when the engine attached one.
   // Deck-builder path: `obj` is null, so we keep the name-based fallback.
-  const { src, isLoading, isRotated } = useCardImage(cardName, {
+  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
     size: "normal",
     faceIndex: defaultFaceIndex,
     isToken,
@@ -180,8 +180,12 @@ function CardPreviewInner({
     };
   }, []);
 
+  // Kamigawa flip cards print both halves in one image, the alternate half
+  // rotated 180°. There's no second face to fetch, so Ctrl spins the same image
+  // 180° (flip180) instead of swapping faces the way DFC/MDFC do (showOtherFace).
+  const flip180 = !isMobile && ctrlHeld && isFlip;
   // On desktop, Ctrl swaps to the other face (back face normally, front face if transformed)
-  const showOtherFace = !isMobile && ctrlHeld && backFaceName != null;
+  const showOtherFace = !isMobile && ctrlHeld && backFaceName != null && !isFlip;
   // Fetch other face image when Ctrl is held (hook must always be called, but with empty
   // string when not needed so useCardImage short-circuits without a network request).
   // Battlefield path: the back_face's printed_ref carries the other face's
@@ -345,9 +349,12 @@ function CardPreviewInner({
           isLoading={activeLoading}
           src={activeSrc}
           isRotated={activeRotated}
-          backFaceHint={backFaceName != null && !showOtherFace
-            ? (isTransformed ? t("preview.holdCtrlFront") : t("preview.holdCtrlBack"))
-            : null}
+          flip180={flip180}
+          backFaceHint={isFlip
+            ? (flip180 ? null : t("preview.holdCtrlFlip"))
+            : backFaceName != null && !showOtherFace
+              ? (isTransformed ? t("preview.holdCtrlFront") : t("preview.holdCtrlBack"))
+              : null}
           altAvailable={Boolean(frontParseDetails || engineFrontFace)}
           debugObjectId={showDebugId && inspectedObjectId != null ? inspectedObjectId : null}
         />
@@ -373,13 +380,19 @@ function MobilePreviewOverlay({
   sourcePrinting?: SourcePrinting;
   layout?: "modal" | "compact";
 }) {
-  const { src, isRotated } = useCardImage(cardName, {
+  const { t } = useTranslation("game");
+  const { src, isRotated, isFlip } = useCardImage(cardName, {
     size: "normal",
     faceIndex,
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
     sourcePrinting,
   });
+
+  // Mobile has no Ctrl key, so a Kamigawa flip card's 180° spin is a tap toggle
+  // (desktop holds Ctrl). Only the full-screen modal layout can host the button —
+  // the compact peek dismisses on any tap via document-level capture listeners.
+  const [flipped, setFlipped] = useState(false);
 
   // Compact layout: dismiss on the next tap or scroll anywhere, so no separate
   // dismiss gesture is needed. Listeners attach on a deferred tick so the very
@@ -449,8 +462,17 @@ function MobilePreviewOverlay({
             draggable={false}
             className={isRotated
               ? "absolute left-1/2 top-1/2 h-[min(84vw,420px)] w-[min(60vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
-              : "max-h-[calc(100dvh-2rem)] max-w-full object-contain"}
+              : `max-h-[calc(100dvh-2rem)] max-w-full object-contain${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
           />
+          {isFlip && (
+            <button
+              type="button"
+              onClick={() => setFlipped((f) => !f)}
+              className="pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/20 bg-black/70 px-4 py-2 text-sm font-semibold text-white shadow-lg backdrop-blur active:bg-black/80"
+            >
+              ⟳ {t("preview.flip")}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -468,6 +490,7 @@ function CardImagePreview({
   isLoading,
   src,
   isRotated,
+  flip180,
   backFaceHint,
   altAvailable,
   mobileMode,
@@ -482,6 +505,7 @@ function CardImagePreview({
   isLoading: boolean;
   src: string | null;
   isRotated: boolean;
+  flip180?: boolean;
   backFaceHint: string | null;
   altAvailable: boolean;
   mobileMode?: boolean;
@@ -508,7 +532,7 @@ function CardImagePreview({
     ? mobileMode
       ? "absolute left-1/2 top-1/2 h-[min(56vw,420px)] w-[min(40vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
       : "absolute left-1/2 top-1/2 h-[clamp(308px,36.4vw,661px)] w-[clamp(220px,26vw,472px)] max-h-[80vh] max-w-[42vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
-    : `${frameClass} object-cover`;
+    : `${frameClass} object-cover transition-transform duration-200${flip180 ? " rotate-180" : ""}`;
 
   // Use effective spell cost from engine if available (reflects alt costs, reductions),
   // otherwise fall back to printed mana cost. When the user holds Ctrl to view the

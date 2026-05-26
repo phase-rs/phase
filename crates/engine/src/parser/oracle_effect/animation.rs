@@ -17,7 +17,7 @@ use super::token::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
-use crate::types::ability::QuantityExpr;
+use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
@@ -59,6 +59,17 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
     if let Some((power, toughness, after_pt)) = parse_fixed_become_pt_prefix(rest) {
         spec.power = Some(power);
         spec.toughness = Some(toughness);
+        rest = after_pt;
+    } else if let Some(after_pt) = parse_cost_x_become_pt_prefix(rest) {
+        // CR 107.3 + CR 107.3a: "{X}{G}: ~ becomes an X/X creature" — P/T resolves
+        // to the X paid for the activation cost. Maps Variable("X")/Variable("X") to
+        // CostXPaid so the animate effect reads cost_x_paid at resolution (not Variable
+        // which only resolves while the spell/ability is on the stack).
+        let cost_x = QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        };
+        spec.dynamic_power = Some(cost_x.clone());
+        spec.dynamic_toughness = Some(cost_x);
         rest = after_pt;
     }
 
@@ -217,6 +228,29 @@ pub(super) fn parse_fixed_become_pt_prefix(text: &str) -> Option<(i32, i32, &str
             crate::types::ability::PtValue::Fixed(power),
             crate::types::ability::PtValue::Fixed(toughness),
         ) => Some((power, toughness, rest.trim_start())),
+        _ => None,
+    }
+}
+
+/// CR 107.3 + CR 107.3a: Recognize "X/X" at the start of a "becomes" descriptor
+/// and map it to the CostXPaid dynamic quantity (the X paid in the activation cost).
+///
+/// Returns the remainder after the "X/X" token when both power and toughness
+/// are `Variable("X")`. Returns `None` for `*/*`, fixed P/T, or asymmetric X
+/// (e.g. "X/1" — not yet supported in this path, falls through to other parsers).
+///
+/// This enables X-cost creature-land animate abilities like "{X}{G}: Until end
+/// of turn, ~ becomes an X/X green Hydra creature" (Lair of the Hydra) to
+/// produce SetPowerDynamic + SetToughnessDynamic modifications keyed to
+/// CostXPaid.
+fn parse_cost_x_become_pt_prefix(text: &str) -> Option<&str> {
+    let (rest, (power, toughness)) = nom_primitives::parse_pt_value.parse(text).ok()?;
+    match (power, toughness) {
+        (PtValue::Variable(ref p), PtValue::Variable(ref t))
+            if p.eq_ignore_ascii_case("x") && t.eq_ignore_ascii_case("x") =>
+        {
+            Some(rest.trim_start())
+        }
         _ => None,
     }
 }
@@ -889,6 +923,103 @@ mod test_den_bugbear {
         assert_eq!(
             parse_animation_types("demon in addition to its other types", false),
             vec!["Demon"]
+        );
+    }
+
+    /// CR 107.3 + CR 107.3a: "{X}{G}: Until end of turn, ~ becomes an X/X green Hydra creature"
+    /// The X/X P/T in a "becomes" predicate must map to CostXPaid (not Variable("X")),
+    /// so the animate effect reads cost_x_paid at resolution rather than failing to resolve X.
+    /// Covers Lair of the Hydra and future X-cost X/X animation patterns.
+    #[test]
+    fn animation_spec_x_x_becomes_cost_x_paid() {
+        use crate::types::ability::{ContinuousModification, QuantityExpr, QuantityRef};
+        use crate::types::card_type::CoreType;
+
+        let spec =
+            parse_animation_spec("an X/X green Hydra creature", &mut ParseContext::default())
+                .expect("X/X creature-land animate spec must parse");
+
+        // Dynamic P/T must be CostXPaid (not Variable("X")).
+        let expected_qty = QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        };
+        assert_eq!(
+            spec.dynamic_power,
+            Some(expected_qty.clone()),
+            "dynamic_power must be CostXPaid"
+        );
+        assert_eq!(
+            spec.dynamic_toughness,
+            Some(expected_qty),
+            "dynamic_toughness must be CostXPaid"
+        );
+        // Fixed P/T must be None (X/X is dynamic, not fixed).
+        assert_eq!(spec.power, None);
+        assert_eq!(spec.toughness, None);
+
+        // Type list must include Creature and Hydra.
+        assert!(
+            spec.types.contains(&"Creature".to_string()),
+            "must include Creature"
+        );
+        assert!(
+            spec.types.contains(&"Hydra".to_string()),
+            "must include Hydra"
+        );
+
+        // animation_modifications must emit SetPowerDynamic, SetToughnessDynamic, AddType(Creature), AddSubtype(Hydra).
+        let mods = animation_modifications(&spec);
+        assert!(
+            mods.contains(&ContinuousModification::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            }),
+            "must include SetPowerDynamic(CostXPaid)"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::SetToughnessDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            }),
+            "must include SetToughnessDynamic(CostXPaid)"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }),
+            "must include AddType(Creature)"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Hydra".to_string()
+            }),
+            "must include AddSubtype(Hydra)"
+        );
+    }
+
+    /// CR 107.3a: X/X P/T with no explicit type (bare "X/X creature" with infer_creature=true).
+    #[test]
+    fn animation_spec_bare_x_x_infers_creature() {
+        use crate::types::ability::QuantityRef;
+
+        let spec = parse_animation_spec("an X/X creature", &mut ParseContext::default())
+            .expect("bare X/X creature must parse");
+
+        assert!(spec.dynamic_power.is_some(), "dynamic_power must be set");
+        assert!(
+            spec.dynamic_toughness.is_some(),
+            "dynamic_toughness must be set"
+        );
+        if let Some(crate::types::ability::QuantityExpr::Ref { qty }) = spec.dynamic_power {
+            assert_eq!(qty, QuantityRef::CostXPaid, "must be CostXPaid");
+        } else {
+            panic!("dynamic_power must be Ref(CostXPaid)");
+        }
+        assert!(
+            spec.types.contains(&"Creature".to_string()),
+            "must infer Creature"
         );
     }
 }

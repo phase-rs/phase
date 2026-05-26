@@ -10,12 +10,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
-    DoublePTMode, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp, GainLifePlayer,
+    GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -71,6 +71,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::SuppressTriggers { .. }
             // CR 603.2d: DoubleTriggers carries the `TriggerCause` predicate.
             | StaticMode::DoubleTriggers { .. }
+            // CR 508.1c + CR 509.1b: Combat declaration caps carry the maximum
+            // count and are enforced by combat.rs declaration validation.
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
@@ -1123,6 +1127,17 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
+        }
+        QuantityRef::ControlledByEachPlayer { filter, aggregate } => {
+            let func = match aggregate {
+                AggregateFunction::Max => "most",
+                AggregateFunction::Min => "fewest",
+                AggregateFunction::Sum => "total",
+            };
+            format!(
+                "# of {} controlled by player with {func}",
+                fmt_target(filter)
+            )
         }
     }
 }
@@ -4976,14 +4991,21 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (crates/engine/src/game/effects/mod.rs).
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
-        AbilityCondition::IfYouDo => ("IfYouDo", Handled),
+        AbilityCondition::EffectOutcome { signal } => match signal {
+            EffectOutcomeSignal::OptionalEffectPerformed => {
+                ("EffectOutcomeOptionalPerformed", Handled)
+            }
+            EffectOutcomeSignal::CurrentScopeSucceeded => {
+                ("EffectOutcomeCurrentScopeSucceeded", Handled)
+            }
+        },
+        AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
-        AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
         AbilityCondition::QuantityCheck { .. } => ("QuantityCheck", Handled),
         AbilityCondition::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
         AbilityCondition::CastDuringPhase { .. } => ("CastDuringPhase", Handled),
@@ -5144,7 +5166,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TokensCreatedThisTurn { .. } => ("TokensCreatedThisTurn", Handled),
         QuantityRef::PlayerActionsThisTurn { .. } => ("PlayerActionsThisTurn", Handled),
         QuantityRef::DungeonsCompleted => ("DungeonsCompleted", Unhandled),
-        QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Unhandled),
+        QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Handled),
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
@@ -5159,6 +5181,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
+        QuantityRef::ControlledByEachPlayer { .. } => ("ControlledByEachPlayer", Handled),
     }
 }
 
@@ -8664,6 +8687,7 @@ mod tests {
                         mode: StaticMode::MustBeBlocked,
                     }],
                     condition: None,
+                    per_player_condition: None,
                     affected_zone: None,
                     effect_zone: None,
                     active_zones: vec![],
@@ -8706,6 +8730,7 @@ mod tests {
                         },
                     ],
                     condition: None,
+                    per_player_condition: None,
                     affected_zone: None,
                     effect_zone: None,
                     active_zones: vec![],
@@ -8755,6 +8780,20 @@ mod tests {
         assert_eq!(
             features.get("quantity_ref:Speed"),
             Some(&FeatureSupport::Handled)
+        );
+    }
+
+    #[test]
+    fn target_zone_card_count_quantity_feature_is_marked_handled() {
+        let (name, support) = quantity_ref_feature(&QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Library,
+        });
+
+        assert_eq!(name, "TargetZoneCardCount");
+        assert_eq!(
+            support,
+            FeatureSupport::Handled,
+            "TargetZoneCardCount is resolved by game::quantity and should not block coverage",
         );
     }
 
@@ -9456,6 +9495,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9485,6 +9525,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9514,6 +9555,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9581,6 +9623,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9618,6 +9661,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9646,6 +9690,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9682,6 +9727,7 @@ mod tests {
                 affected: Some(TargetFilter::SelfRef),
                 modifications: vec![],
                 condition: None,
+                per_player_condition: None,
                 affected_zone: None,
                 effect_zone: None,
                 active_zones: vec![],
@@ -9694,6 +9740,34 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "CantBeBlockedExceptBy variants should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 508.1c + CR 509.1b: declaration-cap statics carry the maximum
+    /// creature count and are enforced by combat declaration validation rather
+    /// than exact registry-key lookup. Silent Arbiter is the canonical paired
+    /// attacker/blocker cap card.
+    #[test]
+    fn max_combat_creature_statics_have_no_coverage_gap() {
+        let mut face = make_face();
+        face.oracle_text = Some(
+            "No more than one creature can attack each combat.\nNo more than one creature can block each combat."
+                .to_string(),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxAttackersEachCombat { max: 1 })
+                .description("No more than one creature can attack each combat.".to_string()),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxBlockersEachCombat { max: 1 })
+                .description("No more than one creature can block each combat.".to_string()),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "Max combat creature statics should be fully supported, but got gaps: {:?}",
             gaps
         );
     }

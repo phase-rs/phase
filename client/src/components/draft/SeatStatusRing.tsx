@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 
 import type { SeatPublicView } from "../../adapter/draft-adapter";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
+import { BotIndicator } from "./BotIndicator";
 
 const EMPTY_SEATS: SeatPublicView[] = [];
 
@@ -30,6 +31,7 @@ interface SeatBadgeProps {
 
 function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
   const { t } = useTranslation("draft");
+  const botLabel = t("lobby.botSeat");
   const borderColor = isLocal
     ? "border-emerald-400/40"
     : PICK_STATUS_BORDER[seat.pick_status];
@@ -42,6 +44,7 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
       <span className="truncate text-xs text-white/70">
         {seat.display_name || t("seat.label", { number: seat.seat_index + 1 })}
       </span>
+      {seat.is_bot && <BotIndicator label={botLabel} size="sm" />}
     </div>
   );
 }

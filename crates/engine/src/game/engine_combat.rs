@@ -497,10 +497,12 @@ fn next_blocker_or_finish_declaration(
     if let Some(player) = super::combat::next_defending_player_to_declare_blockers(state) {
         let valid_block_targets = super::combat::get_valid_block_targets_for_player(state, player);
         let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+        let block_requirements = super::combat::block_requirements_for_player(state, player);
         return Ok(WaitingFor::DeclareBlockers {
             player,
             valid_blocker_ids,
             valid_block_targets,
+            block_requirements,
         });
     }
 

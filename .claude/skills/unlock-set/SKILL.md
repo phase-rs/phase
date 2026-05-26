@@ -1,11 +1,11 @@
 ---
 name: unlock-set
-description: Unlock the majority of a Magic set's unsupported cards by clustering missing parser/engine primitives, briefing engine-implementer agents tier-by-tier, and committing between clusters. Use when the user asks to "unlock the [SET] cards", "improve coverage for [SET]", or requests highest-ROI coverage work on a specific set (Standard, Commander precon, supplemental). If no set is named, default to the most recent Standard or Commander set by expected ROI (new-printing density).
+description: Unlock the majority of a Magic set's unsupported cards by clustering missing parser/engine primitives, briefing the engine-implementer skill tier-by-tier, and committing between clusters. Use when the user asks to "unlock the [SET] cards", "improve coverage for [SET]", or requests highest-ROI coverage work on a specific set (Standard, Commander precon, supplemental). If no set is named, default to the most recent Standard or Commander set by expected ROI (new-printing density).
 ---
 
 # Unlock Set Cards — Tier-Based Coverage Pass
 
-Derive a set's unsupported card list, cluster by shared missing primitive (not by card), rank clusters by unlock-count × engineering cost, then run each cluster through `engine-implementer` sequentially. Commit between clusters. Defer anything that would ship a partial runtime worse than Unimplemented.
+Derive a set's unsupported card list, cluster by shared missing primitive (not by card), rank clusters by unlock-count × engineering cost, then run each cluster through `$engine-implementer` sequentially. Commit between clusters. Defer anything that would ship a partial runtime worse than Unimplemented.
 
 ## When to use this skill vs. `parser-velocity`
 
@@ -17,9 +17,9 @@ Use the companion **`parser-velocity`** skill instead when:
 - You want to iterate across Category A (VerbVariation), B (SubjectStripping), D (StaticCondition), or parser-miss C (TriggerEffect) cards — these are the parser-only categories in `gap_analysis.rs`.
 - You want to defer the full gate (`fmt` / `clippy` / `test-all` / `coverage` / `semantic-audit`) to session end instead of paying it per cluster.
 
-`parser-velocity` batches edits per compile cycle and avoids the `engine-implementer` plan/review overhead — use it for quick wins, then return here for the cluster-level work that remains.
+`parser-velocity` batches edits per compile cycle and avoids the `$engine-implementer` plan/review overhead — use it for quick wins, then return here for the cluster-level work that remains.
 
-**Prereqs.** Run from the repo root. `engine-implementer` agent must be available. `cargo`, `jq`, `./scripts/gen-card-data.sh`, and `docs/MagicCompRules.txt` must be present (run `./scripts/fetch-comp-rules.sh` if missing).
+**Prereqs.** Run from the repo root. The `$engine-implementer` skill must be available. `cargo`, `jq`, `./scripts/gen-card-data.sh`, and `docs/MagicCompRules.txt` must be present (run `./scripts/fetch-comp-rules.sh` if missing).
 
 ---
 
@@ -110,7 +110,7 @@ You now have: (a) the set's unsupported cards, (b) their **parser-side** failure
 
 ### ⚠️ `supported: false` + `gap_count: 0` = hidden gap
 
-**Any card where `supported: false` AND `gap_count: 0` AND `gap_details` is empty/null is invisible to the above pipeline.** These cards parse cleanly but fail one of the non-`parse_details` checks (resolver feature, silent drop, target-fallback warning, subtype lexicon). If you skip Phase 2.5, you will cluster the *parser* gaps correctly and then spawn an `engine-implementer` to fix a parser that is already fine — wasting a review cycle. Count these cards BEFORE proceeding:
+**Any card where `supported: false` AND `gap_count: 0` AND `gap_details` is empty/null is invisible to the above pipeline.** These cards parse cleanly but fail one of the non-`parse_details` checks (resolver feature, silent drop, target-fallback warning, subtype lexicon). If you skip Phase 2.5, you will cluster the *parser* gaps correctly and then run `$engine-implementer` to fix a parser that is already fine — wasting a review cycle. Count these cards BEFORE proceeding:
 
 ```bash
 jq --slurpfile names <(jq -R . /tmp/set_unsupported.txt | jq -s .) \
@@ -269,11 +269,11 @@ Wait for the user to confirm the order (or adjust). Then proceed.
 
 For each cluster in priority order:
 
-1. **Spawn `engine-implementer`** (not `general-purpose`, not `feature-architect`). This agent runs plan → implement → review internally (per `feedback_engine_implementer_runs_review`), so do not spawn an external reviewer after it finishes.
-2. **Brief the agent with the template below.** Under-briefed agents produce inconsistent work.
-3. **After the agent returns**, verify the commit exists (`git log -1`) and that tests pass. The agent is responsible for verification before committing using the Tilt-preferred / direct-cargo-fallback pattern (`cargo fmt` → `tilt-wait.sh clippy test-engine` if Tilt up, else `clippy-strict` + `test -p engine`; then one-shot `cargo coverage`). See CLAUDE.md § "Canonical verification pattern".
-4. **Commit between clusters** is the agent's responsibility per the brief. Do not amend prior commits.
-5. **Handle deferrals** per Phase 6 if the agent returns with a deferral recommendation.
+1. **Run `$engine-implementer`** for the cluster (not a general-purpose implementation flow).
+2. **Brief the skill with the template below.** Under-briefed runs produce inconsistent work.
+3. **After the skill returns**, verify the commit exists (`git log -1`) and that tests pass. `$engine-implementer` is responsible for verification before committing using the Tilt-preferred / direct-cargo-fallback pattern (`cargo fmt` → `tilt-wait.sh clippy test-engine` if Tilt up, else `clippy-strict` + `test -p engine`; then one-shot `cargo coverage`). See CLAUDE.md § "Canonical verification pattern".
+4. **Commit between clusters** is the implementer's responsibility per the brief. Do not amend prior commits.
+5. **Handle deferrals** per Phase 6 if the implementer returns with a deferral recommendation.
 
 ### Working Tree & Isolation
 
@@ -285,7 +285,7 @@ Before briefing each cluster, check `git status`. If there are uncommitted files
 
 ### Agent Brief Template
 
-Every `engine-implementer` invocation must include these sections. Brevity is fine for sections when the information is obvious, but do not omit sections.
+Every `$engine-implementer` invocation must include these sections. Brevity is fine for sections when the information is obvious, but do not omit sections.
 
 ```
 Context

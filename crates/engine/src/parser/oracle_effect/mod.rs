@@ -43,7 +43,7 @@ use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, CardPlayMode,
     CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
     CombatDamageScope, Comparator, ConjureCard, ContinuousModification, ControllerRef,
     DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget, Duration, Effect,
@@ -154,7 +154,10 @@ fn if_you_do_object_anchor(
     clauses: &[ClauseIr],
     condition: &Option<AbilityCondition>,
 ) -> Option<TargetFilter> {
-    if !matches!(condition, Some(AbilityCondition::IfYouDo)) {
+    if !condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_optional_effect_performed)
+    {
         return None;
     }
     clauses
@@ -2265,16 +2268,14 @@ fn parse_event_context_ref_with_ctx<'a>(
     ctx: &ParseContext,
 ) -> Option<(TargetFilter, &'a str)> {
     let (target, rest) = parse_event_context_ref(text)?;
-    let target = if matches!(
-        (&target, ctx.relative_player_scope.as_ref()),
-        (
-            TargetFilter::TriggeringPlayer,
-            Some(ControllerRef::ScopedPlayer)
-        )
-    ) {
-        TargetFilter::ScopedPlayer
-    } else {
-        target
+    let target = match (&target, ctx.relative_player_scope.as_ref()) {
+        (TargetFilter::TriggeringPlayer, Some(ControllerRef::ScopedPlayer)) => {
+            TargetFilter::ScopedPlayer
+        }
+        (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
+            TargetFilter::ParentTargetController
+        }
+        _ => target,
     };
     Some((target, rest))
 }
@@ -4982,6 +4983,218 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
     Some(def)
 }
 
+/// The two equalization verbs Balance / Restore Balance / Balancing Act use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EqualizeVerb {
+    Sacrifice,
+    Discard,
+}
+
+/// CR 107.1b: Build the "keep N, dispose the rest" effect for one Balance
+/// clause. "Each player keeps the minimum, disposes the rest" is identically
+/// "each player disposes (their own count − the minimum)". Operand order is
+/// load-bearing: `left` MUST be the per-player count and `right` MUST be the
+/// cross-player minimum. The `Difference` resolver takes `.abs()`, which masks
+/// a `left >= right` invariant — `left >= right` always holds here because the
+/// per-player count includes the minimizing player, and the §8 clause-local
+/// snapshot freezes `right` so an earlier APNAP player's sacrifices cannot
+/// shrink it below a later player's `left`. A swapped pair (or an unsnapshot
+/// minimum) would mis-clamp a positive disposal count instead of yielding 0.
+fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
+    match verb {
+        // CR 701.21a: battlefield clause — "lands they control" / "creatures
+        // they control". `filter` carries `controller: You`, rebound to the
+        // iterating player by the `player_scope` driver.
+        EqualizeVerb::Sacrifice => {
+            let left = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: filter.clone(),
+                },
+            };
+            let right = QuantityExpr::Ref {
+                qty: QuantityRef::ControlledByEachPlayer {
+                    filter: filter.clone(),
+                    aggregate: AggregateFunction::Min,
+                },
+            };
+            Effect::Sacrifice {
+                target: filter,
+                // CR 107.1b: left = per-player count, right = minimum.
+                count: QuantityExpr::Difference {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                min_count: 0,
+            }
+        }
+        // CR 701.9a: hand clause — "cards they control" in hand. No battlefield
+        // filter: `HandSize { ScopedPlayer }` is the iterating player's hand
+        // size, `HandSize { AllPlayers { Min } }` the cross-player minimum.
+        EqualizeVerb::Discard => {
+            let left = QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            };
+            let right = QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Min,
+                        exclude: None,
+                    },
+                },
+            };
+            Effect::Discard {
+                // CR 107.1b: left = per-player count, right = minimum.
+                count: QuantityExpr::Difference {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            }
+        }
+    }
+}
+
+/// Force a type-phrase filter's controller clause to "you control" so the
+/// `player_scope` driver scopes it to the iterating player. Balance's "lands
+/// they control" has the "they control" consumed by an outer `tag()`, so the
+/// inner `parse_type_phrase` sees only the bare type word.
+fn balance_filter_you_control(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            ..tf
+        }),
+        other => other,
+    }
+}
+
+/// Arm B — Balance's first sentence: "each player chooses a number of
+/// [type-phrase] they control equal to [min-quantity], then
+/// sacrifices/discards the rest". The verb branch determines the clause type;
+/// the `[type-phrase]` is consumed by the nom-typed `parse_type_phrase`.
+fn parse_balance_arm_b(input: &str) -> OracleResult<'_, (EqualizeVerb, TargetFilter)> {
+    let (input, _) = tag("each player chooses a number of ").parse(input)?;
+    let (input, filter) = super::oracle_nom::target::parse_type_phrase(input)?;
+    let (input, _) = tag(" they control equal to ").parse(input)?;
+    // CR 107.1b: the min-quantity phrase MUST parse to the equalization shape
+    // (`ControlledByEachPlayer { aggregate: Min, .. }` — "the number of [type]
+    // controlled by the player who controls the fewest"). The parsed ref is
+    // not retained because the verb branch substitutes the zone-correct
+    // minimum directly, but its STRUCTURE is load-bearing: accepting any other
+    // quantity here would mis-intercept superficially similar text (e.g.,
+    // "equal to the number of cards in their hand") and emit a Balance chain
+    // that mis-clamps disposal counts. If the inner ref doesn't match the
+    // equalization shape, fail so the parser falls through to its normal path.
+    let saved = input;
+    let (input, parsed_qty) = nom_quantity::parse_quantity_ref.parse(input)?;
+    if !matches!(
+        parsed_qty,
+        QuantityRef::ControlledByEachPlayer {
+            aggregate: AggregateFunction::Min,
+            ..
+        }
+    ) {
+        return Err(nom::Err::Error(OracleError::new(
+            saved,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    let (input, _) = tag(", then ").parse(input)?;
+    let (input, verb) = alt((
+        value(EqualizeVerb::Sacrifice, tag("sacrifices")),
+        value(EqualizeVerb::Discard, tag("discards")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" the rest").parse(input)?;
+    Ok((input, (verb, filter)))
+}
+
+/// Arm C — Balance's "the same way" continuation: "players / each player
+/// [verb]s [type-phrase] ... the same way". Subject is an `alt()`; the clause
+/// list is 1-or-2 `(verb, filter)` pairs joined by " and ". The verb wraps
+/// `opt(tag("s"))` to accept both the bare ("Players discard") and `-s`
+/// ("Each player discards") inflections. The `alt()` over the verb makes the
+/// Balance-vs-Restore-Balance clause-order reversal a non-issue.
+fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, TargetFilter)>> {
+    use nom::character::complete::space1;
+    use nom::multi::separated_list1;
+
+    let (input, _) = alt((tag("players "), tag("each player "))).parse(input)?;
+    let (input, pairs) = separated_list1(
+        tag(" and "),
+        (
+            terminated(
+                alt((
+                    value(EqualizeVerb::Discard, tag("discard")),
+                    value(EqualizeVerb::Sacrifice, tag("sacrifice")),
+                )),
+                opt(tag("s")),
+            ),
+            preceded(space1, super::oracle_nom::target::parse_type_phrase),
+        ),
+    )
+    .parse(input)?;
+    let (input, _) = tag(" the same way").parse(input)?;
+    Ok((input, pairs))
+}
+
+/// CR 107.1 + CR 608.2e: Whole-line interceptor for the Balance equalization
+/// class (Balance, Restore Balance, Balancing Act).
+///
+/// Arm B parses the first sentence and Arm C parses the "the same way"
+/// continuation. Each clause lowers to a `player_scope: All`
+/// `Effect::Sacrifice` / `Effect::Discard` with a `QuantityExpr::Difference`
+/// count; the clauses are chained via `sub_ability` as three independent steps
+/// (CR 608.2e — each clause computes its own minimum at its own resolution
+/// time, guaranteed by the §8 per-link clause-minimum snapshot).
+pub(crate) fn try_parse_balance_equalization(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_lowercase();
+
+    let parsed = nom_on_lower(text, &lower, |input| {
+        let (input, first) = parse_balance_arm_b(input)?;
+        let (input, _) = tag(". ").parse(input)?;
+        let (input, rest) = parse_balance_arm_c(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, (first, rest)))
+    });
+    let ((first, rest), _) = parsed?;
+
+    // Build the clause list: the Arm B clause followed by the Arm C clauses.
+    let mut clauses: Vec<(EqualizeVerb, TargetFilter)> = Vec::with_capacity(1 + rest.len());
+    clauses.push(first);
+    clauses.extend(rest);
+
+    // Lower each (verb, filter) into a `player_scope: All` link, chained via
+    // `sub_ability` (CR 608.2e — three independent steps).
+    let mut links: Vec<AbilityDefinition> = clauses
+        .into_iter()
+        .map(|(verb, filter)| {
+            let filter = balance_filter_you_control(filter);
+            let mut def = AbilityDefinition::new(kind, balance_clause_effect(verb, filter));
+            def.player_scope = Some(PlayerFilter::All);
+            def.sub_link = SubAbilityLink::SequentialSibling;
+            def
+        })
+        .collect();
+
+    // Fold the chain back-to-front so each link's `sub_ability` is the next.
+    let mut chain = links.pop()?;
+    while let Some(mut prev) = links.pop() {
+        prev.sub_ability = Some(Box::new(chain));
+        chain = prev;
+    }
+    Some(chain)
+}
+
 /// Parse "for each" quantity patterns on draw/life/damage/mill effects.
 ///
 /// Handles patterns like:
@@ -5899,6 +6112,13 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     }
     if matches!(clause.effect, Effect::DealDamage { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_deal_damage_multi_target(text);
+    }
+    // CR 115.1d: Post-parse fixup for SwitchPT prepositional form. The
+    // imperative parser strips "any number of" / "each of" to keep `parse_target`
+    // bare, so the MultiTargetSpec is rebuilt from the original text here
+    // (parallel to the DealDamage / Double counter fixups above).
+    if matches!(clause.effect, Effect::SwitchPT { .. }) && clause.multi_target.is_none() {
+        clause.multi_target = extract_switch_pt_multi_target(text);
     }
     if matches!(
         clause.effect,
@@ -10726,6 +10946,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_balance_equalization(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
@@ -10741,6 +10964,9 @@ pub(crate) fn parse_effect_chain_with_context(
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
     if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
+        return def;
+    }
+    if let Some(def) = try_parse_balance_equalization(text, kind) {
         return def;
     }
     let ir = parse_effect_chain_ir(text, kind, ctx);
@@ -11675,13 +11901,18 @@ pub(crate) fn parse_effect_chain_ir(
         // action). Retarget the preceding clause's trailing boundary to `Then`
         // so this clause lowers as a within-action `ContinuationStep` — never a
         // `SequentialSibling` that would resolve even when the opponent accepts.
-        let (text, condition, is_consequence_head) =
-            if let Some(body) = strip_for_each_opponent_who_doesnt(&text) {
-                // CR 608.2e: Do NOT stamp `player_scope` on the body — it
-                // inherits the parent `Sacrifice(opponent)` node's
-                // `player_scope: Opponent` iteration by being its `sub_ability`
-                // inside the scoped clone. The `Not{IfYouDo}` condition makes it
-                // a decline branch; recipient rebinds resolve "that player"/"you".
+        let (text, condition, is_decline_head) =
+            if let Some((body, decline_condition)) = strip_for_each_opponent_who_doesnt(&text) {
+                // CR 608.2e + CR 101.3: Do NOT stamp `player_scope` on the body
+                // — it inherits the parent's `player_scope: Opponent` iteration
+                // by being its `sub_ability` inside the scoped clone. The
+                // `Not{...}` wrapper makes it the decline branch:
+                //   - `Not{IfYouDo}` for "doesn't / does not" (Braids-class,
+                //     optional parent — CR 118.12 optional-cost branch).
+                //   - `Not{IfCurrentScopeSucceeded}` for "can't / cannot"
+                //     (Refurbished-Familiar-class, mandatory parent — CR 101.3
+                //     + CR 118.12 mandatory-cost branch).
+                // Recipient rebinds resolve "that player"/"you".
                 if let Some(prev) = clauses.last_mut() {
                     if prev.boundary == Some(ClauseBoundary::Sentence) {
                         prev.boundary = Some(ClauseBoundary::Then);
@@ -11691,7 +11922,7 @@ pub(crate) fn parse_effect_chain_ir(
                 (
                     body,
                     Some(AbilityCondition::Not {
-                        condition: Box::new(AbilityCondition::IfYouDo),
+                        condition: Box::new(decline_condition),
                     }),
                     true,
                 )
@@ -11714,7 +11945,7 @@ pub(crate) fn parse_effect_chain_ir(
         // Recipient rebinds apply to every chunk of the decline-consequence
         // sentence; the `Not{IfYouDo}` condition and `player_scope` only to the
         // head chunk that carried the "for each opponent who doesn't" prefix.
-        let is_decline_consequence = is_consequence_head || decline_consequence_active;
+        let is_decline_consequence = is_decline_head || decline_consequence_active;
 
         let (text, mut unless_pay) = extract_resolution_unless_pay_modifier(&text);
 
@@ -14114,31 +14345,54 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     (Some(scope), deconjugated)
 }
 
-/// CR 608.2e + CR 608.2c: Strip a leading "For each opponent who doesn't, "
-/// decline-tail prefix. This is a separate sentence whose body ("that player
-/// loses N life and you draw a card") runs once per opponent who declined the
-/// preceding "each opponent may <optional action>" — i.e. it is a per-opponent
-/// iteration gated on the decline of the optional action. Returns the body text
-/// on match; the caller stamps `player_scope: Opponent` + `condition:
-/// Not{IfYouDo}` on the resulting clause so the body resolves per declining
-/// opponent. The `tag()`/`alt()` chain is both the detector and the consumer —
-/// no `contains()`/`starts_with()`.
-fn strip_for_each_opponent_who_doesnt(text: &str) -> Option<String> {
+/// CR 608.2e + CR 608.2c + CR 101.3: Strip a leading "For each opponent who
+/// doesn't / does not / can't / cannot, " decline-tail prefix. Two shapes:
+///
+/// - **Optional-decline** (`doesn't` / `does not`): Braids-class. The parent is
+///   "each opponent may <optional action>"; the body runs once per opponent
+///   who declined the optional action. Returns `AbilityCondition::effect_performed()` —
+///   caller wraps in `Not { IfYouDo }` so the body fires on the decline branch
+///   (CR 118.12 optional-cost branch + CR 608.2d).
+/// - **Mandatory-impossible** (`can't` / `cannot`): Refurbished-Familiar-class.
+///   The parent is "each opponent <bare imperative>"; the body runs once per
+///   opponent who couldn't perform the action (empty hand for discard, no
+///   permanent to sacrifice, etc.). Returns
+///   `AbilityCondition::current_scope_succeeded()` — caller wraps in `Not` so
+///   the body fires on the mandatory-impossible branch (CR 101.3 +
+///   CR 118.12 mandatory-cost branch).
+///
+/// The matched-arm condition is returned alongside the residual body so the
+/// caller can stamp the right gate on the sub_ability. The `tag()`/`alt()`
+/// chain is both the detector and the consumer — no
+/// `contains()`/`starts_with()`.
+fn strip_for_each_opponent_who_doesnt(text: &str) -> Option<(String, AbilityCondition)> {
     let lower = text.to_lowercase();
     nom_on_lower(text, &lower, |i| {
-        value(
-            (),
-            preceded(
-                alt((
-                    tag("for each opponent who doesn't"),
-                    tag("for each opponent who does not"),
-                )),
-                preceded(opt(tag(",")), opt(multispace1)),
+        alt((
+            value(
+                AbilityCondition::effect_performed(),
+                preceded(
+                    alt((
+                        tag("for each opponent who doesn't"),
+                        tag("for each opponent who does not"),
+                    )),
+                    preceded(opt(tag(",")), opt(multispace1)),
+                ),
             ),
-        )
+            value(
+                AbilityCondition::current_scope_succeeded(),
+                preceded(
+                    alt((
+                        tag("for each opponent who can't"),
+                        tag("for each opponent who cannot"),
+                    )),
+                    preceded(opt(tag(",")), opt(multispace1)),
+                ),
+            ),
+        ))
         .parse(i)
     })
-    .map(|((), rest)| rest.to_string())
+    .map(|(cond, rest)| (rest.to_string(), cond))
 }
 
 /// CR 608.2c: Strip a leading "For each opponent who can't, " consequence
@@ -14742,6 +14996,45 @@ fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
 fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let after_each_of = strip_after(&lower, "damage to each of ")?;
+    let (_, multi_target) = strip_optional_target_prefix(after_each_of);
+    multi_target
+}
+
+/// CR 115.1d + CR 613.4d: Recover the `MultiTargetSpec` for the prepositional
+/// SwitchPT form ("switch the power and toughness of <subject>"). The
+/// imperative parser strips "each of" and "any number of" so `parse_target`
+/// sees a bare target phrase; this helper rebuilds the spec from the original
+/// text. Mirrors `extract_double_counter_multi_target` — the only axis of
+/// variation is the verb prefix.
+fn extract_switch_pt_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    let (_, target_text) = preceded(
+        tag::<_, _, OracleError<'_>>("switch the power and toughness of "),
+        rest,
+    )
+    .parse(lower.as_str())
+    .ok()?;
+    // The distribution prefix "each of " is optional ("switch ... of each of
+    // any number of target creatures" vs "switch ... of any number of target
+    // creatures"); both surface the same MultiTargetSpec.
+    let after_each_of = tag::<_, _, OracleError<'_>>("each of ")
+        .parse(target_text)
+        .map(|(rest, _)| rest)
+        .unwrap_or(target_text);
+    if let Ok((after_any_number, _)) =
+        tag::<_, _, OracleError<'_>>("any number of ").parse(after_each_of)
+    {
+        if alt((
+            tag::<_, _, OracleError<'_>>("target "),
+            tag("other target "),
+            tag("another target "),
+        ))
+        .parse(after_any_number)
+        .is_ok()
+        {
+            return Some(MultiTargetSpec::unlimited(0));
+        }
+    }
     let (_, multi_target) = strip_optional_target_prefix(after_each_of);
     multi_target
 }
@@ -16315,9 +16608,9 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
 /// card with mana value X or less ..., where X is 1 plus the sacrificed
 /// creature's mana value").
 ///
-/// Walks the typed-filter property list, recursing through `AnyOf` nesting so
-/// composite "mana value N or M" bounds are covered. Non-`Cmc` props and
-/// non-typed filters pass through unchanged.
+/// Walks typed-filter property lists and target-filter compositions, recursing
+/// through `AnyOf` nesting so composite "mana value N or M" bounds are
+/// covered. Non-`Cmc` props and non-typed filters pass through unchanged.
 pub(super) fn apply_where_x_to_filter(
     filter: TargetFilter,
     where_x_expression: Option<&str>,
@@ -16334,6 +16627,21 @@ pub(super) fn apply_where_x_to_filter(
                 .collect();
             TargetFilter::Typed(typed)
         }
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| apply_where_x_to_filter(filter, where_x_expression))
+                .collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| apply_where_x_to_filter(filter, where_x_expression))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(apply_where_x_to_filter(*filter, where_x_expression)),
+        },
         other => other,
     }
 }
@@ -20120,7 +20428,7 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("Rhystic Lightning must chain the if-they-do alternative");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
         assert!(
             matches!(
                 *sub.effect,
@@ -27319,7 +27627,7 @@ mod tests {
         while let Some(d) = current {
             effects.push(std::mem::discriminant(&*d.effect));
             // Check else_ability on any node with IfYouDo condition
-            if d.condition == Some(AbilityCondition::IfYouDo) {
+            if d.condition == Some(AbilityCondition::effect_performed()) {
                 if let Some(else_ab) = &d.else_ability {
                     effects.push(std::mem::discriminant(&*else_ab.effect));
                 }
@@ -29429,7 +29737,7 @@ mod tests {
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
         assert_eq!(
             sub.condition,
-            Some(AbilityCondition::IfAPlayerDoes),
+            Some(AbilityCondition::effect_performed()),
             "sub condition should be IfAPlayerDoes"
         );
         assert!(
@@ -29462,7 +29770,10 @@ mod tests {
             .as_ref()
             .expect("controller sacrifice chains to the each-opponent sacrifice");
         assert!(matches!(*sac_opponent.effect, Effect::Sacrifice { .. }));
-        assert_eq!(sac_opponent.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(
+            sac_opponent.condition,
+            Some(AbilityCondition::effect_performed())
+        );
         assert_eq!(
             sac_opponent.player_scope,
             Some(PlayerFilter::Opponent),
@@ -29477,7 +29788,7 @@ mod tests {
         assert_eq!(
             lose_life.condition,
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::IfYouDo)
+                condition: Box::new(AbilityCondition::effect_performed())
             }),
             "the decline body runs only for an opponent who did NOT sacrifice"
         );
@@ -29511,8 +29822,73 @@ mod tests {
         }
     }
 
+    /// CR 101.3 + CR 608.2c + CR 118.12: Refurbished Familiar / Aclazotz,
+    /// Deepest Betrayal — mandatory-impossible decline-tail. "each opponent
+    /// discards a card. For each opponent who can't, you draw a card." must
+    /// lower to a `Discard(opponent)` node (`player_scope: Opponent`) whose
+    /// `Not{IfCurrentScopeSucceeded}`-conditioned body is
+    /// `Draw { target: OriginalController }`, a `ContinuationStep` link.
+    /// Asserted alongside the unchanged `Not{IfYouDo}` shape for the
+    /// `doesn't` arm to guard against the new arm cross-contaminating.
     #[test]
-    fn for_each_opponent_who_cant_uses_previous_discard_count() {
+    fn for_each_opponent_who_cant_lowers_to_if_current_scope_succeeded() {
+        use crate::types::ability::SubAbilityLink;
+        let def = parse_effect_chain(
+            "each opponent discards a card. For each opponent who can't, you draw a card.",
+            AbilityKind::Spell,
+        );
+        // Root: each opponent discards — player_scope: Opponent.
+        assert!(matches!(*def.effect, Effect::Discard { .. }));
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the discard iterates per opponent"
+        );
+        // Decline body: Draw, gated on Not{IfCurrentScopeSucceeded}.
+        let draw = def
+            .sub_ability
+            .as_ref()
+            .expect("discard chains to the decline body");
+        assert_eq!(
+            draw.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::current_scope_succeeded())
+            }),
+            "the can't body runs only for an opponent whose mandatory discard failed"
+        );
+        assert_eq!(draw.sub_link, SubAbilityLink::ContinuationStep);
+        match &*draw.effect {
+            Effect::Draw { target, .. } => assert_eq!(
+                target,
+                &TargetFilter::OriginalController,
+                "\"you draw a card\" is the printed controller"
+            ),
+            other => panic!("expected Draw, got {other:?}"),
+        }
+
+        // Regression guard: the "doesn't" arm must still stamp Not{IfYouDo},
+        // NOT the new IfCurrentScopeSucceeded variant. Use a Braids-shaped
+        // optional parent so the doesn't arm is reachable.
+        let braids_like = parse_effect_chain(
+            "each opponent may sacrifice a creature of their choice. For each \
+             opponent who doesn't, you draw a card.",
+            AbilityKind::Spell,
+        );
+        let braids_draw = braids_like
+            .sub_ability
+            .as_ref()
+            .expect("optional sacrifice chains to the decline body");
+        assert_eq!(
+            braids_draw.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed())
+            }),
+            "the doesn't arm must still stamp Not{{IfYouDo}} (optional-decline branch)"
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_cant_is_case_insensitive() {
         use crate::types::ability::SubAbilityLink;
 
         let def = parse_effect_chain(
@@ -29527,16 +29903,15 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("discard should chain to the can't consequence");
-        assert_eq!(draw.player_scope, Some(PlayerFilter::Opponent));
-        assert_eq!(draw.sub_link, SubAbilityLink::SequentialSibling);
+        assert_eq!(
+            draw.player_scope, None,
+            "the body inherits the surrounding opponent scope instead of starting a second loop"
+        );
+        assert_eq!(draw.sub_link, SubAbilityLink::ContinuationStep);
         assert_eq!(
             draw.condition,
-            Some(AbilityCondition::QuantityCheck {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
-                comparator: Comparator::LT,
-                rhs: QuantityExpr::Fixed { value: 1 },
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::current_scope_succeeded())
             })
         );
         match &*draw.effect {
@@ -29557,7 +29932,7 @@ mod tests {
         );
         assert!(def.optional);
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
     }
 
     #[test]
@@ -29585,7 +29960,7 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("sacrifice should chain to copy spell");
-        assert_eq!(copy.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(copy.condition, Some(AbilityCondition::effect_performed()));
         assert!(matches!(*copy.effect, Effect::CopySpell { .. }));
     }
 
@@ -29626,7 +30001,7 @@ mod tests {
             AbilityKind::Spell,
         );
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
         let else_ab = sub.else_ability.as_ref().expect("should have else_ability");
         assert!(
             matches!(*else_ab.effect, Effect::Draw { .. }),
@@ -30092,7 +30467,7 @@ mod tests {
         match result {
             Some(AbilityCondition::Or { conditions }) => {
                 assert_eq!(conditions.len(), 2);
-                assert!(matches!(conditions[0], AbilityCondition::IfYouDo));
+                assert!(conditions[0].is_optional_effect_performed());
                 assert!(matches!(
                     conditions[1],
                     AbilityCondition::QuantityCheck {
@@ -31960,6 +32335,42 @@ mod tests {
                 }
             ),
             "expected SwitchPT with SelfRef, got: {e:?}"
+        );
+    }
+
+    /// CR 613.4d: prepositional surface form ("switch the power and toughness
+    /// of target creature") — single-target sibling of the possessive form.
+    #[test]
+    fn effect_switch_pt_prepositional_single_target() {
+        let e = parse_effect("switch the power and toughness of target creature until end of turn");
+        assert!(
+            matches!(e, Effect::SwitchPT { .. }),
+            "expected SwitchPT, got: {e:?}"
+        );
+    }
+
+    /// CR 613.4d + CR 115.1d: Inversion Behemoth class — "switch the power and
+    /// toughness of each of any number of target creatures" must parse to
+    /// `Effect::SwitchPT` carrying a typed creature filter, with
+    /// `MultiTargetSpec::unlimited(0)` recovered on the clause so the spell
+    /// allows any number of targets.
+    #[test]
+    fn effect_switch_pt_any_number_of_target_creatures_is_multi_targeted() {
+        let clause = parse_effect_clause(
+            "switch the power and toughness of each of any number of target creatures until end of turn",
+            &mut ParseContext::default(),
+        );
+
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::SwitchPT {
+                    target: TargetFilter::Typed(_),
+                }
+            ),
+            "expected SwitchPT {{ target: Typed(..) }}, got: {:?}",
+            clause.effect
         );
     }
 
@@ -37229,7 +37640,10 @@ mod snapshot_tests {
             }
         ));
         let followup = def.sub_ability.as_ref().expect("expected followup");
-        assert_eq!(followup.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(
+            followup.condition,
+            Some(AbilityCondition::effect_performed())
+        );
         assert!(followup.sub_ability.is_none());
         assert!(matches!(
             &*followup.effect,
@@ -37480,6 +37894,170 @@ mod snapshot_tests {
                     }
                 )),
             "no ScopedPlayer ref may survive in the chain, got {tf:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Balance equalization parser arms (try_parse_balance_equalization)
+    // -----------------------------------------------------------------------
+
+    /// Assert a `Difference { ObjectCount(Land, You), ControlledByEachPlayer }`
+    /// sacrifice link with `player_scope: All`.
+    fn assert_land_sacrifice_clause(def: &AbilityDefinition) {
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        let Effect::Sacrifice { target, count, .. } = &*def.effect else {
+            panic!("expected Effect::Sacrifice, got {:?}", def.effect);
+        };
+        assert!(
+            matches!(
+                target,
+                TargetFilter::Typed(tf)
+                    if tf.controller == Some(ControllerRef::You)
+                    && tf.type_filters == vec![TypeFilter::Land]
+            ),
+            "sacrifice target must be lands you control, got {target:?}"
+        );
+        let QuantityExpr::Difference { left, right } = count else {
+            panic!("sacrifice count must be a Difference, got {count:?}");
+        };
+        assert!(matches!(
+            &**left,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+        assert!(matches!(
+            &**right,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ControlledByEachPlayer {
+                    aggregate: AggregateFunction::Min,
+                    ..
+                }
+            }
+        ));
+    }
+
+    /// Assert a `Difference { HandSize(ScopedPlayer), HandSize(AllPlayers Min) }`
+    /// discard link with `player_scope: All`.
+    fn assert_hand_discard_clause(def: &AbilityDefinition) {
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        let Effect::Discard { target, count, .. } = &*def.effect else {
+            panic!("expected Effect::Discard, got {:?}", def.effect);
+        };
+        assert_eq!(*target, TargetFilter::Controller);
+        let QuantityExpr::Difference { left, right } = count else {
+            panic!("discard count must be a Difference, got {count:?}");
+        };
+        assert!(matches!(
+            &**left,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer
+                }
+            }
+        ));
+        assert!(matches!(
+            &**right,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Min,
+                        ..
+                    }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn balance_parses_to_three_link_equalization_chain() {
+        // Arm B (sacrifice lands) + Arm C (discard cards, sacrifice creatures).
+        let def = parse_effect_chain(
+            "Each player chooses a number of lands they control equal to the number of lands controlled by the player who controls the fewest, then sacrifices the rest. Players discard cards and sacrifice creatures the same way.",
+            AbilityKind::Spell,
+        );
+        // Link 1: sacrifice lands.
+        assert_land_sacrifice_clause(&def);
+        // Link 2: discard cards.
+        let link2 = def.sub_ability.as_ref().expect("expected discard clause");
+        assert_hand_discard_clause(link2);
+        // Link 3: sacrifice creatures.
+        let link3 = link2
+            .sub_ability
+            .as_ref()
+            .expect("expected creature sacrifice clause");
+        assert_eq!(link3.player_scope, Some(PlayerFilter::All));
+        let Effect::Sacrifice { target, .. } = &*link3.effect else {
+            panic!("link 3 must be Effect::Sacrifice, got {:?}", link3.effect);
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::You)
+                && tf.type_filters == vec![TypeFilter::Creature]
+        ));
+        // The chain ends after three links.
+        assert!(link3.sub_ability.is_none(), "chain must be exactly 3 links");
+    }
+
+    #[test]
+    fn restore_balance_reversed_clause_order_parses() {
+        // Restore Balance reverses the "the same way" clause order
+        // (sacrifice creatures before discard cards) — the `alt()` over the
+        // verb handles it for free.
+        let def = parse_effect_chain(
+            "Each player chooses a number of lands they control equal to the number of lands controlled by the player who controls the fewest, then sacrifices the rest. Players sacrifice creatures and discard cards the same way.",
+            AbilityKind::Spell,
+        );
+        assert_land_sacrifice_clause(&def);
+        let link2 = def.sub_ability.as_ref().expect("expected clause 2");
+        // Reversed: clause 2 is the creature sacrifice.
+        assert!(matches!(&*link2.effect, Effect::Sacrifice { .. }));
+        let link3 = link2.sub_ability.as_ref().expect("expected clause 3");
+        assert_hand_discard_clause(link3);
+        assert!(link3.sub_ability.is_none());
+    }
+
+    #[test]
+    fn balancing_act_single_continuation_clause_parses() {
+        // Balancing Act: "Each player" subject + a single "the same way" clause.
+        let def = parse_effect_chain(
+            "Each player chooses a number of permanents they control equal to the number of permanents controlled by the player who controls the fewest, then sacrifices the rest. Each player discards cards the same way.",
+            AbilityKind::Spell,
+        );
+        // Link 1: sacrifice permanents.
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(&*def.effect, Effect::Sacrifice { .. }));
+        // Link 2: the single discard continuation.
+        let link2 = def.sub_ability.as_ref().expect("expected discard clause");
+        assert_hand_discard_clause(link2);
+        assert!(link2.sub_ability.is_none(), "chain must be exactly 2 links");
+    }
+
+    #[test]
+    fn non_balance_text_is_not_intercepted() {
+        // The interceptor must not fire on unrelated "each player" text.
+        assert!(
+            try_parse_balance_equalization("Each player draws a card.", AbilityKind::Spell)
+                .is_none(),
+            "interceptor must only match the Balance equalization shape"
+        );
+    }
+
+    #[test]
+    fn balance_arm_b_rejects_non_equalization_quantity() {
+        // CR 107.1b: Arm B must REQUIRE the equalization-shape quantity
+        // (`ControlledByEachPlayer { aggregate: Min, .. }`) — a superficially
+        // similar phrase whose inner quantity is unrelated (here: a hand-size
+        // ref) must NOT be intercepted. Confirms Arm B verifies the structure
+        // rather than discarding the parsed ref.
+        assert!(
+            try_parse_balance_equalization(
+                "Each player chooses a number of lands they control equal to the number of cards in their hand, then sacrifices the rest. Players discard cards and sacrifice creatures the same way.",
+                AbilityKind::Spell,
+            )
+            .is_none(),
+            "interceptor must reject inputs whose inner quantity is not the equalization shape"
         );
     }
 }

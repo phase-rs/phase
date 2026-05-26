@@ -13,9 +13,9 @@ The goal is not just "make CI green." The goal is to leave the PR in the most id
 
 Before changing code, read these files from the repo root and apply their logic:
 
-- `.claude/commands/review-impl.md` for the implementation-gap review lenses.
+- `$review-impl` for the implementation-gap review lenses.
 - `.claude/agents/pr-review-comment-resolver.md` for phase.rs-specific review-comment fetching, categorization, prioritization, resolution, verification, and reporting.
-- `.codex/agents/engine-implementer.toml` and then `.claude/agents/engine-implementer.md` when the PR needs the full engine implementation plan/review cycle.
+- `.agents/skills/engine-implementer/SKILL.md` when the PR needs the full engine implementation plan/review cycle.
 
 Do not paraphrase these from memory. Re-read them each time because they are the source of truth.
 
@@ -83,7 +83,7 @@ When a comment asks for a questionable design, satisfy the underlying concern wh
 
 ## Architecture Review
 
-After comment resolution, run `.claude/commands/review-impl.md` against the PR diff.
+After comment resolution, run `$review-impl` against the PR diff.
 
 Use this diff basis:
 
@@ -116,7 +116,7 @@ Make inline changes when the fix is local, well-understood, and does not require
 - local bug fix in one resolver, component, or adapter
 - cleanup of a reviewer-requested nit that does not alter design
 
-Use `.codex/agents/engine-implementer.toml` and the full plan -> implement -> review cycle when the PR needs architectural redesign or new engine primitives. Typical triggers:
+Use `$engine-implementer` and the full plan -> implement -> review cycle when the PR needs architectural redesign or new engine primitives. Typical triggers:
 
 - new or changed `Effect`, `Keyword`, `TriggerCondition`, `ReplacementCondition`, `TargetFilter`, `QuantityRef`, or similar engine enum surface
 - parser work that introduces a new grammar family or risks one-off Oracle matching

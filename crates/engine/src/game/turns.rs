@@ -1430,10 +1430,13 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     let valid_block_targets =
                         super::combat::get_valid_block_targets_for_player(state, defending);
                     let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+                    let block_requirements =
+                        super::combat::block_requirements_for_player(state, defending);
                     return WaitingFor::DeclareBlockers {
                         player: defending,
                         valid_blocker_ids,
                         valid_block_targets,
+                        block_requirements,
                     };
                 } else {
                     // CR 508.8: Declare blockers and combat damage steps are skipped if no attackers.

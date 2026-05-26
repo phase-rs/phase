@@ -1,9 +1,20 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router";
 
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
+import { useDraftPodStore } from "../../stores/draftPodStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 
 const EMPTY_SEATS: Array<{ seat_index: number; display_name: string; is_bot: boolean; connected: boolean }> = [];
+
+function winnerChoiceClass(selected: boolean): string {
+  return menuButtonClass({
+    tone: selected ? "emerald" : "neutral",
+    size: "xs",
+    className: "min-w-0 flex-1 justify-center px-2",
+  });
+}
 
 // ── Component ───────────────────────────────────────────────────────────
 
@@ -13,6 +24,8 @@ const EMPTY_SEATS: Array<{ seat_index: number; display_name: string; is_bot: boo
  */
 export function HostControls() {
   const { t } = useTranslation("draft");
+  const navigate = useNavigate();
+  const [endingDraft, setEndingDraft] = useState(false);
   const role = useMultiplayerDraftStore((s) => s.role);
   const phase = useMultiplayerDraftStore((s) => s.phase);
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
@@ -24,6 +37,8 @@ export function HostControls() {
   const overrideMatchResult = useMultiplayerDraftStore(
     (s) => s.overrideMatchResult,
   );
+  const leave = useMultiplayerDraftStore((s) => s.leave);
+  const resetPod = useDraftPodStore((s) => s.reset);
   const replaceSeatWithBot = useMultiplayerDraftStore(
     (s) => s.replaceSeatWithBot,
   );
@@ -37,18 +52,42 @@ export function HostControls() {
     podPolicy === "Casual" && phase === "roundComplete";
   const showOverride =
     podPolicy === "Casual" &&
-    phase === "matchInProgress" &&
+    (phase === "matchInProgress" || phase === "roundComplete") &&
     pairings.length > 0;
   const humanSeats = seats.filter((s) => !s.is_bot);
   const showKickReplace =
     humanSeats.length > 0 &&
     (phase === "matchInProgress" || phase === "roundComplete");
+  const showEndDraft = ![
+    "idle",
+    "connecting",
+    "complete",
+    "error",
+    "kicked",
+    "hostLeft",
+  ].includes(phase);
+
+  const handleEndDraft = async () => {
+    if (endingDraft) return;
+    if (!window.confirm(t("hostControls.endDraftConfirm"))) return;
+
+    setEndingDraft(true);
+    try {
+      await leave(false);
+      resetPod();
+      navigate("/");
+    } catch (err) {
+      console.error("[HostControls] failed to end draft:", err);
+      setEndingDraft(false);
+    }
+  };
 
   if (
     !showPauseResume &&
     !showAdvanceRound &&
     !showOverride &&
-    !showKickReplace
+    !showKickReplace &&
+    !showEndDraft
   )
     return null;
 
@@ -83,32 +122,46 @@ export function HostControls() {
 
       {/* Override match result — Casual mode, during matches */}
       {showOverride && (
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-2">
           <div className="text-xs text-white/40">{t("hostControls.overrideResult")}</div>
-          {pairings
-            .filter((p) => p.status !== "Complete")
-            .map((p) => (
-              <div
-                key={p.match_id}
-                className="flex items-center gap-1 text-xs"
-              >
-                <span className="text-white/60 truncate">
-                  {t("hostControls.versusPair", { a: p.name_a, b: p.name_b })}
-                </span>
-                <button
-                  onClick={() => overrideMatchResult(p.match_id, p.seat_a)}
-                  className="px-1 py-0.5 text-emerald-400/70 hover:text-emerald-300 text-xs"
+          {pairings.map((p) => {
+            const seatAWon = p.winner_seat === p.seat_a;
+            const seatBWon = p.winner_seat === p.seat_b;
+
+            return (
+              <div key={p.match_id} className="flex flex-col gap-1">
+                <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1 text-xs">
+                  <button
+                    onClick={() => overrideMatchResult(p.match_id, p.seat_a)}
+                    aria-pressed={seatAWon}
+                    className={winnerChoiceClass(seatAWon)}
+                    title={p.name_a}
+                  >
+                    {seatAWon && <span aria-hidden="true">✓</span>}
+                    <span className="truncate">{p.name_a}</span>
+                  </button>
+                  <span className="px-1 text-[0.62rem] uppercase tracking-[0.14em] text-white/30">
+                    {t("standings.versus")}
+                  </span>
+                  <button
+                    onClick={() => overrideMatchResult(p.match_id, p.seat_b)}
+                    aria-pressed={seatBWon}
+                    className={winnerChoiceClass(seatBWon)}
+                    title={p.name_b}
+                  >
+                    {seatBWon && <span aria-hidden="true">✓</span>}
+                    <span className="truncate">{p.name_b}</span>
+                  </button>
+                </div>
+                <div
+                  className="truncate text-[0.64rem] uppercase tracking-[0.14em] text-white/30"
+                  title={`${p.match_id} ${p.status}`}
                 >
-                  {p.name_a.split(" ")[0]}
-                </button>
-                <button
-                  onClick={() => overrideMatchResult(p.match_id, p.seat_b)}
-                  className="px-1 py-0.5 text-emerald-400/70 hover:text-emerald-300 text-xs"
-                >
-                  {p.name_b.split(" ")[0]}
-                </button>
+                  {p.match_id} - {p.status}
+                </div>
               </div>
-            ))}
+            );
+          })}
         </div>
       )}
 
@@ -126,6 +179,21 @@ export function HostControls() {
             </button>
           ))}
         </div>
+      )}
+
+      {showEndDraft && (
+        <button
+          onClick={() => void handleEndDraft()}
+          disabled={endingDraft}
+          className={menuButtonClass({
+            tone: "red",
+            size: "sm",
+            disabled: endingDraft,
+            className: "mt-1",
+          })}
+        >
+          {t("hostControls.endDraft")}
+        </button>
       )}
     </div>
   );

@@ -1,1 +1,210 @@
-{}
+{
+  "search": {
+    "title": "Suche",
+    "subtitle": "Füge der aktuellen Liste Karten hinzu.",
+    "reset": "Zurücksetzen",
+    "textPlaceholder": "Karten suchen...",
+    "allTypes": "Alle Typen",
+    "cmcMax": "CMC max:",
+    "sets": "Sets",
+    "addSetPlaceholder": "Set-Code hinzufügen...",
+    "addSet": "Hinzufügen",
+    "removeSet": "{{name}} entfernen",
+    "emptyHint": "Füge einen Filter hinzu, um mit dem Durchsuchen zu beginnen",
+    "searching": "Wird gesucht...",
+    "searchFailed": "Suche fehlgeschlagen",
+    "results_one": "{{count}} Ergebnis",
+    "results_other": "{{count}} Ergebnisse",
+    "browseFormat": {
+      "all": "Alle Karten"
+    }
+  },
+  "filters": {
+    "title": "Filter",
+    "close": "Filter schließen",
+    "done": "Fertig",
+    "search": "Suche"
+  },
+  "deck": {
+    "backToDeck": "Zurück zum Deck",
+    "listView": "Listenansicht",
+    "stackView": "Stapelansicht"
+  },
+  "tabs": {
+    "ariaLabel": "Deckbuilder-Oberfläche",
+    "deck": "Deck",
+    "info": "Info"
+  },
+  "toolbar": {
+    "menu": "Menü",
+    "deckBuilder": "Deckbuilder",
+    "untitledDeck": "Unbenanntes Deck",
+    "deckName": "Deckname",
+    "format": "Format",
+    "bracket": "Bracket",
+    "saved": "Gespeichert ✓",
+    "clone": "Klonen",
+    "cloneTitle": "Eine Kopie unter neuem Namen speichern",
+    "loadDeck": "Deck laden...",
+    "nameToSave": "Benenne das Deck, um es zu speichern"
+  },
+  "unsaved": {
+    "title": "Ungespeicherte Änderungen",
+    "dismiss": "Dialog schließen",
+    "bodyLeaving": "Du hast ungespeicherte Änderungen an diesem Deck. Vor dem Verlassen speichern?",
+    "bodyLoading": "Du hast ungespeicherte Änderungen an diesem Deck. Vor dem Laden eines anderen Decks speichern?",
+    "discard": "Verwerfen",
+    "saveAndContinue": "Speichern & fortfahren"
+  },
+  "card": {
+    "moveToSideboard": "Ein {{name}} ins Sideboard verschieben",
+    "moveToMain": "Ein {{name}} ins Hauptdeck verschieben",
+    "removeOne": "Ein {{name}} entfernen",
+    "makeCommander": "{{name}} zum Kommandeur machen",
+    "makeCommanderTitle": "Zu meinem Kommandeur machen",
+    "chooseArtFor": "Artwork für {{name}} wählen",
+    "alternateArtTap": "Alternatives Artwork verfügbar — zum Wählen antippen",
+    "alternateArtRightClick": "Alternatives Artwork verfügbar — zum Wählen rechtsklicken",
+    "unsupportedExpand_one": "{{count}} nicht unterstützte Mechanik; Details aufklappen",
+    "unsupportedExpand_other": "{{count}} nicht unterstützte Mechaniken; Details aufklappen",
+    "unsupportedTitle_one": "{{count}} nicht unterstützte Mechanik — zum Aufklappen klicken",
+    "unsupportedTitle_other": "{{count}} nicht unterstützte Mechaniken — zum Aufklappen klicken"
+  },
+  "grid": {
+    "allFormats": "Alle",
+    "addCard": "{{name}} hinzufügen",
+    "notLegal": "{{name}} – nicht legal in {{format}}",
+    "notFormat": "Nicht {{format}}"
+  },
+  "deckList": {
+    "currentList": "Aktuelle Liste",
+    "import": "Importieren",
+    "importTitle": "Deck aus Text importieren (MTGA- oder .dck-Format)",
+    "export": "Exportieren",
+    "exportTitle": "Deck exportieren",
+    "mainTab": "Haupt ({{count}})",
+    "sideboardTab": "Sideboard ({{count}})",
+    "mainDeckHeading_one": "Hauptdeck ({{count}} Karte)",
+    "mainDeckHeading_other": "Hauptdeck ({{count}} Karten)",
+    "sideboardUnlimited": "Sideboard ({{count}})",
+    "sideboardLimited": "Sideboard ({{count}}/{{max}})",
+    "sideboardExceeds": "Sideboard überschreitet das Limit von {{max}} Karten",
+    "sideboardEmptyHint": "Fahre über eine Hauptdeck-Karte und klicke auf →, um sie hierher zu verschieben.",
+    "group": {
+      "Creatures": "Kreaturen",
+      "Spells": "Zaubersprüche",
+      "Lands": "Länder"
+    },
+    "importModalTitle": "Deck importieren",
+    "pastePlaceholder": "Deckliste einfügen (MTGA- oder .dck-Format)...",
+    "fromFile": "Aus Datei",
+    "parse": "Einlesen",
+    "exportModalTitle": "Deck exportieren",
+    "saveToFile": "In Datei speichern",
+    "copied": "Kopiert!",
+    "copy": "Kopieren"
+  },
+  "moveList": {
+    "empty": "Leer"
+  },
+  "stack": {
+    "deckView": "Deckansicht",
+    "visualDeckStack": "Visueller Deckstapel",
+    "mainBadge": "Haupt {{count}}",
+    "sideboardBadge": "Sideboard {{count}}",
+    "emptyHint": "Hinzugefügte Karten erscheinen hier als gestaffelter Stapel.",
+    "commanderBadge": "Kommandeur",
+    "commanderLane": "Kommandeur",
+    "mainDeckLane": "Hauptdeck",
+    "noCommander": "Kein Kommandeur ausgewählt.",
+    "mainEmpty": "Hauptdeck-Karten erscheinen hier.",
+    "cardCount_one": "{{count}} Karte",
+    "cardCount_other": "{{count}} Karten",
+    "mainSideBadge": "{{main}} Haupt + {{side}} Side",
+    "groupCards_one": "{{count}} Karte",
+    "groupCards_other": "{{count}} Karten",
+    "group": {
+      "Creatures": "Kreaturen",
+      "Spells": "Zaubersprüche",
+      "Lands": "Länder"
+    },
+    "sideboardGroup": "Sideboard",
+    "addOne": "Ein {{name}} hinzufügen",
+    "copyLimit": "{{name}} hat das Kopienlimit erreicht",
+    "removeOne": "Ein {{name}} entfernen",
+    "removeCommander": "{{name}} als Kommandeur entfernen"
+  },
+  "printingPicker": {
+    "title": "Artwork wählen",
+    "noPrintings": "Für diese Karte sind keine alternativen Drucke verfügbar.",
+    "filterPlaceholder": "Nach Set oder Sammlernummer filtern…",
+    "filterAriaLabel": "Drucke filtern",
+    "count_one": "{{count}} Druck",
+    "count_other": "{{count}} Drucke",
+    "countMatching_one": "{{count}} Druck passend zu „{{query}}“",
+    "countMatching_other": "{{count}} Drucke passend zu „{{query}}“",
+    "useDefault": "Standard verwenden",
+    "noMatches": "Keine Drucke passen zu deinem Filter.",
+    "noImage": "Kein Bild",
+    "showMore_one": "Mehr anzeigen ({{count}} verbleibend)",
+    "showMore_other": "Mehr anzeigen ({{count}} verbleibend)"
+  },
+  "stats": {
+    "formatLegality": "Format-Legalität",
+    "engineCoverage": "Engine-Abdeckung",
+    "unsupportedTitle": "Nicht unterstützt:\n{{list}}"
+  },
+  "commanderPanel": {
+    "heading": "Kommandeur",
+    "noCommander": "Kein Kommandeur ausgewählt",
+    "remove": "Entfernen",
+    "identity": "Identität:",
+    "setAsCommander": "Als Kommandeur festlegen:",
+    "cardCount": "{{count}}/{{expected}} Karten",
+    "singletonViolations": "Singleton-Verstöße: {{cards}}",
+    "colorViolations": "Verstöße gegen die Farbidentität: {{cards}}"
+  },
+  "manaCurve": {
+    "title": "Manakurve",
+    "colors": "Farben"
+  },
+  "legality": {
+    "legal": "Legal",
+    "banned": "Verboten",
+    "restricted": "Eingeschränkt",
+    "notLegal": "Nicht legal"
+  },
+  "contextMenu": {
+    "chooseArt": "Artwork wählen…",
+    "noAlternates": "Keine alternativen Drucke",
+    "clearOverride": "Artwork-Überschreibung aufheben"
+  },
+  "bracket": {
+    "unavailable": "Die Bracket-Schätzung ist in diesem Build nicht verfügbar.",
+    "addCommander": "Füge einen Kommandeur hinzu, um deine Bracket-Schätzung zu sehen.",
+    "estimated": "Geschätzt: B{{tier}} {{label}}",
+    "manual": "Manuell: B{{tier}} {{label}}",
+    "mismatch": " ⚠ Abweichung",
+    "hideBreakdown": "Aufschlüsselung ausblenden",
+    "showBreakdown": "Aufschlüsselung anzeigen",
+    "hideBreakdownButton": "▲ Aufschlüsselung ausblenden",
+    "showBreakdownButton": "▼ Aufschlüsselung anzeigen",
+    "forced": "(erzwungen B{{tier}})",
+    "dataVersion": "Daten: {{version}}",
+    "aboutBrackets": "Über Brackets ↗",
+    "estimatedChip": "Geschätzt: B{{tier}}",
+    "estimatedChipFull": "Geschätztes Bracket: B{{tier}} {{label}}"
+  },
+  "bracketPicker": {
+    "ariaLabel": "Deck-Bracket",
+    "unrated": "Unbewertet"
+  },
+  "warnings": {
+    "commanderCount": "Das Deck hat {{count}} Karten (genau {{expected}} erforderlich)",
+    "singleton": "{{name}}: mehrere Kopien (Singleton-Format)",
+    "colorIdentity": "{{name}}: außerhalb der Farbidentität des Kommandeurs",
+    "minimumCount": "Das Deck hat {{count}} Karten (Minimum 60)",
+    "maxCopies": "{{name}}: {{count}} Kopien (max. 4)",
+    "companionInMain": "{{name}} ist dein Gefährte, befindet sich aber auch im Hauptdeck — das verstößt gegen seine Deckbau-Bedingung. Entferne ihn aus dem Hauptdeck, um ihn als Gefährten zu nutzen."
+  }
+}

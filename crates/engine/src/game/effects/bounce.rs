@@ -552,6 +552,7 @@ mod tests {
                 trigger_event: None,
                 description: None,
                 source_name: "Ability Source".to_string(),
+                subject_match_count: None,
             },
         });
 

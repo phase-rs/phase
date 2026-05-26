@@ -27,6 +27,7 @@ import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
+import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
@@ -63,6 +64,7 @@ import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
+import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { CLICK_THROUGH_WAITING_FOR_TYPES, DialogHost } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -108,6 +110,7 @@ import {
   useMultiplayerStore,
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
+import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
@@ -192,16 +195,18 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" =
+  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
         ? "p2p-join"
-        : rawMode === "host" || rawMode === "join"
-          ? "online"
-          : rawMode === "ai"
-            ? "ai"
-            : "local";
+        : rawMode === "draft-match"
+          ? "draft-match"
+          : rawMode === "host" || rawMode === "join"
+            ? "online"
+            : rawMode === "ai"
+              ? "ai"
+              : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -1257,6 +1262,10 @@ function GamePageContent({
       {/* Combat SVG overlays: blocker assignments + attack target arrows */}
       <BlockAssignmentLines />
       <AttackTargetLines />
+      {/* Per-attacker "needs N blockers" badges (menace / "blocked by N or more").
+          Self-gates: renders nothing unless the local player is assigning blockers
+          to attackers that carry a minimum-blocker requirement. */}
+      <BlockRequirementBadges />
 
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />
@@ -1321,6 +1330,12 @@ function GamePageContent({
         {(waitingFor?.type === "OptionalEffectChoice" || waitingFor?.type === "OpponentMayChoice") &&
           canActForWaitingState && (
             <OptionalEffectModal />
+          )}
+
+        {/* CR 401.4: Owner puts permanent on top or bottom of library */}
+        {(waitingFor?.type === "TopOrBottomChoice" || waitingFor?.type === "ClashCardPlacement") &&
+          canActForWaitingState && (
+            <TopOrBottomModal />
           )}
 
         {waitingFor?.type === "UntapChoice" &&
@@ -2050,6 +2065,7 @@ function GameOverScreen({
   const source = searchParams.get("source");
   const draftId = searchParams.get("draftId");
   const isDraft = source === "draft" && !!draftId;
+  const isDraftPodMatch = mode === "draft-match";
   const gameId = useGameStore((s) => s.gameId);
 
   const [resultRecorded, setResultRecorded] = useState(false);
@@ -2064,6 +2080,17 @@ function GameOverScreen({
       if (meta?.phase === "complete") setRunOver(true);
     });
   }, [isDraft, gameId, isDraw, isVictory, resultRecorded]);
+
+  useEffect(() => {
+    if (!isDraftPodMatch || resultRecorded) return;
+    void useMultiplayerDraftStore
+      .getState()
+      .reportActiveMatchGameResult(winner)
+      .then(() => setResultRecorded(true))
+      .catch((err) => {
+        console.error("[GameOverScreen] failed to report draft pod match result:", err);
+      });
+  }, [isDraftPodMatch, resultRecorded, winner]);
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();
@@ -2167,6 +2194,19 @@ function GameOverScreen({
                 {runOver
                   ? t("gamePage.gameOver.backToDraft")
                   : t("gamePage.gameOver.continueRun")}
+              </button>
+            ) : isDraftPodMatch ? (
+              <button
+                disabled={!resultRecorded}
+                onClick={() => navigate("/draft-pod")}
+                className={gameButtonClass({
+                  tone: isVictory ? "amber" : "slate",
+                  size: "lg",
+                  disabled: !resultRecorded,
+                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                })}
+              >
+                {t("gamePage.gameOver.backToDraft")}
               </button>
             ) : isOnlineMode ? (
               <button
@@ -2324,6 +2364,18 @@ function OptionalEffectModal() {
   if (waitingFor?.type !== "OptionalEffectChoice" && waitingFor?.type !== "OpponentMayChoice") return null;
 
   return <OptionalEffectModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
+// ── Top or Bottom Choice Modal (CR 401.4) ──────────────────────────────
+
+function TopOrBottomModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "TopOrBottomChoice" && waitingFor?.type !== "ClashCardPlacement") return null;
+
+  return <TopOrBottomChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
 // ── Untap Choice Modal ─────────────────────────────────────────────────

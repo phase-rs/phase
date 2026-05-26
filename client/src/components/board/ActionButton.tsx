@@ -10,6 +10,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
+import { useBlockRequirements } from "../combat/useBlockRequirements.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
@@ -76,6 +77,16 @@ export function ActionButton() {
   const clearCombatSelection = useUiStore((s) => s.clearCombatSelection);
   const setCombatMode = useUiStore((s) => s.setCombatMode);
   const setCombatClickHandler = useUiStore((s) => s.setCombatClickHandler);
+
+  // Engine-declared per-attacker minimum-blocker requirements (menace /
+  // "blocked by N or more"). Used to block confirmation while any attacker is
+  // under-assigned, so the player gets a clear message instead of an engine
+  // rejection (CR 702.111b / CR 509.1b).
+  const { byAttacker: blockRequirements } = useBlockRequirements();
+  const incompleteBlockCount = useMemo(
+    () => Array.from(blockRequirements.values()).filter((r) => r.status === "incomplete").length,
+    [blockRequirements],
+  );
 
   const canCompanionToHand = useGameStore((s) =>
     s.legalActions.some((a) => a.type === "CompanionToHand"),
@@ -302,9 +313,9 @@ export function ActionButton() {
             {blockerAssignments.size > 0 ? (
               <>
                 <button
-                  disabled={actionPending}
+                  disabled={actionPending || incompleteBlockCount > 0}
                   onClick={handleConfirmBlockers}
-                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionPending, className: primaryButtonClass })}
+                  className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionPending || incompleteBlockCount > 0, className: primaryButtonClass })}
                 >
                   {t("actionButton.confirmBlockers", { count: blockerAssignments.size })}
                 </button>
@@ -330,6 +341,11 @@ export function ActionButton() {
             {pendingBlocker !== null && (
               <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-full border border-cyan-300/25 bg-cyan-950/80 px-4 py-2 text-sm font-medium text-cyan-100 shadow-lg backdrop-blur-xl">
                 {t("actionButton.selectAttackerForBlocker")}
+              </div>
+            )}
+            {pendingBlocker === null && incompleteBlockCount > 0 && (
+              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-full border border-amber-300/30 bg-amber-950/85 px-4 py-2 text-sm font-medium text-amber-100 shadow-lg backdrop-blur-xl">
+                {t("combat.blockIncomplete", { count: incompleteBlockCount })}
               </div>
             )}
           </>

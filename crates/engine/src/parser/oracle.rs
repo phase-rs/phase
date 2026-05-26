@@ -271,7 +271,7 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
 ///   1. CR 122.1: an optional "with [N] [type] counter(s) on it" clause →
 ///      populates `Effect::ChangeZone::enter_with_counters`.
 ///   2. An optional "If you do, [effect]" follow-up sentence → becomes a
-///      `sub_ability` gated by `AbilityCondition::IfYouDo`, so the dependent
+///      `sub_ability` gated by `AbilityCondition::effect_performed()`, so the dependent
 ///      effect only fires when the player accepts the begin-game opt-in.
 ///
 /// Mirrors `try_parse_opening_hand_reveal_delayed_trigger` end-to-end shape and
@@ -345,7 +345,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
         if has_unimplemented(&sub) {
             return None;
         }
-        def = def.sub_ability(sub.condition(AbilityCondition::IfYouDo));
+        def = def.sub_ability(sub.condition(AbilityCondition::effect_performed()));
     }
 
     Some(def)
@@ -5328,7 +5328,7 @@ mod tests {
             .sub_ability
             .as_deref()
             .expect("'If you do, exile a card from your hand' must create a sub-ability");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
         assert!(
             !has_unimplemented(sub),
             "exile-from-hand sub-ability must not be Unimplemented: {:?}",

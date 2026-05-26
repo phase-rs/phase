@@ -1948,11 +1948,11 @@ fn is_annihilator_attack_trigger(t: &TriggerDefinition) -> bool {
 }
 
 /// Idempotency-shape predicate for `synthesize`-installed Evolve triggers.
-/// `TriggerMode::Evolved` is unique to the Evolve keyword, so the mode alone
+/// `TriggerMode::Evolve` is unique to the Evolve keyword, so the mode alone
 /// uniquely identifies a synthesized Evolve trigger — no execute-shape check
 /// is needed (or wanted: it would disambiguate nothing).
 fn is_evolve_trigger(t: &TriggerDefinition) -> bool {
-    matches!(t.mode, TriggerMode::Evolved)
+    matches!(t.mode, TriggerMode::Evolve)
 }
 
 fn is_myriad_attack_trigger(t: &TriggerDefinition) -> bool {
@@ -2185,7 +2185,7 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
 /// satisfied for free by `triggers_for` being invoked per keyword instance.
 fn build_evolve_trigger() -> TriggerDefinition {
     // CR 122.1: put a single +1/+1 counter on the Evolve creature itself.
-    let put_counter = AbilityDefinition::new(
+    let mut put_counter = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PutCounter {
             counter_type: CounterType::Plus1Plus1,
@@ -2194,6 +2194,7 @@ fn build_evolve_trigger() -> TriggerDefinition {
         },
     )
     .description("Put a +1/+1 counter on this creature".to_string());
+    put_counter.ability_tag = Some(AbilityTag::Evolve);
 
     // CR 702.100a "and/or": fire if the entering creature's power is greater
     // OR its toughness is greater than this creature's. CR 603.4: this is the
@@ -2234,7 +2235,7 @@ fn build_evolve_trigger() -> TriggerDefinition {
     // `valid_card` selects any creature the trigger controller controls
     // (including the Evolve creature itself — its self-vs-self P/T comparison
     // yields equal values, so the strict-`GT` intervening-if filters it out).
-    TriggerDefinition::new(TriggerMode::Evolved)
+    TriggerDefinition::new(TriggerMode::Evolve)
         .destination(Zone::Battlefield)
         .valid_card(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),

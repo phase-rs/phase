@@ -1,0 +1,4 @@
+interface:
+  display_name: "Engine Implementer"
+  short_description: "Plan, implement, review, commit"
+  default_prompt: "Use $engine-implementer to plan, implement, review, and commit this engine change."
