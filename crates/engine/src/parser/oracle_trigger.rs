@@ -4487,11 +4487,19 @@ fn with_triggering_player_controller(filter: TargetFilter) -> TargetFilter {
 // ---------------------------------------------------------------------------
 
 /// Parse the "to <target>" qualifier that follows a damage verb.
-/// Returns a `TargetFilter` for the three common cases:
-/// - "to a player"         → `Player`
-/// - "to an opponent"      → opponent-controlled TypedFilter
-/// - "to you"              → `Controller`
 ///
+/// CR 102.2: In a two-player game, "another player" is exactly the controller's
+/// opponent. The engine's `ControllerRef::Opponent` evaluates at runtime as
+/// `source_controller != player_id`, which correctly matches any player who is
+/// not the source controller in games of any size.
+///
+/// Returns a `TargetFilter` for the recognized recipient phrases:
+/// - "to a player"                  → `Player`
+/// - "to an opponent"               → opponent-controlled TypedFilter
+/// - "to another player"            → opponent-controlled TypedFilter (CR 102.2)
+/// - "to one of your opponents"     → opponent-controlled TypedFilter
+/// - "to you"                       → `Controller`
+/// - "to a player or planeswalker"  → `Or { Player, Planeswalker }`
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
     let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("to "))
         .parse(after_verb.trim_start())
@@ -4519,6 +4527,12 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                 tag("one of your opponents"),
+            ),
+            // CR 102.2: "Another player" = any player other than the controller
+            // (ControllerRef::Opponent evaluates as source_controller != player_id).
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("another player"),
             ),
             value(TargetFilter::Controller, tag("you")),
         ))
