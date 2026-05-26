@@ -2516,6 +2516,17 @@ fn evaluate_replacement_condition(
                 .count();
             matching_count >= *minimum as usize
         }
+        // CR 716.2a: A Class-level replacement applies only while the source
+        // Class enchantment is at the gated level or higher. Mirrors the
+        // `StaticCondition::ClassLevelGE` evaluation in `layers.rs` — read
+        // the source object's `class_level` and compare. When the source
+        // object is missing (e.g. removed mid-event), the replacement does
+        // not apply (conservative; matches CR 716.4 "ceases to exist").
+        ReplacementCondition::ClassLevelGE { level } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.class_level)
+            .is_some_and(|current| current >= *level),
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.

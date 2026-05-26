@@ -688,8 +688,18 @@ fn resolve_ref(
     // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
     // `FilterContext::recipient_id` so recipient-relative filter properties
     // resolve against the per-object recipient bound by the layer evaluator.
+    // CR 119.5 + CR 603.3c: When the ability is being resolved with a
+    // scoped controller (e.g. Betor's third sub-ability with
+    // `player_scope: Opponent` re-binding `ability.controller` to each
+    // opponent in turn), filters embedded inside the condition's
+    // `QuantityCheck` ("creatures you control have total toughness ≥ 40")
+    // must still resolve from the *original* controller's perspective.
+    // The condition check belongs to the trigger source's controller, not
+    // to whichever player the scope iteration is currently visiting.
+    // `original_controller` is preserved across scope iteration; fall back
+    // to the live controller when no scope swap is active.
     let mut filter_ctx = match ability {
-        Some(a) => FilterContext::from_ability(a),
+        Some(a) => FilterContext::from_ability_with_controller(a, controller),
         None => FilterContext::from_source_with_controller(source_id, controller),
     };
     filter_ctx.recipient_id = ctx.recipient;

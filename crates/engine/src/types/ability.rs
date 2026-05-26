@@ -9559,6 +9559,12 @@ pub enum ReplacementCondition {
         minimum: u32,
         filter: TargetFilter,
     },
+    /// CR 716.2a: Replacement effect granted by a Class enchantment level —
+    /// applies only while the source Class is at `level` or higher. Parallels
+    /// `StaticCondition::ClassLevelGE`. Innkeeper's Talent level 3 (the
+    /// "twice that many of each of those kinds of counters" doubling
+    /// replacement) is the canonical case.
+    ClassLevelGE { level: u8 },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
