@@ -19,6 +19,20 @@ Before Step 1, confirm the following. **Model** and **Thinking level** are advis
 
 ---
 
+## 0.25. Notation — skill invocation
+
+Throughout this document, skills are written with a leading `$` (Codex convention), e.g. `$engine-implementer`, `$review-impl`, `$review-engine-plan`, `$engine-planner`. If you are running under Claude Code, substitute a leading `/` instead — `/engine-implementer`, `/review-impl`, etc. Both forms invoke the same skill file under `.claude/skills/<name>/SKILL.md`. Pick the form your runtime understands; do not mix them in a single command.
+
+---
+
+## 0.5. Out-of-scope paths — `mtgish` is dormant
+
+`mtgish/`, `crates/mtgish-import/`, and `data/mtgish-*` are **dormant** — they are NOT live consumers of the engine, parser, or card data. The runtime pipeline is MTGJSON → `crates/engine/src/parser/` → `client/public/card-data.json`.
+
+Do not modify any mtgish path. Do not mirror new engine variants, struct-variant fields, or parser changes into `mtgish-import` "for consistency." PRs that only touch mtgish files will be rejected on sight. If a tool, audit, or skill steers you toward mtgish, treat the reference as historical and stay in `crates/engine/`.
+
+---
+
 ## 1. Pick your track
 
 | Track | You (the human) have... | The LLM will... |

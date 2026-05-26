@@ -9,6 +9,8 @@ Produce an implementation plan for the phase.rs engine. Design for the class, no
 
 This skill produces the plan only. The plan-review loop belongs to the caller — when invoked from `/engine-implementer`, the orchestrator owns the loop. When invoked standalone, run `/review-engine-plan` against the plan yourself and iterate until clean.
 
+> **⚠️ `mtgish` is dormant — out of scope for ALL plans.** Never plan changes to `mtgish/`, `crates/mtgish-import/`, or `data/mtgish-*`. The import pipeline is not a live consumer of the engine or parser; new variants, parser patterns, and effects do NOT need to be mirrored there. If a task description references mtgish, surface the contradiction and stop — do not silently include mtgish in the plan.
+
 ## Input
 
 A task description: parser enhancement/fix, or engine mechanic enhancement/fix. May reference cards, Oracle text patterns, CR rules, or coverage gaps.
