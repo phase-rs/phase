@@ -2297,7 +2297,20 @@ fn apply_selected_target_cost_modifiers(
     ability: &ResolvedAbility,
     mana_cost: &mut ManaCost,
 ) {
-    apply_all_cost_modifiers_inner(state, player, object_id, Some(ability), true, mana_cost);
+    // CR 601.2f: After targets are selected, apply only newly knowable
+    // target-sensitive modifiers, then re-run every applicable cost floor.
+    // Floors such as Trinisphere are not target-sensitive, but they must still
+    // see the final post-target total.
+    apply_self_spell_cost_modifiers_inner(state, player, object_id, Some(ability), true, mana_cost);
+    apply_battlefield_cost_modifiers_inner(
+        state,
+        player,
+        object_id,
+        Some(ability),
+        true,
+        mana_cost,
+    );
+    apply_cost_floor_inner(state, player, object_id, Some(ability), false, mana_cost);
 }
 
 fn apply_all_cost_modifiers_inner(
@@ -12110,6 +12123,76 @@ mod tests {
             &mut blue_cost,
         );
         assert_eq!(blue_cost, ManaCost::generic(3));
+    }
+
+    #[test]
+    fn target_gated_reduction_reapplies_general_cost_floor() {
+        let mut state = setup_game_at_main_phase();
+        add_trinisphere(&mut state, PlayerId(0));
+        let spell_id = create_object(
+            &mut state,
+            CardId(994),
+            PlayerId(0),
+            "Target Floor Test".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::generic(3);
+            let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+                amount: ManaCost::generic(2),
+                spell_filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Targets {
+                        filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                            vec![FilterProp::HasColor {
+                                color: ManaColor::Red,
+                            }],
+                        ))),
+                    },
+                ]))),
+                dynamic_count: None,
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = vec![Zone::Hand, Zone::Stack];
+            obj.static_definitions.push(def);
+        }
+
+        let red_creature = create_object(
+            &mut state,
+            CardId(995),
+            PlayerId(1),
+            "Red Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&red_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color.push(ManaColor::Red);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(red_creature)],
+            spell_id,
+            PlayerId(0),
+        );
+        let cost = super::super::casting::apply_selected_target_cost_adjustments(
+            &state,
+            PlayerId(0),
+            spell_id,
+            &ability,
+            ManaCost::generic(3),
+        );
+
+        assert_eq!(
+            cost,
+            ManaCost::generic(3),
+            "Trinisphere must re-floor the cost after target-gated reduction"
+        );
     }
 
     /// CR 601.2f: Cost reductions are applied during cost determination (before
