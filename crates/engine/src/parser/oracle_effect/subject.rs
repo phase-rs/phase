@@ -920,6 +920,18 @@ pub(super) fn parse_subject_application(
             false,
         );
     }
+    if all_consuming(alt((
+        tag("your opponents"),
+        tag::<_, _, OracleError<'_>>("your opponent"),
+    )))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return subject_filter_application(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            false,
+        );
+    }
     // CR 506.3d: "defending player" as subject — resolves from combat state.
     if lower == "defending player" {
         return Some(SubjectApplication {
@@ -2585,6 +2597,8 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
         alt((
             value((), tag::<_, _, OracleError<'_>>("all ")),
             value((), tag("an opponent ")),
+            value((), tag("your opponent ")),
+            value((), tag("your opponents ")),
             value((), tag("any number of ")),
             value((), tag("defending player ")),
             value((), tag("each of ")),
@@ -2925,6 +2939,14 @@ mod tests {
     }
 
     #[test]
+    fn starts_with_subject_prefix_your_opponents() {
+        assert!(starts_with_subject_prefix(
+            "your opponents can't gain life this turn"
+        ));
+        assert!(starts_with_subject_prefix("your opponent discards a card"));
+    }
+
+    #[test]
     fn starts_with_subject_prefix_the_player() {
         assert!(starts_with_subject_prefix("the player draws a card"));
     }
@@ -3038,6 +3060,78 @@ mod tests {
             app.affected,
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
         );
+    }
+
+    #[test]
+    fn parse_subject_your_opponents() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("your opponents", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert_eq!(
+            app.affected,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert!(app.target.is_none());
+    }
+
+    #[test]
+    fn parse_subject_your_opponents_possessive_is_not_bare_opponent_scope() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("your opponents' creatures", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert_ne!(
+            app.affected,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+    }
+
+    #[test]
+    fn parse_subject_your_opponent_may_is_not_treated_as_bare_subject() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("your opponent may", &mut ctx);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn your_opponents_cant_gain_life_builds_restriction() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "Your opponents can't gain life this turn",
+            &mut ctx,
+        )
+        .expect("your opponents life-lock should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+
+        assert_eq!(target, None);
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        let def = &static_abilities[0];
+        assert_eq!(def.mode, StaticMode::CantGainLife);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantGainLife
+            }
+        )));
     }
 
     #[test]

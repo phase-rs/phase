@@ -29431,6 +29431,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn effect_your_opponents_cant_gain_life() {
+        let def = parse_effect_chain(
+            "Your opponents can't gain life this turn",
+            AbilityKind::Activated,
+        );
+        match *def.effect {
+            Effect::GenericEffect {
+                ref static_abilities,
+                ..
+            } => {
+                assert!(
+                    static_abilities
+                        .iter()
+                        .any(|s| s.mode == StaticMode::CantGainLife),
+                    "should contain CantGainLife mode"
+                );
+                assert!(static_abilities.iter().any(|s| {
+                    matches!(
+                        s.affected,
+                        Some(TargetFilter::Typed(TypedFilter {
+                            controller: Some(ControllerRef::Opponent),
+                            ..
+                        }))
+                    )
+                }));
+            }
+            _ => panic!("expected GenericEffect"),
+        }
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+    }
+
     /// End-to-end parser integration test for Teferi's Protection.
     ///
     /// CR 119.7 + CR 119.8 + CR 702.16 + CR 702.26: The full Oracle text
