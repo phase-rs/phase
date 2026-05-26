@@ -92,4 +92,42 @@ mod tests {
             state.waiting_for
         );
     }
+
+    #[test]
+    fn test_resolve_stack_spell_prompts_owner() {
+        let mut state = GameState::new_two_player(42);
+        // CR 108.3 + CR 401.4: a stack spell is moved by its owner, and that owner chooses.
+        let obj_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Stack Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&obj_id).unwrap().controller = PlayerId(0);
+
+        let ability = ResolvedAbility::new(
+            Effect::PutOnTopOrBottom {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(101),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::TopOrBottomChoice {
+                    player: PlayerId(1),
+                    object_id: oid,
+                } if oid == obj_id
+            ),
+            "Expected TopOrBottomChoice for stack spell owner (P1), got {:?}",
+            state.waiting_for
+        );
+    }
 }
