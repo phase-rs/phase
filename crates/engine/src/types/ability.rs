@@ -8642,6 +8642,18 @@ impl AbilityDefinition {
     }
 }
 
+/// Which previous-effect outcome a conditional sub-ability asks about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectOutcomeSignal {
+    /// CR 608.2c / CR 608.2d: "if you do", "if that player does", and "if a
+    /// player does" all read whether the prompted optional effect was
+    /// performed.
+    OptionalEffectPerformed,
+    /// CR 101.3 + CR 608.2c: "for each opponent who can't" reads whether the
+    /// current player-scope iteration's mandatory instruction succeeded.
+    CurrentScopeSucceeded,
+}
+
 /// Condition on an ability within a sub_ability chain.
 /// Checked during resolve_ability_chain before executing the ability.
 /// The condition is a pure predicate — it describes WHAT to check, not the outcome.
@@ -8681,8 +8693,11 @@ pub enum AbilityCondition {
     /// the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
-    /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
-    IfYouDo,
+    /// CR 608.2c / CR 608.2d / CR 101.3: Gates a sub-ability on the outcome of
+    /// a previous instruction in the same resolution. Parameterized so
+    /// optional-decline and mandatory-impossible branches share one condition
+    /// family instead of proliferating `IfYouDo`-style siblings.
+    EffectOutcome { signal: EffectOutcomeSignal },
     /// CR 608.2c: "If you won" — sub_ability executes only if this ability's
     /// controller won the triggering event, such as a clash or coin flip. Falls
     /// back to `optional_effect_performed` for in-chain clash continuations
@@ -8731,9 +8746,6 @@ pub enum AbilityCondition {
     /// Unlike AdditionalCostPaidInstead (which reads SpellContext.additional_cost_paid),
     /// this reads GameObject.cast_variant_paid from the game state.
     CastVariantPaidInstead { variant: CastVariantPaid },
-    /// CR 608.2d: "If a player does" / "if they do" — gates sub_ability on whether
-    /// any prompted opponent accepted an "any opponent may" optional effect.
-    IfAPlayerDoes,
     /// CR 608.2c: General-purpose quantity comparison condition on effects.
     /// "if its power is N or greater" / "if its toughness is less than N" etc.
     /// Composes existing `QuantityExpr` and `Comparator` building blocks.
@@ -8879,6 +8891,35 @@ pub enum AbilityCondition {
 }
 
 impl AbilityCondition {
+    /// CR 608.2c / CR 608.2d: "if you do", "if that player does", and "if a
+    /// player does" all read the same optional-effect-performed signal.
+    pub fn effect_performed() -> Self {
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        }
+    }
+
+    /// CR 101.3 + CR 608.2c: "for each opponent who can't" reads whether the
+    /// current player-scope iteration's mandatory instruction succeeded.
+    pub fn current_scope_succeeded() -> Self {
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::CurrentScopeSucceeded,
+        }
+    }
+
+    pub fn is_effect_outcome(&self) -> bool {
+        matches!(self, AbilityCondition::EffectOutcome { .. })
+    }
+
+    pub fn is_optional_effect_performed(&self) -> bool {
+        matches!(
+            self,
+            AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed
+            }
+        )
+    }
+
     /// Default `min_count` for `AdditionalCostPaid` is 1 (any single payment).
     /// Used by serde `#[serde(default = ...)]`.
     pub(crate) fn default_min_count() -> u32 {
@@ -8980,7 +9021,7 @@ pub struct SpellContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<KickerVariant>,
     /// Whether an optional "you may" effect was performed during resolution.
-    /// Used by AbilityCondition::IfYouDo to gate dependent sub_abilities.
+    /// Used by AbilityCondition::effect_performed() to gate dependent sub_abilities.
     #[serde(default)]
     pub optional_effect_performed: bool,
     /// CR 608.2d: The player who accepted an "any opponent may" optional effect.

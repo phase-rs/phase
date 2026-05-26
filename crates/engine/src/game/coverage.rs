@@ -10,12 +10,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
-    DoublePTMode, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp, GainLifePlayer,
+    GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -4991,7 +4991,14 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (crates/engine/src/game/effects/mod.rs).
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
-        AbilityCondition::IfYouDo => ("IfYouDo", Handled),
+        AbilityCondition::EffectOutcome { signal } => match signal {
+            EffectOutcomeSignal::OptionalEffectPerformed => {
+                ("EffectOutcomeOptionalPerformed", Handled)
+            }
+            EffectOutcomeSignal::CurrentScopeSucceeded => {
+                ("EffectOutcomeCurrentScopeSucceeded", Handled)
+            }
+        },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
@@ -4999,7 +5006,6 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
-        AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
         AbilityCondition::QuantityCheck { .. } => ("QuantityCheck", Handled),
         AbilityCondition::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
         AbilityCondition::CastDuringPhase { .. } => ("CastDuringPhase", Handled),

@@ -15382,10 +15382,10 @@ mod tests {
         );
 
         let sub_ability = execute.sub_ability.as_ref().expect("If you do sub-ability");
-        assert!(matches!(
-            sub_ability.condition,
-            Some(AbilityCondition::IfYouDo)
-        ));
+        assert!(sub_ability
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed));
         let Effect::GenericEffect {
             static_abilities, ..
         } = sub_ability.effect.as_ref()
@@ -17238,7 +17238,7 @@ mod tests {
 
         assert_eq!(
             sub.condition,
-            Some(AbilityCondition::IfYouDo),
+            Some(AbilityCondition::effect_performed()),
             "sub-ability must be gated by IfYouDo so it only fires when the player accepted"
         );
         assert!(
@@ -19236,7 +19236,7 @@ mod tests {
         assert_eq!(
             sub.condition,
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::IfYouDo)
+                condition: Box::new(AbilityCondition::effect_performed())
             })
         );
         match &*sub.effect {
@@ -20969,7 +20969,7 @@ mod snapshot_tests {
         let Some(token) = pay_cost.sub_ability.as_deref() else {
             panic!("expected if-you-do token tail");
         };
-        assert_eq!(token.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(token.condition, Some(AbilityCondition::effect_performed()));
         let Some(haste) = token.sub_ability.as_deref() else {
             panic!("expected if-you-won haste tail");
         };

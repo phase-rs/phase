@@ -154,7 +154,10 @@ fn if_you_do_object_anchor(
     clauses: &[ClauseIr],
     condition: &Option<AbilityCondition>,
 ) -> Option<TargetFilter> {
-    if !matches!(condition, Some(AbilityCondition::IfYouDo)) {
+    if !condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_optional_effect_performed)
+    {
         return None;
     }
     clauses
@@ -11898,13 +11901,18 @@ pub(crate) fn parse_effect_chain_ir(
         // action). Retarget the preceding clause's trailing boundary to `Then`
         // so this clause lowers as a within-action `ContinuationStep` — never a
         // `SequentialSibling` that would resolve even when the opponent accepts.
-        let (text, condition, is_consequence_head) =
-            if let Some(body) = strip_for_each_opponent_who_doesnt(&text) {
-                // CR 608.2e: Do NOT stamp `player_scope` on the body — it
-                // inherits the parent `Sacrifice(opponent)` node's
-                // `player_scope: Opponent` iteration by being its `sub_ability`
-                // inside the scoped clone. The `Not{IfYouDo}` condition makes it
-                // a decline branch; recipient rebinds resolve "that player"/"you".
+        let (text, condition, is_decline_head) =
+            if let Some((body, decline_condition)) = strip_for_each_opponent_who_doesnt(&text) {
+                // CR 608.2e + CR 101.3: Do NOT stamp `player_scope` on the body
+                // — it inherits the parent's `player_scope: Opponent` iteration
+                // by being its `sub_ability` inside the scoped clone. The
+                // `Not{...}` wrapper makes it the decline branch:
+                //   - `Not{IfYouDo}` for "doesn't / does not" (Braids-class,
+                //     optional parent — CR 118.12 optional-cost branch).
+                //   - `Not{IfCurrentScopeSucceeded}` for "can't / cannot"
+                //     (Refurbished-Familiar-class, mandatory parent — CR 101.3
+                //     + CR 118.12 mandatory-cost branch).
+                // Recipient rebinds resolve "that player"/"you".
                 if let Some(prev) = clauses.last_mut() {
                     if prev.boundary == Some(ClauseBoundary::Sentence) {
                         prev.boundary = Some(ClauseBoundary::Then);
@@ -11914,7 +11922,7 @@ pub(crate) fn parse_effect_chain_ir(
                 (
                     body,
                     Some(AbilityCondition::Not {
-                        condition: Box::new(AbilityCondition::IfYouDo),
+                        condition: Box::new(decline_condition),
                     }),
                     true,
                 )
@@ -11937,7 +11945,7 @@ pub(crate) fn parse_effect_chain_ir(
         // Recipient rebinds apply to every chunk of the decline-consequence
         // sentence; the `Not{IfYouDo}` condition and `player_scope` only to the
         // head chunk that carried the "for each opponent who doesn't" prefix.
-        let is_decline_consequence = is_consequence_head || decline_consequence_active;
+        let is_decline_consequence = is_decline_head || decline_consequence_active;
 
         let (text, mut unless_pay) = extract_resolution_unless_pay_modifier(&text);
 
@@ -14337,31 +14345,54 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     (Some(scope), deconjugated)
 }
 
-/// CR 608.2e + CR 608.2c: Strip a leading "For each opponent who doesn't, "
-/// decline-tail prefix. This is a separate sentence whose body ("that player
-/// loses N life and you draw a card") runs once per opponent who declined the
-/// preceding "each opponent may <optional action>" — i.e. it is a per-opponent
-/// iteration gated on the decline of the optional action. Returns the body text
-/// on match; the caller stamps `player_scope: Opponent` + `condition:
-/// Not{IfYouDo}` on the resulting clause so the body resolves per declining
-/// opponent. The `tag()`/`alt()` chain is both the detector and the consumer —
-/// no `contains()`/`starts_with()`.
-fn strip_for_each_opponent_who_doesnt(text: &str) -> Option<String> {
+/// CR 608.2e + CR 608.2c + CR 101.3: Strip a leading "For each opponent who
+/// doesn't / does not / can't / cannot, " decline-tail prefix. Two shapes:
+///
+/// - **Optional-decline** (`doesn't` / `does not`): Braids-class. The parent is
+///   "each opponent may <optional action>"; the body runs once per opponent
+///   who declined the optional action. Returns `AbilityCondition::effect_performed()` —
+///   caller wraps in `Not { IfYouDo }` so the body fires on the decline branch
+///   (CR 118.12 optional-cost branch + CR 608.2d).
+/// - **Mandatory-impossible** (`can't` / `cannot`): Refurbished-Familiar-class.
+///   The parent is "each opponent <bare imperative>"; the body runs once per
+///   opponent who couldn't perform the action (empty hand for discard, no
+///   permanent to sacrifice, etc.). Returns
+///   `AbilityCondition::current_scope_succeeded()` — caller wraps in `Not` so
+///   the body fires on the mandatory-impossible branch (CR 101.3 +
+///   CR 118.12 mandatory-cost branch).
+///
+/// The matched-arm condition is returned alongside the residual body so the
+/// caller can stamp the right gate on the sub_ability. The `tag()`/`alt()`
+/// chain is both the detector and the consumer — no
+/// `contains()`/`starts_with()`.
+fn strip_for_each_opponent_who_doesnt(text: &str) -> Option<(String, AbilityCondition)> {
     let lower = text.to_lowercase();
     nom_on_lower(text, &lower, |i| {
-        value(
-            (),
-            preceded(
-                alt((
-                    tag("for each opponent who doesn't"),
-                    tag("for each opponent who does not"),
-                )),
-                preceded(opt(tag(",")), opt(multispace1)),
+        alt((
+            value(
+                AbilityCondition::effect_performed(),
+                preceded(
+                    alt((
+                        tag("for each opponent who doesn't"),
+                        tag("for each opponent who does not"),
+                    )),
+                    preceded(opt(tag(",")), opt(multispace1)),
+                ),
             ),
-        )
+            value(
+                AbilityCondition::current_scope_succeeded(),
+                preceded(
+                    alt((
+                        tag("for each opponent who can't"),
+                        tag("for each opponent who cannot"),
+                    )),
+                    preceded(opt(tag(",")), opt(multispace1)),
+                ),
+            ),
+        ))
         .parse(i)
     })
-    .map(|((), rest)| rest.to_string())
+    .map(|(cond, rest)| (rest.to_string(), cond))
 }
 
 /// CR 608.2c: Strip a leading "For each opponent who can't, " consequence
@@ -20397,7 +20428,7 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("Rhystic Lightning must chain the if-they-do alternative");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
         assert!(
             matches!(
                 *sub.effect,
@@ -27596,7 +27627,7 @@ mod tests {
         while let Some(d) = current {
             effects.push(std::mem::discriminant(&*d.effect));
             // Check else_ability on any node with IfYouDo condition
-            if d.condition == Some(AbilityCondition::IfYouDo) {
+            if d.condition == Some(AbilityCondition::effect_performed()) {
                 if let Some(else_ab) = &d.else_ability {
                     effects.push(std::mem::discriminant(&*else_ab.effect));
                 }
@@ -29706,7 +29737,7 @@ mod tests {
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
         assert_eq!(
             sub.condition,
-            Some(AbilityCondition::IfAPlayerDoes),
+            Some(AbilityCondition::effect_performed()),
             "sub condition should be IfAPlayerDoes"
         );
         assert!(
@@ -29739,7 +29770,10 @@ mod tests {
             .as_ref()
             .expect("controller sacrifice chains to the each-opponent sacrifice");
         assert!(matches!(*sac_opponent.effect, Effect::Sacrifice { .. }));
-        assert_eq!(sac_opponent.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(
+            sac_opponent.condition,
+            Some(AbilityCondition::effect_performed())
+        );
         assert_eq!(
             sac_opponent.player_scope,
             Some(PlayerFilter::Opponent),
@@ -29754,7 +29788,7 @@ mod tests {
         assert_eq!(
             lose_life.condition,
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::IfYouDo)
+                condition: Box::new(AbilityCondition::effect_performed())
             }),
             "the decline body runs only for an opponent who did NOT sacrifice"
         );
@@ -29788,8 +29822,73 @@ mod tests {
         }
     }
 
+    /// CR 101.3 + CR 608.2c + CR 118.12: Refurbished Familiar / Aclazotz,
+    /// Deepest Betrayal — mandatory-impossible decline-tail. "each opponent
+    /// discards a card. For each opponent who can't, you draw a card." must
+    /// lower to a `Discard(opponent)` node (`player_scope: Opponent`) whose
+    /// `Not{IfCurrentScopeSucceeded}`-conditioned body is
+    /// `Draw { target: OriginalController }`, a `ContinuationStep` link.
+    /// Asserted alongside the unchanged `Not{IfYouDo}` shape for the
+    /// `doesn't` arm to guard against the new arm cross-contaminating.
     #[test]
-    fn for_each_opponent_who_cant_uses_previous_discard_count() {
+    fn for_each_opponent_who_cant_lowers_to_if_current_scope_succeeded() {
+        use crate::types::ability::SubAbilityLink;
+        let def = parse_effect_chain(
+            "each opponent discards a card. For each opponent who can't, you draw a card.",
+            AbilityKind::Spell,
+        );
+        // Root: each opponent discards — player_scope: Opponent.
+        assert!(matches!(*def.effect, Effect::Discard { .. }));
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the discard iterates per opponent"
+        );
+        // Decline body: Draw, gated on Not{IfCurrentScopeSucceeded}.
+        let draw = def
+            .sub_ability
+            .as_ref()
+            .expect("discard chains to the decline body");
+        assert_eq!(
+            draw.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::current_scope_succeeded())
+            }),
+            "the can't body runs only for an opponent whose mandatory discard failed"
+        );
+        assert_eq!(draw.sub_link, SubAbilityLink::ContinuationStep);
+        match &*draw.effect {
+            Effect::Draw { target, .. } => assert_eq!(
+                target,
+                &TargetFilter::OriginalController,
+                "\"you draw a card\" is the printed controller"
+            ),
+            other => panic!("expected Draw, got {other:?}"),
+        }
+
+        // Regression guard: the "doesn't" arm must still stamp Not{IfYouDo},
+        // NOT the new IfCurrentScopeSucceeded variant. Use a Braids-shaped
+        // optional parent so the doesn't arm is reachable.
+        let braids_like = parse_effect_chain(
+            "each opponent may sacrifice a creature of their choice. For each \
+             opponent who doesn't, you draw a card.",
+            AbilityKind::Spell,
+        );
+        let braids_draw = braids_like
+            .sub_ability
+            .as_ref()
+            .expect("optional sacrifice chains to the decline body");
+        assert_eq!(
+            braids_draw.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed())
+            }),
+            "the doesn't arm must still stamp Not{{IfYouDo}} (optional-decline branch)"
+        );
+    }
+
+    #[test]
+    fn for_each_opponent_who_cant_is_case_insensitive() {
         use crate::types::ability::SubAbilityLink;
 
         let def = parse_effect_chain(
@@ -29804,16 +29903,15 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("discard should chain to the can't consequence");
-        assert_eq!(draw.player_scope, Some(PlayerFilter::Opponent));
-        assert_eq!(draw.sub_link, SubAbilityLink::SequentialSibling);
+        assert_eq!(
+            draw.player_scope, None,
+            "the body inherits the surrounding opponent scope instead of starting a second loop"
+        );
+        assert_eq!(draw.sub_link, SubAbilityLink::ContinuationStep);
         assert_eq!(
             draw.condition,
-            Some(AbilityCondition::QuantityCheck {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
-                comparator: Comparator::LT,
-                rhs: QuantityExpr::Fixed { value: 1 },
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::current_scope_succeeded())
             })
         );
         match &*draw.effect {
@@ -29834,7 +29932,7 @@ mod tests {
         );
         assert!(def.optional);
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
     }
 
     #[test]
@@ -29862,7 +29960,7 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("sacrifice should chain to copy spell");
-        assert_eq!(copy.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(copy.condition, Some(AbilityCondition::effect_performed()));
         assert!(matches!(*copy.effect, Effect::CopySpell { .. }));
     }
 
@@ -29903,7 +30001,7 @@ mod tests {
             AbilityKind::Spell,
         );
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
         let else_ab = sub.else_ability.as_ref().expect("should have else_ability");
         assert!(
             matches!(*else_ab.effect, Effect::Draw { .. }),
@@ -30369,7 +30467,7 @@ mod tests {
         match result {
             Some(AbilityCondition::Or { conditions }) => {
                 assert_eq!(conditions.len(), 2);
-                assert!(matches!(conditions[0], AbilityCondition::IfYouDo));
+                assert!(conditions[0].is_optional_effect_performed());
                 assert!(matches!(
                     conditions[1],
                     AbilityCondition::QuantityCheck {
@@ -37542,7 +37640,10 @@ mod snapshot_tests {
             }
         ));
         let followup = def.sub_ability.as_ref().expect("expected followup");
-        assert_eq!(followup.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(
+            followup.condition,
+            Some(AbilityCondition::effect_performed())
+        );
         assert!(followup.sub_ability.is_none());
         assert!(matches!(
             &*followup.effect,

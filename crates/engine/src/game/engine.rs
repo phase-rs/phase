@@ -13607,7 +13607,7 @@ mod phase_trigger_regression_tests {
             PlayerId(0),
         );
         let mut draw = draw_that_many(source_id, PlayerId(0));
-        draw.condition = Some(AbilityCondition::IfYouDo);
+        draw.condition = Some(AbilityCondition::effect_performed());
         ability.sub_ability = Some(Box::new(draw));
 
         state.pending_optional_effect = Some(Box::new(ability));
@@ -13764,7 +13764,7 @@ mod phase_trigger_regression_tests {
             source_id,
             PlayerId(0),
         );
-        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        alternative.condition = Some(AbilityCondition::effect_performed());
         primary.sub_ability = Some(Box::new(alternative));
 
         // Player 1 (the unless payer) starts with 20 life and 2 energy to pay.
@@ -13822,7 +13822,7 @@ mod phase_trigger_regression_tests {
             source_id,
             PlayerId(0),
         );
-        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        alternative.condition = Some(AbilityCondition::effect_performed());
         primary.sub_ability = Some(Box::new(alternative));
 
         state.waiting_for = WaitingFor::UnlessPayment {
@@ -13926,7 +13926,7 @@ mod phase_trigger_regression_tests {
             source_id,
             PlayerId(0),
         );
-        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        alternative.condition = Some(AbilityCondition::effect_performed());
         primary.sub_ability = Some(Box::new(alternative));
 
         state.players[1].energy = 2;

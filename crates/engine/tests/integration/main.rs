@@ -60,6 +60,7 @@ mod master_of_ceremonies;
 mod mystic_forge_regression;
 mod oracle_parser;
 mod ponder_decline_shuffle_regression;
+mod refurbished_familiar;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;
 mod rite_of_consumption_damage;

@@ -3871,7 +3871,7 @@ pub mod tests {
                 target: TargetFilter::Controller,
             },
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
         let pay_then_draw = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PayCost {
