@@ -17602,6 +17602,7 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
             origin: Some(Zone::Battlefield),
             ..
         } => Some("return"),
+        Effect::Bounce { .. } | Effect::BounceAll { .. } => Some("return"),
         Effect::Sacrifice { .. } => Some("sacrifice"),
         Effect::Tap { .. } | Effect::TapAll { .. } => Some("tap"),
         Effect::Untap { .. } | Effect::UntapAll { .. } => Some("untap"),
@@ -18021,11 +18022,7 @@ mod tests {
         );
 
         match &clause.effect {
-            Effect::ChangeZone {
-                destination,
-                target,
-                ..
-            } if *destination == Zone::Hand => {
+            Effect::Bounce { target, .. } => {
                 let tf = typed_leg(target).expect("primary return target should be typed");
                 assert_eq!(
                     tf.controller,
@@ -18033,18 +18030,14 @@ mod tests {
                     "primary return target should remain 'you control'",
                 );
             }
-            other => panic!("primary clause must be ChangeZone to hand, got {:?}", other),
+            other => panic!("primary clause must be Bounce, got {:?}", other),
         }
 
         let sub = clause
             .sub_ability
             .expect("must have sub_ability for compound return");
         match sub.effect.as_ref() {
-            Effect::ChangeZone {
-                destination,
-                target,
-                ..
-            } if *destination == Zone::Hand => {
+            Effect::Bounce { target, .. } => {
                 let tf = typed_leg(target).expect("sub return target should be typed");
                 assert_eq!(
                     tf.controller,
@@ -18052,7 +18045,7 @@ mod tests {
                     "sub return target should resolve to 'you don't control'",
                 );
             }
-            other => panic!("sub-clause must be ChangeZone to hand, got {:?}", other),
+            other => panic!("sub-clause must be Bounce, got {:?}", other),
         }
     }
 
