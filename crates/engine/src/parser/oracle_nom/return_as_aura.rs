@@ -18,16 +18,16 @@
 //! caller's `try_fold_loses_other_sibling` consumes (see
 //! `parser/oracle_effect/mod.rs`).
 //!
-//! Body closure detection uses `after_open_quote.find('"')` — the first
-//! closing `"`. This works for the three-card class because no member nests
-//! inner double quotes; single-quoted segments inside the body are fine. If a
-//! future card nests `"..."` inside the outer block, the body parser must
-//! track double-quote depth.
+//! Body closure detection consumes up to the first closing `"`. This works for
+//! the three-card class because no member nests inner double quotes;
+//! single-quoted segments inside the body are fine. If a future card nests
+//! `"..."` inside the outer block, the body parser must track double-quote
+//! depth.
 //!
 //! Returns `(TargetFilter, Vec<ContinuousModification>, bool /* loses_other */)`.
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_till1};
 use nom::combinator::value;
 use nom::Parser;
 
@@ -69,14 +69,12 @@ pub fn try_parse(
     // opener. `split_once_on_lower` returns both halves in original case.
     let (_, after_open_quote) = split_once_on_lower(text, lower, " and \"")?;
 
-    // Step 3: find the closing `"` in original-case `text`. BLOCKER E: body
+    // Step 3: consume the quoted body in original-case `text`. BLOCKER E: body
     // must be non-empty.
-    let close_offset = after_open_quote.find('"')?;
-    let body_original = &after_open_quote[..close_offset];
+    let (after_close_quote, body_original) = parse_quoted_body(after_open_quote).ok()?;
     if body_original.trim().is_empty() {
         return None;
     }
-    let after_close_quote = &after_open_quote[close_offset + 1..];
 
     // Step 4: optional loses-other-abilities suffix (Harold-shape only;
     // Bronzehide-shape is consumed by `try_fold_loses_other_sibling` at the IR
@@ -100,6 +98,12 @@ fn parse_prefix_and_filter(input: &str) -> OracleResult<'_, TargetFilter> {
     let (input, _) = tag("it's an aura enchantment with enchant ").parse(input)?;
     let (input, filter) = parse_enchant_target_full(input)?;
     Ok((input, filter))
+}
+
+fn parse_quoted_body(input: &str) -> OracleResult<'_, &str> {
+    let (input, body) = take_till1(|c| c == '"').parse(input)?;
+    let (input, _) = tag("\"").parse(input)?;
+    Ok((input, body))
 }
 
 /// Loses-clause combinator — Harold-shape only.

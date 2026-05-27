@@ -2973,11 +2973,14 @@ fn apply_action(
             )
             .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             // After resolving the attach, return control to standard priority
-            // flow under the picker's controller.
-            effects::drain_pending_continuation(state, &mut events);
-            WaitingFor::Priority {
+            // flow under the picker's controller, then resume any chain that was
+            // paused behind the picker.
+            state.waiting_for = WaitingFor::Priority {
                 player: active_player,
-            }
+            };
+            state.priority_player = active_player;
+            effects::drain_pending_continuation(state, &mut events);
+            state.waiting_for.clone()
         }
         (
             WaitingFor::EquipTarget {
