@@ -5077,7 +5077,9 @@ fn try_parse_event(
         BecomesSaddled,
         BecomesCrewed,
         BecomesTargetSpellOrAbility,
-        BecomesTargetSpellOnly,
+        BecomesTargetSpell {
+            qualifier: Option<TargetFilter>,
+        },
         DealtCombatDamage,
         DealtDamage,
         BecomesTapped,
@@ -5132,7 +5134,15 @@ fn try_parse_event(
                 tag("becomes the target of a spell or ability"),
             ),
             value(
-                SimpleEvent::BecomesTargetSpellOnly,
+                SimpleEvent::BecomesTargetSpell {
+                    qualifier: Some(TargetFilter::Typed(
+                        TypedFilter::default().subtype("Aura".to_string()),
+                    )),
+                },
+                tag("becomes the target of an aura spell"),
+            ),
+            value(
+                SimpleEvent::BecomesTargetSpell { qualifier: None },
                 tag("becomes the target of a spell"),
             ),
             value(
@@ -5200,10 +5210,18 @@ fn try_parse_event(
                 def.mode = TriggerMode::BecomesTarget;
                 def.valid_card = Some(subject.clone());
             }
-            SimpleEvent::BecomesTargetSpellOnly => {
+            // CR 115.1a + CR 115.1b: "target" spell text defines targeted spells,
+            // and Aura spells are always targeted via enchant.
+            SimpleEvent::BecomesTargetSpell { qualifier } => {
                 def.mode = TriggerMode::BecomesTarget;
                 def.valid_card = Some(subject.clone());
-                def.valid_source = Some(TargetFilter::StackSpell);
+                def.valid_source = Some(if let Some(extra_filter) = qualifier {
+                    TargetFilter::And {
+                        filters: vec![TargetFilter::StackSpell, extra_filter],
+                    }
+                } else {
+                    TargetFilter::StackSpell
+                });
             }
             SimpleEvent::DealtCombatDamage => {
                 def.mode = TriggerMode::DamageReceived;
@@ -15322,6 +15340,25 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::BecomesTarget);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(def.valid_source, Some(TargetFilter::StackSpell));
+    }
+
+    #[test]
+    fn trigger_becomes_target_of_aura_spell_only() {
+        let def = parse_trigger_line(
+            "Whenever this creature becomes the target of an Aura spell, you draw a card.",
+            "Fugitive Druid",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string())),
+                ],
+            })
+        );
     }
 
     #[test]
