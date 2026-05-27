@@ -9,7 +9,7 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration,
     Effect, FilterProp, GainLifePlayer, KickerVariant, ManaContribution, ManaProduction,
     ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PlayerFilter,
-    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticDefinition,
     TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier,
@@ -150,6 +150,7 @@ impl KeywordTriggerInstaller {
                 "M1M1", "-1/-1", "702.79a",
             )],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
@@ -180,6 +181,7 @@ impl KeywordTriggerInstaller {
                 is_dies_return_with_counter_trigger(trigger, &CounterType::Minus1Minus1)
             }
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
+            Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
@@ -1808,6 +1810,13 @@ pub fn synthesize_extort(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Extort));
 }
 
+/// CR 702.105a: Dethrone — an attack trigger that fires whenever this creature
+/// attacks the player with the most life or tied for most life, putting a +1/+1
+/// counter on it. CR 702.105b: each instance triggers separately.
+pub fn synthesize_dethrone(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Dethrone));
+}
+
 /// CR 702.100a: Evolve — an ETB trigger that fires whenever another creature you
 /// control enters with greater power or toughness than the Evolve creature,
 /// putting a +1/+1 counter on it. CR 702.100d: each instance triggers
@@ -1982,7 +1991,32 @@ fn is_myriad_attack_trigger(t: &TriggerDefinition) -> bool {
             ability.optional && matches!(ability.effect.as_ref(), Effect::Myriad)
         })
 }
-
+/// Idempotency-shape predicate for `synthesize_dethrone`. True iff `trigger`
+/// is the synthesized Dethrone attack-trigger shape (`TriggerMode::Attacks`
+/// + `valid_card = SelfRef` + execute = PutCounter(P1P1) on SelfRef
+/// + condition = DefendingPlayer life >= AllPlayers max life).
+fn is_dethrone_attack_trigger(t: &TriggerDefinition) -> bool {
+    if !matches!(t.mode, TriggerMode::Attacks)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        || !matches!(
+            t.attack_target_filter,
+            Some(crate::types::triggers::AttackTargetFilter::Player)
+        )
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ) && t.condition.is_some()
+}
 fn is_echo_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::PayEcho)
         && t.phase == Some(Phase::Upkeep)
@@ -2288,6 +2322,60 @@ fn build_extort_trigger() -> TriggerDefinition {
              If you do, each opponent loses 1 life and you gain that much life."
                 .to_string(),
         )
+}
+
+/// CR 702.105a: Dethrone — "Whenever a creature with dethrone attacks the
+/// player with the most life or tied for most life, put a +1/+1 counter on
+/// that creature."
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Dethrone`, so every printed
+/// Dethrone card and every creature granted Dethrone at runtime gets an identical
+/// trigger. CR 702.105b: each instance triggers separately.
+fn build_dethrone_trigger() -> TriggerDefinition {
+    // CR 122.1: put a single +1/+1 counter on the Dethrone creature itself.
+    let put_counter = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("Put a +1/+1 counter on this creature".to_string());
+
+    // CR 702.105a: "attacks the player with the most life or tied for most
+    // life". The defending player's life total must be >= the maximum life
+    // total among all players. This is an intervening-if condition checked
+    // at both detection and resolution per CR 603.4.
+    let condition = TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::DefendingPlayer,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            },
+        },
+    };
+
+    let mut trigger = TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(condition)
+        .execute(put_counter)
+        .description(
+            "CR 702.105a: Dethrone — whenever ~ attacks the player with the most life or tied for most life, put a +1/+1 counter on ~."
+                .to_string(),
+        );
+    // CR 702.105a: Dethrone only triggers when attacking a player, not a
+    // planeswalker or battle.
+    trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
+    trigger
 }
 
 /// CR 702.100a: Evolve — "Whenever a creature you control enters, if that
@@ -3385,6 +3473,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.101a: Extort — spell-cast trigger that lets you pay {W/B} to drain
     // each opponent for 1 life. CR 702.101b: each instance triggers separately.
     synthesize_extort(face);
+    // CR 702.105a: Dethrone — attack trigger that puts a +1/+1 counter on the
+    // creature whenever it attacks the player with the most life or tied for
+    // most life. CR 702.105b: each instance triggers separately.
+    synthesize_dethrone(face);
     // CR 702.100a: Evolve — ETB trigger that puts a +1/+1 counter on the
     // creature whenever another creature you control enters with greater power
     // or toughness. CR 702.100d: each instance triggers separately.
@@ -5633,8 +5725,6 @@ mod exalted_synthesis_tests {
             .expect("exalted should add an Attacks trigger");
 
         assert!(matches!(trigger.mode, TriggerMode::Attacks));
-
-        // Condition must be Not(MinCoAttackers { minimum: 1 })
         assert!(matches!(
             trigger.condition,
             Some(TriggerCondition::Not { .. })
@@ -5832,6 +5922,101 @@ mod extort_synthesis_tests {
         assert_eq!(state.players[0].life, 22);
         assert_eq!(state.players[1].life, 19);
         assert_eq!(state.players[2].life, 19);
+    }
+}
+
+#[cfg(test)]
+mod dethrone_tests {
+    //! CR 702.105a: Dethrone synthesis tests. The synthesized trigger must be
+    //! `TriggerMode::Attacks` with `valid_card = SelfRef`, an intervening-if
+    //! condition comparing the defending player's life total against the maximum
+    //! life total among all players, and execute body `Effect::PutCounter` with
+    //! a single +1/+1 counter on `SelfRef`.
+    use super::*;
+
+    fn dethrone_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Dethrone);
+        face
+    }
+
+    /// CR 702.105a: synthesizer emits an `Attacks` trigger with execute body
+    /// `Effect::PutCounter(P1P1)` on SelfRef and a life-total condition.
+    #[test]
+    fn synthesize_dethrone_adds_attack_trigger() {
+        let mut face = dethrone_face();
+        synthesize_dethrone(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_dethrone_attack_trigger(t))
+            .expect("dethrone should add an Attacks trigger");
+
+        assert!(
+            matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
+            "valid_card must be SelfRef so the trigger fires only when this creature attacks"
+        );
+        assert_eq!(
+            trigger.attack_target_filter,
+            Some(crate::types::triggers::AttackTargetFilter::Player),
+            "attack_target_filter must be Player so the trigger fires only when attacking a player"
+        );
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("execute body must be Effect::PutCounter");
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+        assert!(matches!(target, TargetFilter::SelfRef));
+        assert!(
+            trigger.condition.is_some(),
+            "dethrone trigger must have an intervening-if condition"
+        );
+    }
+
+    #[test]
+    fn synthesize_dethrone_is_idempotent() {
+        let mut face = dethrone_face();
+        synthesize_dethrone(&mut face);
+        synthesize_dethrone(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_dethrone_attack_trigger(t))
+            .count();
+        assert_eq!(count, 1, "dethrone trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_dethrone_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_dethrone(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.105b: multiple instances trigger separately.
+    #[test]
+    fn synthesize_dethrone_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Dethrone);
+        face.keywords.push(Keyword::Dethrone);
+        synthesize_dethrone(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_dethrone_attack_trigger(t))
+            .count();
+        assert_eq!(count, 2);
     }
 }
 
