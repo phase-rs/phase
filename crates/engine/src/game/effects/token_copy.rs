@@ -454,12 +454,68 @@ fn apply_token_modifications(
                     token.base_card_types.subtypes.retain(|s| s != subtype);
                 }
             }
+            // CR 707.9b: "except it's 1/1" — set base and live P/T so the
+            // override persists through layer resets. Used by Offspring
+            // (CR 702.175a) and Saw in Half.
+            ContinuousModification::SetPower { value } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_power = Some(*value);
+                    token.power = Some(*value);
+                }
+            }
+            ContinuousModification::SetToughness { value } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_toughness = Some(*value);
+                    token.toughness = Some(*value);
+                }
+            }
+            // CR 707.9b: fixed additive P/T exceptions are baked into the
+            // token's copiable values by updating both base and live P/T.
+            ContinuousModification::AddPower { value } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_power = token.base_power.map(|p| p + *value);
+                    token.power = token.power.map(|p| p + *value);
+                }
+            }
+            ContinuousModification::AddToughness { value } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_toughness = token.base_toughness.map(|t| t + *value);
+                    token.toughness = token.toughness.map(|t| t + *value);
+                }
+            }
+            // CR 707.9b: "except its base power and toughness are each equal
+            // to half [X]" (Saw in Half). Dynamic quantity resolved at
+            // creation time and stamped as base P/T.
+            ContinuousModification::SetPowerDynamic { value } => {
+                let controller = state
+                    .objects
+                    .get(&token_id)
+                    .map(|o| o.controller)
+                    .unwrap_or(crate::types::player::PlayerId(0));
+                let val = resolve_quantity(state, value, controller, token_id);
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_power = Some(val);
+                    token.power = Some(val);
+                }
+            }
+            ContinuousModification::SetToughnessDynamic { value } => {
+                let controller = state
+                    .objects
+                    .get(&token_id)
+                    .map(|o| o.controller)
+                    .unwrap_or(crate::types::player::PlayerId(0));
+                let val = resolve_quantity(state, value, controller, token_id);
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.base_toughness = Some(val);
+                    token.toughness = Some(val);
+                }
+            }
             // CR 707.2 + CR 702 keyword grants flow through `extra_keywords`,
             // not here. Other layered-only modifications (CopyValues,
-            // ChangeController, dynamic P/T, etc.) are intentionally
-            // skipped — their "stamp at copy time" interpretation is
-            // ambiguous, and a future except body needing them should
-            // route through the BecomeCopy layered path instead.
+            // ChangeController, etc.) are intentionally skipped — their
+            // "stamp at copy time" interpretation is ambiguous, and a
+            // future except body needing them should route through the
+            // BecomeCopy layered path instead.
             _ => {}
         }
     }
@@ -470,10 +526,11 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, CostPaidObjectSnapshot, Effect, FilterProp, TargetFilter, TargetRef,
+        ContinuousModification, ControllerRef, CostPaidObjectSnapshot, Effect, FilterProp,
+        ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TargetRef, TypeFilter,
         TypedFilter,
     };
-    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::identifiers::ObjectId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
@@ -1202,9 +1259,6 @@ mod tests {
     /// must coexist on the battlefield without state-based action collapse.
     #[test]
     fn copy_token_remove_supertype_strips_legendary_from_token() {
-        use crate::types::ability::ContinuousModification;
-        use crate::types::card_type::Supertype;
-
         let mut state = GameState::new_two_player(42);
         // Source is a legendary creature (e.g., a Dragon).
         let source_id = create_object(
@@ -1277,8 +1331,6 @@ mod tests {
     /// the same primitive on the token-copy path.
     #[test]
     fn copy_token_add_counter_on_enter_unconditional() {
-        use crate::types::ability::{ContinuousModification, QuantityExpr};
-
         let mut state = GameState::new_two_player(42);
         let source_id = create_object(
             &mut state,
@@ -1344,8 +1396,6 @@ mod tests {
     /// planeswalker copy).
     #[test]
     fn copy_token_add_counter_on_enter_if_type_mismatch_skips() {
-        use crate::types::ability::{ContinuousModification, QuantityExpr};
-
         let mut state = GameState::new_two_player(42);
         // Copy source: a planeswalker (no Creature core type).
         let source_id = create_object(
@@ -1427,9 +1477,6 @@ mod tests {
     /// semantics, and the equipped-creature relationship.
     #[test]
     fn helm_of_the_host_token_copy_strips_legendary_from_equipped_creature() {
-        use crate::types::ability::{ContinuousModification, FilterProp, TypeFilter, TypedFilter};
-        use crate::types::card_type::Supertype;
-
         let mut state = GameState::new_two_player(42);
 
         // Equipped creature: a legendary 7/7 Dragon (e.g., Bahamut).
@@ -1560,5 +1607,163 @@ mod tests {
             Zone::Battlefield,
             "non-legendary token-copy must remain on battlefield"
         );
+    }
+
+    /// CR 702.175a: Offspring creates a token that's a copy of the creature,
+    /// except it's 1/1. `SetPower`/`SetToughness` in `additional_modifications`
+    /// must override the copied base P/T at creation time.
+    #[test]
+    fn offspring_token_is_1_1_not_copy_pt() {
+        let mut state = GameState::new_two_player(42);
+
+        // Create a 3/2 creature (the "parent" with offspring).
+        let parent_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coruscation Mage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let parent = state.objects.get_mut(&parent_id).unwrap();
+            parent.base_power = Some(3);
+            parent.base_toughness = Some(2);
+            parent.power = Some(3);
+            parent.toughness = Some(2);
+            parent.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Human".to_string(), "Wizard".to_string()],
+            };
+            parent.card_types = parent.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+
+        // Simulate the offspring ETB trigger: CopyTokenOf with SetPower(1), SetToughness(1).
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![
+                    ContinuousModification::SetPower { value: 1 },
+                    ContinuousModification::SetToughness { value: 1 },
+                ],
+            },
+            vec![],
+            parent_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Find the token (newest object).
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+
+        // Token must be 1/1, not 3/2.
+        assert_eq!(
+            token.base_power,
+            Some(1),
+            "offspring token base_power must be 1"
+        );
+        assert_eq!(
+            token.base_toughness,
+            Some(1),
+            "offspring token base_toughness must be 1"
+        );
+        assert_eq!(token.power, Some(1), "offspring token power must be 1");
+        assert_eq!(
+            token.toughness,
+            Some(1),
+            "offspring token toughness must be 1"
+        );
+        // Name and types are still copied.
+        assert_eq!(token.name, "Coruscation Mage");
+        assert!(token.card_types.subtypes.contains(&"Wizard".to_string()));
+        assert!(token.is_token);
+    }
+
+    /// CR 707.9b: dynamic copy exceptions are resolved after the copied values
+    /// are stamped onto the token, then baked into the token's base P/T.
+    #[test]
+    fn copy_token_dynamic_pt_exception_uses_copied_values() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sawed Beast".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(5);
+            source.base_toughness = Some(4);
+            source.power = Some(5);
+            source.toughness = Some(4);
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Beast".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![
+                    ContinuousModification::SetPowerDynamic {
+                        value: QuantityExpr::DivideRounded {
+                            inner: Box::new(QuantityExpr::Ref {
+                                qty: QuantityRef::Power {
+                                    scope: ObjectScope::Source,
+                                },
+                            }),
+                            divisor: 2,
+                            rounding: RoundingMode::Up,
+                        },
+                    },
+                    ContinuousModification::SetToughnessDynamic {
+                        value: QuantityExpr::DivideRounded {
+                            inner: Box::new(QuantityExpr::Ref {
+                                qty: QuantityRef::Toughness {
+                                    scope: ObjectScope::Source,
+                                },
+                            }),
+                            divisor: 2,
+                            rounding: RoundingMode::Up,
+                        },
+                    },
+                ],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert_eq!(token.base_power, Some(3));
+        assert_eq!(token.power, Some(3));
+        assert_eq!(token.base_toughness, Some(2));
+        assert_eq!(token.toughness, Some(2));
+        assert_eq!(token.name, "Sawed Beast");
+        assert!(token.is_token);
     }
 }

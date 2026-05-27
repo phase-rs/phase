@@ -7,6 +7,8 @@ description: "End-to-end phase.rs implementation pipeline: plan, review-plan, im
 
 This is the orchestrator for the phase.rs implementation pipeline. It runs as a **skill in the main thread** so it can spawn agents for every step that benefits from fresh context (plan review, surgical implementation, implementation review). Do not turn this into an agent — agents cannot spawn sub-agents, which is what made earlier versions silently degrade.
 
+> **⚠️ `mtgish` is dormant — DO NOT route implementation work through it.** `mtgish/`, `crates/mtgish-import/`, and `data/mtgish-*` are NOT live consumers of the engine, parser, or card data. Reject any plan section, executor edit, or review fix that touches mtgish files; surface it to the user instead of silently shipping it. PRs that only modify mtgish are rejected on sight.
+
 ## Roles
 
 | Step | Where it runs | Why |

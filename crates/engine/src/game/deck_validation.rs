@@ -99,7 +99,12 @@ pub fn evaluate_deck_compatibility(
     let unknown_cards = collect_unknown_cards(db, request);
     let standard = evaluate_standard(db, request, &unknown_cards);
     let commander = evaluate_commander(db, request, &unknown_cards);
-    let bo3_ready = !request.sideboard.is_empty();
+    // CR 100.4a / CR 903.5e: A "BO3-ready" deck is one with a real sideboard
+    // the format actually uses. Decks that declare a commander are
+    // Commander-style (CR 903) — their submitted sideboard slot is Phase's
+    // builder-only Maybeboard staging area and the engine drops it at load
+    // time, so they are never BO3-ready regardless of slot occupancy.
+    let bo3_ready = !request.sideboard.is_empty() && request.commander.is_empty();
     let color_identity = collect_color_identity(db, request);
 
     let (selected_format_compatible, selected_format_reasons) = evaluate_selected_format(
@@ -131,7 +136,12 @@ fn evaluate_deck_compatibility_summary(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
 ) -> DeckCompatibilityResult {
-    let bo3_ready = !request.sideboard.is_empty();
+    // CR 100.4a / CR 903.5e: A "BO3-ready" deck is one with a real sideboard
+    // the format actually uses. Decks that declare a commander are
+    // Commander-style (CR 903) — their submitted sideboard slot is Phase's
+    // builder-only Maybeboard staging area and the engine drops it at load
+    // time, so they are never BO3-ready regardless of slot occupancy.
+    let bo3_ready = !request.sideboard.is_empty() && request.commander.is_empty();
     let (mut selected_format_compatible, mut selected_format_reasons, unknown_cards) =
         evaluate_selected_format_summary(db, request);
 
@@ -181,7 +191,12 @@ pub fn validate_deck_for_format(
     let unknown_cards = collect_unknown_cards(db, request);
     let standard = evaluate_standard(db, request, &unknown_cards);
     let commander = evaluate_commander(db, request, &unknown_cards);
-    let bo3_ready = !request.sideboard.is_empty();
+    // CR 100.4a / CR 903.5e: A "BO3-ready" deck is one with a real sideboard
+    // the format actually uses. Decks that declare a commander are
+    // Commander-style (CR 903) — their submitted sideboard slot is Phase's
+    // builder-only Maybeboard staging area and the engine drops it at load
+    // time, so they are never BO3-ready regardless of slot occupancy.
+    let bo3_ready = !request.sideboard.is_empty() && request.commander.is_empty();
     let (compatible, reasons) = evaluate_selected_format(
         db,
         request,
@@ -387,6 +402,19 @@ impl CommanderVariantRules {
     }
 }
 
+/// Strip the sideboard slot from a request before running the validators
+/// that share `all_deck_cards`/`combined_copy_counts`. Commander, Brawl, and
+/// their variants drop the sideboard at game load (CR 903.5e), so its
+/// contents must not contribute to singleton, color-identity, or legality
+/// rules. The original request is preserved for callers that still need it
+/// (e.g. unknown-card collection, which is computed once upstream).
+fn request_without_sideboard(request: &DeckCompatibilityRequest) -> DeckCompatibilityRequest {
+    DeckCompatibilityRequest {
+        sideboard: Vec::new(),
+        ..request.clone()
+    }
+}
+
 /// Shared commander-variant validator. Commander, Duel Commander, and Pauper
 /// Commander all use 100-card-singleton deck shape with a command zone; only
 /// the legality table, commander eligibility, and display label differ.
@@ -400,6 +428,11 @@ fn evaluate_commander_with_format(
     format_label: &str,
     rules: CommanderVariantRules,
 ) -> CompatibilityCheck {
+    // CR 903.5e: the sideboard is dropped at game load for Commander-style
+    // formats. Re-scope the request so singleton, color-identity, and legality
+    // checks operate on the actual game deck.
+    let stripped = request_without_sideboard(request);
+    let request = &stripped;
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
@@ -449,12 +482,11 @@ fn evaluate_commander_with_format(
         }
     }
 
-    // CR 903.5e (+ variant rules): Commander-style formats do not use sideboards.
-    if !request.sideboard.is_empty() {
-        reasons.push(format!(
-            "{format_label} decks should not include a sideboard"
-        ));
-    }
+    // CR 903.5e (+ variant rules): Commander-style formats do not start the
+    // game with a sideboard. We accept extra entries in the submitted list
+    // (Phase's deck builder uses that slot as a builder-only "Maybeboard"
+    // staging area) and enforce CR 903.5e at game load by dropping them —
+    // see `load_deck_into_state` in `deck_loading.rs`.
 
     let represented_in_main = request
         .commander
@@ -590,6 +622,10 @@ fn evaluate_brawl(
     legality_format: LegalityFormat,
     format_label: &str,
 ) -> CompatibilityCheck {
+    // CR 903.5e (Brawl variant): drop the sideboard slot before shape /
+    // singleton / identity checks — it is not part of the loaded deck.
+    let stripped = request_without_sideboard(request);
+    let request = &stripped;
     let mut reasons = Vec::new();
 
     if !unknown_cards.is_empty() {
@@ -616,16 +652,9 @@ fn evaluate_brawl(
         }
     }
 
-    // CR 903.5e (via Brawl variant): Brawl formats do not use sideboards.
-    if matches!(
-        GameFormat::Brawl.sideboard_policy(),
-        SideboardPolicy::Forbidden
-    ) && !request.sideboard.is_empty()
-    {
-        reasons.push(format!(
-            "{format_label} decks should not include a sideboard"
-        ));
-    }
+    // CR 903.5e (via Brawl variant): Brawl formats do not start the game with
+    // a sideboard. Extra entries in the submitted list are silently ignored at
+    // load time — see `load_deck_into_state` in `deck_loading.rs`.
 
     // Exactly 60 total cards (main + commander, accounting for commander listed in main)
     let represented_in_main = request
@@ -1294,11 +1323,13 @@ fn quick_commander_check(
             request.commander.len()
         ));
     }
-    if !request.sideboard.is_empty() {
-        return QuickCheckResult::incompatible(format!(
-            "{format_label} decks should not include a sideboard"
-        ));
-    }
+    // CR 903.5e: Commander-style formats do not start with a sideboard. Extra
+    // entries in the submitted list are silently ignored at game load (see
+    // `load_deck_into_state` in `deck_loading.rs`) — strip them here so the
+    // shape, singleton, and color-identity checks below operate on the actual
+    // loaded deck.
+    let stripped = request_without_sideboard(request);
+    let request = &stripped;
 
     let represented_in_main = request
         .commander
@@ -2433,6 +2464,10 @@ mod tests {
         main.push("Commander Banned".to_string());
         let request = DeckCompatibilityRequest {
             main_deck: main,
+            // CR 903.5e: a Commander deck's sideboard slot is Phase's
+            // builder-only Maybeboard — extra entries are accepted by the
+            // validator and dropped at game load. They must not contribute
+            // to the singleton count below.
             sideboard: vec!["Legal Standard".to_string()],
             commander: vec!["Legal Standard".to_string()],
             selected_format: None,
@@ -2442,11 +2477,6 @@ mod tests {
 
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(!result.commander.compatible);
-        assert!(result
-            .commander
-            .reasons
-            .iter()
-            .any(|r| r.contains("should not include a sideboard")));
         assert!(result
             .commander
             .reasons
@@ -3851,7 +3881,11 @@ mod tests {
     }
 
     #[test]
-    fn commander_sideboard_policy_forbidden_rejects_any_sideboard() {
+    fn commander_sideboard_policy_accepts_maybeboard_entries() {
+        // CR 903.5e: Phase's deck builder reuses the sideboard slot as a
+        // builder-only "Maybeboard" for Commander-style formats. The
+        // validator must accept extra entries (the engine drops them at game
+        // load) and the deck must not be flagged as BO3-ready.
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         let request = DeckCompatibilityRequest {
             main_deck: expand("Plains", 99),
@@ -3862,11 +3896,14 @@ mod tests {
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
-        assert_eq!(result.selected_format_compatible, Some(false));
-        assert!(result
-            .selected_format_reasons
-            .iter()
-            .any(|r| r.contains("should not include a sideboard")));
+        assert_eq!(
+            result.selected_format_compatible,
+            Some(true),
+            "reasons: {:?}",
+            result.selected_format_reasons
+        );
+        assert!(result.commander.compatible);
+        assert!(!result.bo3_ready, "commander decks are never BO3-ready");
     }
 
     #[test]
