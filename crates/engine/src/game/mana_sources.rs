@@ -517,13 +517,23 @@ pub fn display_land_mana_pips(
                     ManaPip::CombinationOfColors(color_options.clone()),
                 );
             }
-            // CR 106.1a: Display the chosen color when available; otherwise
-            // surface as a generic "any color" choice across WUBRG so the
-            // frame still renders something meaningful.
-            ManaProduction::ChosenColor { .. } => match obj.chosen_color() {
-                Some(color) => push(&mut pips, ManaPip::Color(color)),
-                None => push(&mut pips, ManaPip::OneOfColors(ManaColor::ALL.to_vec())),
-            },
+            // CR 106.1a: Display the chosen color when available. If the
+            // ability also has a fixed alternative ("{G} or one mana of the
+            // chosen color"), show both available mana choices.
+            ManaProduction::ChosenColor {
+                fixed_alternative, ..
+            } => {
+                if let Some(color) = fixed_alternative {
+                    push(&mut pips, ManaPip::Color(*color));
+                }
+                match obj.chosen_color() {
+                    Some(color) => push(&mut pips, ManaPip::Color(color)),
+                    None if fixed_alternative.is_none() => {
+                        push(&mut pips, ManaPip::OneOfColors(ManaColor::ALL.to_vec()));
+                    }
+                    None => {}
+                }
+            }
             // CR 106.7: Dynamically computed from opponent lands.
             ManaProduction::OpponentLandColors { .. } => {
                 let colors: Vec<ManaColor> = opponent_land_color_options(state, controller)
@@ -1367,7 +1377,9 @@ mod tests {
 
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityDefinition, AbilityKind, ManaContribution, QuantityExpr};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ChosenAttribute, ManaContribution, QuantityExpr,
+    };
     use crate::types::identifiers::CardId;
 
     fn verge_ability(color: ManaColor) -> AbilityDefinition {
@@ -1425,6 +1437,13 @@ mod tests {
     /// `display_land_mana_pips` against it. Used by the parametric pip table
     /// below to verify every variant projects to the expected `Vec<ManaPip>`.
     fn pips_for_production(production: ManaProduction) -> Vec<ManaPip> {
+        pips_for_production_with_chosen_color(production, None)
+    }
+
+    fn pips_for_production_with_chosen_color(
+        production: ManaProduction,
+        chosen_color: Option<ManaColor>,
+    ) -> Vec<ManaPip> {
         let mut state = GameState::new_two_player(42);
         let id = create_object(
             &mut state,
@@ -1435,6 +1454,9 @@ mod tests {
         );
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
+        if let Some(color) = chosen_color {
+            obj.chosen_attributes.push(ChosenAttribute::Color(color));
+        }
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
@@ -1661,6 +1683,24 @@ mod tests {
             fixed_alternative: None,
         });
         assert_eq!(chosen, vec![ManaPip::OneOfColors(ManaColor::ALL.to_vec())]);
+
+        // CR 106.1a: Thriving Grove-style producers display both the fixed
+        // alternative and the source's chosen color.
+        let fixed_or_chosen = pips_for_production_with_chosen_color(
+            ManaProduction::ChosenColor {
+                count: QuantityExpr::Fixed { value: 1 },
+                contribution: ManaContribution::Base,
+                fixed_alternative: Some(ManaColor::Green),
+            },
+            Some(ManaColor::Red),
+        );
+        assert_eq!(
+            fixed_or_chosen,
+            vec![
+                ManaPip::Color(ManaColor::Green),
+                ManaPip::Color(ManaColor::Red)
+            ]
+        );
 
         // CR 605.3b + CR 106.1a: Filter-land combinations (Mystic Gate-style)
         // collapse to the union of all colors across combos.

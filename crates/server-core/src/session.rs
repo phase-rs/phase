@@ -259,14 +259,19 @@ impl GameSession {
             MatchConfig::default()
         };
         // Preserve sandbox seeding through rematch — the format flag is
-        // immutable, so debug capability survives the new game.
+        // immutable, so debug capability survives the new game. Every seat
+        // is permitted by default (see initial create site for rationale);
+        // explicit revocations from the previous game are dropped at rematch
+        // since the new game is a fresh debug context.
         if self.state.format_config.allow_debug_actions {
             self.state.debug_mode = true;
-            self.state.debug_permitted.insert(PlayerId(0));
+            for i in 0..player_count {
+                self.state.debug_permitted.insert(PlayerId(i));
+            }
         }
     }
 
-    pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta) {
+    pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta, db: &CardDatabase) {
         let old_player_count = self.player_count;
         let new_player_count = new_state.seats.len() as u8;
 
@@ -350,8 +355,36 @@ impl GameSession {
             }
         }
 
-        for &(seat_idx, _, ref deck) in &delta.new_ai {
-            self.decks[seat_idx as usize] = Some(deck.clone());
+        // SeatDelta carries name-only `PlayerDeckList` (see DeckResolver docs);
+        // server-core's `self.decks` stores the fully-resolved `PlayerDeckPayload`
+        // because `start_game` and the broadcast paths consume that shape.
+        // Resolve at the boundary using the live `CardDatabase`. `resolve_deck`
+        // takes a `DeckData` which has the same shape as `PlayerDeckList`.
+        for (seat_idx, _, ref deck) in &delta.new_ai {
+            let deck_data = crate::starter_decks::DeckData {
+                main_deck: deck.main_deck.clone(),
+                sideboard: deck.sideboard.clone(),
+                commander: deck.commander.clone(),
+            };
+            // The resolver (`ServerDeckResolver::resolve` in phase-server)
+            // has already validated these names against the same `db`, so
+            // this should never error in practice. The `Err` arm exists as
+            // defense-in-depth — if it does fire, log loudly: `start_game`
+            // below would otherwise substitute an empty deck and silently
+            // eliminate the player on their first draw step (CR 704.5b).
+            self.decks[*seat_idx as usize] = match crate::resolve_deck(db, &deck_data) {
+                Ok(payload) => Some(payload),
+                Err(err) => {
+                    warn!(
+                        seat = *seat_idx,
+                        error = %err,
+                        "AI deck failed re-resolution at apply_seat_delta despite \
+                         passing the resolver gate; seat will start with an empty \
+                         library — investigate the resolver/DB mismatch",
+                    );
+                    None
+                }
+            };
         }
         for &seat_idx in &delta.removed_ai {
             if seat_idx as usize >= self.decks.len() {
@@ -611,11 +644,15 @@ impl SessionManager {
         // Sandbox capability: the engine-level `debug_mode` gate must agree
         // with the transport-level `allow_debug_actions` flag, otherwise a
         // sandbox-permitted action would pass the server gate only to be
-        // rejected inside `apply`. The host (PlayerId(0)) is seeded as the
-        // sole holder of debug permission; they grant/revoke for others.
+        // rejected inside `apply`. Every seat is permitted by default — a
+        // sandbox is a shared playground, not an admin console. The host's
+        // grant/revoke flow remains (for the rare "kick this seat out of
+        // debug" case) but is no longer the gate for normal sandbox use.
         if state.format_config.allow_debug_actions {
             state.debug_mode = true;
-            state.debug_permitted.insert(PlayerId(0));
+            for i in 0..player_count {
+                state.debug_permitted.insert(PlayerId(i));
+            }
         }
 
         let session = GameSession {
@@ -1486,14 +1523,17 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_game_seeds_host_in_debug_permitted() {
+    fn sandbox_game_seeds_all_seats_in_debug_permitted() {
+        // Sandbox is a shared playground: every seat is permitted by default
+        // so any participant can drive debug tools without an admin gate.
         let mut mgr = SessionManager::new();
         let (code, _token) = create_sandbox_game(&mut mgr);
         let session = mgr.sessions.get(&code).unwrap();
         assert!(session.state.format_config.allow_debug_actions);
         assert!(session.state.debug_mode);
         assert!(session.state.debug_permitted.contains(&PlayerId(0)));
-        assert_eq!(session.state.debug_permitted.len(), 1);
+        assert!(session.state.debug_permitted.contains(&PlayerId(1)));
+        assert_eq!(session.state.debug_permitted.len(), 2);
     }
 
     #[test]
@@ -1565,12 +1605,25 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_rejects_debug_from_non_host_without_permission() {
+    fn sandbox_rejects_debug_from_revoked_seat() {
+        // Default is "all seats permitted" — a guest is only rejected after
+        // an explicit revoke. This exercises the revoke escape hatch.
         let mut mgr = SessionManager::new();
-        let (code, _host_token) = create_sandbox_game(&mut mgr);
+        let (code, host_token) = create_sandbox_game(&mut mgr);
         let (guest_token, _state) = mgr
             .join_game_with_name(&code, make_deck(), "Guest".to_string())
             .expect("guest joins");
+
+        // Host revokes the guest's default permission.
+        let revoke = mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(1),
+            },
+        );
+        assert!(revoke.is_ok(), "revoke must succeed: {:?}", revoke.err());
+
         let result = mgr.handle_action(
             &code,
             &guest_token,

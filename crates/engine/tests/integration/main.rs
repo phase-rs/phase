@@ -61,6 +61,7 @@ mod magnetic_mountain_choose_and_pay;
 mod mana_drain_refund;
 mod master_of_ceremonies;
 mod mystic_forge_regression;
+mod old_growth_troll_return_as_aura;
 mod oracle_parser;
 mod ponder_decline_shuffle_regression;
 mod refurbished_familiar;

@@ -224,22 +224,27 @@ pub(crate) fn payable_spell_alternative_cost(
         return None;
     }
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
-    // alternative-cost cards until the pending-cast flow can compose
+    // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.
     if obj.additional_cost.is_some() {
         return None;
     }
 
     obj.casting_options.iter().find_map(|option| {
-        if option.kind != SpellCastingOptionKind::AlternativeCost {
-            return None;
-        }
         if option.condition.as_ref().is_some_and(|condition| {
             !restrictions::evaluate_condition(state, player, object_id, condition)
         }) {
             return None;
         }
-        let cost = option.cost.clone()?;
+        let cost = match option.kind {
+            SpellCastingOptionKind::AlternativeCost => option.cost.clone()?,
+            SpellCastingOptionKind::CastWithoutManaCost => AbilityCost::Mana {
+                cost: ManaCost::NoCost,
+            },
+            SpellCastingOptionKind::AsThoughHadFlash | SpellCastingOptionKind::CastAdventure => {
+                return None;
+            }
+        };
         if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
             Some(cost)
         } else {
@@ -1143,7 +1148,14 @@ pub(super) fn push_activated_ability_to_stack(
             resolved,
             crate::types::mana::ManaCost::NoCost,
         );
-        pending_act.activation_cost = remaining_cost.cloned();
+        // CR 602.2b: The remainder of the process for activating an ability is
+        // identical to the process for casting a spell listed in rules 601.2b–i.
+        // Note: The engine currently pays non-mana costs (Tap, Sacrifice, etc.)
+        // before target selection, which is a shortcut that deviates from the
+        // strict CR 601.2 order (targets at 601.2c, costs at 601.2h). To prevent
+        // double-payment when target selection resumes, we clear the activation
+        // cost here — it was already consumed above (issue #897 class).
+        pending_act.activation_cost = None;
         pending_act.activation_ability_index = Some(ability_index);
         return Ok(WaitingFor::TargetSelection {
             player,
@@ -2534,8 +2546,8 @@ pub(super) fn pay_and_push_adventure(
         return enter_payment_step(state, player, convoke_mode, events);
     }
 
-    // CR 107.4f + CR 601.2f: Pause for interactive Phyrexian choice when the cost has
-    // at least one shard with both mana and 2-life viable. The resume handler calls
+    // CR 107.4f + CR 601.2f: Pause before any Phyrexian shard would deduct life,
+    // whether life is optional or the only legal route. The resume handler calls
     // `finalize_mana_payment_with_phyrexian_choices` which finishes the cast.
     if let Some(waiting) = maybe_pause_for_phyrexian_choice(
         state,
@@ -3953,6 +3965,18 @@ pub fn enter_payment_step(
         }
     }
 
+    if state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|pending| pending.deferred_target_selection)
+    {
+        let pending = *state
+            .pending_cast
+            .take()
+            .expect("checked pending cast presence");
+        return begin_deferred_target_selection(state, player, pending, events);
+    }
+
     // CR 601.2h: Auto-finalize when no player-level decision remains. Convoke requires
     // the caster to choose which creatures to tap, so it always surfaces the modal.
     if convoke_mode.is_none() {
@@ -4318,8 +4342,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
 /// Auto-taps mana sources first (idempotent: already-tapped lands are skipped) so the
 /// shard-options computation reflects the pool the caster will actually spend from.
 /// Returns `Some(WaitingFor::PhyrexianPayment {...})` when at least one Phyrexian shard
-/// has `ShardOptions::ManaOrLife`; otherwise returns `None` so the caller proceeds with
-/// the existing auto-decision path.
+/// can deduct life; otherwise returns `None` so the caller proceeds with the existing
+/// auto-decision path.
 pub(super) fn maybe_pause_for_phyrexian_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -4405,25 +4429,45 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     let permissions =
         super::static_abilities::build_cost_permission_context(state, player, any_color);
 
-    let shards = {
+    let (shards, payable) = {
         let player_data = state.players.iter().find(|p| p.id == player)?;
-        mana_payment::compute_phyrexian_shards(
+        let shards = mana_payment::compute_phyrexian_shards(
             &player_data.mana_pool,
             cost,
             effective_payment_context,
             permissions,
-        )
+        );
+        // CR 601.2h: Only pause when the cost is actually payable in aggregate.
+        // Phyrexian shards may surface as `LifeOnly` even when the non-Phyrexian
+        // portion (e.g., a {1} generic shard) is unpayable; in that case the
+        // downstream finalizer must reject with "Cannot pay mana cost" rather
+        // than pausing on an unpayable cast.
+        let payable = mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            effective_payment_context,
+            permissions,
+        );
+        (shards, payable)
     };
+    if !payable {
+        return None;
+    }
 
-    // CR 107.4f + CR 601.2f: Pause iff the choice is meaningful — at least one shard
-    // has both options viable. Trivial-choice shards auto-resolve without pausing.
-    let has_meaningful_choice = shards.iter().any(|s| {
+    // CR 107.4f + CR 601.2h: Pause whenever any shard would deduct life — either
+    // because the player explicitly chooses (`ManaOrLife`) or because life is the
+    // only remaining payment route (`LifeOnly`). The player retains the CR 601.2h
+    // option to refuse the cast via `CancelCast` rather than have life silently
+    // deducted (issue #704). `ManaOnly` shards have no life consequence and
+    // continue to auto-resolve.
+    let has_life_consequence = shards.iter().any(|s| {
         matches!(
             s.options,
             crate::types::game_state::ShardOptions::ManaOrLife
+                | crate::types::game_state::ShardOptions::LifeOnly,
         )
     });
-    if !has_meaningful_choice {
+    if !has_life_consequence {
         return None;
     }
 

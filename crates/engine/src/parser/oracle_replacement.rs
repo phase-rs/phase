@@ -52,7 +52,12 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 
 /// IR production: parse a replacement line into `ReplacementIr` (pre-lowering).
 pub(crate) fn parse_replacement_line_ir(text: &str, card_name: &str) -> Option<ReplacementIr> {
-    let definition = parse_replacement_line_inner(text, card_name)?;
+    let mut definition = parse_replacement_line_inner(text, card_name)?;
+    if definition.condition.is_none() {
+        if let Some(condition) = parse_replacement_ability_word_condition(text) {
+            definition = definition.condition(condition);
+        }
+    }
     Some(ReplacementIr {
         definition,
         source_text: text.to_string(),
@@ -140,11 +145,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
 
     // --- "~ enters the battlefield tapped" (unconditional) ---
     // Guard: reject text with " unless " or "if you control" — all conditional
-    // patterns must be handled above.
+    // patterns must be handled above. Counter-bearing variants fall through to
+    // `parse_enters_with_counters`, which composes the tap and counter modifiers.
     if (nom_primitives::scan_contains(&norm_lower, "enters the battlefield tapped")
         || nom_primitives::scan_contains(&norm_lower, "enters tapped"))
         && !nom_primitives::scan_contains(&norm_lower, "unless")
         && !nom_primitives::scan_contains(&norm_lower, "if you control")
+        && !has_enters_tapped_with_counter(&norm_lower)
     {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -424,6 +431,17 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         if let Some(def) = parse_manufactor_ensure_all_token_replacement(&lower, &text) {
             return Some(def);
         }
+    }
+
+    // --- Copy-count replacement: "If you would copy a spell one or more times,
+    //     instead copy it that many times plus an additional time." (Twinning
+    //     Staff) ---
+    // CR 707.10 + CR 614.1a: A replacement effect that increases the number of
+    // copies a copy-a-spell effect produces, modeled as a `CopySpell`
+    // replacement carrying a `QuantityModification` — the same shape as the
+    // token / counter doubling family above.
+    if let Some(def) = parse_copy_count_replacement(&lower, &text) {
+        return Some(def);
     }
 
     // --- Counter addition replacement: "if one or more ... counters would be put on..." ---
@@ -1722,6 +1740,17 @@ fn parse_enters_with_counters(
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
     );
+    let execute = if has_enters_tapped_phrase(work_text) {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .sub_ability(put_counter)
+    } else {
+        put_counter
+    };
 
     // Determine valid_card filter: self vs other permanents.
     // CR 614.1c: "each other Angel you control enters with ..." is a
@@ -1781,7 +1810,7 @@ fn parse_enters_with_counters(
         ReplacementEvent::Moved
     };
     let mut def = ReplacementDefinition::new(event)
-        .execute(put_counter)
+        .execute(execute)
         .description(original_text.to_string());
     if let Some(filter) = valid_card {
         def = def.valid_card(filter);
@@ -1815,6 +1844,31 @@ fn parse_enters_with_counters(
     }
 
     Some(def)
+}
+
+fn has_enters_tapped_with_counter(text: &str) -> bool {
+    has_enters_tapped_phrase(text)
+        && preceded(
+            take_until::<_, _, OracleError<'_>>("counter"),
+            tag::<_, _, OracleError<'_>>("counter"),
+        )
+        .parse(text)
+        .is_ok()
+}
+
+fn has_enters_tapped_phrase(text: &str) -> bool {
+    alt((
+        preceded(
+            take_until::<_, _, OracleError<'_>>("enters the battlefield tapped"),
+            tag::<_, _, OracleError<'_>>("enters the battlefield tapped"),
+        ),
+        preceded(
+            take_until::<_, _, OracleError<'_>>("enters tapped"),
+            tag::<_, _, OracleError<'_>>("enters tapped"),
+        ),
+    ))
+    .parse(text)
+    .is_ok()
 }
 
 fn parse_enters_with_where_x_suffix(text: &str) -> Option<QuantityExpr> {
@@ -2268,8 +2322,25 @@ fn replacement_condition_from_static(condition: StaticCondition) -> Option<Repla
         StaticCondition::Not { condition } if *condition == StaticCondition::SourceIsTapped => {
             Some(ReplacementCondition::SourceTappedState { tapped: false })
         }
+        StaticCondition::HasMaxSpeed => Some(ReplacementCondition::HasMaxSpeed),
         _ => None,
     }
+}
+
+fn parse_replacement_ability_word_condition(text: &str) -> Option<ReplacementCondition> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        value(
+            ReplacementCondition::HasMaxSpeed,
+            alt((
+                tag("max speed \u{2014} "),
+                tag("max speed -- "),
+                tag("max speed - "),
+            )),
+        )
+        .parse(input)
+    })
+    .map(|(condition, _)| condition)
 }
 
 fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, bool)> {
@@ -3285,6 +3356,12 @@ fn damage_target_any_player() -> DamageTargetFilter {
     }
 }
 
+fn damage_target_controller() -> DamageTargetFilter {
+    DamageTargetFilter::Player {
+        player: DamageTargetPlayerScope::Controller,
+    }
+}
+
 fn damage_target_opponent() -> DamageTargetFilter {
     DamageTargetFilter::Player {
         player: DamageTargetPlayerScope::Opponent,
@@ -3736,6 +3813,47 @@ pub(super) fn has_except_first_draw_in_draw_step_clause(lower: &str) -> bool {
             .map_or("", |i| remaining[i + 1..].trim_start());
     }
     false
+}
+
+/// CR 707.10 + CR 614.1a: Parse a "copy an additional time" replacement —
+/// "If you would copy a spell one or more times, instead copy it that many
+/// times plus an additional time. You may choose new targets for the additional
+/// copy." (Twinning Staff).
+///
+/// Modeled as a `CopySpell` replacement carrying a `QuantityModification`,
+/// mirroring the token/counter doubling family (Doubling Season, Hardened
+/// Scales). Generalizes to "plus N additional times" via `parse_number`. The
+/// count change is consumed by `copy_spell::copy_count_with_replacements` at the
+/// copy-count site — copies are produced by the `repeat_for` loop, not the
+/// `ProposedEvent` pipeline, so this replacement is queried directly rather than
+/// proposed. The additional copies always permit new targets (standard wording
+/// for this class), satisfied by each copy's existing retarget step.
+fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    use crate::types::ability::QuantityModification;
+
+    // Require the "plus [N] additional time(s)" tail so this only matches the
+    // count-increasing class, not an unrelated one-shot "copy a spell" effect.
+    // Composed from modular combinators along three independent axes — count
+    // (`an` => 1, else a number), the fixed `additional` token, and the
+    // singular/plural `time(s)` noun — rather than enumerating full-phrase tags,
+    // so "plus an additional time" and "plus N additional times" both parse.
+    let additional = nom_on_lower(lower, lower, |i| {
+        let (i, _) = tag(
+            "if you would copy a spell one or more times, instead copy it that many times plus ",
+        )
+        .parse(i)?;
+        let (i, n) = alt((value(1u32, tag("an")), nom_primitives::parse_number)).parse(i)?;
+        let (i, _) = tag(" additional ").parse(i)?;
+        let (i, _) = alt((tag("times"), tag("time"))).parse(i)?;
+        Ok((i, n))
+    })
+    .map(|(n, _)| n)?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::CopySpell)
+            .quantity_modification(QuantityModification::Plus { value: additional })
+            .description(original_text.to_string()),
+    )
 }
 
 /// CR 614.1a: Parse token creation replacement effects.
@@ -4251,7 +4369,7 @@ fn parse_damage_redirection_replacement(
         && nom_primitives::scan_contains(norm_lower, "is dealt to")
     {
         let target_filter = if nom_primitives::scan_contains(norm_lower, "would be dealt to you") {
-            Some(damage_target_any_player())
+            Some(damage_target_controller())
         } else {
             // "would be dealt to ~" or other targets — no specific filter
             None
@@ -4286,7 +4404,7 @@ fn parse_damage_redirection_replacement(
         return Some(
             ReplacementDefinition::new(ReplacementEvent::DamageDone)
                 .prevention_shield(PreventionAmount::All)
-                .damage_target_filter(damage_target_any_player())
+                .damage_target_filter(damage_target_controller())
                 .redirect_target(TargetFilter::SelfRef)
                 .description(original_text.to_string()),
         );
@@ -4485,7 +4603,7 @@ fn parse_damage_prevention_replacement(
     let damage_target_filter = if nom_primitives::scan_contains(working_lower, "dealt to you")
         || nom_primitives::scan_contains(working_lower, "deal to you")
     {
-        Some(damage_target_any_player())
+        Some(damage_target_controller())
     } else if nom_primitives::scan_contains(working_lower, "dealt to target creature")
         || nom_primitives::scan_contains(working_lower, "dealt to ~")
         || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
@@ -4517,7 +4635,8 @@ fn parse_damage_prevention_replacement(
                 ),
             )
             .parse(input)
-        });
+        })
+        .or_else(|| parse_damage_recipient_valid_card_filter(working_lower));
 
     // --- 4. Extract damage source filter ---
     let damage_source_filter = parse_damage_source_filter(working_lower);
@@ -4580,6 +4699,49 @@ fn parse_damage_prevention_replacement(
     }
 
     Some(def)
+}
+
+fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<TargetFilter> {
+    nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+        let (after_to, _) = tag::<_, _, OracleError<'_>>("dealt to ").parse(input)?;
+        let (filter, rest) = parse_type_phrase(after_to);
+        if matches!(filter, TargetFilter::Any) {
+            return Err(nom::Err::Error(OracleError::new(
+                after_to,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+
+        let rest = rest.trim_start();
+        if all_consuming(alt((
+            value((), eof::<&str, OracleError<'_>>),
+            value((), tag::<_, _, OracleError<'_>>(".")),
+            value(
+                (),
+                terminated(
+                    tag::<_, _, OracleError<'_>>("this turn"),
+                    opt(tag::<_, _, OracleError<'_>>(".")),
+                ),
+            ),
+            value(
+                (),
+                terminated(
+                    tag::<_, _, OracleError<'_>>("until end of turn"),
+                    opt(tag::<_, _, OracleError<'_>>(".")),
+                ),
+            ),
+        )))
+        .parse(rest)
+        .is_ok()
+        {
+            Ok((rest, filter))
+        } else {
+            Err(nom::Err::Error(OracleError::new(
+                rest,
+                nom::error::ErrorKind::Verify,
+            )))
+        }
+    })
 }
 
 /// CR 615.5 + CR 609.7: Walk an `AbilityDefinition` tree and rewrite every
@@ -5596,7 +5758,7 @@ mod tests {
             }
         ));
         assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
-        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
     }
 
     #[test]
@@ -5653,7 +5815,26 @@ mod tests {
             }
         ));
         assert!(def.combat_scope.is_none()); // all damage, not just combat
-        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
+    }
+
+    #[test]
+    fn replacement_prevent_all_damage_to_you_without_duration() {
+        let def = parse_replacement_line(
+            "Prevent all damage that would be dealt to you.",
+            "Solitary Confinement",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert!(matches!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ));
+        assert!(def.combat_scope.is_none());
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
     }
 
     #[test]
@@ -5744,6 +5925,28 @@ mod tests {
                 "expected attached-object scope for {text}"
             );
         }
+    }
+
+    #[test]
+    fn replacement_prevent_damage_to_attacking_artifact_creatures_you_control_scopes_recipient() {
+        let def = parse_replacement_line(
+            "Prevent all combat damage that would be dealt to attacking artifact creatures you control.",
+            "Losheel, Clockwork Scholar",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact)
+                    .with_type(TypeFilter::Creature)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Attacking])
+            ))
+        );
+        assert!(def.damage_target_filter.is_none());
     }
 
     #[test]
@@ -6395,6 +6598,34 @@ mod tests {
             Effect::Tap {
                 target: TargetFilter::SelfRef
             }
+        ));
+    }
+
+    #[test]
+    fn self_enters_tapped_with_counter_composes_modifiers() {
+        let def = parse_replacement_line(
+            "This creature enters tapped with a stun counter on it.",
+            "Tonberry",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("execute ability");
+        assert!(matches!(
+            *execute.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        let sub = execute.sub_ability.as_ref().expect("counter sub_ability");
+        assert!(matches!(
+            *sub.effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            } if *counter_type == CounterType::Stun
         ));
     }
 
@@ -8659,7 +8890,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
         // CR 615.1a: Redirect populates prevention shield + redirect target
         assert!(matches!(
             def.shield_kind,
@@ -8680,7 +8911,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
         assert!(matches!(
             def.shield_kind,
             ShieldKind::Prevention {
@@ -9326,6 +9557,25 @@ mod tests {
     }
 
     #[test]
+    fn max_speed_draw_replacement_gets_replacement_condition() {
+        let def = parse_replacement_line(
+            "Max speed \u{2014} If you would draw a card, draw two cards instead.",
+            "Vnwxt, Verbose Host",
+        )
+        .expect("max speed draw replacement parses");
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.condition, Some(ReplacementCondition::HasMaxSpeed));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn parses_opponent_mill_replacement_with_multiplier() {
         let text =
             "If an opponent would mill one or more cards, they mill twice that many cards instead.";
@@ -9843,5 +10093,61 @@ mod snapshot_tests {
         let (no_modal, unchanged) = super::strip_optional_instead_lead_in("draw two cards");
         assert!(!no_modal, "mandatory effect text must not be misclassified");
         assert_eq!(unchanged, "draw two cards");
+    }
+
+    /// CR 707.10 + CR 614.1a: Twinning Staff's "If you would copy a spell one or
+    /// more times, instead copy it that many times plus an additional time"
+    /// parses to a `CopySpell` replacement carrying `Plus { value: 1 }`.
+    #[test]
+    fn copy_count_replacement_parses_twinning_staff() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::replacements::ReplacementEvent;
+
+        let def = super::parse_replacement_line(
+            "If you would copy a spell one or more times, instead copy it that many times \
+             plus an additional time. You may choose new targets for the additional copy.",
+            "Twinning Staff",
+        )
+        .expect("Twinning Staff replacement must parse");
+
+        assert_eq!(def.event, ReplacementEvent::CopySpell);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+    }
+
+    /// The "additional time(s)" tail is composed from modular combinators, so a
+    /// numbered, pluralized variant ("plus 2 additional times") parses to the
+    /// corresponding `Plus { value }` — sibling coverage beyond the single
+    /// Twinning Staff wording.
+    #[test]
+    fn copy_count_replacement_parses_plural_numbered_variant() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::replacements::ReplacementEvent;
+
+        let def = super::parse_replacement_line(
+            "If you would copy a spell one or more times, instead copy it that many times \
+             plus 2 additional times.",
+            "Hypothetical Double Staff",
+        )
+        .expect("plural numbered copy-count replacement must parse");
+
+        assert_eq!(def.event, ReplacementEvent::CopySpell);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 2 })
+        );
+    }
+
+    #[test]
+    fn copy_count_replacement_requires_full_copy_count_shape() {
+        let text = "If you would copy a spell, instead copy target spell plus an additional time.";
+        let lower = text.to_lowercase();
+
+        assert!(
+            super::parse_copy_count_replacement(&lower, text).is_none(),
+            "copy-count replacement must not be gated by loose substring matching"
+        );
     }
 }

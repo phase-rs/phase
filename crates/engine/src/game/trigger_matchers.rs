@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, EffectKind, OriginConstraint,
-    TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DestinationConstraint, EffectKind,
+    OriginConstraint, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
-use crate::types::game_state::{GameState, StackEntryKind};
+use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
@@ -746,6 +746,15 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint) -> bool {
+    match constraint {
+        DestinationConstraint::Any => true,
+        DestinationConstraint::Equals(expected) => zone == *expected,
+        DestinationConstraint::NotEquals(excluded) => zone != *excluded,
+        DestinationConstraint::OneOf(zones) => zones.contains(&zone),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core Trigger Matchers (~20 with real logic)
 // ---------------------------------------------------------------------------
@@ -757,6 +766,7 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
 fn zone_change_clause_matches(
     origin: &OriginConstraint,
     destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
     valid_card: Option<&TargetFilter>,
     from: &Option<Zone>,
     to: &Zone,
@@ -781,6 +791,9 @@ fn zone_change_clause_matches(
         if dest != to {
             return false;
         }
+    }
+    if !destination_matches_constraint(*to, destination_constraint) {
+        return false;
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_source(state, source_id);
@@ -820,6 +833,7 @@ pub(super) fn match_changes_zone(
                 zone_change_clause_matches(
                     &clause.origin,
                     clause.destination.as_ref(),
+                    &clause.destination_constraint,
                     clause.valid_card.as_ref(),
                     from,
                     to,
@@ -843,6 +857,7 @@ pub(super) fn match_changes_zone(
         zone_change_clause_matches(
             &origin,
             trigger.destination.as_ref(),
+            &trigger.destination_constraint,
             trigger.valid_card.as_ref(),
             from,
             to,
@@ -1647,13 +1662,28 @@ pub(super) fn match_becomes_target(
         return false;
     };
 
-    // CR 115.1a: Check source filter — "of a spell" restricts to StackEntryKind::Spell
-    if let Some(TargetFilter::StackSpell) = &trigger.valid_source {
-        let is_spell = state
+    // CR 115.1a + CR 115.1b: Trigger text like "of a spell" and "of an Aura spell"
+    // constrains the targeting source to matching stack spell characteristics.
+    if let Some(source_filter) = &trigger.valid_source {
+        let Some(targeting_entry) = state
             .stack
             .iter()
-            .any(|e| e.id == *targeting_spell_id && matches!(e.kind, StackEntryKind::Spell { .. }));
-        if !is_spell {
+            .find(|entry| entry.id == *targeting_spell_id)
+        else {
+            return false;
+        };
+        let trigger_controller = state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(state.active_player);
+        if !super::targeting::stack_entry_matches_filter(
+            state,
+            targeting_entry,
+            source_filter,
+            trigger_controller,
+            source_id,
+        ) {
             return false;
         }
     }
@@ -2282,10 +2312,21 @@ pub(super) fn match_leaves_battlefield(
     state: &GameState,
 ) -> bool {
     if let GameEvent::ZoneChanged {
-        object_id, from, ..
+        object_id,
+        from,
+        to,
+        ..
     } = event
     {
         if *from != Some(Zone::Battlefield) {
+            return false;
+        }
+        if let Some(destination) = trigger.destination {
+            if destination != *to {
+                return false;
+            }
+        }
+        if !destination_matches_constraint(*to, &trigger.destination_constraint) {
             return false;
         }
         valid_card_matches(trigger, state, *object_id, source_id)
@@ -4292,6 +4333,7 @@ mod tests {
             ZoneChangeClause {
                 origin: OriginConstraint::Equals(Zone::Battlefield),
                 destination: Some(Zone::Graveyard),
+                destination_constraint: DestinationConstraint::Any,
                 valid_card: None,
             },
             // Clause 2: a creature card put into a graveyard from anywhere
@@ -4299,12 +4341,14 @@ mod tests {
             ZoneChangeClause {
                 origin: OriginConstraint::NotEquals(Zone::Battlefield),
                 destination: Some(Zone::Graveyard),
+                destination_constraint: DestinationConstraint::Any,
                 valid_card: None,
             },
             // Clause 3: a creature card leaves the graveyard (any destination).
             ZoneChangeClause {
                 origin: OriginConstraint::Equals(Zone::Graveyard),
                 destination: None,
+                destination_constraint: DestinationConstraint::Any,
                 valid_card: None,
             },
         ];
@@ -4392,6 +4436,7 @@ mod tests {
                 Zone::Command,
             ]),
             destination: Some(Zone::Battlefield),
+            destination_constraint: DestinationConstraint::Any,
             valid_card: None,
         }];
 
@@ -4685,6 +4730,41 @@ mod tests {
             Vec::new(),
         );
         assert!(match_changes_zone(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn leaves_battlefield_without_dying_rejects_graveyard_destination() {
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::LeavesBattlefield);
+        trigger.destination_constraint = DestinationConstraint::NotEquals(Zone::Graveyard);
+
+        let to_exile = zone_changed_event(
+            ObjectId(5),
+            Zone::Battlefield,
+            Zone::Exile,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(match_leaves_battlefield(
+            &to_exile,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        let to_graveyard = zone_changed_event(
+            ObjectId(5),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!match_leaves_battlefield(
+            &to_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
     }
 
     #[test]
@@ -6321,9 +6401,25 @@ mod tests {
     // BecomesTarget + valid_source (spell-only filtering)
     // -----------------------------------------------------------------------
 
-    fn setup_with_spell_on_stack() -> (GameState, ObjectId) {
+    fn setup_with_spell_on_stack(is_aura_spell: bool) -> (GameState, ObjectId) {
         let mut state = setup();
-        let spell_id = ObjectId(50);
+        let spell_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            if is_aura_spell {
+                "Pacifism".to_string()
+            } else {
+                "Lightning Bolt".to_string()
+            },
+            Zone::Stack,
+        );
+        if is_aura_spell {
+            if let Some(spell_obj) = state.objects.get_mut(&spell_id) {
+                spell_obj.card_types.core_types.push(CoreType::Enchantment);
+                spell_obj.card_types.subtypes.push("Aura".to_string());
+            }
+        }
         state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,
@@ -6344,6 +6440,15 @@ mod tests {
             },
         });
         (state, spell_id)
+    }
+
+    fn aura_stack_spell_filter() -> TargetFilter {
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string())),
+            ],
+        }
     }
 
     fn setup_with_ability_on_stack() -> (GameState, ObjectId) {
@@ -6371,7 +6476,7 @@ mod tests {
 
     #[test]
     fn becomes_target_spell_only_matches_spell() {
-        let (state, spell_id) = setup_with_spell_on_stack();
+        let (state, spell_id) = setup_with_spell_on_stack(false);
         // trigger_owner is the permanent with the trigger (e.g. Bonecrusher Giant)
         let trigger_owner = ObjectId(5);
         let mut trigger = make_trigger(TriggerMode::BecomesTarget);
@@ -6424,6 +6529,63 @@ mod tests {
             source_id: ability_id,
         };
         assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_aura_spell_filter_matches_aura_spell() {
+        let (state, spell_id) = setup_with_spell_on_stack(true);
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(aura_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            object_id: trigger_owner,
+            source_id: spell_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_aura_spell_filter_rejects_non_aura_spell() {
+        let (state, spell_id) = setup_with_spell_on_stack(false);
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(aura_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            object_id: trigger_owner,
+            source_id: spell_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_aura_spell_filter_rejects_ability_source() {
+        let (state, ability_id) = setup_with_ability_on_stack();
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(aura_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            object_id: trigger_owner,
+            source_id: ability_id,
+        };
+        assert!(!match_becomes_target(
             &event,
             &trigger,
             trigger_owner,

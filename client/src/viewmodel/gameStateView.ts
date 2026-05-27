@@ -65,6 +65,8 @@ export function getWaitingForObjectChoiceIds(
       );
     case "ExploreChoice":
       return waitingFor.data.choosable;
+    case "ReturnAsAuraTarget":
+      return waitingFor.data.legal_targets;
     case "PairChoice":
       return waitingFor.data.choices;
     default:

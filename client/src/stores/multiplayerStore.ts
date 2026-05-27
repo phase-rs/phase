@@ -984,6 +984,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               set({ playerSlots: activeP2PHostAdapter.getPlayerSlots() });
             }
           })().catch((err) => {
+            // Surface the failure to BOTH the dev console and the in-app
+            // toaster. The toaster can be off-screen or hidden behind the
+            // lobby modal; without the console.error a silent rejection in
+            // startPregameGame / applySeatMutation looks like the button
+            // did nothing at all.
+            console.error("[seatMutate]", mutation.type, err);
             get().showToast(err instanceof Error ? err.message : String(err));
           });
           return;

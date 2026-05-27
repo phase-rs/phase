@@ -369,6 +369,7 @@
     "chooseNewTargetForCopy": "Wähle ein neues Ziel für die Kopie",
     "chooseTargetForCopy": "Wähle ein Ziel für die Kopie",
     "chooseCreatureToExplore": "Wähle, welche Kreatur als Nächstes erkundet",
+    "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
@@ -874,6 +875,20 @@
       "title": "Exil",
       "subtitle_one": "Wähle {{count}} bleibende Karte fürs Exil",
       "subtitle_other": "Wähle {{count}} bleibende Karten fürs Exil"
+    },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "multiTarget": {
       "title": "Ziele wählen",

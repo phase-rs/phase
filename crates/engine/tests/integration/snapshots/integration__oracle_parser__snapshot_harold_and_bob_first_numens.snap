@@ -1,0 +1,171 @@
+---
+source: crates/engine/tests/integration/oracle_parser.rs
+expression: result
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZone",
+          "origin": null,
+          "destination": "Battlefield",
+          "target": {
+            "type": "TriggeringSource"
+          },
+          "owner_library": false,
+          "enter_transformed": false,
+          "under_your_control": false,
+          "enter_tapped": false,
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "ReturnAsAura",
+            "enchant_filter": {
+              "type": "Typed",
+              "type_filters": [
+                {
+                  "Subtype": "Forest"
+                }
+              ],
+              "controller": "You",
+              "properties": []
+            },
+            "grants": [
+              {
+                "type": "RemoveAllAbilities"
+              },
+              {
+                "type": "GrantAbility",
+                "definition": {
+                  "kind": "Activated",
+                  "effect": {
+                    "type": "Mana",
+                    "produced": {
+                      "type": "AnyOneColor",
+                      "count": {
+                        "type": "Fixed",
+                        "value": 3
+                      },
+                      "color_options": [
+                        "White",
+                        "Blue",
+                        "Black",
+                        "Red",
+                        "Green"
+                      ]
+                    }
+                  },
+                  "cost": {
+                    "type": "Unimplemented",
+                    "description": "Enchanted Forest has '{T}"
+                  },
+                  "sub_ability": {
+                    "kind": "Spell",
+                    "effect": {
+                      "type": "GivePlayerCounter",
+                      "counter_kind": "Rad",
+                      "count": {
+                        "type": "Fixed",
+                        "value": 2
+                      },
+                      "target": {
+                        "type": "Controller"
+                      }
+                    },
+                    "cost": null,
+                    "sub_ability": {
+                      "kind": "Spell",
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "'",
+                        "description": "'"
+                      },
+                      "cost": null,
+                      "sub_ability": null,
+                      "duration": null,
+                      "description": null,
+                      "target_prompt": null,
+                      "sorcery_speed": false,
+                      "condition": null,
+                      "optional_targeting": false,
+                      "optional": false,
+                      "forward_result": false,
+                      "sub_link": "SequentialSibling"
+                    },
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "sorcery_speed": false,
+                    "condition": null,
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false,
+                    "sub_link": "SequentialSibling"
+                  },
+                  "duration": null,
+                  "description": "Enchanted Forest has '{T}: Add three mana of any one color. You get two rad counters.'",
+                  "target_prompt": null,
+                  "sorcery_speed": false,
+                  "condition": null,
+                  "optional_targeting": false,
+                  "optional": false,
+                  "forward_result": false
+                }
+              }
+            ]
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "sorcery_speed": false,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false,
+          "sub_link": "SequentialSibling"
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": "Battlefield",
+      "destination": "Graveyard",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When ~ dies, if it was a creature, return it to the battlefield. It's an Aura enchantment with enchant Forest you control and \"Enchanted Forest has '{T}: Add three mana of any one color. You get two rad counters.'\" ~ loses all other abilities.",
+      "constraint": null,
+      "condition": {
+        "type": "WasType",
+        "card_type": "Creature"
+      },
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

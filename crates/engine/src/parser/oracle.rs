@@ -1,6 +1,6 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_until, take_while};
 use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,40 @@ fn parse_commander_permission_sentence(input: &str) -> nom::IResult<&str, (), Or
 pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
     let lower = line.trim().to_ascii_lowercase();
     let parsed = all_consuming(parse_commander_permission_sentence)
+        .parse(lower.as_str())
+        .is_ok();
+    parsed
+}
+
+// CR 100.2a / CR 903.5b: Deck-construction overrides like "A deck can have
+// any number of cards named X." (Tempest Hawk, Rat Colony, Relentless Rats,
+// Persistent Petitioners, Shadowborn Apostle, etc.) are deck-construction
+// metadata that override CR 100.2a's four-of limit and the CR 903.5b
+// Commander singleton rule. They have no runtime effect to resolve. The
+// recognizer matches this exact phrase shape to avoid false-positives
+// against legitimate "up to N cards named ..." patterns (e.g. Seven Dwarves).
+fn parse_deck_can_have_any_number_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = tag("a deck can have any number of cards named ").parse(input)?;
+    let (input, subject) = take_while(|c: char| {
+        c.is_alphanumeric() || c == ' ' || c == '\'' || c == ',' || c == '-' || c == '~'
+    })
+    .parse(input)?;
+    if subject.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
+}
+
+/// Recognizer for "A deck can have any number of cards named X." —
+/// deck-construction text consumed silently by the parser so it does not
+/// fall through to `Effect::Unimplemented { name: "static_structure", .. }`.
+pub(crate) fn is_deck_construction_any_number_sentence(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    let parsed = all_consuming(parse_deck_can_have_any_number_sentence)
         .parse(lower.as_str())
         .is_ok();
     parsed
@@ -773,7 +807,10 @@ fn is_spell_resolution_instruction_line(
     let loyalty_snap = ctx.diagnostics.len();
     let is_loyalty = try_parse_loyalty_line(line, ctx).is_some();
     ctx.diagnostics.truncate(loyalty_snap);
-    if is_commander_permission_sentence(line) || is_loyalty {
+    if is_commander_permission_sentence(line)
+        || is_deck_construction_any_number_sentence(line)
+        || is_loyalty
+    {
         return false;
     }
 
@@ -1651,6 +1688,11 @@ pub(crate) fn parse_oracle_ir(
         }
 
         if is_commander_permission_sentence(&line) {
+            i += 1;
+            continue;
+        }
+
+        if is_deck_construction_any_number_sentence(&line) {
             i += 1;
             continue;
         }
@@ -4008,7 +4050,7 @@ mod tests {
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::replacements::ReplacementEvent;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -4086,6 +4128,28 @@ mod tests {
         assert_eq!(r.abilities.len(), 1, "expected one spell ability");
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
         assert!(matches!(*r.abilities[0].effect, Effect::DealDamage { .. }));
+    }
+
+    #[test]
+    fn mindlock_orb_routes_to_static_search_prohibition() {
+        let r = parse(
+            "Players can't search libraries.",
+            "Mindlock Orb",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(
+            r.abilities.is_empty(),
+            "Mindlock Orb should not emit spell abilities"
+        );
+        assert_eq!(r.statics.len(), 1, "expected one static search prohibition");
+        assert_eq!(
+            r.statics[0].mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::AllPlayers,
+            }
+        );
     }
 
     /// CR 115.1 + CR 701.9b: "random target X" — the parser stamps
@@ -4930,6 +4994,88 @@ mod tests {
         assert!(r.replacements.is_empty());
     }
 
+    // CR 100.2a / CR 903.5b: "A deck can have any number of cards named X."
+    // is deck-construction metadata, not an in-game ability. The recognizer
+    // must accept the raw card name, the engine's normalized self-reference
+    // "~", and reject "up to N" patterns (Seven Dwarves).
+    #[test]
+    fn deck_construction_any_number_sentence_positive_cases() {
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Tempest Hawk."
+        ));
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Relentless Rats."
+        ));
+        // After normalize_self_refs_for_static rewrites the card name to "~".
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named ~."
+        ));
+        // Trailing period is optional.
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Tempest Hawk"
+        ));
+    }
+
+    #[test]
+    fn deck_construction_any_number_sentence_negative_cases() {
+        // Wrong determiner — must be "A deck", not "Your deck".
+        assert!(!is_deck_construction_any_number_sentence(
+            "Your deck can have any number of cards named X."
+        ));
+        // "Up to seven" is a different deck-construction pattern (Seven Dwarves).
+        // It must NOT be silently consumed by this recognizer.
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have up to seven cards named Seven Dwarves."
+        ));
+        // Unrelated static lines must not match.
+        assert!(!is_deck_construction_any_number_sentence(
+            "Creatures you control get +1/+1."
+        ));
+        // Empty subject after the "named " prefix.
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named ."
+        ));
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named"
+        ));
+    }
+
+    #[test]
+    fn tempest_hawk_oracle_text_produces_no_unimplemented_static() {
+        // Full Oracle text fixture for Tempest Hawk — the bug surface from
+        // GitHub issue #1074. Before the fix, the "A deck can have any number
+        // of cards named Tempest Hawk." line fell through to
+        // Effect::Unimplemented { name: "static_structure", .. }. After the
+        // fix, it must be silently consumed.
+        let r = parse(
+            "Flying\n\
+             Whenever this creature deals combat damage to a player, you may search your library for a card named Tempest Hawk, reveal it, put it into your hand, then shuffle.\n\
+             A deck can have any number of cards named Tempest Hawk.",
+            "Tempest Hawk",
+            &[Keyword::Flying],
+            &["Creature"],
+            &["Bird"],
+        );
+
+        // No ability should be Unimplemented with name "static_structure".
+        let static_unimplemented: Vec<&AbilityDefinition> = r
+            .abilities
+            .iter()
+            .filter(|a| {
+                matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name == "static_structure"
+                )
+            })
+            .collect();
+        assert!(
+            static_unimplemented.is_empty(),
+            "deck-construction line must be silently consumed, but produced \
+             {} static_structure Unimplemented entries: {:#?}",
+            static_unimplemented.len(),
+            static_unimplemented
+        );
+    }
     #[test]
     fn oracle_text_allows_commander_uses_commander_permission_parser() {
         assert!(oracle_text_allows_commander(
@@ -6270,6 +6416,48 @@ mod tests {
         match sub.condition.as_ref().expect("expected condition") {
             AbilityCondition::And { conditions } => assert_eq!(conditions.len(), 2),
             other => panic!("expected conjunction condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ugin_labyrinth_exiled_card_mana_as_delta() {
+        let r = parse(
+            "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n{T}: Add {C}. If a card is exiled with Ugin's Labyrinth, add {C}{C} instead.",
+            "Ugin's Labyrinth",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        match ability.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected base colorless mana, got {other:?}"),
+        }
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional delta");
+        match sub.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected colorless mana delta, got {other:?}"),
+        }
+        match sub.condition.as_ref().expect("expected condition") {
+            AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected exiled-with-source condition, got {other:?}"),
         }
     }
 
@@ -10462,7 +10650,10 @@ mod tests {
             .iter()
             .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
         assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(r.statics[0].active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            r.statics[0].active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
         assert!(
             r.parse_warnings
                 .iter()
@@ -10641,6 +10832,51 @@ mod tests {
             "third clause should be DealDamage, got {:?}",
             sub2.effect
         );
+    }
+
+    #[test]
+    fn roiling_vortex_parses_trigger_lines_and_opponent_life_lock_activation() {
+        use crate::types::statics::StaticMode;
+
+        let r = parse(
+            "At the beginning of each player's upkeep, this enchantment deals 1 damage to them.\nWhenever a player casts a spell, if no mana was spent to cast that spell, this enchantment deals 5 damage to that player.\n{R}: Your opponents can't gain life this turn.",
+            "Roiling Vortex",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+
+        assert_eq!(r.triggers.len(), 2, "expected both printed trigger lines");
+        assert_eq!(r.abilities.len(), 1, "expected one activated ability");
+
+        let ab = &r.abilities[0];
+        assert_eq!(ab.kind, AbilityKind::Activated);
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*ab.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", ab.effect);
+        };
+
+        assert_eq!(*target, None);
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn)
+        );
+        assert!(static_abilities
+            .iter()
+            .any(|s| s.mode == StaticMode::CantGainLife));
+        assert!(static_abilities.iter().any(|s| {
+            matches!(
+                s.affected,
+                Some(TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                }))
+            )
+        }));
     }
 
     // CR 104.2b + CR 104.3b + CR 119.7 + CR 119.8 + CR 611.2b:

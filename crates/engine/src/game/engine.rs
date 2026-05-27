@@ -1995,20 +1995,20 @@ fn apply_action(
             &chosen,
             &mut events,
         )?,
-        // CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Player selected battlefield
-        // permanent(s) to exile as a mana ability cost (Food Chain class).
+        // CR 117.1 + CR 118.3 + CR 605.3b + CR 400.7j: Player selected
+        // object(s) to exile as a mana ability cost.
         (
-            WaitingFor::ExileFromBattlefieldForManaAbility {
+            WaitingFor::ExileForManaAbility {
                 count,
-                permanents,
+                cards,
                 pending_mana_ability,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => super::mana_abilities::handle_exile_from_battlefield_for_mana_ability(
+        ) => super::mana_abilities::handle_exile_for_mana_ability(
             state,
             *count,
-            permanents,
+            cards,
             pending_mana_ability,
             &chosen,
             &mut events,
@@ -2921,6 +2921,66 @@ fn apply_action(
                 pending_effect.as_ref(),
                 &mut events,
             )?
+        }
+        // CR 303.4 + CR 303.4g + CR 115.1: Player picked the permanent to
+        // enchant for a `Effect::ReturnAsAura` sub-effect. The picker is a
+        // CHOICE (not a target), so the action shape mirrors
+        // `WaitingFor::ExploreChoice` — `GameAction::ChooseTarget { target:
+        // Some(Object(id)) }` with `id` drawn from `legal_targets`.
+        (
+            WaitingFor::ReturnAsAuraTarget {
+                player,
+                source_id: _,
+                returned_id,
+                legal_targets,
+                pending_effect,
+            },
+            GameAction::ChooseTarget { target },
+        ) => {
+            if turn_control::authorized_submitter(state) != Some(*player) {
+                return Err(EngineError::WrongPlayer);
+            }
+            let chosen = match target {
+                Some(TargetRef::Object(id)) if legal_targets.contains(&id) => id,
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "ReturnAsAuraTarget: invalid or missing legal Object target".to_string(),
+                    ));
+                }
+            };
+            let pending = pending_effect.clone();
+            let returned = *returned_id;
+            let active_player = *player;
+            let (filter, grants) = match &pending.effect {
+                crate::types::ability::Effect::ReturnAsAura {
+                    enchant_filter,
+                    grants,
+                } => (enchant_filter.clone(), grants.clone()),
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "ReturnAsAuraTarget: pending_effect is not ReturnAsAura".to_string(),
+                    ));
+                }
+            };
+            super::effects::return_as_aura::finalize_attach(
+                state,
+                pending.as_ref(),
+                returned,
+                chosen,
+                &filter,
+                grants,
+                &mut events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // After resolving the attach, return control to standard priority
+            // flow under the picker's controller, then resume any chain that was
+            // paused behind the picker.
+            state.waiting_for = WaitingFor::Priority {
+                player: active_player,
+            };
+            state.priority_player = active_player;
+            effects::drain_pending_continuation(state, &mut events);
+            state.waiting_for.clone()
         }
         (
             WaitingFor::EquipTarget {
@@ -4044,22 +4104,39 @@ pub(super) fn begin_pending_trigger_target_selection(
     // CR 700.2b: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
+            let player = trigger.controller;
+            let source_id = trigger.source_id;
+            let mode_abilities = trigger.mode_abilities.clone();
+            let trigger_event = trigger.trigger_event.clone();
+            let trigger_events = if state.pending_trigger_event_batch.is_empty() {
+                trigger_event.iter().cloned().collect::<Vec<_>>()
+            } else {
+                state.pending_trigger_event_batch.clone()
+            };
+            let subject_match_count = trigger.subject_match_count;
             let modal = modal_choice_for_player(
                 state,
-                trigger.controller,
-                trigger.source_id,
+                player,
+                source_id,
                 modal,
                 &crate::types::ability::SpellContext::default(),
             );
-            let mut unavailable_modes = compute_unavailable_modes(state, trigger.source_id, &modal);
+            let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+            let context_snapshot = super::triggers::push_trigger_event_context(
+                state,
+                trigger_event.as_ref(),
+                &trigger_events,
+                subject_match_count,
+            );
             super::ability_utils::filter_modes_by_target_legality(
                 state,
-                trigger.source_id,
-                trigger.controller,
-                &trigger.mode_abilities,
+                source_id,
+                player,
+                &mode_abilities,
                 &modal,
                 &mut unavailable_modes,
             );
+            super::triggers::restore_trigger_event_context(state, context_snapshot);
 
             // CR 700.2b: All modes unavailable (previously chosen OR no legal
             // targets) — ability cannot be put on the stack. Clear pending
@@ -4070,10 +4147,10 @@ pub(super) fn begin_pending_trigger_target_selection(
             }
 
             return Ok(Some(WaitingFor::AbilityModeChoice {
-                player: trigger.controller,
+                player,
                 modal,
-                source_id: trigger.source_id,
-                mode_abilities: trigger.mode_abilities.clone(),
+                source_id,
+                mode_abilities,
                 is_activated: false,
                 ability_index: None,
                 ability_cost: None,
@@ -4082,26 +4159,42 @@ pub(super) fn begin_pending_trigger_target_selection(
         }
     }
 
-    let target_slots = build_target_slots(state, &trigger.ability)?;
-    if target_slots.is_empty() {
-        return Ok(None);
-    }
-
+    let ability = trigger.ability.clone();
     let player = trigger.controller;
+    let source_id = trigger.source_id;
     let target_constraints = trigger.target_constraints.clone();
-    let selection = begin_target_selection_for_ability(
+    let description = trigger.description.clone();
+    let trigger_event = trigger.trigger_event.clone();
+    let trigger_events = if state.pending_trigger_event_batch.is_empty() {
+        trigger_event.iter().cloned().collect::<Vec<_>>()
+    } else {
+        state.pending_trigger_event_batch.clone()
+    };
+    let subject_match_count = trigger.subject_match_count;
+    let context_snapshot = super::triggers::push_trigger_event_context(
         state,
-        &trigger.ability,
-        &target_slots,
-        &target_constraints,
-    )?;
+        trigger_event.as_ref(),
+        &trigger_events,
+        subject_match_count,
+    );
+    let selection_result = build_target_slots(state, &ability).and_then(|target_slots| {
+        if target_slots.is_empty() {
+            return Ok(None);
+        }
+        begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
+            .map(|selection| Some((target_slots, selection)))
+    });
+    super::triggers::restore_trigger_event_context(state, context_snapshot);
+    let Some((target_slots, selection)) = selection_result? else {
+        return Ok(None);
+    };
     Ok(Some(WaitingFor::TriggerTargetSelection {
         player,
         target_slots,
         target_constraints,
         selection,
-        source_id: Some(trigger.source_id),
-        description: trigger.description.clone(),
+        source_id: Some(source_id),
+        description,
     }))
 }
 
@@ -5510,6 +5603,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::game::combat::AttackTarget;
     use crate::game::game_object::{BackFaceData, RoomDoor};
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
@@ -5524,7 +5618,7 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::TriggerMode;
 
     /// Create a simple test ability definition.
@@ -8672,6 +8766,301 @@ mod tests {
                 }
             )));
         }
+    }
+
+    // CR 120 (damage), CR 510.1 (combat damage step), CR 510.3a
+    // (combat-damage triggers go on the stack), CR 701.23a/b/d (search
+    // library / fail-to-find), CR 701.24 (shuffle), CR 100.2a /
+    // CR 903.5b (deck-construction overrides — verified silently consumed
+    // by Step 1's parser fix).
+    //
+    // Tempest Hawk's combat-damage trigger:
+    //   "Whenever this creature deals combat damage to a player, you may
+    //    search your library for a card named Tempest Hawk, reveal it,
+    //    put it into your hand, then shuffle."
+    //
+    // The AST shape: TriggerMode::DamageDone with damage_kind = CombatOnly,
+    // valid_target = Player, optional = true, execute chain =
+    // SearchLibrary → ChangeZone(Library→Hand) → Shuffle. The shape is
+    // identical to Squadron Hawk's ETB-triggered search, so we reuse the
+    // search-and-shuffle assertion structure; only the trigger source
+    // (combat damage vs ETB) differs.
+    const TEMPEST_HAWK_ORACLE: &str = "Flying\nWhenever this creature deals combat damage to a player, you may search your library for a card named Tempest Hawk, reveal it, put it into your hand, then shuffle.\nA deck can have any number of cards named Tempest Hawk.";
+
+    fn add_tempest_hawk_to_library(state: &mut GameState, card_id: u64) -> ObjectId {
+        let hawk = create_object(
+            state,
+            CardId(card_id),
+            PlayerId(0),
+            "Tempest Hawk".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&hawk).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        hawk
+    }
+
+    /// Set up a board where a Tempest Hawk on the battlefield is the sole
+    /// attacker against PlayerId(1), and advance combat through declare-
+    /// attackers / declare-blockers so the damage step is about to fire.
+    /// Returns (state, attacking hawk, hawks in library).
+    fn setup_tempest_hawk_attack(library_hawk_ids: &[u64]) -> (GameState, ObjectId, Vec<ObjectId>) {
+        let mut state = new_game(42);
+        state.turn_number = 5;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let attacker = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Tempest Hawk".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.color = vec![ManaColor::White];
+            obj.base_color = vec![ManaColor::White];
+            obj.entered_battlefield_turn = Some(4);
+        }
+        apply_oracle_to_object(&mut state, attacker, "Tempest Hawk", TEMPEST_HAWK_ORACLE);
+
+        let library_hawks: Vec<ObjectId> = library_hawk_ids
+            .iter()
+            .map(|id| add_tempest_hawk_to_library(&mut state, *id))
+            .collect();
+
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .unwrap();
+
+        (state, attacker, library_hawks)
+    }
+
+    /// Advance combat from DeclareAttackers (just submitted) through to the
+    /// point where Tempest Hawk's `you may` combat-damage trigger has been
+    /// pushed onto the stack and is being resolved (engine is at
+    /// `WaitingFor::OptionalEffectChoice`).
+    fn advance_to_tempest_hawk_optional_choice(state: &mut GameState) {
+        for _ in 0..16 {
+            if matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }) {
+                return;
+            }
+            apply_as_current(state, GameAction::PassPriority).unwrap();
+        }
+        panic!(
+            "expected WaitingFor::OptionalEffectChoice for Tempest Hawk's combat-damage trigger, \
+             got {:?} after exhausting priority passes",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn tempest_hawk_combat_damage_optional_accept_finds_named_card() {
+        // Accept path: Tempest Hawk deals combat damage to PlayerId(1),
+        // the optional `you may search` trigger is accepted, the
+        // SearchChoice exposes only Tempest Hawks from the library, and
+        // SelectCards moves the chosen hawk to hand with a Shuffle event.
+        let (mut state, _attacker, library_hawks) = setup_tempest_hawk_attack(&[701, 702, 703]);
+
+        // Sanity: also drop a non-Hawk into the library to confirm the
+        // SearchChoice filters by name.
+        let nonmatch = create_object(
+            &mut state,
+            CardId(799),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+
+        advance_to_tempest_hawk_optional_choice(&mut state);
+        assert_eq!(
+            state.players[1].life, 18,
+            "Tempest Hawk should have dealt 2 combat damage to PlayerId(1)"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice {
+                player,
+                cards,
+                count,
+                reveal,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 1);
+                assert!(*reveal);
+                for hawk in &library_hawks {
+                    assert!(
+                        cards.contains(hawk),
+                        "SearchChoice must offer library Tempest Hawk {hawk:?}, got {cards:?}"
+                    );
+                }
+                assert!(
+                    !cards.contains(&nonmatch),
+                    "SearchChoice must not offer non-Tempest-Hawk card {nonmatch:?}"
+                );
+            }
+            other => {
+                panic!("expected SearchChoice after accepting Tempest Hawk trigger, got {other:?}")
+            }
+        }
+
+        let chosen = library_hawks[0];
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![chosen],
+            },
+        )
+        .unwrap();
+
+        assert!(
+            state.stack.is_empty(),
+            "stack must be empty after resolving search"
+        );
+        assert_eq!(state.objects[&chosen].zone, Zone::Hand);
+        assert!(state.players[0].hand.contains(&chosen));
+        assert!(!state.players[0].library.contains(&chosen));
+        for other in &library_hawks[1..] {
+            assert_eq!(state.objects[other].zone, Zone::Library);
+        }
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "library must be shuffled at end of the trigger chain (CR 701.24)"
+        );
+    }
+
+    #[test]
+    fn tempest_hawk_combat_damage_optional_decline_leaves_library_untouched() {
+        // Decline path: declining the `you may` trigger must leave the
+        // library and hand untouched and clear the stack — no search,
+        // no shuffle.
+        let (mut state, _attacker, library_hawks) = setup_tempest_hawk_attack(&[711, 712]);
+
+        advance_to_tempest_hawk_optional_choice(&mut state);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        assert!(state.stack.is_empty());
+        for hawk in &library_hawks {
+            assert_eq!(state.objects[hawk].zone, Zone::Library);
+            assert!(state.players[0].library.contains(hawk));
+            assert!(!state.players[0].hand.contains(hawk));
+        }
+        assert!(
+            !result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::SearchedLibrary,
+                    ..
+                } | GameEvent::CardsRevealed { .. }
+                    | GameEvent::EffectResolved {
+                        kind: EffectKind::Shuffle,
+                        ..
+                    }
+            )),
+            "declining the trigger must produce no search/reveal/shuffle events"
+        );
+    }
+
+    #[test]
+    fn tempest_hawk_combat_damage_accept_with_empty_library_resolves_cleanly() {
+        // Fail-to-find path: accepting the search with zero Tempest Hawks
+        // in the library must resolve cleanly per CR 701.23b (player may
+        // search and find nothing; library still shuffles per CR 701.23d).
+        let (mut state, _attacker, _) = setup_tempest_hawk_attack(&[]);
+        // Non-matching filler so the library is not literally empty —
+        // this isolates "no card matching the filter" from "library empty".
+        let filler = create_object(
+            &mut state,
+            CardId(720),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+
+        advance_to_tempest_hawk_optional_choice(&mut state);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        let mut events = result.events;
+
+        // Engine may either (a) skip straight past SearchChoice because no
+        // cards match, in which case the shuffle event is emitted by the
+        // DecideOptionalEffect call above, or (b) expose an empty/zero
+        // SearchChoice that resolves to SelectCards { cards: vec![] }, in
+        // which case the shuffle event is emitted by SelectCards. Combine
+        // events from both possible paths so the shuffle assertion holds
+        // regardless of which branch the engine takes (CR 701.24 still
+        // applies — the library shuffles even on fail-to-find).
+        if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
+            let select_result =
+                apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
+            events.extend(select_result.events);
+        }
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "library must shuffle even when the search finds nothing (CR 701.24)"
+        );
+
+        assert!(
+            state.stack.is_empty(),
+            "stack must drain even on fail-to-find"
+        );
+        assert_eq!(state.objects[&filler].zone, Zone::Library);
+        assert!(state.players[0].hand.is_empty());
     }
 
     #[test]
@@ -14264,6 +14653,63 @@ mod phase_trigger_regression_tests {
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.players[0].graveyard.contains(&obj_id));
         assert_eq!(state.players[0].life, 22);
+        assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
+    fn effect_zone_choice_handler_resolves_untap_selection() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let chosen_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chosen Land".to_string(),
+            Zone::Battlefield,
+        );
+        let unchosen_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unchosen Land".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [chosen_land, unchosen_land] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.tapped = true;
+        }
+
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![chosen_land, unchosen_land],
+            count: 2,
+            min_count: 0,
+            up_to: true,
+            source_id,
+            effect_kind: EffectKind::Untap,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            count_param: 0,
+        };
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![chosen_land],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!state.objects[&chosen_land].tapped);
+        assert!(state.objects[&unchosen_land].tapped);
         assert_eq!(state.last_effect_count, Some(1));
     }
 
