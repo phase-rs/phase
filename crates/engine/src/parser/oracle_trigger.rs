@@ -11236,10 +11236,10 @@ mod tests {
     /// `QuantityCheck` comparing `LifeTotal{Controller}` to
     /// `DivideRounded(StartingLifeTotal, 2, Down)` — fractional rounding
     /// follows the engine convention when Oracle text does not specify
-    /// direction (CR 107.1a). The Untap and Transform clauses chain as
-    /// `SequentialSibling` so the Untap's condition does not gate the
-    /// Transform; both share the same per-clause check by virtue of the
-    /// gate sitting on the first sub_ability.
+    /// direction (CR 107.1a). The Untap clause is a `SequentialSibling` after
+    /// the life-loss instruction, and Transform is a `ContinuationStep` under
+    /// Untap, so the QuantityCheck on Untap gates both actions in the "then if"
+    /// clause.
     #[test]
     fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
         use crate::types::ability::{AbilityCondition, Effect, RoundingMode, SubAbilityLink};
@@ -11332,8 +11332,8 @@ mod tests {
         );
 
         // Nested sub_ability: Transform { target: ParentTarget } with no
-        // condition (the QuantityCheck sits on the Untap sub_ability above;
-        // both clauses share the gate by SequentialSibling chaining).
+        // duplicated condition. The QuantityCheck sits on the Untap sub_ability
+        // above and gates this ContinuationStep.
         let transform_sub = untap_sub
             .sub_ability
             .as_deref()
