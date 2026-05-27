@@ -5510,6 +5510,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::game::combat::AttackTarget;
     use crate::game::game_object::{BackFaceData, RoomDoor};
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
@@ -5524,7 +5525,7 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::TriggerMode;
 
     /// Create a simple test ability definition.
@@ -8718,9 +8719,6 @@ mod tests {
     /// attackers / declare-blockers so the damage step is about to fire.
     /// Returns (state, attacking hawk, hawks in library).
     fn setup_tempest_hawk_attack(library_hawk_ids: &[u64]) -> (GameState, ObjectId, Vec<ObjectId>) {
-        use crate::game::combat::AttackTarget;
-        use crate::types::mana::ManaColor;
-
         let mut state = new_game(42);
         state.turn_number = 5;
         state.phase = Phase::DeclareAttackers;

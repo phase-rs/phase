@@ -1,6 +1,6 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_until, take_while};
 use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
@@ -185,7 +185,6 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
 // recognizer matches this exact phrase shape to avoid false-positives
 // against legitimate "up to N cards named ..." patterns (e.g. Seven Dwarves).
 fn parse_deck_can_have_any_number_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    use nom::bytes::complete::take_while;
     let (input, _) = tag("a deck can have any number of cards named ").parse(input)?;
     let (input, subject) = take_while(|c: char| {
         c.is_alphanumeric() || c == ' ' || c == '\'' || c == ',' || c == '-' || c == '~'
