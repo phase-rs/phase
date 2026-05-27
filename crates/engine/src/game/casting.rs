@@ -6974,6 +6974,10 @@ pub fn can_activate_ability_now(
     if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return false;
     }
+    // CR 602.5 + CR 117.1b: Time-axis activation prohibition (City of Solitude class).
+    if is_blocked_by_cant_activate_during(state, player, &ability_def) {
+        return false;
+    }
     if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
         return false;
     }
@@ -7095,6 +7099,14 @@ pub fn handle_activate_ability(
     if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return Err(EngineError::ActionNotAllowed(
             "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+        ));
+    }
+    // CR 602.5 + CR 117.1b: Reject activation if any CantActivateDuring static
+    // prohibits activation during the current turn condition (City of Solitude class).
+    if is_blocked_by_cant_activate_during(state, player, &ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities can't be activated during this turn (CR 602.5 + CR 117.1b)"
+                .to_string(),
         ));
     }
     if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
@@ -7788,7 +7800,7 @@ fn is_blocked_from_casting_from_zone(
 ///   prohibits activation of opponent-controlled artifacts' activated abilities.
 /// - Pithing Needle (`source_filter=HasChosenName, exemption=ManaAbilities`): prohibits
 ///   activation of named-card sources except their mana abilities.
-fn is_blocked_by_cant_be_activated(
+pub(super) fn is_blocked_by_cant_be_activated(
     state: &GameState,
     caster: PlayerId,
     activating_source_id: ObjectId,
@@ -7835,57 +7847,129 @@ fn is_blocked_by_cant_be_activated(
     false
 }
 
+/// CR 117.1 + CR 604.1: Evaluate a `CastingProhibitionCondition` against the
+/// current game state from the perspective of the static's source permanent
+/// and the prospective caster/activator.
+///
+/// Single-authority condition evaluator shared by `is_blocked_by_cant_cast_during`
+/// (CR 601.2) and `is_blocked_by_cant_activate_during` (CR 602.5). Inline
+/// matching at the two call sites is forbidden — every new
+/// `CastingProhibitionCondition` variant lands here exactly once.
+///
+/// `source_controller` is the controller of the static's source permanent (used
+/// to bind possessive timing references such as "during your turn" — CR 109.5).
+/// `caster` is the player whose action is being legality-checked (used for
+/// timing predicates that scope to the active actor such as `NotSorcerySpeed`
+/// or the distributive `NotDuringAffectedPlayersTurn`).
+fn evaluate_casting_prohibition_condition(
+    state: &GameState,
+    when: &CastingProhibitionCondition,
+    source_controller: PlayerId,
+    caster: PlayerId,
+) -> bool {
+    use crate::types::phase::Phase;
+    match when {
+        // CR 109.5: "during your turn" — bound to the static's source controller.
+        CastingProhibitionCondition::DuringYourTurn => state.active_player == source_controller,
+        // CR 506.1: "during combat" — any combat phase, game-wide.
+        CastingProhibitionCondition::DuringCombat => matches!(
+            state.phase,
+            Phase::BeginCombat
+                | Phase::DeclareAttackers
+                | Phase::DeclareBlockers
+                | Phase::CombatDamage
+                | Phase::EndCombat
+        ),
+        // CR 109.5 + CR 117.1a + CR 604.1: "only during your turn" — blocked
+        // when it is NOT the source-controller's turn (Fires of Invention's
+        // "your turn"). Differs from `NotDuringAffectedPlayersTurn`: this
+        // binds to the static source's controller per CR 109.5.
+        CastingProhibitionCondition::NotDuringYourTurn => state.active_player != source_controller,
+        // CR 102.1 + CR 117.1a + CR 604.1: "only during their own turn" —
+        // distributive per-affected-player binding (Dosan / City of Solitude).
+        // Blocked when it is NOT the *caster's* turn. The pronoun "their own"
+        // is not governed by CR 109.5 (which binds "you/your"); the
+        // distributive reading follows from CR 102.1 + the template structure
+        // of "[every player] can [action] only during their own [time]".
+        CastingProhibitionCondition::NotDuringAffectedPlayersTurn => state.active_player != caster,
+        // CR 117.1a + CR 117.1b: "only any time they could cast a sorcery"
+        // — blocked when not at sorcery speed (active player's main phase
+        // + empty stack + caster is the active player).
+        CastingProhibitionCondition::NotSorcerySpeed => {
+            let at_sorcery_speed = state.active_player == caster
+                && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
+                && state.stack.is_empty();
+            !at_sorcery_speed
+        }
+    }
+}
+
 /// CR 101.2: Check if any CantCastDuring static on the battlefield prevents the
 /// given player from casting spells during the current turn/phase.
 /// E.g., Teferi, Time Raveler: "Your opponents can't cast spells during your turn."
 /// E.g., Basandra, Battle Seraph: "Players can't cast spells during combat."
+/// E.g., Dosan, the Falling Leaf (`who=AllPlayers, when=NotDuringAffectedPlayersTurn`):
+///   each player can only cast on their own turn.
 fn is_blocked_by_cant_cast_during(state: &GameState, caster: PlayerId) -> bool {
-    use crate::types::phase::Phase;
-
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        {
-            let StaticMode::CantCastDuring { ref who, ref when } = def.mode else {
-                continue;
-            };
+        let StaticMode::CantCastDuring { ref who, ref when } = def.mode else {
+            continue;
+        };
+        // CR 101.2: Check if the caster is in the affected scope.
+        if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
+            continue;
+        }
+        // CR 109.5 / CR 102.1: Bind the timing predicate via the single-authority
+        // evaluator. The (source_controller, caster) pair is passed verbatim;
+        // each `CastingProhibitionCondition` arm picks the binding it needs.
+        if evaluate_casting_prohibition_condition(state, when, bf_obj.controller, caster) {
+            return true;
+        }
+    }
+    false
+}
 
-            // CR 101.2: Check if the caster is in the affected scope.
-            if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
-                continue;
-            }
-
-            // Check if the current game state matches the timing condition.
-            let condition_met = match when {
-                CastingProhibitionCondition::DuringYourTurn => {
-                    // "During your turn" = the static controller's turn is active.
-                    state.active_player == bf_obj.controller
+/// CR 602.5 + CR 117.1b: Check if any active `CantActivateDuring` static on
+/// the battlefield prevents the given player from activating the given
+/// activated ability during the current turn condition.
+///
+/// E.g., City of Solitude — both casting and activating are prohibited unless
+/// it's the affected player's own turn.
+///
+/// CR 605.1a: When the static carries `exemption: ManaAbilities`, abilities
+/// classified as mana abilities (CR 605.1a) by `mana_abilities::is_mana_ability`
+/// bypass the prohibition. City of Solitude emits `ActivationExemption::None`
+/// per its 2009-10-01 ruling ("This stops players from activating mana
+/// abilities") — mana abilities are NOT exempt for that card.
+pub(super) fn is_blocked_by_cant_activate_during(
+    state: &GameState,
+    activator: PlayerId,
+    activating_ability: &AbilityDefinition,
+) -> bool {
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        let StaticMode::CantActivateDuring {
+            ref who,
+            ref when,
+            ref exemption,
+        } = def.mode
+        else {
+            continue;
+        };
+        if !casting_prohibition_scope_matches(who, activator, bf_obj, state) {
+            continue;
+        }
+        if !evaluate_casting_prohibition_condition(state, when, bf_obj.controller, activator) {
+            continue;
+        }
+        // CR 605.1a: Apply the exemption gate via the single classifier authority.
+        match exemption {
+            ActivationExemption::None => return true,
+            ActivationExemption::ManaAbilities => {
+                if !super::mana_abilities::is_mana_ability(activating_ability) {
+                    return true;
                 }
-                CastingProhibitionCondition::DuringCombat => {
-                    matches!(
-                        state.phase,
-                        Phase::BeginCombat
-                            | Phase::DeclareAttackers
-                            | Phase::DeclareBlockers
-                            | Phase::CombatDamage
-                            | Phase::EndCombat
-                    )
-                }
-                CastingProhibitionCondition::NotDuringYourTurn => {
-                    // CR 117.1a + CR 604.1: "can cast spells only during your turn"
-                    // = blocked when it is NOT the controller's turn.
-                    state.active_player != bf_obj.controller
-                }
-                CastingProhibitionCondition::NotSorcerySpeed => {
-                    // CR 117.1: "can cast spells only any time they could cast a sorcery"
-                    // Blocked when NOT at sorcery speed: active player's main phase + empty stack.
-                    let at_sorcery_speed = state.active_player == caster
-                        && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-                        && state.stack.is_empty();
-                    !at_sorcery_speed
-                }
-            };
-            if condition_met {
-                return true;
             }
         }
     }
@@ -25022,5 +25106,353 @@ mod tests {
             ManaCost::generic(3),
             "Trinisphere must floor a free spell's zero mana component to {{3}}"
         );
+    }
+
+    // === CR 117.1 + CR 602.5 + CR 605.1a: shared condition evaluator &
+    //     CantActivateDuring runtime tests ===
+
+    /// Attach a `CantActivateDuring` static to a freshly-created permanent on the battlefield.
+    fn add_cant_activate_during_permanent(
+        state: &mut GameState,
+        controller: PlayerId,
+        who: ProhibitionScope,
+        when: CastingProhibitionCondition,
+        exemption: ActivationExemption,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Activation Prohibitor".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantActivateDuring {
+                who,
+                when,
+                exemption,
+            }));
+        id
+    }
+
+    /// CR 117.1 + CR 604.1: Exhaustive coverage of every
+    /// `CastingProhibitionCondition` arm via the single-authority evaluator.
+    /// Verifies the binding axis is correct for each variant.
+    #[test]
+    fn evaluate_casting_prohibition_condition_all_arms() {
+        let mut state = setup_game_at_main_phase();
+        // Active player is P0 in PreCombatMain with an empty stack.
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+
+        // CR 109.5: DuringYourTurn — bound to source controller.
+        // Active player is P0; source controller=P0 → true; source controller=P1 → false.
+        assert!(evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::DuringYourTurn,
+            p0,
+            p0,
+        ));
+        assert!(!evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::DuringYourTurn,
+            p1,
+            p0,
+        ));
+
+        // CR 506.1: DuringCombat — false in PreCombatMain.
+        assert!(!evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::DuringCombat,
+            p0,
+            p0,
+        ));
+        // Same predicate is true in a combat phase.
+        state.phase = Phase::DeclareAttackers;
+        assert!(evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::DuringCombat,
+            p0,
+            p0,
+        ));
+        state.phase = Phase::PreCombatMain;
+
+        // CR 109.5: NotDuringYourTurn — blocked when active player != source controller.
+        // Active player=P0; source controller=P0 → not blocked. Source controller=P1 → blocked.
+        assert!(!evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::NotDuringYourTurn,
+            p0,
+            p0,
+        ));
+        assert!(evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::NotDuringYourTurn,
+            p1,
+            p0,
+        ));
+
+        // CR 102.1: NotDuringAffectedPlayersTurn — blocked when active player != caster.
+        // Active player=P0; caster=P0 → not blocked. Caster=P1 → blocked.
+        assert!(!evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+            p0, // source_controller — irrelevant for this arm
+            p0,
+        ));
+        assert!(evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+            p0,
+            p1,
+        ));
+
+        // CR 117.1b: NotSorcerySpeed — blocked unless caster is active player +
+        // main phase + empty stack.
+        // setup_game_at_main_phase sets active=P0, PreCombatMain, empty stack.
+        assert!(!evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::NotSorcerySpeed,
+            p0,
+            p0,
+        ));
+        // Caster=P1 on P0's turn → not at sorcery speed → blocked.
+        assert!(evaluate_casting_prohibition_condition(
+            &state,
+            &CastingProhibitionCondition::NotSorcerySpeed,
+            p0,
+            p1,
+        ));
+    }
+
+    /// CR 102.1 + CR 601.2: Dosan's `CantCastDuring(AllPlayers, NotDuringAffectedPlayersTurn)`
+    /// must produce a 4-quadrant blocking matrix per the distributive binding:
+    /// each player is blocked when it is NOT their own turn, regardless of who controls Dosan.
+    #[test]
+    fn cant_cast_during_dosan_per_affected_player_matrix() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        // Dosan on P0's battlefield.
+        add_cant_cast_during_permanent(
+            &mut state,
+            p0,
+            ProhibitionScope::AllPlayers,
+            CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+        );
+
+        // (A) active=P0, caster=P0 → not blocked (it IS the caster's turn).
+        state.active_player = p0;
+        assert!(
+            !is_blocked_by_cant_cast_during(&state, p0),
+            "P0 must NOT be blocked on their own turn"
+        );
+        // (B) active=P0, caster=P1 → blocked (not P1's turn).
+        assert!(
+            is_blocked_by_cant_cast_during(&state, p1),
+            "P1 must be blocked on P0's turn"
+        );
+        // (C) active=P1, caster=P0 → blocked (not P0's turn).
+        state.active_player = p1;
+        assert!(
+            is_blocked_by_cant_cast_during(&state, p0),
+            "P0 must be blocked on P1's turn"
+        );
+        // (D) active=P1, caster=P1 → not blocked (it IS the caster's turn).
+        assert!(
+            !is_blocked_by_cant_cast_during(&state, p1),
+            "P1 must NOT be blocked on their own turn"
+        );
+    }
+
+    /// CR 102.1 + CR 602.5: City of Solitude's activate-half emits
+    /// `CantActivateDuring(AllPlayers, NotDuringAffectedPlayersTurn, None)`.
+    /// The activation-blocking matrix mirrors the cast matrix.
+    #[test]
+    fn cant_activate_during_city_of_solitude_per_affected_player_matrix() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        add_cant_activate_during_permanent(
+            &mut state,
+            p0,
+            ProhibitionScope::AllPlayers,
+            CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+            ActivationExemption::None,
+        );
+        // Use a non-mana ability for the 4-quadrant matrix so the exemption gate
+        // does not short-circuit.
+        let ability = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            crate::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(crate::types::ability::AbilityCost::Tap);
+
+        // (A) active=P0, activator=P0 → NOT blocked.
+        state.active_player = p0;
+        assert!(!is_blocked_by_cant_activate_during(&state, p0, &ability));
+        // (B) active=P0, activator=P1 → blocked.
+        assert!(is_blocked_by_cant_activate_during(&state, p1, &ability));
+        // (C) active=P1, activator=P0 → blocked.
+        state.active_player = p1;
+        assert!(is_blocked_by_cant_activate_during(&state, p0, &ability));
+        // (D) active=P1, activator=P1 → NOT blocked.
+        assert!(!is_blocked_by_cant_activate_during(&state, p1, &ability));
+    }
+
+    /// CR 605.1a + City of Solitude 2009-10-01 ruling: City of Solitude emits
+    /// `ActivationExemption::None`, so mana abilities ARE blocked (not exempt).
+    #[test]
+    fn city_of_solitude_blocks_mana_abilities_per_2009_ruling() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        // City of Solitude on P0's battlefield.
+        add_cant_activate_during_permanent(
+            &mut state,
+            p0,
+            ProhibitionScope::AllPlayers,
+            CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+            ActivationExemption::None,
+        );
+        let mana_ability = make_tap_for_green_mana_ability();
+        // Verify this IS classified as a mana ability (sanity).
+        assert!(
+            super::super::mana_abilities::is_mana_ability(&mana_ability),
+            "Sanity: {{T}}: Add {{G}} must classify as a mana ability"
+        );
+        // On P0's turn, P1's mana ability is blocked because P0's turn ≠ P1's turn.
+        state.active_player = p0;
+        assert!(
+            is_blocked_by_cant_activate_during(&state, p1, &mana_ability),
+            "City of Solitude must block P1's mana ability on P0's turn (exemption=None)"
+        );
+    }
+
+    /// CR 605.1a contrast: when `ActivationExemption::ManaAbilities` is set, mana
+    /// abilities bypass the prohibition. Guards the exemption gate's mana-ability
+    /// branch in `is_blocked_by_cant_activate_during`.
+    #[test]
+    fn cant_activate_during_with_mana_exemption_permits_mana_abilities() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        // Hypothetical permanent: same shape as City of Solitude but mana-ability exempt.
+        add_cant_activate_during_permanent(
+            &mut state,
+            p0,
+            ProhibitionScope::AllPlayers,
+            CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+            ActivationExemption::ManaAbilities,
+        );
+        let mana_ability = make_tap_for_green_mana_ability();
+        // On P0's turn, P1's mana ability must NOT be blocked because the exemption
+        // permits mana abilities — even though the timing predicate is satisfied.
+        state.active_player = p0;
+        assert!(
+            !is_blocked_by_cant_activate_during(&state, p1, &mana_ability),
+            "ManaAbilities exemption must permit P1's mana ability"
+        );
+        // Non-mana ability is still blocked.
+        let non_mana_ability = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            crate::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(crate::types::ability::AbilityCost::Tap);
+        assert!(
+            is_blocked_by_cant_activate_during(&state, p1, &non_mana_ability),
+            "Non-mana ability still blocked under timing predicate"
+        );
+    }
+
+    /// CR 601.2: Fires of Invention emits ONLY a `CantCastDuring` — its activate-side
+    /// must remain unaffected. Regression guard for the parser rewrite.
+    #[test]
+    fn fires_of_invention_does_not_block_ability_activations() {
+        let mut state = setup_game_at_main_phase();
+        let p1 = PlayerId(1);
+        // Fires-like: cast-only prohibition, controller binding.
+        add_cant_cast_during_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Controller,
+            CastingProhibitionCondition::NotDuringYourTurn,
+        );
+        let ability = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            crate::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(crate::types::ability::AbilityCost::Tap);
+        // No `CantActivateDuring` on the battlefield, so the activate gate is a no-op.
+        assert!(
+            !is_blocked_by_cant_activate_during(&state, p1, &ability),
+            "Fires of Invention is CantCastDuring only; activations must be unaffected"
+        );
+    }
+
+    /// CR 601.2 + Dosan 2004-12-01 ruling ("doesn't stop activated or triggered abilities"):
+    /// Dosan emits ONLY a `CantCastDuring`, never a `CantActivateDuring`. The runtime gate
+    /// must never spuriously block activations from a Dosan-only static loadout.
+    #[test]
+    fn dosan_does_not_block_ability_activations_per_2004_ruling() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        // Dosan-like static — cast-only.
+        add_cant_cast_during_permanent(
+            &mut state,
+            p0,
+            ProhibitionScope::AllPlayers,
+            CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+        );
+        let ability = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            crate::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(crate::types::ability::AbilityCost::Tap);
+        // Active player is P0; P1 tries to activate. Without a CantActivateDuring static,
+        // the activation must NOT be blocked.
+        assert!(
+            !is_blocked_by_cant_activate_during(&state, p1, &ability),
+            "Dosan's cast-only prohibition must not affect activations (2004-12-01 ruling)"
+        );
+    }
+
+    /// CR 602.5 + CR 117.1b: Display/FromStr round-trip preserves the (who, when) axes.
+    /// `exemption` is data-carrying and defaults to `None` (mirrors `CantBeActivated`).
+    #[test]
+    fn cant_activate_during_display_from_str_roundtrip() {
+        use std::str::FromStr;
+        let original = StaticMode::CantActivateDuring {
+            who: ProhibitionScope::AllPlayers,
+            when: CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+            exemption: ActivationExemption::None,
+        };
+        let displayed = original.to_string();
+        let parsed = StaticMode::from_str(&displayed).expect("round-trip must parse");
+        assert!(matches!(
+            parsed,
+            StaticMode::CantActivateDuring {
+                who: ProhibitionScope::AllPlayers,
+                when: CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+                ..
+            }
+        ));
     }
 }

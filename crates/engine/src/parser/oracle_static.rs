@@ -51,6 +51,114 @@ use crate::types::statics::{
 };
 use crate::types::zones::Zone;
 
+/// CR 109.5 vs CR 102.1 + structural distributive: the pronoun-binding axis
+/// of an "only during X turn(s)" prohibition.
+///
+/// - `SourceRelative` ≡ "your turn" — CR 109.5 binds to the static's source
+///   controller (Fires of Invention).
+/// - `PerAffected` ≡ "their own turn(s)" — distributive per-affected-player
+///   binding (Dosan, City of Solitude). The CompRules don't carve out a
+///   specific pronoun rule for "their"; the distributive reading follows from
+///   CR 102.1 + the template structure of "[every player] can [action] only
+///   during their own [time]".
+///
+/// This enum is parser-internal — it never appears on `StaticMode`. The
+/// resulting `CastingProhibitionCondition` (`NotDuringYourTurn` vs
+/// `NotDuringAffectedPlayersTurn`) carries the binding axis into the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WhenKind {
+    SourceRelative,
+    PerAffected,
+}
+
+/// Parse the trailing `"only during {your | their own} turn(s?)"` clause and
+/// return the typed binding axis.
+///
+/// Composed from nested `alt()` calls — one axis per choice — not enumerated
+/// as 4 full-string permutations. Adding "his or her" or "each player's own"
+/// is a single new `value(WhenKind::_, tag("..."))` arm.
+///
+/// Grammar:
+///   "only during " (`"your"` | `"their own"`) " turn" `"s"?` `"."?`
+///
+/// Returns `(remaining_input, WhenKind)` on success.
+fn parse_when_clause(input: &str) -> OracleResult<'_, WhenKind> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("only during ").parse(input)?;
+    let (input, kind) = alt((
+        value(WhenKind::SourceRelative, tag("your")),
+        value(WhenKind::PerAffected, tag("their own")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" turn").parse(input)?;
+    let (input, _) = opt(tag("s")).parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, kind))
+}
+
+/// Map a `WhenKind` to its `CastingProhibitionCondition`. Single-authority
+/// mapper so the binding axis lives in exactly one place.
+fn when_kind_to_condition(kind: WhenKind) -> CastingProhibitionCondition {
+    match kind {
+        WhenKind::SourceRelative => CastingProhibitionCondition::NotDuringYourTurn,
+        WhenKind::PerAffected => CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+    }
+}
+
+/// CR 601.2 + CR 602.5 + CR 117.1a + CR 117.1b: Parse "[subject] can cast spells
+/// and activate abilities only during {your | their own} turn(s)" — City of
+/// Solitude class. Emits TWO statics (cast-half + activate-half) so the
+/// runtime gates dispatch independently.
+///
+/// Subject → scope via the shared `strip_casting_prohibition_subject` helper.
+/// Trailing "only during X turn(s)" → typed `WhenKind` via the same shared
+/// `parse_when_clause` combinator that the cast-only branch uses.
+///
+/// Grammar:
+///   <SUBJECT> "can cast spells and activate abilities " parse_when_clause
+fn parse_cast_and_activate_only_during(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let lower = tp.lower;
+    if !nom_primitives::scan_contains(lower, "can cast spells and activate abilities only during") {
+        return None;
+    }
+    // Subject → scope.
+    let (who, after_subject) = strip_casting_prohibition_subject(lower)?;
+    // Verb phrase + shared when-clause combinator.
+    fn parse_predicate(i: &str) -> OracleResult<'_, WhenKind> {
+        let (i, _) =
+            tag::<_, _, OracleError<'_>>("can cast spells and activate abilities ").parse(i)?;
+        let (i, kind) = parse_when_clause(i)?;
+        Ok((i, kind))
+    }
+    let (rest, kind) = parse_predicate(after_subject).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let when = when_kind_to_condition(kind);
+
+    // Preserve full Oracle text on both emitted statics' `description`.
+    // CR 605.1a: City of Solitude per its 2009-10-01 ruling blocks mana
+    // abilities — emit `ActivationExemption::None`. Future printings that
+    // carve out mana abilities ("...except mana abilities") may extend the
+    // parser to detect the exemption suffix; today no printed card uses that
+    // shape.
+    Some(vec![
+        StaticDefinition::new(StaticMode::CantCastDuring {
+            who: who.clone(),
+            when: when.clone(),
+        })
+        .description(text.to_string()),
+        StaticDefinition::new(StaticMode::CantActivateDuring {
+            who,
+            when,
+            exemption: ActivationExemption::None,
+        })
+        .description(text.to_string()),
+    ])
+}
+
 /// Try matching a nom `tag()` against the lowercase text, returning the remaining original-case
 /// text on success. This bridges nom's exact-match combinators with the TextPair dual-string
 /// pattern used throughout the parser.
@@ -1888,25 +1996,37 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
-    // --- CR 117.1a + CR 604.1: "can cast spells only during your turn" ---
-    // E.g., Fires of Invention: "You can cast spells only during your turn."
-    // Must be checked AFTER PerTurnCastLimit (which handles "no more than N" in compound clauses)
-    // and BEFORE the generic CantCastDuring block (which matches "can't cast spells during").
-    // Guard: exclude compound lines containing "each turn" — those are split at the oracle.rs level
-    // so both CantCastDuring and PerTurnCastLimit are emitted independently.
-    if nom_primitives::scan_contains(tp.lower, "can cast spells only during your turn")
+    // --- CR 117.1a + CR 604.1: "[subject] can cast spells only during {your | their own} turn(s)" ---
+    // E.g., Fires of Invention: "You can cast spells only during your turn." → SourceRelative
+    // E.g., Dosan, the Falling Leaf: "Players can cast spells only during their own turns." → PerAffected
+    //
+    // Must be checked AFTER PerTurnCastLimit (which handles "no more than N" in compound
+    // clauses) and BEFORE the generic CantCastDuring block (which matches "can't cast
+    // spells during"). Guard: exclude compound lines containing "each turn" — those are
+    // split at the oracle.rs level so CantCastDuring and PerTurnCastLimit emit independently.
+    if nom_primitives::scan_contains(tp.lower, "can cast spells only during")
         && !nom_primitives::scan_contains(tp.lower, "each turn")
     {
-        let who = strip_casting_prohibition_subject(tp.lower)
-            .map(|(scope, _)| scope)
-            .unwrap_or(ProhibitionScope::Controller);
-        return Some(
-            StaticDefinition::new(StaticMode::CantCastDuring {
-                who,
-                when: CastingProhibitionCondition::NotDuringYourTurn,
-            })
-            .description(text.to_string()),
-        );
+        // Subject → scope, via the shared building block.
+        let (who, after_subject) = strip_casting_prohibition_subject(tp.lower)
+            .unwrap_or((ProhibitionScope::Controller, tp.lower));
+        // Predicate must be exactly "can cast spells " + parse_when_clause.
+        fn parse_predicate(i: &str) -> OracleResult<'_, WhenKind> {
+            let (i, _) = tag::<_, _, OracleError<'_>>("can cast spells ").parse(i)?;
+            let (i, kind) = parse_when_clause(i)?;
+            Ok((i, kind))
+        }
+        if let Ok((rest, kind)) = parse_predicate(after_subject) {
+            if rest.trim().is_empty() {
+                return Some(
+                    StaticDefinition::new(StaticMode::CantCastDuring {
+                        who,
+                        when: when_kind_to_condition(kind),
+                    })
+                    .description(text.to_string()),
+                );
+            }
+        }
     }
 
     // CR 117.1: "can cast spells only any time they could cast a sorcery"
@@ -2571,6 +2691,15 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
+
+    // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and
+    // activate abilities only during {your | their own} turn(s)". Emits both
+    // halves of the prohibition independently. Must run first so the cast-only
+    // branch (which matches "can cast spells only during") does not consume
+    // the line before the activate-half is emitted.
+    if let Some(defs) = parse_cast_and_activate_only_during(&tp, &stripped) {
+        return defs;
+    }
 
     if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &stripped) {
         return defs;
@@ -22023,5 +22152,131 @@ mod snapshot_tests {
             .is_none(),
             "non-2-life variants must not bind to PayLifeAsColoredMana"
         );
+    }
+
+    // === CR 117.1a + CR 102.1 + CR 109.5: "only during X turn(s)" parser tests ===
+
+    /// CR 109.5: Fires of Invention emits the source-relative binding
+    /// (`NotDuringYourTurn`) and does NOT emit a CantActivateDuring static.
+    /// Regression guard — parser rewrite must preserve bit-for-bit behavior.
+    #[test]
+    fn parses_fires_of_invention_cast_only_during_your_turn() {
+        let defs = parse_static_line_multi("You can cast spells only during your turn.");
+        let cast = defs
+            .iter()
+            .find(|d| matches!(&d.mode, StaticMode::CantCastDuring { .. }))
+            .expect("expected CantCastDuring");
+        match &cast.mode {
+            StaticMode::CantCastDuring { who, when } => {
+                assert_eq!(*who, ProhibitionScope::Controller);
+                assert_eq!(*when, CastingProhibitionCondition::NotDuringYourTurn);
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !defs
+                .iter()
+                .any(|d| matches!(&d.mode, StaticMode::CantActivateDuring { .. })),
+            "Fires of Invention does NOT emit an activate-during static"
+        );
+    }
+
+    /// CR 102.1: Dosan emits `CantCastDuring(AllPlayers, NotDuringAffectedPlayersTurn)`
+    /// and per its 2004-12-01 ruling does NOT emit a CantActivateDuring static.
+    #[test]
+    fn parses_dosan_cast_only_during_their_own_turns() {
+        let defs = parse_static_line_multi("Players can cast spells only during their own turns.");
+        assert_eq!(defs.len(), 1, "expected exactly one static, got {defs:?}");
+        let cast = &defs[0];
+        match &cast.mode {
+            StaticMode::CantCastDuring { who, when } => {
+                assert_eq!(*who, ProhibitionScope::AllPlayers);
+                assert_eq!(
+                    *when,
+                    CastingProhibitionCondition::NotDuringAffectedPlayersTurn
+                );
+            }
+            other => panic!(
+                "expected CantCastDuring(AllPlayers, NotDuringAffectedPlayersTurn), got {other:?}"
+            ),
+        }
+        // Per Dosan's 2004-12-01 ruling: "doesn't stop activated or triggered abilities".
+        assert!(
+            !defs
+                .iter()
+                .any(|d| matches!(&d.mode, StaticMode::CantActivateDuring { .. })),
+            "Dosan must NOT emit an activate-during static"
+        );
+    }
+
+    /// CR 601.2 + CR 602.5: City of Solitude emits BOTH halves (cast + activate)
+    /// with `NotDuringAffectedPlayersTurn`, and the activate-half has
+    /// `ActivationExemption::None` per its 2009-10-01 ruling.
+    #[test]
+    fn parses_city_of_solitude_cast_and_activate_only_during_their_own_turns() {
+        let oracle = "Players can cast spells and activate abilities only during their own turns.";
+        let defs = parse_static_line_multi(oracle);
+        assert_eq!(
+            defs.len(),
+            2,
+            "City of Solitude must emit cast-half + activate-half, got {defs:?}"
+        );
+        let cast = defs
+            .iter()
+            .find(|d| matches!(&d.mode, StaticMode::CantCastDuring { .. }))
+            .expect("cast-half");
+        let activate = defs
+            .iter()
+            .find(|d| matches!(&d.mode, StaticMode::CantActivateDuring { .. }))
+            .expect("activate-half");
+        match &cast.mode {
+            StaticMode::CantCastDuring { who, when } => {
+                assert_eq!(*who, ProhibitionScope::AllPlayers);
+                assert_eq!(
+                    *when,
+                    CastingProhibitionCondition::NotDuringAffectedPlayersTurn
+                );
+            }
+            _ => unreachable!(),
+        }
+        match &activate.mode {
+            StaticMode::CantActivateDuring {
+                who,
+                when,
+                exemption,
+            } => {
+                assert_eq!(*who, ProhibitionScope::AllPlayers);
+                assert_eq!(
+                    *when,
+                    CastingProhibitionCondition::NotDuringAffectedPlayersTurn
+                );
+                // CR 605.1a: City of Solitude does NOT exempt mana abilities (2009-10-01 ruling).
+                assert_eq!(*exemption, ActivationExemption::None);
+            }
+            _ => unreachable!(),
+        }
+        // Both emitted statics carry the full Oracle text on `description`.
+        assert_eq!(cast.description.as_deref(), Some(oracle));
+        assert_eq!(activate.description.as_deref(), Some(oracle));
+    }
+
+    /// CR 117.1: Teferi-class regression — "only any time they could cast a sorcery"
+    /// remains a `NotSorcerySpeed` condition; the parser rewrite must not regress it.
+    #[test]
+    fn parses_teferi_cast_only_at_sorcery_speed_regression() {
+        let defs = parse_static_line_multi(
+            "Each opponent can cast spells only any time they could cast a sorcery.",
+        );
+        let s = defs
+            .iter()
+            .find(|d| matches!(&d.mode, StaticMode::CantCastDuring { .. }))
+            .expect("expected CantCastDuring for Teferi");
+        match &s.mode {
+            StaticMode::CantCastDuring { who, when } => {
+                assert_eq!(*who, ProhibitionScope::Opponents);
+                assert_eq!(*when, CastingProhibitionCondition::NotSorcerySpeed);
+            }
+            _ => unreachable!(),
+        }
     }
 }

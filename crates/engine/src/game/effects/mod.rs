@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CostPaidObjectSnapshot, Effect,
-    EffectError, EffectKind, EffectOutcomeSignal, FilterProp, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, SharedQuality,
-    SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
+    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, FilterProp,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -3202,7 +3202,7 @@ fn resolve_chain_body(
             // so that ability.chosen_x (the paid X value) is passed through. The
             // plain resolve_quantity path passes chosen_x=None, causing X to always
             // resolve to 0 and the loop to never execute (Torment of Hailfire bug).
-            let iterations = if member_driven {
+            let base_iterations = if member_driven {
                 iter_tracked_members.len()
             } else if let Some(ref qty) = ability.repeat_for {
                 crate::game::quantity::resolve_quantity_with_targets(state, qty, ability).max(0)
@@ -3229,9 +3229,16 @@ fn resolve_chain_body(
             let iterations = if matches!(ability.effect, Effect::CopySpell { .. })
                 && ability.copy_count_status.is_pending()
             {
-                copy_spell::copy_count_with_replacements(state, ability, iterations)
+                copy_spell::copy_count_with_replacements(state, ability, base_iterations)
             } else {
-                iterations
+                base_iterations
+            };
+            let replacement_added_copy_start = if matches!(ability.effect, Effect::CopySpell { .. })
+                && iterations > base_iterations
+            {
+                Some(base_iterations)
+            } else {
+                None
             };
 
             let initial_waiting_for = state.waiting_for.clone();
@@ -3247,10 +3254,20 @@ fn resolve_chain_body(
                 // case (two sequential object slots) has zero reachable card
                 // consumers and is deferred — see `effect_parent_ref_slots`.
                 let mut iter_ability;
+                let member = iter_tracked_members.get(iteration).copied();
+                let is_replacement_added_copy =
+                    replacement_added_copy_start.is_some_and(|start| iteration >= start);
                 let iter_effective: &ResolvedAbility =
-                    if let Some(member) = iter_tracked_members.get(iteration) {
+                    if member.is_some() || is_replacement_added_copy {
                         iter_ability = effective.clone();
-                        rebind_first_object_target(&mut iter_ability.targets, *member);
+                        if let Some(member) = member {
+                            rebind_first_object_target(&mut iter_ability.targets, member);
+                        }
+                        if let (true, Effect::CopySpell { retarget, .. }) =
+                            (is_replacement_added_copy, &mut iter_ability.effect)
+                        {
+                            *retarget = CopyRetargetPermission::MayChooseNewTargets;
+                        }
                         &iter_ability
                     } else {
                         effective

@@ -1552,4 +1552,67 @@ mod tests {
             "Twinning Staff must make exactly one extra copy (2 total), got {copies}"
         );
     }
+
+    /// Twinning Staff's ruling grants new-target permission for the replacement-
+    /// added copy even if the original copy effect keeps targets unchanged.
+    #[test]
+    fn twinning_staff_added_copy_can_retarget_when_base_copy_cannot() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        push_twinning_staff(&mut state, ObjectId(50), PlayerId(0));
+
+        let mut bear = GameObject::new(
+            ObjectId(60),
+            CardId(5),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        bear.card_types.core_types.push(CoreType::Creature);
+        state.objects.insert(ObjectId(60), bear);
+
+        let spell = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(ObjectId(60))],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt",
+            spell,
+            CastingVariant::Normal,
+        );
+
+        let copy = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+            },
+            vec![],
+            ObjectId(70),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        let _ = crate::game::effects::resolve_ability_chain(&mut state, &copy, &mut events, 0);
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::CopyRetarget { .. }),
+            "replacement-added copy must allow new targets"
+        );
+        let copies = state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.zone == Zone::Stack)
+            .count();
+        assert_eq!(copies, 2);
+    }
 }

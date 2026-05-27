@@ -203,6 +203,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantCastFrom, handle_rule_mod);
     // Note: CantCastDuring is a data-carrying variant — runtime enforcement will be in
     // casting.rs. Coverage support is via is_data_carrying_static().
+    // Note: CantActivateDuring is a data-carrying variant — runtime enforcement is in
+    // casting.rs::is_blocked_by_cant_activate_during(). Coverage support is via
+    // is_data_carrying_static(). Like CantBeActivated, parameterized — no registry entry.
     // Note: PerTurnCastLimit is a data-carrying variant — runtime enforcement is in
     // casting.rs::is_blocked_by_per_turn_cast_limit(). Coverage support is via is_data_carrying_static().
 
