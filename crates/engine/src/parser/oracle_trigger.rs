@@ -11162,10 +11162,9 @@ mod tests {
     /// `QuantityCheck` comparing `LifeTotal{Controller}` to
     /// `DivideRounded(StartingLifeTotal, 2, Down)` — fractional rounding
     /// follows the engine convention when Oracle text does not specify
-    /// direction (CR 107.1a). The Untap and Transform clauses chain as
-    /// `SequentialSibling` so the Untap's condition does not gate the
-    /// Transform; both share the same per-clause check by virtue of the
-    /// gate sitting on the first sub_ability.
+    /// direction (CR 107.1a). The Untap clause chains as SequentialSibling
+    /// after LoseLife, and Transform chains as ContinuationStep under
+    /// Untap, so the Untap's condition gates the Transform.
     #[test]
     fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
         use crate::types::ability::{AbilityCondition, Effect, RoundingMode, SubAbilityLink};
