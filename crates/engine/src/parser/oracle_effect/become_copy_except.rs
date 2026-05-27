@@ -412,28 +412,39 @@ fn split_single_quoted_ability(input: &str) -> Option<(&str, &str)> {
 }
 
 /// CR 205.4 + CR 707.9b: Match `"the token isn't <supertype>"` /
-/// `"it isn't <supertype>"` (and apostrophe-free / "is not" variants).
+/// `"it isn't <supertype>"` (and apostrophe-free, "is not", and contracted
+/// `"it's not"` variants).
 /// Emits [`ContinuousModification::RemoveSupertype`].
 ///
 /// Miirym, Sentinel Wyrm: `"create a token that's a copy of it, except the
 /// token isn't legendary"` is the canonical case. The arm is permissive about
 /// subject phrasing because both forms appear across token-copy and
 /// replacement-copy texts (Spark Double's `"and it isn't legendary"` is the
-/// replacement-form variant).
+/// replacement-form variant). The contracted negated-copula form `"it's not
+/// legendary"` (Delina, Wild Mage; Ember Island Production; Ratadrabik of
+/// Urborg; etc.) is also accepted with both ASCII and curly apostrophes.
 fn parse_isnt_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("the token isn't "),
         tag("the token isnt "),
         tag("the token is not "),
+        tag("the token's not "),
+        tag("the token\u{2019}s not "),
         tag("it isn't "),
         tag("it isnt "),
         tag("it is not "),
+        tag("it's not "),
+        tag("it\u{2019}s not "),
         tag("he isn't "),
         tag("he isnt "),
         tag("he is not "),
+        tag("he's not "),
+        tag("he\u{2019}s not "),
         tag("she isn't "),
         tag("she isnt "),
         tag("she is not "),
+        tag("she's not "),
+        tag("she\u{2019}s not "),
     ))
     .parse(input)
     .ok()?;
@@ -1022,6 +1033,128 @@ mod tests {
             vec![ContinuousModification::RemoveSupertype {
                 supertype: Supertype::Legendary,
             }]
+        );
+    }
+
+    /// CR 205.4 + CR 707.9b: contracted negated-copula form "it's not
+    /// legendary" (Delina, Wild Mage; Ratadrabik of Urborg; Jace, Mirror Mage;
+    /// etc.). Issue #685: previously fell through, leaving the token Legendary
+    /// and triggering the legend rule (CR 704.5j) against the original.
+    #[test]
+    fn it_is_not_legendary_contracted_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 205.4 + CR 707.9b: curly-apostrophe variant of the contracted
+    /// negated-copula form. Mirrors the apostrophe-pair parity used by
+    /// `parse_subject_pt_and_types` and `parse_is_supertype_in_addition`.
+    #[test]
+    fn its_not_legendary_curly_apostrophe_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except it\u{2019}s not legendary",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 707.9a + CR 707.9b: Delina, Wild Mage's full token-copy except clause
+    /// chains the contracted "it's not legendary" with a quoted triggered
+    /// ability. Both modifications must flow through together; previously the
+    /// contracted form was dropped, leaving the token Legendary. The granted
+    /// ability variant (GrantTrigger vs GrantAbility) depends on whether the
+    /// quoted body's trigger condition is recognised — either is acceptable
+    /// here; the assertion is that *some* granted-ability modification
+    /// accompanies the RemoveSupertype, not that the contracted form blocks
+    /// the trailing " and " conjunction.
+    #[test]
+    fn token_compound_clause_strips_legendary_and_grants_ability() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary and it has \"when ~ enters, draw a card.\"",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods.len(),
+            2,
+            "expected RemoveSupertype + a granted ability; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary
+                }
+            )),
+            "missing RemoveSupertype(Legendary); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::GrantTrigger { .. }
+                    | ContinuousModification::GrantAbility { .. }
+            )),
+            "missing granted ability (GrantTrigger or GrantAbility); got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b: Ember Island Production's first-mode body chains the
+    /// contracted "it's not legendary" with a P/T+subtype override. Both
+    /// halves are characteristic modifications (RemoveSupertype + SetPower +
+    /// SetToughness + AddSubtype), so 707.9b covers the full clause. Confirms
+    /// the contracted negated-copula does not block the
+    /// `parse_subject_pt_and_types` arm that follows the " and " conjunction.
+    #[test]
+    fn token_compound_clause_strips_legendary_and_sets_pt_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary and it's a 4/4 hero in addition to its other types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary
+                }
+            )),
+            "missing RemoveSupertype(Legendary); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "missing SetPower(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+            "missing SetToughness(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Hero"
+            )),
+            "missing AddSubtype(Hero); got {mods:?}"
         );
     }
 

@@ -1325,6 +1325,86 @@ mod tests {
         );
     }
 
+    /// CR 704.5j + CR 707.9b: Issue #685 regression. When token-copy strips
+    /// the Legendary supertype via `additional_modifications`, the legend
+    /// rule SBA must NOT prompt the controller to choose which copy to
+    /// sacrifice — the token is no longer Legendary, so there is exactly one
+    /// Legendary permanent with the shared name (the original). Both
+    /// permanents must remain on the battlefield. This is the SBA-side
+    /// counterpart to the parser-side fix for the contracted "it's not
+    /// legendary" form (Delina, Wild Mage; Ratadrabik of Urborg; etc.).
+    #[test]
+    fn legend_rule_does_not_fire_when_copy_token_drops_legendary() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bahamut".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source_id).unwrap();
+            s.base_power = Some(7);
+            s.base_toughness = Some(7);
+            s.power = Some(7);
+            s.toughness = Some(7);
+            s.base_card_types = CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Dragon".to_string()],
+            };
+            s.card_types = s.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary,
+                }],
+            },
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+
+        // Run state-based actions; the legend rule SBA must NOT fire because
+        // the token is not Legendary.
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+
+        assert!(
+            !matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::ChooseLegend { .. }
+            ),
+            "legend rule must not present a choice when token is not legendary; \
+             got waiting_for={:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.objects[&source_id].zone,
+            Zone::Battlefield,
+            "original legendary creature must remain on battlefield"
+        );
+        assert_eq!(
+            state.objects[&token_id].zone,
+            Zone::Battlefield,
+            "non-legendary token-copy must remain on battlefield"
+        );
+    }
+
     /// CR 122.1 + CR 614.1c: AddCounterOnEnter with matching `if_type` places
     /// the counter on the synthesized token. Spark Double's planeswalker copy
     /// branch is exercised at the BecomeCopy resolver site; this test pins
