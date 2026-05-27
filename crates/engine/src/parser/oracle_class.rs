@@ -336,21 +336,20 @@ fn wrap_static_with_class_level(mut static_def: StaticDefinition, level: u8) -> 
 }
 
 /// CR 716.2a: Gate a Class-level replacement on the source Class being at
-/// `level` or higher. If the replacement already carries a condition, keep
-/// the existing condition: a single `condition: Option<ReplacementCondition>`
-/// field can hold only one predicate, so we prefer the leaf condition (the
-/// printed restriction) and rely on the runtime to skip the replacement when
-/// the level isn't reached via the surrounding static / trigger gating
-/// already in place. In practice no shipping Class card combines a level
-/// gate with a second replacement predicate; if one ships, extend
-/// `ReplacementCondition` with an `And` variant rather than dropping a leaf.
+/// `level` or higher. If the replacement already carries a condition, compose
+/// both predicates so neither the printed restriction nor the Class level gate
+/// is lost.
 fn wrap_replacement_with_class_level(
     mut rep_def: ReplacementDefinition,
     level: u8,
 ) -> ReplacementDefinition {
-    if rep_def.condition.is_none() {
-        rep_def.condition = Some(ReplacementCondition::ClassLevelGE { level });
-    }
+    let level_cond = ReplacementCondition::ClassLevelGE { level };
+    rep_def.condition = Some(match rep_def.condition.take() {
+        Some(existing) => ReplacementCondition::And {
+            conditions: vec![level_cond, existing],
+        },
+        None => level_cond,
+    });
     rep_def
 }
 

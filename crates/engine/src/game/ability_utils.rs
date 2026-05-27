@@ -1018,19 +1018,14 @@ fn collect_target_slots(
                 continue;
             }
             let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
-            // CR 603.3c + CR 117.6b: An optional ("you may") trigger with "any
-            // number of" semantics (Forgotten Ancient) must still go on the
-            // stack when no candidates exist for the destination filter — the
-            // player can decline, or choose zero targets and resolve to no-op.
-            // Erroring here would silently drop the trigger.
-            if legal_targets.is_empty() && !ability.optional_targeting && !ability.optional {
+            if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets available".to_string(),
                 ));
             }
             slots.push(TargetSelectionSlot {
                 legal_targets,
-                optional: ability.optional_targeting || ability.optional,
+                optional: ability.optional_targeting,
             });
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {

@@ -9565,6 +9565,11 @@ pub enum TriggerCondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ReplacementCondition {
+    /// CR 614.1d: A replacement may carry multiple independent restrictions.
+    /// Every child condition must match for the replacement to apply.
+    And {
+        conditions: Vec<ReplacementCondition>,
+    },
     /// "unless you control a [subtype] or a [subtype]"
     /// Replacement is suppressed if the controller controls any permanent with a listed subtype.
     /// Used for check lands (Clifftop Retreat, Drowned Catacomb, etc.).

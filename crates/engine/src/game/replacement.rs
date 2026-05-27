@@ -2196,6 +2196,16 @@ fn evaluate_replacement_condition(
     event: &ProposedEvent,
 ) -> bool {
     match condition {
+        ReplacementCondition::And { conditions } => conditions.iter().all(|condition| {
+            evaluate_replacement_condition(
+                condition,
+                controller,
+                source_id,
+                state,
+                affected_object_id,
+                event,
+            )
+        }),
         ReplacementCondition::UnlessControlsSubtype { subtypes } => {
             // "unless you control a [subtype]" → suppressed if controller has a matching permanent
             let controls_any = state.objects.values().any(|o| {
@@ -2517,17 +2527,13 @@ fn evaluate_replacement_condition(
                 .count();
             matching_count >= *minimum as usize
         }
-        // CR 716.2a: A Class-level replacement applies only while the source
-        // Class enchantment is at the gated level or higher. Mirrors the
-        // `StaticCondition::ClassLevelGE` evaluation in `layers.rs` — read
-        // the source object's `class_level` and compare. When the source
-        // object is missing (e.g. removed mid-event), the replacement does
-        // not apply (conservative; matches CR 716.4 "ceases to exist").
+        // CR 611.3b + CR 716.2a: A Class-level static replacement applies only
+        // while the source Class enchantment is on the battlefield and at the
+        // gated level or higher.
         ReplacementCondition::ClassLevelGE { level } => state
             .objects
             .get(&source_id)
-            .and_then(|obj| obj.class_level)
-            .is_some_and(|current| current >= *level),
+            .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.class_level >= Some(*level)),
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.
@@ -5676,6 +5682,66 @@ mod tests {
             &ReplacementCondition::SourceTappedState { tapped: false },
             PlayerId(0),
             ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn and_condition_requires_all_children() {
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        state.objects.get_mut(&ObjectId(10)).unwrap().tapped = true;
+
+        let condition = ReplacementCondition::And {
+            conditions: vec![
+                ReplacementCondition::SourceTappedState { tapped: true },
+                ReplacementCondition::UnlessYourTurn,
+            ],
+        };
+
+        state.active_player = PlayerId(1);
+        assert!(evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+
+        state.active_player = PlayerId(0);
+        assert!(!evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn class_level_condition_requires_battlefield_source_at_level() {
+        let source = ObjectId(10);
+        let mut state = test_state_with_object(source, Zone::Battlefield, Vec::new());
+        state.objects.get_mut(&source).unwrap().class_level = Some(3);
+        let condition = ReplacementCondition::ClassLevelGE { level: 3 };
+
+        assert!(evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            source,
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+
+        state.objects.get_mut(&source).unwrap().zone = Zone::Graveyard;
+        assert!(!evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            source,
             &state,
             None,
             &dummy_begin_turn_event(),
