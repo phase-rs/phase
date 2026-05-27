@@ -15,6 +15,8 @@ import {
 } from "../constants/storage";
 import type { CommanderBracket } from "../types/bracket";
 import { getPreconBracket } from "../data/preconBrackets";
+import { BUNDLED_CEDH_DECKS } from "../data/cedhDecks";
+import { CEDH_BRACKET } from "./cedhLock";
 import type { Feed, FeedDeck } from "../types/feed";
 import {
   isCommanderPreconDeck,
@@ -136,10 +138,37 @@ export async function buildDeckCatalog({
   if (!includePrecons) return candidates;
 
   const decks = await loadPreconDeckMap();
-  if (!decks) return candidates;
+  if (decks) {
+    for (const [deckId, deck] of Object.entries(decks)) {
+      if (!isCommanderPreconDeck(deck)) continue;
+      const name = `${deck.name} (${deck.code})`;
+      if (savedDisplayNames.has(name)) continue;
+      savedDisplayNames.add(name);
+      candidates.push({
+        id: preconDeckCatalogId(deckId),
+        name,
+        source: { type: "precon", deckId, code: deck.code, releaseDate: deck.releaseDate },
+        deck: preconDeckEntryToParsedDeck(deck),
+        knownFormat: "Commander",
+        coveragePct: deck.coveragePct,
+        bracket: getPreconBracket(deckId),
+        preconDeck: deck,
+      });
+    }
+  }
 
-  for (const [deckId, deck] of Object.entries(decks)) {
+  // Bundled cEDH decks (hand-curated in TypeScript, NOT MTGJSON-derived). They
+  // flow through the same precon-source path so the AI picker and downstream
+  // compatibility checks treat them uniformly, but their bracket is bracket 5
+  // by authorship — never looked up via `getPreconBracket`, which is reserved
+  // for MTGJSON precons. Surfaced independently of MTGJSON availability so
+  // the cEDH picker has options even if the MTGJSON catalog fetch fails.
+  for (const [deckId, deck] of Object.entries(BUNDLED_CEDH_DECKS)) {
     if (!isCommanderPreconDeck(deck)) continue;
+    // Defensive: skip if an MTGJSON precon already claimed this id. In
+    // practice IDs cannot collide because bundled IDs use the
+    // `BundledCedh_` prefix, but the check keeps the loop honest.
+    if (decks && decks[deckId]) continue;
     const name = `${deck.name} (${deck.code})`;
     if (savedDisplayNames.has(name)) continue;
     savedDisplayNames.add(name);
@@ -150,7 +179,7 @@ export async function buildDeckCatalog({
       deck: preconDeckEntryToParsedDeck(deck),
       knownFormat: "Commander",
       coveragePct: deck.coveragePct,
-      bracket: getPreconBracket(deckId),
+      bracket: CEDH_BRACKET,
       preconDeck: deck,
     });
   }

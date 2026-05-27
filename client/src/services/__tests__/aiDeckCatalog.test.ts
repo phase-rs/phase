@@ -4,9 +4,12 @@ import type { DeckCompatibilityResult } from "../deckCompatibility";
 import type { ParsedDeck } from "../deckParser";
 import { evaluateDeckCompatibility } from "../deckCompatibility";
 import { buildLegalAiDeckCatalog, filterByBracket, type AiDeckCandidate } from "../aiDeckCatalog";
+import { buildDeckCatalog } from "../deckCatalog";
 import { getCachedFeed, listSubscriptions } from "../feedService";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
+import { BUNDLED_CEDH_DECKS } from "../../data/cedhDecks";
+import { CEDH_BRACKET } from "../cedhLock";
 
 vi.mock("../deckCompatibility", () => ({
   evaluateDeckCompatibility: vi.fn(),
@@ -261,6 +264,54 @@ describe("buildLegalAiDeckCatalog", () => {
     const ids = catalog.candidates.map((candidate) => candidate.id);
 
     expect(ids).not.toContain("precon:tainted");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bundled cEDH decks — hand-curated TS catalog, surfaced through precon path
+// ---------------------------------------------------------------------------
+
+describe("bundled cEDH decks", () => {
+  const DEMO_ID = "BundledCedh_HeliodBallista_Demo";
+  const DEMO_CATALOG_ID = `precon:${DEMO_ID}`;
+
+  it("exports the seeded Heliod + Walking Ballista demo deck", () => {
+    const entry = BUNDLED_CEDH_DECKS[DEMO_ID];
+    expect(entry).toBeDefined();
+    // isCommanderPreconDeck in deckCatalog filters non-Commander decks; the
+    // bundled type must match so the entry reaches the catalog.
+    expect(entry.type).toBe("Commander Deck");
+    expect(entry.commander?.[0]?.name).toBe("Heliod, Sun-Crowned");
+    expect(entry.mainBoard.some((c) => c.name === "Walking Ballista")).toBe(true);
+  });
+
+  it("surfaces the bundled cEDH demo deck through buildDeckCatalog", async () => {
+    // Mock returns null — proves bundled decks are surfaced independently of
+    // the MTGJSON precon catalog, which may be missing in fresh installs.
+    vi.mocked(loadPreconDeckMap).mockResolvedValue(null);
+
+    const candidates = await buildDeckCatalog({ includePrecons: true });
+    const demo = candidates.find((c) => c.id === DEMO_CATALOG_ID);
+
+    expect(demo).toBeDefined();
+    expect(demo?.source.type).toBe("precon");
+    expect(demo?.bracket).toBe(CEDH_BRACKET);
+    expect(demo?.knownFormat).toBe("Commander");
+  });
+
+  it("filterByBracket(5) surfaces the bundled cEDH demo deck through the legal AI catalog", async () => {
+    vi.mocked(loadPreconDeckMap).mockResolvedValue(null);
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+    const cedhOnly = filterByBracket(catalog.candidates, CEDH_BRACKET);
+
+    const demo = cedhOnly.find((c) => c.id === DEMO_CATALOG_ID);
+    expect(demo).toBeDefined();
+    expect(demo?.source.type).toBe("precon");
+    expect(demo?.bracket).toBe(CEDH_BRACKET);
   });
 });
 
