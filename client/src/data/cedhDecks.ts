@@ -75,4 +75,88 @@ export const BUNDLED_CEDH_DECKS: Readonly<Record<string, DeckEntry>> = {
       { name: "Plains", count: 82 },
     ],
   },
+
+  /**
+   * Demo deck — Inalla, Archmage Ritualist + Thassa's Oracle/Demonic
+   * Consultation combo.
+   *
+   * Grixis (Blue/Black/Red) Commander build. Inalla is chosen because her
+   * color identity legally permits BOTH halves of the combo: Thassa's
+   * Oracle (Blue) and Demonic Consultation (Black). Per CR 903.4, every
+   * mainboard card's color identity must be ⊆ {Blue, Black, Red,
+   * colorless}; this deck contains no White/Green cards. The combo line
+   * itself is Blue/Black-flavored — Red staples (e.g. Dockside
+   * Extortionist) are intentionally omitted to keep the skeleton focused
+   * on the U/B combo plan rather than turning into a full Grixis pile.
+   *
+   * Like the Heliod demo, the curated portion is a "skeleton" (not a
+   * tournament list) and the remainder is padded with basic Islands and
+   * Swamps so the picker always has a well-formed 100-card deck (1
+   * commander + 99 mainboard) to hand to the engine. Per CR 903.5a.
+   */
+  BundledCedh_InallaThoracle_Demo: {
+    code: "BCDI",
+    name: "cEDH Demo - Inalla Thoracle Combo",
+    type: "Commander Deck",
+    releaseDate: undefined,
+    // Placeholder: a real coverage % is computed by the engine when the
+    // deck is evaluated through `evaluateDeckCompatibility`. The catalog
+    // surfaces this value only for UI display; it does not gate inclusion.
+    coveragePct: 0,
+    commander: [{ name: "Inalla, Archmage Ritualist", count: 1 }],
+    mainBoard: [
+      // Combo pieces (Blue/Black)
+      { name: "Thassa's Oracle", count: 1 },
+      { name: "Demonic Consultation", count: 1 },
+
+      // Tutors (Blue/Black — in color identity for Grixis)
+      { name: "Demonic Tutor", count: 1 },
+      { name: "Vampiric Tutor", count: 1 },
+      { name: "Mystical Tutor", count: 1 },
+      { name: "Imperial Seal", count: 1 },
+      { name: "Grim Tutor", count: 1 },
+
+      // Counterspells (Blue)
+      { name: "Force of Will", count: 1 },
+      { name: "Mana Drain", count: 1 },
+      { name: "Counterspell", count: 1 },
+      { name: "Swan Song", count: 1 },
+      { name: "Pact of Negation", count: 1 },
+      { name: "Mindbreak Trap", count: 1 },
+
+      // Cantrips / card selection (Blue + colorless)
+      { name: "Brainstorm", count: 1 },
+      { name: "Ponder", count: 1 },
+      { name: "Preordain", count: 1 },
+      { name: "Sensei's Divining Top", count: 1 },
+
+      // Fast mana (colorless or in-color)
+      { name: "Sol Ring", count: 1 },
+      { name: "Mana Crypt", count: 1 },
+      { name: "Mox Diamond", count: 1 },
+      { name: "Mana Vault", count: 1 },
+      { name: "Lotus Petal", count: 1 },
+      { name: "Chrome Mox", count: 1 },
+
+      // Removal (Black)
+      { name: "Toxic Deluge", count: 1 },
+      { name: "Dismember", count: 1 },
+
+      // Lands (colorless color identity — legal in Grixis per CR 903.4)
+      { name: "Command Tower", count: 1 },
+      { name: "Mana Confluence", count: 1 },
+      { name: "City of Brass", count: 1 },
+      { name: "Reflecting Pool", count: 1 },
+      { name: "Exotic Orchard", count: 1 },
+
+      // Basic lands — padded to reach exactly 99 mainboard copies
+      // (CR 903.5a). Curated slots: 30 (above). Padding: 99 − 30 = 69.
+      // The combo plan is Blue-primary (Thoracle is the win condition),
+      // so the basic split leans Islands. No Plains/Forest/Mountains —
+      // White/Green are off-color, and the combo doesn't require Red
+      // mana so Mountains are omitted for simplicity.
+      { name: "Island", count: 35 },
+      { name: "Swamp", count: 34 },
+    ],
+  },
 };
