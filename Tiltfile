@@ -10,7 +10,7 @@
 # All resources are always visible in the Tilt UI — opt-in groups just
 # control which auto-start. Click any stopped resource to start it on demand.
 
-config.define_string_list('enable', args = True, usage = 'Resource groups to auto-start: server, tauri, test, lint')
+config.define_string_list('enable', args = True, usage = 'Resource groups to auto-start: server, tauri, test, lint, https')
 enabled = config.parse().get('enable', [])
 
 # ---------------------------------------------------------------------------
@@ -34,12 +34,32 @@ local_resource('wasm',
 # Serve
 # ---------------------------------------------------------------------------
 
+# When the Caddy HTTPS proxy is in the loop, set CADDY_PROXY=1 so vite.config.ts
+# rewrites the injected HMR client to talk wss://local.phase-rs.dev:443 instead
+# of ws://localhost:5173 — the page is served from the proxy origin, so the
+# default would silently fail the mixed-origin / mixed-content checks.
 local_resource('frontend',
     serve_cmd = 'pnpm dev',
     serve_dir = 'client',
+    serve_env = {'CADDY_PROXY': '1'} if 'https' in enabled else {},
     auto_init = 'tauri' not in enabled,
     allow_parallel = True,
     links = ['http://localhost:5173'],
+    labels = ['serve'],
+)
+
+# HTTPS reverse proxy for LAN testing — required so WebRTC (PeerJS P2P
+# hosting) and crypto.randomUUID work for guest devices, which both refuse
+# to operate on insecure origins other than localhost. Bound to :443 via
+# the macOS 0.0.0.0 quirk (see scripts/run-caddy.sh) so no sudo is needed.
+# Run `./scripts/setup-ssl.sh` once before first use.
+local_resource('caddy',
+    serve_cmd = './scripts/run-caddy.sh',
+    deps = ['Caddyfile', 'certs/local.phase-rs.dev/server.crt'],
+    resource_deps = ['frontend'],
+    auto_init = 'https' in enabled,
+    allow_parallel = True,
+    links = ['https://local.phase-rs.dev'],
     labels = ['serve'],
 )
 

@@ -5810,6 +5810,94 @@ fn parse_damage_amount_quantifier(input: &str) -> OracleResult<'_, (Comparator, 
     alt((parse_exactly, parse_or_more)).parse(input)
 }
 
+/// CR 601.2a + CR 707.10: "When[ever] {actor} cast[s] or cop[ies] a[n] [type] spell"
+/// — unified parser for all SpellCastOrCopy trigger variants. `match_spell_cast`
+/// in trigger_matchers.rs validates the caster against `valid_target`, so:
+/// - "you cast or copy"       → `TargetFilter::Controller`
+/// - "an opponent casts or copies" → `TypedFilter` with `ControllerRef::Opponent`
+///   (evaluates as `source_controller != player_id` in the current engine model)
+/// - "a player casts or copies" → `TargetFilter::Player` (any player, CR 102.1)
+///
+/// Covers Storm-Kiln Artist (you), Mage Hunter (opponent), and any future card
+/// that triggers on any player casting or copying a spell.
+fn try_parse_casts_or_copies_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // CR 603.1: "When"/"Whenever" trigger keyword.
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Actor + verb phrase — encodes caster identity in valid_target.
+    // `terminated` binds each actor tag to its conjugated verb so the two
+    // dimensions (who + action) are parsed as a single atomic combinator arm.
+    let (rest, caster_filter) = alt((
+        // "you cast or copy " — controller of the triggered permanent.
+        terminated(
+            value(
+                TargetFilter::Controller,
+                tag::<_, _, OracleError<'_>>("you"),
+            ),
+            tag(" cast or copy "),
+        ),
+        // "An opponent" uses the engine's existing opponent controller filter.
+        terminated(
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag::<_, _, OracleError<'_>>("an opponent"),
+            ),
+            tag(" casts or copies "),
+        ),
+        // "a player" in Oracle means any player including the controller (CR 102.1).
+        terminated(
+            value(TargetFilter::Player, tag("a player")),
+            tag(" casts or copies "),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // CR 601.2a + CR 707.10: optional spell-type restriction.
+    // `terminated(..., tag(" spell"))` avoids repeating the trailing word across arms.
+    let (_, spell_filter) = terminated(
+        alt((
+            value(
+                Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+                tag::<_, _, OracleError<'_>>("an instant or sorcery"),
+            ),
+            value(
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+                tag("a creature"),
+            ),
+            value(
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+                tag("an instant"),
+            ),
+            value(
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery))),
+                tag("a sorcery"),
+            ),
+            // Generic — any spell, no type restriction.
+            value(None, tag("a")),
+        )),
+        tag(" spell"),
+    )
+    .parse(rest)
+    .ok()?;
+
+    let mut def = make_base();
+    def.mode = TriggerMode::SpellCastOrCopy;
+    def.valid_card = spell_filter;
+    def.valid_target = Some(caster_filter);
+    Some((TriggerMode::SpellCastOrCopy, def))
+}
+
 fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     if let Some(result) = try_parse_self_or_another_controlled_subtype_enters(lower) {
         return Some(result);
@@ -6012,24 +6100,10 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
-    for prefix in ["whenever you cast or copy ", "when you cast or copy "] {
-        if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) {
-            if matches!(
-                rest,
-                "an instant or sorcery spell" | "a instant or sorcery spell"
-            ) {
-                let mut def = make_base();
-                def.mode = TriggerMode::SpellCastOrCopy;
-                def.valid_card = Some(TargetFilter::Or {
-                    filters: vec![
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
-                    ],
-                });
-                def.valid_target = Some(TargetFilter::Controller);
-                return Some((TriggerMode::SpellCastOrCopy, def));
-            }
-        }
+    // CR 601.2a + CR 707.10: all "cast or copy a spell" trigger variants —
+    // covers "you", "an opponent", and "a player" actor phrases.
+    if let Some(result) = try_parse_casts_or_copies_trigger(lower) {
+        return Some(result);
     }
 
     // CR 700.4 + CR 120.1: "a creature dealt damage by ~ this turn dies"
@@ -11171,6 +11245,146 @@ mod tests {
         }
     }
 
+    /// CR 603.4 + CR 608.2c + CR 119.3 + CR 107.1a: Cecil, Dark Knight —
+    /// damage-done trigger with a "Then if your life total is less than or
+    /// equal to half your starting life total, untap ~ and transform it"
+    /// sub-ability gate. The "Then if" gate must NOT be hoisted as a
+    /// trigger-level intervening-if; it scopes to the per-clause Untap
+    /// sub_ability (with Transform chained sequentially). The condition is a
+    /// `QuantityCheck` comparing `LifeTotal{Controller}` to
+    /// `DivideRounded(StartingLifeTotal, 2, Down)` — fractional rounding
+    /// follows the engine convention when Oracle text does not specify
+    /// direction (CR 107.1a). The Untap clause is a `SequentialSibling` after
+    /// the life-loss instruction, and Transform is a `ContinuationStep` under
+    /// Untap, so the QuantityCheck on Untap gates both actions in the "then if"
+    /// clause.
+    #[test]
+    fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
+        use crate::types::ability::{AbilityCondition, Effect, RoundingMode, SubAbilityLink};
+
+        let def = parse_trigger_line(
+            "Whenever ~ deals damage, you lose that much life. Then if your life total is less than or equal to half your starting life total, untap ~ and transform it.",
+            "Cecil, Dark Knight",
+        );
+
+        // CR 603.4 — "Then if" attaches as per-clause QuantityCheck, NOT
+        // trigger-level intervening-if. The gate scopes only to the
+        // sub_ability chain.
+        assert_eq!(
+            def.condition, None,
+            "trigger.condition must be None (the 'Then if' gate scopes to sub_ability, not the trigger as a whole)",
+        );
+
+        let execute = def.execute.as_ref().expect("execute must be Some");
+
+        // Outer effect: LoseLife { amount: Ref(EventContextAmount), target: Controller }.
+        // CR 119.3 — life-loss adjusts the player's life total.
+        match &*execute.effect {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    "LoseLife.amount must be Ref(EventContextAmount) — 'you lose that much life' tracks the damage amount",
+                );
+                assert_eq!(
+                    *target,
+                    Some(TargetFilter::Controller),
+                    "LoseLife.target must be Controller — 'you' is the trigger source's controller",
+                );
+            }
+            other => panic!("outer execute effect must be LoseLife, got {other:?}"),
+        }
+
+        // First sub_ability: Untap { target: SelfRef } with QuantityCheck.
+        // CR 608.2c — per-clause QuantityCheck condition.
+        // CR 119.3 + CR 107.1a — LifeTotal{Controller} compared to half StartingLifeTotal rounded Down.
+        let untap_sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("first sub_ability (Untap) must be Some");
+        match &untap_sub.condition {
+            Some(AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
+                    },
+                comparator: Comparator::LE,
+                rhs:
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                    },
+            }) => {
+                assert_eq!(
+                    **inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal,
+                    },
+                    "DivideRounded.inner must be Ref(StartingLifeTotal), got {inner:?}",
+                );
+            }
+            other => panic!(
+                "Untap sub_ability.condition must be QuantityCheck LifeTotal{{Controller}} LE DivideRounded(StartingLifeTotal, 2, Down), got {other:?}",
+            ),
+        }
+        match &*untap_sub.effect {
+            Effect::Untap { target } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "Untap.target must be SelfRef — 'untap ~' refers to the trigger source",
+                );
+            }
+            other => panic!("first sub_ability effect must be Untap, got {other:?}"),
+        }
+        assert_eq!(
+            untap_sub.sub_link,
+            SubAbilityLink::SequentialSibling,
+            "Untap sub_link must be SequentialSibling (independent following instruction after LoseLife)",
+        );
+
+        // Nested sub_ability: Transform { target: ParentTarget } with no
+        // duplicated condition. The QuantityCheck sits on the Untap sub_ability
+        // above and gates this ContinuationStep.
+        let transform_sub = untap_sub
+            .sub_ability
+            .as_deref()
+            .expect("nested sub_ability (Transform) must be Some");
+        assert!(
+            transform_sub.condition.is_none(),
+            "Transform sub_ability.condition must be None (the 'Then if' gate sits on the Untap sub_ability), got {:?}",
+            transform_sub.condition,
+        );
+        match &*transform_sub.effect {
+            Effect::Transform { target } => {
+                // The parser today emits `ParentTarget` here — "transform it"
+                // refers back to the Untap target (the trigger source).
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTarget,
+                    "Transform.target must be ParentTarget — 'transform it' inherits the Untap target",
+                );
+            }
+            other => panic!("nested sub_ability effect must be Transform, got {other:?}"),
+        }
+        // The Transform clause is the inner-most sub_ability and inherits the
+        // default `ContinuationStep` link — the chain shape is
+        // LoseLife (outer) → Untap (SequentialSibling under the gate)
+        // → Transform (ContinuationStep extension of the Untap clause). The
+        // QuantityCheck on Untap still gates Transform via chain dependency.
+        assert_eq!(
+            transform_sub.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "Transform sub_link must be ContinuationStep (chain extension of the Untap clause)",
+        );
+    }
+
     /// CR 208.1 + CR 603.4: Cloud, Ex-SOLDIER — attack trigger with a "Then if
     /// ~ has power 7 or greater, …" sub-ability gate. Before the `~ has power N`
     /// grammar branch was added to `parse_source_power_toughness_condition`,
@@ -15298,6 +15512,61 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::SpellCastOrCopy);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // CR 601.2a + CR 707.10: try_parse_casts_or_copies_trigger — all actor variants.
+
+    #[test]
+    fn trigger_opponent_casts_or_copies_instant_or_sorcery() {
+        // Mage Hunter: "Whenever an opponent casts or copies an instant or sorcery spell,
+        // they lose 1 life." — SpellCastOrCopy with opponent-controller restriction.
+        let def = parse_trigger_line(
+            "Whenever an opponent casts or copies an instant or sorcery spell, that player loses 1 life.",
+            "Mage Hunter",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCastOrCopy);
+        assert!(
+            matches!(
+                def.valid_target,
+                Some(TargetFilter::Typed(ref t)) if matches!(t.controller, Some(ControllerRef::Opponent))
+            ),
+            "expected Opponent-controller TypedFilter in valid_target, got {:?}",
+            def.valid_target
+        );
+        assert!(
+            matches!(def.valid_card, Some(TargetFilter::Or { .. })),
+            "expected Or{{Instant, Sorcery}} in valid_card, got {:?}",
+            def.valid_card
+        );
+    }
+
+    #[test]
+    fn trigger_opponent_casts_or_copies_any_spell() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts or copies a spell, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCastOrCopy);
+        assert!(
+            matches!(
+                def.valid_target,
+                Some(TargetFilter::Typed(ref t)) if matches!(t.controller, Some(ControllerRef::Opponent))
+            ),
+            "expected Opponent-controller TypedFilter, got {:?}",
+            def.valid_target
+        );
+        assert_eq!(def.valid_card, None);
+    }
+
+    #[test]
+    fn trigger_a_player_casts_or_copies_a_spell() {
+        let def = parse_trigger_line(
+            "Whenever a player casts or copies a spell, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCastOrCopy);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert_eq!(def.valid_card, None);
     }
 
     #[test]
