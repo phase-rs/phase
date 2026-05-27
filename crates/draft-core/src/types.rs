@@ -282,6 +282,17 @@ impl SeatFlags {
         self.0.get(seat as usize).copied().unwrap_or(false)
     }
 
+    /// Like [`SeatFlags::get`] but returns `default` for out-of-bounds reads.
+    ///
+    /// Use this when "absence of an entry" should mean something specific —
+    /// e.g. `connected_seats` reads in the view layer pass `true` so an
+    /// in-flight save deserialised from pre-fix code (empty bitmap before
+    /// `ensure_len` runs) renders human seats as connected, not as a wall
+    /// of disconnect dots.
+    pub fn get_or(&self, seat: u8, default: bool) -> bool {
+        self.0.get(seat as usize).copied().unwrap_or(default)
+    }
+
     pub fn set(&mut self, seat: u8, value: bool) {
         if let Some(slot) = self.0.get_mut(seat as usize) {
             *slot = value;

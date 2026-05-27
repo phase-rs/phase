@@ -689,7 +689,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
             target: TargetFilter::SelfRef,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -1716,7 +1716,7 @@ fn try_parse_self_name_exile(
             target: TargetFilter::SelfRef,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -1781,7 +1781,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             target,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -1853,7 +1853,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             target: TargetFilter::TriggeringSource,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: true,
+            enters_under: Some(ControllerRef::You),
             enter_tapped: true,
             enters_attacking: false,
             up_to: false,
@@ -2436,7 +2436,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -4254,7 +4254,7 @@ fn try_parse_owner_of_target_shuffle(
         target,
         owner_library: true,
         enter_transformed: false,
-        under_your_control: false,
+        enters_under: None,
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
@@ -6556,7 +6556,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             enter_transformed: d.transformed,
-                            under_your_control: d.under_your_control,
+                            enters_under: d.enters_under,
                             enter_tapped: d.enter_tapped,
                             enter_with_counters: d.enter_with_counters,
                         },
@@ -7666,7 +7666,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         target: second,
         owner_library,
         enter_transformed: false,
-        under_your_control: false,
+        enters_under: None,
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
@@ -7682,7 +7682,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         target: first,
         owner_library,
         enter_transformed: false,
-        under_your_control: false,
+        enters_under: None,
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
@@ -11123,7 +11123,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
             target,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped,
             enters_attacking: false,
             up_to: false,
@@ -15595,8 +15595,11 @@ fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) 
 struct ReturnDestination {
     zone: Zone,
     transformed: bool,
-    // CR 110.2: "under your control" — controller override on zone change.
-    under_your_control: bool,
+    // CR 110.2a: Controller override on ETB. `Some(ref)` routes the object to
+    // the player resolved from `ref`; `None` leaves the object under its
+    // owner's control. Downstream IR/Effect construction passes it through
+    // unchanged into `Effect::ChangeZone.enters_under`.
+    enters_under: Option<ControllerRef>,
     // CR 614.1: "tapped" — enters the battlefield tapped.
     enter_tapped: bool,
     // CR 122.1 + CR 122.6: Counters placed on the returned object as it enters.
@@ -15615,7 +15618,10 @@ fn strip_return_destination_ext_with_remainder(
     let lower = text.to_lowercase();
     // Ordered longest-first to avoid partial matches.
     // "transformed" variants must come before their non-transformed counterparts.
-    // Tuples: (phrase, zone, transformed, under_your_control, enter_tapped)
+    // Tuples: (phrase, zone, transformed, enters_under_you, enter_tapped)
+    // The `enters_under_you` bool is the parser-table carrier for the
+    // controller-override flag; it maps to `Some(ControllerRef::You)` / `None`
+    // at the `ReturnDestination` construction site below (CR 110.2a).
     // Ordered longest-first; compound patterns must precede their shorter substrings.
     let patterns: &[(&str, Zone, bool, bool, bool)] = &[
         // Tapped + transformed + owner's control (compound, longest)
@@ -15787,7 +15793,7 @@ fn strip_return_destination_ext_with_remainder(
         // intentionally NOT handled here. They require PutAtLibraryPosition (positional
         // placement without shuffling), not ChangeZone (which auto-shuffles).
     ];
-    for (phrase, zone, transformed, under_your_control, enter_tapped) in patterns {
+    for (phrase, zone, transformed, enters_under_you, enter_tapped) in patterns {
         if let Some(pos) = lower.rfind(phrase) {
             let after_destination = &lower[pos + phrase.len()..];
             let original_after_destination = &text[pos + phrase.len()..];
@@ -15796,7 +15802,7 @@ fn strip_return_destination_ext_with_remainder(
                 Some(ReturnDestination {
                     zone: *zone,
                     transformed: *transformed,
-                    under_your_control: *under_your_control,
+                    enters_under: enters_under_you.then_some(ControllerRef::You),
                     enter_tapped: *enter_tapped,
                     enter_with_counters: parse_with_counters_suffix(after_destination),
                 }),
@@ -15843,11 +15849,18 @@ fn parse_leading_battlefield_return_destination(
         value((false, false), tag("")),
     ))
     .parse(input)?;
-    let (input, under_your_control) = alt((
-        value(true, tag::<_, _, OracleError<'_>>(" under your control")),
-        value(false, tag(" under their owners' control")),
-        value(false, tag(" under its owner's control")),
-        value(false, tag("")),
+    // CR 110.2a: parse the controller-override clause (or its absence) directly
+    // into `Option<ControllerRef>`. Only `"under your control"` produces a
+    // controller override; "owner's control" variants leave the object under
+    // its owner's control (no override).
+    let (input, enters_under) = alt((
+        value(
+            Some(ControllerRef::You),
+            tag::<_, _, OracleError<'_>>(" under your control"),
+        ),
+        value(None, tag(" under their owners' control")),
+        value(None, tag(" under its owner's control")),
+        value(None, tag("")),
     ))
     .parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
@@ -15856,7 +15869,7 @@ fn parse_leading_battlefield_return_destination(
         ReturnDestination {
             zone: Zone::Battlefield,
             transformed: modifier.0,
-            under_your_control,
+            enters_under,
             enter_tapped: modifier.1,
             enter_with_counters: vec![],
         },
@@ -15877,7 +15890,7 @@ fn parse_leading_hand_return_destination(input: &str) -> OracleResult<'_, Return
         ReturnDestination {
             zone: Zone::Hand,
             transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enter_with_counters: vec![],
         },
@@ -15897,7 +15910,7 @@ fn parse_leading_graveyard_return_destination(input: &str) -> OracleResult<'_, R
         ReturnDestination {
             zone: Zone::Graveyard,
             transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enter_with_counters: vec![],
         },
@@ -15911,7 +15924,7 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
         ReturnDestination {
             zone: Zone::Command,
             transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enter_with_counters: vec![],
         },
@@ -17347,8 +17360,9 @@ fn try_parse_put_zone_change_parts(
             } else {
                 target
             };
-            // CR 110.2: "under your control" overrides the entering object's controller.
-            let under_your_control = scan_contains_phrase(after_put_tp.lower, "under your control");
+            // CR 110.2a: "under your control" overrides the entering object's controller.
+            let enters_under = scan_contains_phrase(after_put_tp.lower, "under your control")
+                .then_some(ControllerRef::You);
             // CR 122.1 + CR 614.1c: Detect a trailing "with [N] [type] counter(s)
             // on it" clause and stamp it onto `enter_with_counters`. This covers
             // The Darkness Crystal's "with two additional +1/+1 counters on it"
@@ -17380,7 +17394,7 @@ fn try_parse_put_zone_change_parts(
                     target,
                     owner_library: false,
                     enter_transformed,
-                    under_your_control,
+                    enters_under,
                     enter_tapped,
                     enters_attacking,
                     up_to,
@@ -25767,7 +25781,7 @@ mod tests {
         let Effect::ChangeZone {
             destination,
             target,
-            under_your_control,
+            enters_under,
             enter_tapped,
             up_to,
             ..
@@ -25776,7 +25790,7 @@ mod tests {
             panic!("expected ChangeZone sub-ability, got {:?}", sub.effect);
         };
         assert_eq!(*destination, Zone::Battlefield);
-        assert!(*under_your_control);
+        assert_eq!(*enters_under, Some(ControllerRef::You));
         assert!(*enter_tapped);
         assert!(*up_to);
         match target {
@@ -26653,7 +26667,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 owner_library: true,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 ..
             } => {}
             other => panic!(
@@ -31621,7 +31635,7 @@ mod tests {
         assert_eq!(target_text, "target creature");
         let d = dest.expect("should parse destination");
         assert_eq!(d.zone, Zone::Battlefield);
-        assert!(d.under_your_control);
+        assert_eq!(d.enters_under, Some(ControllerRef::You));
         assert!(!d.enter_tapped);
         assert!(!d.transformed);
     }
@@ -31634,7 +31648,7 @@ mod tests {
         let d = dest.expect("should parse destination");
         assert_eq!(d.zone, Zone::Battlefield);
         assert!(d.enter_tapped);
-        assert!(!d.under_your_control);
+        assert_eq!(d.enters_under, None);
     }
 
     #[test]
@@ -31642,9 +31656,9 @@ mod tests {
         let (_, dest) =
             strip_return_destination_ext("it to the battlefield under its owner's control");
         let d = dest.expect("should parse destination");
-        assert!(
-            !d.under_your_control,
-            "owner's control should not set under_your_control"
+        assert_eq!(
+            d.enters_under, None,
+            "owner's control should not set a controller override"
         );
     }
 
@@ -31654,7 +31668,7 @@ mod tests {
             strip_return_destination_ext("it to the battlefield tapped under your control");
         let d = dest.expect("should parse destination");
         assert!(d.enter_tapped);
-        assert!(d.under_your_control);
+        assert_eq!(d.enters_under, Some(ControllerRef::You));
     }
 
     #[test]
@@ -31663,7 +31677,7 @@ mod tests {
             strip_return_destination_ext("it to the battlefield transformed under your control");
         let d = dest.expect("should parse destination");
         assert!(d.transformed);
-        assert!(d.under_your_control);
+        assert_eq!(d.enters_under, Some(ControllerRef::You));
         assert!(!d.enter_tapped);
     }
 
@@ -31671,7 +31685,7 @@ mod tests {
     fn return_destination_plain_battlefield() {
         let (_, dest) = strip_return_destination_ext("target creature to the battlefield");
         let d = dest.expect("should parse destination");
-        assert!(!d.under_your_control);
+        assert_eq!(d.enters_under, None);
         assert!(!d.enter_tapped);
         assert!(!d.transformed);
     }
@@ -37158,13 +37172,13 @@ mod tests {
         match effect {
             Effect::ChangeZone {
                 destination,
-                under_your_control,
+                enters_under,
                 enter_tapped,
                 enter_with_counters,
                 ..
             } => {
                 assert_eq!(destination, Zone::Battlefield);
-                assert!(under_your_control);
+                assert_eq!(enters_under, Some(ControllerRef::You));
                 assert!(enter_tapped);
                 assert_eq!(
                     enter_with_counters,
@@ -37189,14 +37203,14 @@ mod tests {
                 destination,
                 target,
                 enter_transformed,
-                under_your_control,
+                enters_under,
                 enter_with_counters,
                 ..
             } => {
                 assert_eq!(destination, Zone::Battlefield);
                 assert_eq!(target, TargetFilter::ParentTarget);
                 assert!(enter_transformed);
-                assert!(!under_your_control);
+                assert_eq!(enters_under, None);
                 assert_eq!(
                     enter_with_counters,
                     vec![(
@@ -37418,12 +37432,12 @@ mod tests {
             Effect::ChangeZone {
                 enter_tapped,
                 enters_attacking,
-                under_your_control,
+                enters_under,
                 ..
             } => {
                 assert!(enter_tapped);
                 assert!(!enters_attacking, "tapped-only must not set attacking");
-                assert!(under_your_control);
+                assert_eq!(enters_under, Some(ControllerRef::You));
             }
             other => panic!("expected ChangeZone, got {other:?}"),
         }
@@ -37488,11 +37502,11 @@ mod tests {
                 destination,
                 enter_tapped,
                 enters_attacking,
-                under_your_control,
+                enters_under,
                 ..
             } => {
                 assert_eq!(destination, Zone::Battlefield);
-                assert!(under_your_control);
+                assert_eq!(enters_under, Some(ControllerRef::You));
                 assert!(enter_tapped, "expected enter_tapped");
                 assert!(enters_attacking, "expected enters_attacking");
             }
@@ -37513,10 +37527,10 @@ mod tests {
             Effect::ChangeZone {
                 enter_tapped,
                 enters_attacking,
-                under_your_control,
+                enters_under,
                 ..
             } => {
-                assert!(under_your_control);
+                assert_eq!(enters_under, Some(ControllerRef::You));
                 assert!(enter_tapped, "expected enter_tapped");
                 assert!(
                     !enters_attacking,
@@ -38571,7 +38585,7 @@ mod snapshot_tests {
             target: TargetFilter::ParentTarget,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -38623,7 +38637,7 @@ mod snapshot_tests {
                 target: TargetFilter::ParentTarget,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -38953,7 +38967,7 @@ mod snapshot_tests {
             destination,
             target,
             enter_transformed,
-            under_your_control,
+            enters_under,
             enter_with_counters,
             ..
         } = &*put.effect
@@ -38967,7 +38981,7 @@ mod snapshot_tests {
             "expected transformed battlefield entry, got {:?}",
             put.effect
         );
-        assert!(!*under_your_control);
+        assert_eq!(*enters_under, None);
         assert_eq!(
             enter_with_counters,
             &vec![(

@@ -156,8 +156,10 @@ pub fn filter_for_spectator(
                     // Source of truth: the runtime `connected_seats` bitmap,
                     // populated via `DraftAction::SetSeatConnected` by the host
                     // adapter on (dis)connect. Bots are always considered
-                    // connected by construction.
-                    DraftSeat::Human { .. } => session.connected_seats.get(i as u8),
+                    // connected by construction. `get_or(.., true)` so an
+                    // in-flight save deserialised before `ensure_len` runs
+                    // shows seats as connected, not as a wall of disconnect dots.
+                    DraftSeat::Human { .. } => session.connected_seats.get_or(i as u8, true),
                     DraftSeat::Bot { .. } => true,
                 },
                 has_submitted_deck: player_id_for_seat
@@ -262,8 +264,10 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
                     // Source of truth: the runtime `connected_seats` bitmap,
                     // populated via `DraftAction::SetSeatConnected` by the host
                     // adapter on (dis)connect. Bots are always considered
-                    // connected by construction.
-                    DraftSeat::Human { .. } => session.connected_seats.get(i as u8),
+                    // connected by construction. `get_or(.., true)` so an
+                    // in-flight save deserialised before `ensure_len` runs
+                    // shows seats as connected, not as a wall of disconnect dots.
+                    DraftSeat::Human { .. } => session.connected_seats.get_or(i as u8, true),
                     DraftSeat::Bot { .. } => true,
                 },
                 has_submitted_deck: player_id_for_seat
