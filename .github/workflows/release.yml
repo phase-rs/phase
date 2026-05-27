@@ -564,7 +564,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=phase-rs --commit-dirty=true
+          command: pages deploy dist --project-name=phase-rs --branch=main --commit-dirty=true
 
   deploy-lobby-worker:
     # Builds the Rust lobby-broker -> WASM and deploys the Cloudflare Worker +
