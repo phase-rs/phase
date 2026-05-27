@@ -3291,6 +3291,10 @@ async fn handle_client_message(
                 },
             }
 
+            // Collects a bracket-violation message to broadcast after the state lock releases and
+            // after the joiner receives their direct error (mirrors the seat-delta path).
+            let mut bracket_broadcast: Option<String> = None;
+
             let join_outcome = {
                 let mut mgr = state.lock().await;
                 match mgr.join_game_with_name_and_reservation(
@@ -3321,6 +3325,10 @@ async fn handle_client_message(
                                 // would require deleting their deck/token which is more invasive.
                                 // The host can correct the deck(s) and trigger a new start.
                                 persist_session_async(game_db, &game_code, session);
+                                // Capture the message so we can fan it out to all connected
+                                // players after the state lock releases (mirrors seat-delta path).
+                                bracket_broadcast =
+                                    Some(format!("Cannot start cEDH game: {bracket_err}"));
                                 // Evaluate to Err so the outer match join_outcome sends an Error
                                 // message to the client via the existing Err(e) arm.
                                 Err(bracket_err.to_string())
@@ -3445,6 +3453,20 @@ async fn handle_client_message(
                     let msg = ServerMessage::Error { message: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+            }
+
+            // If a cEDH bracket violation blocked the auto-start, fan the error out to all
+            // players already connected to the room. The joiner's socket is not yet registered
+            // in `connections` (registration only happens on Ok arms above), so this broadcast
+            // naturally excludes them — they already received the direct error above.
+            if let Some(err_msg) = bracket_broadcast {
+                let conns = connections.lock().await;
+                if let Some(players) = conns.get(&game_code) {
+                    let msg = ServerMessage::Error { message: err_msg };
+                    for sender in players.values() {
+                        let _ = sender.send(msg.clone());
                     }
                 }
             }
