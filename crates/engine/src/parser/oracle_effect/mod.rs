@@ -9139,9 +9139,8 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
 /// Three branches:
 /// CR 205.2 + CR 108.1: Parse a leading core-type disjunction with the
 /// "spell" / "card" informational suffix — "an instant or sorcery spell",
-/// "an instant or sorcery card". Returns a `TypedFilter` whose `type_filters`
-/// is the disjunctive set (evaluated via per-object OR in `filter.rs` —
-/// `matches_any_type_filter`).
+/// "target instant or sorcery card". Returns a `TypedFilter` whose type atom
+/// is the disjunctive set.
 ///
 /// `parse_type_phrase` handles single core types and adjective-conjunction
 /// ("artifact creature") but not " or " between bare core-type words. This
@@ -9163,6 +9162,7 @@ fn parse_cast_type_disjunction(rest: &str) -> Option<TypedFilter> {
         ))
         .parse(i)
     }
+    let (rest, _) = opt(tag::<_, _, E>("target ")).parse(rest).ok()?;
     // Strip optional "a "/"an " article.
     let (rest, _) = opt(alt((tag::<_, _, E>("an "), tag("a "))))
         .parse(rest)
@@ -9182,10 +9182,81 @@ fn parse_cast_type_disjunction(rest: &str) -> Option<TypedFilter> {
     .parse(rest)
     .ok()?;
     Some(TypedFilter {
-        type_filters: vec![first, second],
+        type_filters: vec![TypeFilter::AnyOf(vec![first, second])],
         controller: None,
         properties: Vec::new(),
     })
+}
+
+fn strip_cast_target_prefix(rest: &str) -> &str {
+    opt(tag::<_, _, OracleError<'_>>("target "))
+        .parse(rest)
+        .map(|(after, _)| after)
+        .unwrap_or(rest)
+}
+
+fn cast_filter_has_typed_leaf(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            !tf.type_filters.is_empty() || tf.controller.is_some() || !tf.properties.is_empty()
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(cast_filter_has_typed_leaf)
+        }
+        TargetFilter::Not { filter } => cast_filter_has_typed_leaf(filter),
+        _ => false,
+    }
+}
+
+fn add_cast_target_props(
+    filter: &mut TargetFilter,
+    props: &[FilterProp],
+    controller: Option<ControllerRef>,
+) {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            if tf.controller.is_none() {
+                tf.controller = controller;
+            }
+            for prop in props {
+                let already_present = match prop {
+                    FilterProp::Cmc { .. } => tf
+                        .properties
+                        .iter()
+                        .any(|existing| matches!(existing, FilterProp::Cmc { .. })),
+                    _ => tf.properties.contains(prop),
+                };
+                if !already_present {
+                    tf.properties.push(prop.clone());
+                }
+            }
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters {
+                add_cast_target_props(inner, props, controller.clone());
+            }
+        }
+        TargetFilter::Not { filter } => add_cast_target_props(filter, props, controller),
+        _ => {}
+    }
+}
+
+fn apply_cast_target_suffixes(filter: &mut TargetFilter, rest: &str) {
+    type E<'a> = OracleError<'a>;
+
+    if let Some((_zone, controller, props)) = super::oracle_target::scan_zone_phrase(rest) {
+        add_cast_target_props(filter, &props, controller);
+    } else if let Some(zone) = infer_origin_zone(rest) {
+        add_cast_target_props(filter, &[FilterProp::InZone { zone }], None);
+    }
+
+    if let Ok((after_take, _)) = take_until::<_, _, E>("with mana value ").parse(rest) {
+        if let Some((prop, _)) =
+            super::oracle_target::parse_mana_value_suffix(after_take, &mut ParseContext::default())
+        {
+            add_cast_target_props(filter, &[prop], None);
+        }
+    }
 }
 
 /// CR 406.6 + CR 603.10a: Detect the `"from among cards exiled with [self-ref]"`
@@ -9388,50 +9459,12 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     // own internal `parse_mana_value_suffix` call runs before `parse_zone_suffix`,
     // so for inputs of the form "spell from your hand with mana value ..."
     // the mana-value clause is past the type-phrase pos when reached.
-    let (filter, _after) = super::oracle_target::parse_type_phrase(rest);
-    if matches!(filter, TargetFilter::Typed(_)) {
-        let mut filter = filter;
-        if let Some(zone) = infer_origin_zone(rest) {
-            // Fold "from your hand" into the filter as a zone constraint so
-            // downstream target legality (CR 601.2c) restricts the choice to
-            // the right zone.
-            if let TargetFilter::Typed(ref mut tf) = filter {
-                if !tf
-                    .properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::InZone { .. }))
-                {
-                    tf.properties.push(FilterProp::InZone { zone });
-                }
-            }
-        }
-        // CR 202.3 + CR 120.3: Scan for "with mana value <bound>" anywhere
-        // in the remainder via nom `take_until` + delegated parse, and fold
-        // the resulting `CmcLE`/`CmcGE`/`CmcEQ` prop onto the typed filter.
-        // `parse_mana_value_suffix` is a pure-nom combinator that emits the
-        // right `QuantityRef` (EventContextAmount for "that damage",
-        // ObjectManaValue { CostPaidObject } for "that <type>", literal/X
-        // otherwise).
-        // The scan is needed because `parse_type_phrase` runs its internal
-        // `parse_mana_value_suffix` call before `parse_zone_suffix`, so for
-        // inputs of the form "spell from <zone> with mana value ..." the
-        // suffix clause is past the type-phrase scan position.
-        if let Ok((after_take, _)) = take_until::<_, _, E>("with mana value ").parse(rest) {
-            if let Some((prop, _)) = super::oracle_target::parse_mana_value_suffix(
-                after_take,
-                &mut ParseContext::default(),
-            ) {
-                if let TargetFilter::Typed(ref mut tf) = filter {
-                    if !tf
-                        .properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::Cmc { .. }))
-                    {
-                        tf.properties.push(prop);
-                    }
-                }
-            }
-        }
+    let cast_target_rest = strip_cast_target_prefix(rest);
+    let mut filter = parse_cast_type_disjunction(rest)
+        .map(TargetFilter::Typed)
+        .unwrap_or_else(|| super::oracle_target::parse_type_phrase(cast_target_rest).0);
+    if cast_filter_has_typed_leaf(&filter) {
+        apply_cast_target_suffixes(&mut filter, rest);
         return Some(Effect::CastFromZone {
             target: filter,
             without_paying_mana_cost: without_paying,
@@ -36465,19 +36498,13 @@ mod tests {
             })
             .expect("expected typed-filter leg in AND");
         assert!(
-            typed
-                .type_filters
-                .iter()
-                .any(|tf| matches!(tf, TypeFilter::Instant)),
-            "expected Instant in type_filters, got {:?}",
-            typed.type_filters
-        );
-        assert!(
-            typed
-                .type_filters
-                .iter()
-                .any(|tf| matches!(tf, TypeFilter::Sorcery)),
-            "expected Sorcery in type_filters, got {:?}",
+            typed.type_filters.iter().any(|tf| matches!(
+                tf,
+                TypeFilter::AnyOf(types)
+                    if types.contains(&TypeFilter::Instant)
+                        && types.contains(&TypeFilter::Sorcery)
+            )),
+            "expected AnyOf[Instant, Sorcery] in type_filters, got {:?}",
             typed.type_filters
         );
         assert!(
@@ -37616,6 +37643,51 @@ mod tests {
         assert!(
             has_source_mv,
             "expected ObjectManaValue {{ CostPaidObject }} for type-word arm, got {:?}",
+            target.properties
+        );
+    }
+
+    #[test]
+    fn cast_target_instant_or_sorcery_from_your_graveyard_keeps_target_filter() {
+        let effect = super::parse_effect(
+            "cast target instant or sorcery card with mana value less than or equal to this creature's power from your graveyard without paying its mana cost",
+        );
+        let target = match &effect {
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(tf),
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                ..
+            } => tf,
+            _ => panic!("expected CastFromZone with typed target, got {effect:?}"),
+        };
+
+        assert_eq!(
+            target.type_filters,
+            vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Instant,
+                TypeFilter::Sorcery
+            ])]
+        );
+        assert_eq!(target.controller, Some(ControllerRef::You));
+        assert!(target.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert!(
+            target.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: crate::types::ability::QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
+                        },
+                    }
+                )
+            }),
+            "expected source-power CmcLE bound, got {:?}",
             target.properties
         );
     }
