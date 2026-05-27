@@ -2135,6 +2135,22 @@ fn push_pending_trigger_to_stack_with_event_batch(
     stack::push_to_stack(state, entry, events);
 }
 
+/// CR 603.2 + CR 603.3b + CR 309.4c: Dispatch a synthetic
+/// single trigger (game-rule trigger queued mid-resolution, e.g. dungeon
+/// room ability from `effects::venture::queue_room_trigger`). Delegates
+/// to the same pipeline as `process_triggers` so target slots, modal
+/// choice, distribute-among, and mana abilities are handled identically.
+/// Returns `true` if the dispatch paused on player input (target / mode
+/// / distribute prompt), `false` if the trigger reached the stack or
+/// resolved inline.
+pub(crate) fn dispatch_synthetic_trigger(
+    state: &mut GameState,
+    trigger: PendingTrigger,
+    events_out: &mut Vec<GameEvent>,
+) -> bool {
+    dispatch_pending_trigger_context(state, PendingTriggerContext::single(trigger), events_out)
+}
+
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drive a single collected trigger through
 /// its disposition. Returns `true` when the trigger paused on player input
 /// (modal mode choice, target selection, or division-among) — callers must
