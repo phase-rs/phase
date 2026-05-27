@@ -467,6 +467,41 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 603.3b + CR 400.2: Per-controller ordering pass — keep the
+    // placement spine visible to everyone (groups, group sizes,
+    // controllers, ordered flags) but strip each group's private
+    // payload from viewers who are not that group's controller.
+    if let Some(order) = filtered.pending_trigger_order.as_mut() {
+        for group in &mut order.groups {
+            if !can_view_private_for_player(group.controller) {
+                for ctx in &mut group.triggers {
+                    redact_pending_trigger_context_for_observer(ctx);
+                }
+            }
+        }
+    }
+
+    // CR 603.3b + CR 400.2: Same redaction surface applies to the singleton
+    // `pending_trigger` (the currently-targeting trigger) and its sidecar
+    // `pending_trigger_event_batch` (full simultaneous-event set consumed when
+    // it reaches the stack). Gate on the pending trigger's own controller.
+    if let Some(pending) = filtered.pending_trigger.as_mut() {
+        if !can_view_private_for_player(pending.controller) {
+            redact_pending_trigger_for_observer(pending);
+            filtered.pending_trigger_event_batch.clear();
+        }
+    }
+
+    // CR 113.2c + CR 603.2 + CR 603.3b: `deferred_triggers` holds the FIFO
+    // queue of same-pass triggers waiting on the active `pending_trigger` to
+    // resolve. Each entry is a `PendingTriggerContext` with the same private
+    // payload shape — redact per controller.
+    for ctx in &mut filtered.deferred_triggers {
+        if !can_view_private_for_player(ctx.pending.controller) {
+            redact_pending_trigger_context_for_observer(ctx);
+        }
+    }
+
     filtered
 }
 
@@ -499,6 +534,37 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.source_related_token_ids.clear();
         obj.foretold = false;
     }
+}
+
+/// CR 603.3b + CR 400.2: A pending trigger awaiting its
+/// controller's ordering choice may carry private data —
+/// the firing `GameEvent` can reference hidden-zone objects
+/// (library look/scry/surveil/mill triggers), and the
+/// modal/distribute/mode_abilities/description fields describe
+/// the controller's not-yet-public choices. Strip every payload
+/// an opponent has no rules-permission to see, leaving only
+/// the public spine (source_id, controller, timestamp, ability,
+/// condition, target_constraints, subject_match_count,
+/// may_trigger_origin) needed for the engine to keep running on
+/// the wire and for the opponent's frontend to render an
+/// "opponent is ordering N triggers" indicator.
+fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::PendingTrigger) {
+    pending.trigger_event = None;
+    pending.modal = None;
+    pending.distribute = None;
+    pending.mode_abilities.clear();
+    pending.description = None;
+}
+
+/// CR 603.3b + CR 400.2: Wrapping-context variant of
+/// [`redact_pending_trigger_for_observer`] that also clears the
+/// `trigger_events` sidecar (the full simultaneous-event set for
+/// batched triggers, which can reference hidden-zone objects).
+fn redact_pending_trigger_context_for_observer(
+    ctx: &mut crate::game::triggers::PendingTriggerContext,
+) {
+    redact_pending_trigger_for_observer(&mut ctx.pending);
+    ctx.trigger_events.clear();
 }
 
 #[cfg(test)]
