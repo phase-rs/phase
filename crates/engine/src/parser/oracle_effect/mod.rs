@@ -11118,7 +11118,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
             target,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped,
             enters_attacking: false,
             up_to: false,
