@@ -4488,15 +4488,10 @@ fn with_triggering_player_controller(filter: TargetFilter) -> TargetFilter {
 
 /// Parse the "to <target>" qualifier that follows a damage verb.
 ///
-/// CR 102.2: In a two-player game, "another player" is exactly the controller's
-/// opponent. The engine's `ControllerRef::Opponent` evaluates at runtime as
-/// `source_controller != player_id`, which correctly matches any player who is
-/// not the source controller in games of any size.
-///
 /// Returns a `TargetFilter` for the recognized recipient phrases:
 /// - "to a player"                  → `Player`
 /// - "to an opponent"               → opponent-controlled TypedFilter
-/// - "to another player"            → opponent-controlled TypedFilter (CR 102.2)
+/// - "to another player"            → opponent-controlled TypedFilter
 /// - "to one of your opponents"     → opponent-controlled TypedFilter
 /// - "to you"                       → `Controller`
 /// - "to a player or planeswalker"  → `Or { Player, Planeswalker }`
@@ -4506,6 +4501,22 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
         .ok()?;
     // Use nom alt() to match damage target qualifiers (input already lowercase)
     fn parse_damage_target(input: &str) -> OracleResult<'_, TargetFilter> {
+        fn opponent_player_filter() -> TargetFilter {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        }
+
+        fn parse_opponent_player_recipient(input: &str) -> OracleResult<'_, TargetFilter> {
+            value(
+                opponent_player_filter(),
+                alt((
+                    preceded(tag("an "), tag("opponent")),
+                    preceded(tag("one of your "), tag("opponents")),
+                    preceded(tag("another "), tag("player")),
+                )),
+            )
+            .parse(input)
+        }
+
         alt((
             value(
                 TargetFilter::Or {
@@ -4520,20 +4531,7 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
                 )),
             ),
             value(TargetFilter::Player, tag("a player")),
-            value(
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag("an opponent"),
-            ),
-            value(
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag("one of your opponents"),
-            ),
-            // CR 102.2: "Another player" = any player other than the controller
-            // (ControllerRef::Opponent evaluates as source_controller != player_id).
-            value(
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag("another player"),
-            ),
+            parse_opponent_player_recipient,
             value(TargetFilter::Controller, tag("you")),
         ))
         .parse(input)
@@ -15894,6 +15892,30 @@ mod tests {
         ));
         // No amount threshold on Virtue of Courage's trigger.
         assert_eq!(def.damage_amount, None);
+    }
+
+    #[test]
+    fn trigger_source_you_control_deals_damage_to_another_player() {
+        let def = parse_trigger_line(
+            "Whenever a source you control deals damage to another player, put that many theft counters on ~.",
+            "Night Dealings",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.damage_amount, None);
+        assert!(matches!(
+            def.valid_source,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            }))
+        ));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
     }
 
     // CR 603.2 + CR 120.1: "Whenever a source you control deals N or more
