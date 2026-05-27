@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -3290,17 +3290,21 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         }
     }
 
-    if let Some(Effect::ChangeZone {
-        origin,
-        destination,
-        target,
-        under_your_control,
-        enter_tapped,
-        enter_transformed,
-        enters_attacking,
-        enter_with_counters,
-        ..
-    }) = super::try_parse_put_zone_change(lower, text)
+    if let Some((
+        Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            under_your_control,
+            enter_tapped,
+            enter_transformed,
+            enters_attacking,
+            up_to,
+            enter_with_counters,
+            ..
+        },
+        choice_count,
+    )) = super::try_parse_put_zone_change_parts(lower, text)
     {
         return Some(PutImperativeAst::ZoneChange {
             origin,
@@ -3310,6 +3314,8 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
             enter_tapped,
             enter_transformed,
             enters_attacking,
+            up_to,
+            choice_count,
             enter_with_counters,
         });
     }
@@ -3335,6 +3341,8 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             enter_tapped,
             enter_transformed,
             enters_attacking,
+            up_to,
+            choice_count: _,
             enter_with_counters,
         } => {
             // CR 610.3: Mass filters (ExiledBySource, TrackedSet) act on all matching
@@ -3366,7 +3374,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     // CR 508.4: Propagated from the inline-tail patcher in
                     // `try_parse_put_zone_change` (Kaalia / Ilharg class).
                     enters_attacking,
-                    up_to: false,
+                    up_to,
                     enter_with_counters,
                 }
             }
@@ -3642,6 +3650,35 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             target,
             owner_library,
         });
+    }
+    // CR 701.24c + CR 400.3: "shuffle <descriptive target> into <possessive>
+    // library" — covers "shuffle enchanted creature into its owner's library"
+    // (Dramatic Accusation, Stay Hidden Stay Silent) and any future card that
+    // names a non-pronoun target phrase before "into ... library". The target
+    // is parsed by `parse_target` which handles "enchanted creature",
+    // "equipped creature", "target creature", etc.
+    // Placed after the pronoun path (which handles it/them/~/that card) so
+    // pronoun forms are not accidentally consumed by `parse_target`.
+    if let Some(((target_phrase, owner_library), _)) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(input)?;
+        let (input, target_phrase) = take_until(" into ").parse(input)?;
+        not(take_until::<_, _, OracleError<'_>>(" from ")).parse(target_phrase)?;
+        let (input, _) = tag(" into ").parse(input)?;
+        let (input, owner_library) = alt((
+            value(true, tag("its owner's library")),
+            value(true, tag("their owner's library")),
+            value(true, tag("their owners' libraries")),
+        ))
+        .parse(input)?;
+        Ok((input, (target_phrase.to_string(), owner_library)))
+    }) {
+        let (target, _) = parse_target(&target_phrase);
+        if !matches!(target, TargetFilter::Any) {
+            return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library,
+            });
+        }
     }
     // CR 701.24c + CR 400.6: "shuffle the cards from {possessive} {zone} into
     // {possessive} library" and "shuffle {possessive} hand and graveyard into
@@ -5832,6 +5869,34 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
         // Intercepted here (rather than in lower_zone_counter_ast which returns
         // a bare Effect) because the chain requires a sub_ability linkage that
         // only ParsedEffectClause can express.
+        ImperativeFamilyAst::Put(PutImperativeAst::ZoneChange {
+            origin,
+            destination,
+            target,
+            under_your_control,
+            enter_tapped,
+            enter_transformed,
+            enters_attacking,
+            up_to,
+            choice_count: Some(choice_count),
+            enter_with_counters,
+        }) => {
+            let effect = lower_put_ast(PutImperativeAst::ZoneChange {
+                origin,
+                destination,
+                target,
+                under_your_control,
+                enter_tapped,
+                enter_transformed,
+                enters_attacking,
+                up_to,
+                choice_count: Some(choice_count.clone()),
+                enter_with_counters,
+            });
+            let mut clause = parsed_clause(effect);
+            clause.multi_target = Some(choice_count);
+            clause
+        }
         ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::PutCounterList {
             entries,
             target,
@@ -9440,6 +9505,57 @@ mod tests {
                 assert!(!owner_library);
             }
             other => panic!("Expected ChangeZoneToLibrary SelfRef+!owner_library, got {other:?}"),
+        }
+    }
+
+    /// Regression: "shuffle their hand and graveyard into their library"
+    /// (Echo of Eons after subject-stripping + deconjugation) must still route
+    /// to `ChangeZoneAllToLibrary`, NOT the descriptive-target path.
+    #[test]
+    fn parse_shuffle_their_hand_and_graveyard_into_their_library() {
+        let text = "shuffle their hand and graveyard into their library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
+                assert_eq!(origins, vec![Zone::Hand, Zone::Graveyard]);
+            }
+            other => {
+                panic!("Expected ChangeZoneAllToLibrary Hand+Graveyard, got {other:?}")
+            }
+        }
+    }
+
+    /// CR 701.24c + CR 400.3: "shuffle enchanted creature into its owner's
+    /// library" — the descriptive-target path for Aura-based shuffle effects
+    /// (Dramatic Accusation, Stay Hidden Stay Silent). The target is parsed by
+    /// `parse_target` which resolves "enchanted creature" to a `Typed` filter
+    /// with `EnchantedBy` property. `owner_library` is `true` because the
+    /// possessive resolves to the card's owner.
+    #[test]
+    fn parse_shuffle_enchanted_creature_into_owners_library() {
+        use crate::types::ability::FilterProp;
+        let text = "shuffle enchanted creature into its owner's library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library,
+            }) => {
+                // "enchanted creature" → Typed filter with EnchantedBy property
+                match &target {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.properties.contains(&FilterProp::EnchantedBy),
+                            "expected EnchantedBy property, got {tf:?}"
+                        );
+                    }
+                    other => panic!("Expected Typed filter with EnchantedBy, got {other:?}"),
+                }
+                assert!(owner_library, "expected owner_library = true");
+            }
+            other => {
+                panic!("Expected ChangeZoneToLibrary with EnchantedBy target, got {other:?}")
+            }
         }
     }
 

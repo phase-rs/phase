@@ -369,6 +369,7 @@ function MatchInProgressView() {
   const matchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
   const startMatch = useMultiplayerDraftStore((s) => s.startMatch);
   const [showPool, setShowPool] = useState(false);
+  const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const opponentName = matchPairing
     ? matchPairing.type === "Bot"
       ? matchPairing.botName
@@ -424,8 +425,14 @@ function MatchInProgressView() {
         >
           {showPool ? t("podPhaseView.hidePool") : t("podPhaseView.reviewPool")}
         </button>
-        {showPool && <PoolPanel />}
+        {showPool && <PoolPanel onCardHover={setHoveredCard} />}
       </div>
+      <CardPreview
+        cardName={hoveredCard?.name ?? null}
+        sourcePrinting={hoveredCard?.sourcePrinting}
+        mobileLayout="compact"
+        onDismiss={() => setHoveredCard(null)}
+      />
     </div>
   );
 }

@@ -1469,12 +1469,16 @@ fn you_control_subtype_count(
         .iter()
         .filter(|object_id| {
             state.objects.get(object_id).is_some_and(|obj| {
-                obj.controller == player
-                    && obj
-                        .card_types
-                        .subtypes
-                        .iter()
-                        .any(|candidate| candidate.eq_ignore_ascii_case(subtype))
+                if obj.controller != player {
+                    return false;
+                }
+                if subtype.eq_ignore_ascii_case("commander") {
+                    return obj.is_commander;
+                }
+                obj.card_types
+                    .subtypes
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(subtype))
             })
         })
         .count()
@@ -1827,6 +1831,40 @@ mod tests {
             PlayerId(0),
             ObjectId(1),
             "you control two or more vampires"
+        ));
+    }
+
+    #[test]
+    fn evaluates_you_control_a_commander_condition() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legendary Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            creature,
+            "you control a commander"
+        ));
+
+        state.objects.get_mut(&creature).unwrap().is_commander = true;
+        assert!(parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            creature,
+            "you control a commander"
         ));
     }
 

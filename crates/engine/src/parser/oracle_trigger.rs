@@ -32,10 +32,10 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect,
-    FilterProp, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
+    DestinationConstraint, Effect, FilterProp, OriginConstraint, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -4725,6 +4725,7 @@ fn try_parse_event(
                         def.zone_change_clauses.push(ZoneChangeClause {
                             origin: rich,
                             destination: Some(Zone::Battlefield),
+                            destination_constraint: DestinationConstraint::Any,
                             valid_card: Some(subject.clone()),
                         });
                         matched_clause = true;
@@ -4895,27 +4896,37 @@ fn try_parse_event(
     }
 
     // "leaves the battlefield" / "leaves"
-    if alt((
+    let leaves_tail = alt((
         value((), tag::<_, _, OracleError<'_>>("leaves the battlefield")),
         value((), tag("leaves")),
     ))
     .parse(rest)
-    .is_ok()
-    {
-        let mut def = make_base();
-        def.mode = TriggerMode::LeavesBattlefield;
-        def.valid_card = Some(subject.clone());
-        // CR 113.6k + CR 603.10: Self-referential LTB triggers (e.g. Oblivion Ring,
-        // "when ~ leaves the battlefield") must continue to function after the
-        // source has moved to graveyard/exile, because the trigger ability is tied
-        // to the object that left. Non-self-referential LTB triggers (e.g. "whenever
-        // a creature you control leaves the battlefield") live on a permanent that
-        // is still on the battlefield, so `trigger_zones` stays empty (battlefield
-        // default).
-        if filter_references_self(subject) {
-            def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+    .ok()
+    .map(|(tail, _)| tail);
+    if let Some(tail) = leaves_tail {
+        let tail = tail.trim_start();
+        let without_dying = all_consuming(tag::<_, _, OracleError<'_>>("without dying"))
+            .parse(tail)
+            .is_ok();
+        if tail.is_empty() || without_dying {
+            let mut def = make_base();
+            def.mode = TriggerMode::LeavesBattlefield;
+            def.valid_card = Some(subject.clone());
+            if without_dying {
+                def.destination_constraint = DestinationConstraint::NotEquals(Zone::Graveyard);
+            }
+            // CR 113.6k + CR 603.10: Self-referential LTB triggers (e.g. Oblivion Ring,
+            // "when ~ leaves the battlefield") must continue to function after the
+            // source has moved to graveyard/exile, because the trigger ability is tied
+            // to the object that left. Non-self-referential LTB triggers (e.g. "whenever
+            // a creature you control leaves the battlefield") live on a permanent that
+            // is still on the battlefield, so `trigger_zones` stays empty (battlefield
+            // default).
+            if filter_references_self(subject) {
+                def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+            }
+            return Some((TriggerMode::LeavesBattlefield, def));
         }
-        return Some((TriggerMode::LeavesBattlefield, def));
     }
 
     // CR 700.4: "is put into a graveyard from [zone]" / "is put into [possessive] graveyard [from zone]"
@@ -5077,7 +5088,9 @@ fn try_parse_event(
         BecomesSaddled,
         BecomesCrewed,
         BecomesTargetSpellOrAbility,
-        BecomesTargetSpellOnly,
+        BecomesTargetSpell {
+            qualifier: Option<TargetFilter>,
+        },
         DealtCombatDamage,
         DealtDamage,
         BecomesTapped,
@@ -5132,7 +5145,15 @@ fn try_parse_event(
                 tag("becomes the target of a spell or ability"),
             ),
             value(
-                SimpleEvent::BecomesTargetSpellOnly,
+                SimpleEvent::BecomesTargetSpell {
+                    qualifier: Some(TargetFilter::Typed(
+                        TypedFilter::default().subtype("Aura".to_string()),
+                    )),
+                },
+                tag("becomes the target of an aura spell"),
+            ),
+            value(
+                SimpleEvent::BecomesTargetSpell { qualifier: None },
                 tag("becomes the target of a spell"),
             ),
             value(
@@ -5200,10 +5221,18 @@ fn try_parse_event(
                 def.mode = TriggerMode::BecomesTarget;
                 def.valid_card = Some(subject.clone());
             }
-            SimpleEvent::BecomesTargetSpellOnly => {
+            // CR 115.1a + CR 115.1b: "target" spell text defines targeted spells,
+            // and Aura spells are always targeted via enchant.
+            SimpleEvent::BecomesTargetSpell { qualifier } => {
                 def.mode = TriggerMode::BecomesTarget;
                 def.valid_card = Some(subject.clone());
-                def.valid_source = Some(TargetFilter::StackSpell);
+                def.valid_source = Some(if let Some(extra_filter) = qualifier {
+                    TargetFilter::And {
+                        filters: vec![TargetFilter::StackSpell, extra_filter],
+                    }
+                } else {
+                    TargetFilter::StackSpell
+                });
             }
             SimpleEvent::DealtCombatDamage => {
                 def.mode = TriggerMode::DamageReceived;
@@ -8582,6 +8611,7 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
         return Some(ZoneChangeClause {
             origin: OriginConstraint::Equals(Zone::Battlefield),
             destination: Some(Zone::Graveyard),
+            destination_constraint: DestinationConstraint::Any,
             valid_card: Some(subject.clone()),
         });
     }
@@ -8607,6 +8637,7 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
         return Some(ZoneChangeClause {
             origin,
             destination: Some(Zone::Graveyard),
+            destination_constraint: DestinationConstraint::Any,
             valid_card,
         });
     }
@@ -8624,6 +8655,7 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
         return Some(ZoneChangeClause {
             origin: OriginConstraint::Equals(Zone::Graveyard),
             destination: None,
+            destination_constraint: DestinationConstraint::Any,
             valid_card: Some(add_controller(subject.clone(), ControllerRef::You)),
         });
     }
@@ -12109,6 +12141,19 @@ mod tests {
     }
 
     #[test]
+    fn trigger_leaves_battlefield_without_dying_excludes_graveyard_destination() {
+        let def = parse_trigger_line(
+            "Whenever this creature or another creature you control leaves the battlefield without dying, put a +1/+1 counter on target creature you control.",
+            "Three Tree Scribe",
+        );
+        assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+        assert_eq!(
+            def.destination_constraint,
+            DestinationConstraint::NotEquals(Zone::Graveyard)
+        );
+    }
+
+    #[test]
     fn trigger_skyclave_apparition_leaves_battlefield_uses_linked_exile_owner_scope() {
         let def = parse_trigger_line(
             "When this creature leaves the battlefield, the exiled card's owner creates an X/X blue Illusion creature token, where X is the mana value of the exiled card.",
@@ -15322,6 +15367,25 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::BecomesTarget);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(def.valid_source, Some(TargetFilter::StackSpell));
+    }
+
+    #[test]
+    fn trigger_becomes_target_of_aura_spell_only() {
+        let def = parse_trigger_line(
+            "Whenever this creature becomes the target of an Aura spell, you draw a card.",
+            "Fugitive Druid",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string())),
+                ],
+            })
+        );
     }
 
     #[test]
@@ -19878,6 +19942,65 @@ mod tests {
             other => panic!("expected PayCost, got: {other:?}"),
         }
         assert!(execute.optional, "you may pay should remain optional");
+    }
+
+    #[test]
+    fn spellcast_you_may_pay_if_you_do_create_token() {
+        let def = parse_trigger_line(
+            "Whenever you cast an artifact spell, you may pay {1}. If you do, create a 1/1 colorless Myr artifact creature token.",
+            "Myrsmith",
+        );
+
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert!(matches!(
+            &def.valid_card,
+            Some(TargetFilter::Typed(filter))
+                if filter.type_filters == vec![TypeFilter::Artifact]
+        ));
+
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(execute.optional, "you may pay should be optional");
+        match &*execute.effect {
+            Effect::PayCost {
+                payer,
+                cost: crate::types::ability::PaymentCost::Mana { cost },
+            } => {
+                assert_eq!(payer, &TargetFilter::Controller);
+                assert_eq!(cost, &crate::types::mana::ManaCost::generic(1));
+            }
+            other => panic!("expected PayCost, got: {other:?}"),
+        }
+
+        let token = execute
+            .sub_ability
+            .as_ref()
+            .expect("pay-cost trigger should have an if-you-do token");
+        assert_eq!(token.condition, Some(AbilityCondition::effect_performed()));
+        match &*token.effect {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                owner,
+                ..
+            } => {
+                assert_eq!(name, "Myr");
+                assert_eq!(power, &PtValue::Fixed(1));
+                assert_eq!(toughness, &PtValue::Fixed(1));
+                assert_eq!(
+                    types,
+                    &vec![
+                        "Artifact".to_string(),
+                        "Creature".to_string(),
+                        "Myr".to_string()
+                    ]
+                );
+                assert_eq!(owner, &TargetFilter::Controller);
+            }
+            other => panic!("expected token, got: {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------

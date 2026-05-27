@@ -4,7 +4,7 @@ use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityTag, CounterTransferMode, Effect, EffectError, EffectKind, ResolvedAbility,
-    TargetFilter, TargetRef,
+    TargetChoiceTiming, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
@@ -586,6 +586,12 @@ fn resolve_defined_or_targets(
                 })
                 .collect();
         }
+        if ability.target_choice_timing == TargetChoiceTiming::Resolution
+            && ability.targets.is_empty()
+            && filter.contains_source_attachment_host()
+        {
+            return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
+        }
     }
 
     if let Effect::MultiplyCounter { target, .. } = &ability.effect {
@@ -897,7 +903,9 @@ pub fn resolve_remove(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ControllerRef, QuantityExpr, TargetFilter, TypedFilter};
+    use crate::types::ability::{
+        ControllerRef, FilterProp, QuantityExpr, TargetChoiceTiming, TargetFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -1222,6 +1230,54 @@ mod tests {
             "SelfRef counter must land on the source object"
         );
         assert!(state.layers_dirty, "layers must be dirtied for P/T counter");
+    }
+
+    #[test]
+    fn put_counter_resolution_attachment_host_applies_to_equipped_creature() {
+        let mut state = GameState::new_two_player(42);
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Blade of the Bloodchief".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Equipped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, creature);
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(creature.into());
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+                ),
+            },
+            vec![],
+            equipment,
+            PlayerId(0),
+        );
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+
+        resolve_add(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert_eq!(
+            state.objects[&creature].counters[&CounterType::Plus1Plus1],
+            1
+        );
+        assert!(!state.objects[&equipment]
+            .counters
+            .contains_key(&CounterType::Plus1Plus1));
     }
 
     /// Regression test: "+1/+1" oracle-text counter type must map to Plus1Plus1.

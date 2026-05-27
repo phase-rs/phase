@@ -10,13 +10,14 @@ use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
 use super::ability_utils::{
-    assign_selected_slots_in_chain, assign_targets_in_chain, auto_select_targets_for_ability,
-    begin_target_selection_for_ability, build_chained_resolved, build_target_slots,
-    choose_target_for_ability, flatten_targets_in_chain, random_select_targets_for_ability,
-    validate_modal_indices, validate_selected_targets_for_ability, TargetSelectionAdvance,
+    ability_target_legality_needs_chosen_x, assign_selected_slots_in_chain,
+    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
+    build_chained_resolved, build_target_slots, choose_target_for_ability,
+    flatten_targets_in_chain, random_select_targets_for_ability, validate_modal_indices,
+    validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
 use super::casting::{emit_targeting_events, pay_ability_cost};
-use super::casting_costs::finish_pending_cast_cost_or_pay;
+use super::casting_costs::{cost_has_x, enter_payment_step, finish_pending_cast_cost_or_pay};
 use super::engine::EngineError;
 use super::restrictions;
 use super::stack;
@@ -80,6 +81,27 @@ pub(crate) fn handle_select_modes(
     // Build a chain of ResolvedAbility from chosen modes (in order)
     let mut resolved = build_chained_resolved(&abilities, &indices, pending.object_id, controller)?;
     resolved.set_context_recursive(pending.ability.context.clone());
+
+    if pending.activation_ability_index.is_none()
+        && pending.additional_cost_flow.is_none()
+        && cost_has_x(&total_cost)
+        && ability_target_legality_needs_chosen_x(&resolved)
+    {
+        let mut pending_x =
+            PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
+        pending_x.target_constraints = pending.target_constraints;
+        pending_x.casting_variant = pending.casting_variant;
+        pending_x.cast_timing_permission = pending.cast_timing_permission;
+        pending_x.distribute = pending.distribute;
+        pending_x.origin_zone = pending.origin_zone;
+        pending_x.payment_mode = pending.payment_mode;
+        pending_x.deferred_target_selection = true;
+        pending_x.additional_cost_decided = pending.additional_cost_decided;
+        pending_x.declared_kickers_to_pay = pending.declared_kickers_to_pay;
+        pending_x.declined_kickers = pending.declined_kickers;
+        state.pending_cast = Some(Box::new(pending_x));
+        return enter_payment_step(state, controller, None, events);
+    }
 
     // Check for targeting on the combined ability
     if state.layers_dirty {

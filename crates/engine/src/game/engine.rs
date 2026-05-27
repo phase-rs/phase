@@ -1995,20 +1995,20 @@ fn apply_action(
             &chosen,
             &mut events,
         )?,
-        // CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Player selected battlefield
-        // permanent(s) to exile as a mana ability cost (Food Chain class).
+        // CR 117.1 + CR 118.3 + CR 605.3b + CR 400.7j: Player selected
+        // object(s) to exile as a mana ability cost.
         (
-            WaitingFor::ExileFromBattlefieldForManaAbility {
+            WaitingFor::ExileForManaAbility {
                 count,
-                permanents,
+                cards,
                 pending_mana_ability,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => super::mana_abilities::handle_exile_from_battlefield_for_mana_ability(
+        ) => super::mana_abilities::handle_exile_for_mana_ability(
             state,
             *count,
-            permanents,
+            cards,
             pending_mana_ability,
             &chosen,
             &mut events,
@@ -2921,6 +2921,66 @@ fn apply_action(
                 pending_effect.as_ref(),
                 &mut events,
             )?
+        }
+        // CR 303.4 + CR 303.4g + CR 115.1: Player picked the permanent to
+        // enchant for a `Effect::ReturnAsAura` sub-effect. The picker is a
+        // CHOICE (not a target), so the action shape mirrors
+        // `WaitingFor::ExploreChoice` — `GameAction::ChooseTarget { target:
+        // Some(Object(id)) }` with `id` drawn from `legal_targets`.
+        (
+            WaitingFor::ReturnAsAuraTarget {
+                player,
+                source_id: _,
+                returned_id,
+                legal_targets,
+                pending_effect,
+            },
+            GameAction::ChooseTarget { target },
+        ) => {
+            if turn_control::authorized_submitter(state) != Some(*player) {
+                return Err(EngineError::WrongPlayer);
+            }
+            let chosen = match target {
+                Some(TargetRef::Object(id)) if legal_targets.contains(&id) => id,
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "ReturnAsAuraTarget: invalid or missing legal Object target".to_string(),
+                    ));
+                }
+            };
+            let pending = pending_effect.clone();
+            let returned = *returned_id;
+            let active_player = *player;
+            let (filter, grants) = match &pending.effect {
+                crate::types::ability::Effect::ReturnAsAura {
+                    enchant_filter,
+                    grants,
+                } => (enchant_filter.clone(), grants.clone()),
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "ReturnAsAuraTarget: pending_effect is not ReturnAsAura".to_string(),
+                    ));
+                }
+            };
+            super::effects::return_as_aura::finalize_attach(
+                state,
+                pending.as_ref(),
+                returned,
+                chosen,
+                &filter,
+                grants,
+                &mut events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // After resolving the attach, return control to standard priority
+            // flow under the picker's controller, then resume any chain that was
+            // paused behind the picker.
+            state.waiting_for = WaitingFor::Priority {
+                player: active_player,
+            };
+            state.priority_player = active_player;
+            effects::drain_pending_continuation(state, &mut events);
+            state.waiting_for.clone()
         }
         (
             WaitingFor::EquipTarget {
@@ -4044,22 +4104,39 @@ pub(super) fn begin_pending_trigger_target_selection(
     // CR 700.2b: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
+            let player = trigger.controller;
+            let source_id = trigger.source_id;
+            let mode_abilities = trigger.mode_abilities.clone();
+            let trigger_event = trigger.trigger_event.clone();
+            let trigger_events = if state.pending_trigger_event_batch.is_empty() {
+                trigger_event.iter().cloned().collect::<Vec<_>>()
+            } else {
+                state.pending_trigger_event_batch.clone()
+            };
+            let subject_match_count = trigger.subject_match_count;
             let modal = modal_choice_for_player(
                 state,
-                trigger.controller,
-                trigger.source_id,
+                player,
+                source_id,
                 modal,
                 &crate::types::ability::SpellContext::default(),
             );
-            let mut unavailable_modes = compute_unavailable_modes(state, trigger.source_id, &modal);
+            let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+            let context_snapshot = super::triggers::push_trigger_event_context(
+                state,
+                trigger_event.as_ref(),
+                &trigger_events,
+                subject_match_count,
+            );
             super::ability_utils::filter_modes_by_target_legality(
                 state,
-                trigger.source_id,
-                trigger.controller,
-                &trigger.mode_abilities,
+                source_id,
+                player,
+                &mode_abilities,
                 &modal,
                 &mut unavailable_modes,
             );
+            super::triggers::restore_trigger_event_context(state, context_snapshot);
 
             // CR 700.2b: All modes unavailable (previously chosen OR no legal
             // targets) — ability cannot be put on the stack. Clear pending
@@ -4070,10 +4147,10 @@ pub(super) fn begin_pending_trigger_target_selection(
             }
 
             return Ok(Some(WaitingFor::AbilityModeChoice {
-                player: trigger.controller,
+                player,
                 modal,
-                source_id: trigger.source_id,
-                mode_abilities: trigger.mode_abilities.clone(),
+                source_id,
+                mode_abilities,
                 is_activated: false,
                 ability_index: None,
                 ability_cost: None,
@@ -4082,26 +4159,42 @@ pub(super) fn begin_pending_trigger_target_selection(
         }
     }
 
-    let target_slots = build_target_slots(state, &trigger.ability)?;
-    if target_slots.is_empty() {
-        return Ok(None);
-    }
-
+    let ability = trigger.ability.clone();
     let player = trigger.controller;
+    let source_id = trigger.source_id;
     let target_constraints = trigger.target_constraints.clone();
-    let selection = begin_target_selection_for_ability(
+    let description = trigger.description.clone();
+    let trigger_event = trigger.trigger_event.clone();
+    let trigger_events = if state.pending_trigger_event_batch.is_empty() {
+        trigger_event.iter().cloned().collect::<Vec<_>>()
+    } else {
+        state.pending_trigger_event_batch.clone()
+    };
+    let subject_match_count = trigger.subject_match_count;
+    let context_snapshot = super::triggers::push_trigger_event_context(
         state,
-        &trigger.ability,
-        &target_slots,
-        &target_constraints,
-    )?;
+        trigger_event.as_ref(),
+        &trigger_events,
+        subject_match_count,
+    );
+    let selection_result = build_target_slots(state, &ability).and_then(|target_slots| {
+        if target_slots.is_empty() {
+            return Ok(None);
+        }
+        begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
+            .map(|selection| Some((target_slots, selection)))
+    });
+    super::triggers::restore_trigger_event_context(state, context_snapshot);
+    let Some((target_slots, selection)) = selection_result? else {
+        return Ok(None);
+    };
     Ok(Some(WaitingFor::TriggerTargetSelection {
         player,
         target_slots,
         target_constraints,
         selection,
-        source_id: Some(trigger.source_id),
-        description: trigger.description.clone(),
+        source_id: Some(source_id),
+        description,
     }))
 }
 
@@ -14560,6 +14653,63 @@ mod phase_trigger_regression_tests {
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.players[0].graveyard.contains(&obj_id));
         assert_eq!(state.players[0].life, 22);
+        assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
+    fn effect_zone_choice_handler_resolves_untap_selection() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let chosen_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chosen Land".to_string(),
+            Zone::Battlefield,
+        );
+        let unchosen_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unchosen Land".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [chosen_land, unchosen_land] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.tapped = true;
+        }
+
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![chosen_land, unchosen_land],
+            count: 2,
+            min_count: 0,
+            up_to: true,
+            source_id,
+            effect_kind: EffectKind::Untap,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            count_param: 0,
+        };
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![chosen_land],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!state.objects[&chosen_land].tapped);
+        assert!(state.objects[&unchosen_land].tapped);
         assert_eq!(state.last_effect_count, Some(1));
     }
 

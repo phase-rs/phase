@@ -224,22 +224,27 @@ pub(crate) fn payable_spell_alternative_cost(
         return None;
     }
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
-    // alternative-cost cards until the pending-cast flow can compose
+    // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.
     if obj.additional_cost.is_some() {
         return None;
     }
 
     obj.casting_options.iter().find_map(|option| {
-        if option.kind != SpellCastingOptionKind::AlternativeCost {
-            return None;
-        }
         if option.condition.as_ref().is_some_and(|condition| {
             !restrictions::evaluate_condition(state, player, object_id, condition)
         }) {
             return None;
         }
-        let cost = option.cost.clone()?;
+        let cost = match option.kind {
+            SpellCastingOptionKind::AlternativeCost => option.cost.clone()?,
+            SpellCastingOptionKind::CastWithoutManaCost => AbilityCost::Mana {
+                cost: ManaCost::NoCost,
+            },
+            SpellCastingOptionKind::AsThoughHadFlash | SpellCastingOptionKind::CastAdventure => {
+                return None;
+            }
+        };
         if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
             Some(cost)
         } else {
@@ -2046,6 +2051,29 @@ fn pay_additional_cost(
     pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if pending.ability.chosen_x.is_none() {
+        if let Some(max) = additional_cost_x_max(state, player, &cost) {
+            let min = pending.ability.min_x_value;
+            if min > max {
+                super::casting::handle_cancel_cast(state, &pending, events);
+                return Err(EngineError::ActionNotAllowed(format!(
+                    "Minimum legal X value {min} exceeds maximum payable X value {max}"
+                )));
+            }
+            let mut pending = pending;
+            let cost = prepend_deferred_required_cost(cost, &mut pending);
+            pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
+            state.pending_cast = Some(Box::new(pending.clone()));
+            return Ok(WaitingFor::ChooseXValue {
+                player,
+                min,
+                max,
+                pending_cast: Box::new(pending),
+                convoke_mode: None,
+            });
+        }
+    }
+
     match cost {
         AbilityCost::PayLife { amount } => {
             // CR 118.3 + CR 119.4 + CR 119.8: Pay life as an additional cost via
@@ -2053,8 +2081,8 @@ fn pay_additional_cost(
             // CR 119.4 + CR 903.4: `amount` is a QuantityExpr so dynamic refs
             // (e.g. commander color identity count) resolve at cast time.
             let resolved =
-                super::quantity::resolve_quantity(state, &amount, player, pending.object_id).max(0)
-                    as u32;
+                super::quantity::resolve_quantity_with_targets(state, &amount, &pending.ability)
+                    .max(0) as u32;
             match super::life_costs::pay_life_as_cast_or_activation_cost(
                 state, player, resolved, events,
             ) {
@@ -2365,6 +2393,71 @@ fn pay_additional_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+fn prepend_deferred_required_cost(cost: AbilityCost, pending: &mut PendingCast) -> AbilityCost {
+    match pending.additional_cost_flow.take() {
+        Some(AdditionalCost::Required(AbilityCost::Composite { costs })) => {
+            let mut combined = Vec::with_capacity(costs.len() + 1);
+            combined.push(cost);
+            combined.extend(costs);
+            AbilityCost::Composite { costs: combined }
+        }
+        Some(AdditionalCost::Required(next)) => AbilityCost::Composite {
+            costs: vec![cost, next],
+        },
+        Some(other) => {
+            pending.additional_cost_flow = Some(other);
+            cost
+        }
+        None => cost,
+    }
+}
+
+fn additional_cost_x_max(state: &GameState, player: PlayerId, cost: &AbilityCost) -> Option<u32> {
+    match cost {
+        AbilityCost::PayLife { amount } if quantity_expr_contains_x(amount) => {
+            Some(max_pay_life_x(state, player))
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .filter_map(|cost| additional_cost_x_max(state, player, cost))
+            .min(),
+        AbilityCost::PerCounter { base, .. } => additional_cost_x_max(state, player, base),
+        _ => None,
+    }
+}
+
+fn max_pay_life_x(state: &GameState, player: PlayerId) -> u32 {
+    if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, 1) {
+        return 0;
+    }
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| u32::try_from(p.life.max(0)).unwrap_or(0))
+        .unwrap_or(0)
+}
+
+fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } => name == "X",
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_contains_x(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_contains_x),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_contains_x(left) || quantity_expr_contains_x(right)
+        }
+        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
+    }
+}
+
 pub(super) fn effective_casualty_additional_cost(
     state: &GameState,
     player: PlayerId,
@@ -2541,8 +2634,8 @@ pub(super) fn pay_and_push_adventure(
         return enter_payment_step(state, player, convoke_mode, events);
     }
 
-    // CR 107.4f + CR 601.2f: Pause for interactive Phyrexian choice when the cost has
-    // at least one shard with both mana and 2-life viable. The resume handler calls
+    // CR 107.4f + CR 601.2f: Pause before any Phyrexian shard would deduct life,
+    // whether life is optional or the only legal route. The resume handler calls
     // `finalize_mana_payment_with_phyrexian_choices` which finishes the cast.
     if let Some(waiting) = maybe_pause_for_phyrexian_choice(
         state,
@@ -3960,6 +4053,31 @@ pub fn enter_payment_step(
         }
     }
 
+    if state.pending_cast.as_ref().is_some_and(|pending| {
+        matches!(
+            pending.additional_cost_flow,
+            Some(AdditionalCost::Required(_))
+        )
+    }) {
+        let pending = *state
+            .pending_cast
+            .take()
+            .expect("checked pending cast presence");
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+
+    if state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|pending| pending.deferred_target_selection)
+    {
+        let pending = *state
+            .pending_cast
+            .take()
+            .expect("checked pending cast presence");
+        return begin_deferred_target_selection(state, player, pending, events);
+    }
+
     // CR 601.2h: Auto-finalize when no player-level decision remains. Convoke requires
     // the caster to choose which creatures to tap, so it always surfaces the modal.
     if convoke_mode.is_none() {
@@ -4325,8 +4443,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
 /// Auto-taps mana sources first (idempotent: already-tapped lands are skipped) so the
 /// shard-options computation reflects the pool the caster will actually spend from.
 /// Returns `Some(WaitingFor::PhyrexianPayment {...})` when at least one Phyrexian shard
-/// has `ShardOptions::ManaOrLife`; otherwise returns `None` so the caller proceeds with
-/// the existing auto-decision path.
+/// can deduct life; otherwise returns `None` so the caller proceeds with the existing
+/// auto-decision path.
 pub(super) fn maybe_pause_for_phyrexian_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -4412,25 +4530,45 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     let permissions =
         super::static_abilities::build_cost_permission_context(state, player, any_color);
 
-    let shards = {
+    let (shards, payable) = {
         let player_data = state.players.iter().find(|p| p.id == player)?;
-        mana_payment::compute_phyrexian_shards(
+        let shards = mana_payment::compute_phyrexian_shards(
             &player_data.mana_pool,
             cost,
             effective_payment_context,
             permissions,
-        )
+        );
+        // CR 601.2h: Only pause when the cost is actually payable in aggregate.
+        // Phyrexian shards may surface as `LifeOnly` even when the non-Phyrexian
+        // portion (e.g., a {1} generic shard) is unpayable; in that case the
+        // downstream finalizer must reject with "Cannot pay mana cost" rather
+        // than pausing on an unpayable cast.
+        let payable = mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            effective_payment_context,
+            permissions,
+        );
+        (shards, payable)
     };
+    if !payable {
+        return None;
+    }
 
-    // CR 107.4f + CR 601.2f: Pause iff the choice is meaningful — at least one shard
-    // has both options viable. Trivial-choice shards auto-resolve without pausing.
-    let has_meaningful_choice = shards.iter().any(|s| {
+    // CR 107.4f + CR 601.2h: Pause whenever any shard would deduct life — either
+    // because the player explicitly chooses (`ManaOrLife`) or because life is the
+    // only remaining payment route (`LifeOnly`). The player retains the CR 601.2h
+    // option to refuse the cast via `CancelCast` rather than have life silently
+    // deducted (issue #704). `ManaOnly` shards have no life consequence and
+    // continue to auto-resolve.
+    let has_life_consequence = shards.iter().any(|s| {
         matches!(
             s.options,
             crate::types::game_state::ShardOptions::ManaOrLife
+                | crate::types::game_state::ShardOptions::LifeOnly,
         )
     });
-    if !has_meaningful_choice {
+    if !has_life_consequence {
         return None;
     }
 

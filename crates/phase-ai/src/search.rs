@@ -712,11 +712,29 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
-        // Phyrexian payment: pay mana for all shards (safe default).
+        // CR 303.4 + CR 303.4g: Return-as-Aura attach pick — the engine only
+        // installs this state when `legal_targets` is non-empty, so picking
+        // the first candidate is always a legal fallback.
+        WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
+            legal_targets.first().map(|&id| GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(id)),
+            })
+        }
+
+        // Phyrexian payment: preserve each shard's only legal route when there
+        // is no scored candidate to choose from.
         WaitingFor::PhyrexianPayment { shards, .. } => {
             let choices = shards
                 .iter()
-                .map(|_| engine::types::game_state::ShardChoice::PayMana)
+                .map(|shard| match shard.options {
+                    engine::types::game_state::ShardOptions::LifeOnly => {
+                        engine::types::game_state::ShardChoice::PayLife
+                    }
+                    engine::types::game_state::ShardOptions::ManaOrLife
+                    | engine::types::game_state::ShardOptions::ManaOnly => {
+                        engine::types::game_state::ShardChoice::PayMana
+                    }
+                })
                 .collect();
             Some(GameAction::SubmitPhyrexianChoices { choices })
         }
@@ -763,7 +781,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // happen but CancelCast is not valid here. Use empty selection.
         WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
+        | WaitingFor::ExileForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
