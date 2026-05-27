@@ -5799,6 +5799,17 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let descriptor = if let Some(prefix) = descriptor_text.strip_suffix(" creatures") {
         prefix.trim()
     } else if !descriptor_text.contains(' ') && descriptor_text.to_lowercase().ends_with('s') {
+        if descriptor_text.eq_ignore_ascii_case("creatures") {
+            // CR 205.2a: "creatures" names the creature card type, not a creature subtype.
+            let mut typed = TypedFilter::creature();
+            if let Some(controller) = controller {
+                typed = typed.controller(controller);
+            }
+            if has_other {
+                typed = typed.properties(vec![FilterProp::Another]);
+            }
+            return Some(TargetFilter::Typed(typed));
+        }
         // CR 205.3m: Use parse_subtype for irregular plurals (Elves→Elf, Dwarves→Dwarf)
         if let Some((canonical, _)) = parse_subtype(descriptor_text) {
             let mut typed = TypedFilter::creature().subtype(canonical);
@@ -5814,6 +5825,18 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     } else {
         return None;
     };
+
+    if descriptor.eq_ignore_ascii_case("creature") {
+        // CR 205.2a: "creature" names the creature card type, not a creature subtype.
+        let mut typed = TypedFilter::creature();
+        if let Some(controller) = controller {
+            typed = typed.controller(controller);
+        }
+        if has_other {
+            typed = typed.properties(vec![FilterProp::Another]);
+        }
+        return Some(TargetFilter::Typed(typed));
+    }
 
     if descriptor.is_empty() {
         return None;
@@ -12858,7 +12881,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
-        assert!(matches!(def.affected, Some(TargetFilter::Typed(_))));
+        let Some(TargetFilter::Typed(tf)) = def.affected else {
+            panic!("expected typed affected filter, got {:?}", def.affected);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.get_subtype().is_none(),
+            "generic creatures must not become a Creature subtype filter: {:?}",
+            tf
+        );
     }
 
     #[test]
@@ -15261,7 +15297,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_creature_subject_filter_irregular_plurals() {
+    fn parse_creature_subject_filter_generic_and_irregular_plurals() {
+        let filter = super::parse_creature_subject_filter("Creatures you control").unwrap();
+        if let TargetFilter::Typed(tf) = &filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.get_subtype(), None);
+        } else {
+            panic!("Expected generic Creature filter, got {:?}", filter);
+        }
+
+        let filter = super::parse_creature_subject_filter("Other creatures you control").unwrap();
+        if let TargetFilter::Typed(tf) = &filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.get_subtype(), None);
+            assert!(tf.properties.contains(&FilterProp::Another));
+        } else {
+            panic!("Expected generic other Creature filter, got {:?}", filter);
+        }
+
         // Single-word plural subtypes should resolve via parse_subtype
         let filter = super::parse_creature_subject_filter("Elves").unwrap();
         if let TargetFilter::Typed(tf) = &filter {
