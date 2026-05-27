@@ -1845,6 +1845,49 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 }
+                EffectKind::Tap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_tap(state, card_id, source_id, events)
+                        {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Untap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_untap(state, card_id, events) {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
+                            }
+                        }
+                    }
+                }
                 // CR 115.1: Resolution-time selection for PutAtLibraryPosition
                 // from a private zone (e.g. Brainstorm's "put two cards from
                 // your hand on top of your library"). Cards are placed in
@@ -1903,12 +1946,28 @@ pub(super) fn handle_resolution_choice(
             }
             if matches!(
                 effect_kind,
-                EffectKind::ChangeZone | EffectKind::BounceAll | EffectKind::PutAtLibraryPosition
+                EffectKind::Sacrifice
+                    | EffectKind::ChangeZone
+                    | EffectKind::BounceAll
+                    | EffectKind::Tap
+                    | EffectKind::Untap
+                    | EffectKind::PutAtLibraryPosition
             ) && state.pending_continuation.is_some()
             {
+                let tracked = if matches!(effect_kind, EffectKind::Sacrifice) {
+                    events[events_before_effect..]
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    chosen.clone()
+                };
                 let tracked_id = TrackedSetId(state.next_tracked_set_id);
                 state.next_tracked_set_id += 1;
-                state.tracked_object_sets.insert(tracked_id, chosen.clone());
+                state.tracked_object_sets.insert(tracked_id, tracked);
                 state.chain_tracked_set_id = Some(tracked_id);
             }
             state.last_effect_count = Some(chosen.len() as i32);

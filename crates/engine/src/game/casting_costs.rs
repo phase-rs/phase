@@ -251,22 +251,27 @@ pub(crate) fn payable_spell_alternative_cost(
         return None;
     }
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
-    // alternative-cost cards until the pending-cast flow can compose
+    // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.
     if obj.additional_cost.is_some() {
         return None;
     }
 
     obj.casting_options.iter().find_map(|option| {
-        if option.kind != SpellCastingOptionKind::AlternativeCost {
-            return None;
-        }
         if option.condition.as_ref().is_some_and(|condition| {
             !restrictions::evaluate_condition(state, player, object_id, condition)
         }) {
             return None;
         }
-        let cost = option.cost.clone()?;
+        let cost = match option.kind {
+            SpellCastingOptionKind::AlternativeCost => option.cost.clone()?,
+            SpellCastingOptionKind::CastWithoutManaCost => AbilityCost::Mana {
+                cost: ManaCost::NoCost,
+            },
+            SpellCastingOptionKind::AsThoughHadFlash | SpellCastingOptionKind::CastAdventure => {
+                return None;
+            }
+        };
         if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
             Some(cost)
         } else {
@@ -4092,6 +4097,18 @@ pub fn enter_payment_step(
                 convoke_mode,
             });
         }
+    }
+
+    if state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|pending| pending.deferred_target_selection)
+    {
+        let pending = *state
+            .pending_cast
+            .take()
+            .expect("checked pending cast presence");
+        return begin_deferred_target_selection(state, player, pending, events);
     }
 
     // CR 601.2h: Auto-finalize when no player-level decision remains. Convoke requires

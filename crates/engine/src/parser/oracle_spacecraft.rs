@@ -40,6 +40,7 @@ use crate::types::ability::{
     StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::keywords::Keyword;
 
 /// Counter type gating Spacecraft threshold lines (CR 702.184a / CR 721).
 pub(crate) const STATION_COUNTER: &str = "charge";
@@ -82,13 +83,16 @@ pub(crate) fn parse_spacecraft_threshold_lines(
     let mut abilities = Vec::new();
     let mut consumed = Vec::new();
 
-    for (idx, raw) in lines.iter().enumerate() {
+    let mut idx = 0;
+    while idx < lines.len() {
+        let raw = lines[idx];
         let Some((threshold, body)) = parse_threshold_header(raw.trim()) else {
+            idx += 1;
             continue;
         };
-        consumed.push(idx);
         let body = body.trim();
         if body.is_empty() {
+            idx += 1;
             continue;
         }
 
@@ -102,19 +106,69 @@ pub(crate) fn parse_spacecraft_threshold_lines(
             minimum: threshold,
             maximum: None,
         };
+        let parser = ThresholdParser {
+            card_name,
+            threshold,
+            static_cond,
+            trigger_cond,
+            base_trigger_index,
+        };
+        let mut output = ThresholdOutput {
+            statics: &mut statics,
+            triggers: &mut triggers,
+            abilities: &mut abilities,
+        };
 
+        if !parser.parse_body(raw.trim(), body, &mut output) {
+            idx += 1;
+            continue;
+        }
+        consumed.push(idx);
+        idx += 1;
+
+        while idx < lines.len() {
+            let continuation = lines[idx].trim();
+            if continuation.is_empty() || parse_threshold_header(continuation).is_some() {
+                break;
+            }
+            if !parser.parse_body(continuation, continuation, &mut output) {
+                break;
+            }
+            consumed.push(idx);
+            idx += 1;
+        }
+    }
+
+    (statics, triggers, abilities, consumed)
+}
+
+struct ThresholdParser<'a> {
+    card_name: &'a str,
+    threshold: u32,
+    static_cond: StaticCondition,
+    trigger_cond: TriggerCondition,
+    base_trigger_index: usize,
+}
+
+struct ThresholdOutput<'a> {
+    statics: &'a mut Vec<StaticDefinition>,
+    triggers: &'a mut Vec<TriggerDefinition>,
+    abilities: &'a mut Vec<AbilityDefinition>,
+}
+
+impl ThresholdParser<'_> {
+    fn parse_body(&self, description: &str, body: &str, output: &mut ThresholdOutput<'_>) -> bool {
         // Dispatch the body: keywords first (most common), then trigger /
         // static / activated branches modeled on `parse_level_blocks`.
         if let Some(keyword_mods) = parse_keyword_only_body(body) {
-            let description = raw.trim().to_string();
-            statics.push(
+            output.statics.push(
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SelfRef)
-                    .condition(static_cond.clone())
+                    .condition(self.static_cond.clone())
                     .modifications(keyword_mods)
-                    .description(description),
+                    .description(description.to_string()),
             );
-            continue;
+            return true;
         }
 
         if has_trigger_prefix(body) {
@@ -125,15 +179,15 @@ pub(crate) fn parse_spacecraft_threshold_lines(
             // triggers.
             let mut parsed = parse_trigger_lines_at_index(
                 body,
-                card_name,
-                Some(base_trigger_index + triggers.len()),
+                self.card_name,
+                Some(self.base_trigger_index + output.triggers.len()),
                 &mut ParseContext::default(),
             );
             for trig in &mut parsed {
-                trig.condition = Some(trigger_cond.clone());
+                trig.condition = Some(self.trigger_cond.clone());
             }
-            triggers.extend(parsed);
-            continue;
+            output.triggers.extend(parsed);
+            return true;
         }
 
         // Activated ability — structural colon with cost-like prefix.
@@ -141,12 +195,13 @@ pub(crate) fn parse_spacecraft_threshold_lines(
             let cost_text = body[..colon_pos].trim();
             let effect_text = body[colon_pos + 1..].trim();
             let (effect_text, constraints) = strip_activated_constraints(effect_text);
-            let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
+            let normalized_cost_text = normalize_self_refs_for_static(cost_text, self.card_name);
             let cost = parse_oracle_cost(&normalized_cost_text);
 
             let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
             if has_unimplemented(&def) {
-                let normalized_effect = normalize_self_refs_for_static(&effect_text, card_name);
+                let normalized_effect =
+                    normalize_self_refs_for_static(&effect_text, self.card_name);
                 if normalized_effect != effect_text {
                     let alt = parse_effect_chain(&normalized_effect, AbilityKind::Activated);
                     if !has_unimplemented(&alt) {
@@ -155,44 +210,39 @@ pub(crate) fn parse_spacecraft_threshold_lines(
                 }
             }
             def.cost = Some(cost);
-            def.description = Some(raw.trim().to_string());
+            def.description = Some(description.to_string());
             if constraints.sorcery_speed() {
                 def.sorcery_speed = true;
             }
             let mut restrictions = constraints.restrictions;
             restrictions.push(ActivationRestriction::CounterThreshold {
                 counters: CounterMatch::OfType(CounterType::Generic(STATION_COUNTER.to_string())),
-                minimum: threshold,
+                minimum: self.threshold,
                 maximum: None,
             });
             def.activation_restrictions = restrictions;
-            abilities.push(def);
-            continue;
+            output.abilities.push(def);
+            return true;
         }
 
         // Static ability body — multi-line or single — gated with charge threshold.
-        let static_text = normalize_self_refs_for_static(body, card_name);
+        let static_text = normalize_self_refs_for_static(body, self.card_name);
         let multi = parse_static_line_multi(&static_text);
         if !multi.is_empty() {
             for mut sd in multi {
-                sd.condition = Some(static_cond.clone());
-                statics.push(sd);
+                sd.condition = Some(self.static_cond.clone());
+                output.statics.push(sd);
             }
-            continue;
+            return true;
         }
         if let Some(mut sd) = parse_static_line(&static_text) {
-            sd.condition = Some(static_cond.clone());
-            statics.push(sd);
-            continue;
+            sd.condition = Some(self.static_cond.clone());
+            output.statics.push(sd);
+            return true;
         }
 
-        // Unrecognized body — leave the line unconsumed so the main dispatcher
-        // can diagnose it (it will end up as an `Unimplemented` fallback at
-        // worst, which is the correct diagnostic behavior).
-        consumed.pop();
+        false
     }
-
-    (statics, triggers, abilities, consumed)
 }
 
 /// Parse the `N+ |` (or `N+|`) prefix, returning `(threshold, body)`.
@@ -216,8 +266,6 @@ pub(crate) fn parse_threshold_header(line: &str) -> Option<(u32, &str)> {
 /// Returns `Some(mods)` where `mods` are `AddKeyword` modifications, or
 /// `None` if any part fails to parse as a non-Unknown keyword.
 fn parse_keyword_only_body(body: &str) -> Option<Vec<ContinuousModification>> {
-    use crate::types::keywords::Keyword;
-
     // Split on commas, then on " and " — same strategy as `oracle_level.rs`
     // keyword extraction but tolerating the inline " and " conjunction.
     let parts: Vec<&str> = body
@@ -307,6 +355,50 @@ mod tests {
     }
 
     #[test]
+    fn static_continuation_line_inherits_previous_threshold() {
+        let lines = [
+            "8+ | Flying",
+            "Other artifacts you control have hexproof and indestructible.",
+        ];
+        let (statics, triggers, abilities, consumed) =
+            parse_spacecraft_threshold_lines(&lines, "Inspirit, Flagship Vessel", 0);
+        assert_eq!(consumed, vec![0, 1]);
+        assert!(triggers.is_empty());
+        assert!(abilities.is_empty());
+        assert_eq!(statics.len(), 2);
+        assert!(matches!(
+            statics[0].condition,
+            Some(StaticCondition::HasCounters { minimum: 8, .. })
+        ));
+        assert!(matches!(
+            statics[1].condition,
+            Some(StaticCondition::HasCounters { minimum: 8, .. })
+        ));
+        assert_eq!(statics[1].modifications.len(), 2);
+    }
+
+    #[test]
+    fn continuation_consumption_stops_at_next_threshold() {
+        let lines = [
+            "1+ | Whenever you attack, draw a card.",
+            "8+ | Flying",
+            "Other artifacts you control have hexproof and indestructible.",
+        ];
+        let (statics, triggers, _, consumed) =
+            parse_spacecraft_threshold_lines(&lines, "Inspirit, Flagship Vessel", 0);
+        assert_eq!(consumed, vec![0, 1, 2]);
+        assert_eq!(triggers.len(), 1);
+        assert!(matches!(
+            triggers[0].condition,
+            Some(TriggerCondition::HasCounters { minimum: 1, .. })
+        ));
+        assert!(statics.iter().all(|static_def| matches!(
+            static_def.condition,
+            Some(StaticCondition::HasCounters { minimum: 8, .. })
+        )));
+    }
+
+    #[test]
     fn trigger_threshold_line_parses_with_condition() {
         let lines = ["3+ | Whenever you cast an artifact spell, draw a card."];
         let (_, triggers, _, consumed) =
@@ -316,6 +408,32 @@ mod tests {
         assert!(matches!(
             triggers[0].condition,
             Some(TriggerCondition::HasCounters { minimum: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn trigger_threshold_counter_rider_targets_this_spacecraft() {
+        let lines = [
+            "3+ | Whenever you cast an artifact spell, draw a card. Put a charge counter on this Spacecraft.",
+        ];
+        let (_, triggers, _, consumed) =
+            parse_spacecraft_threshold_lines(&lines, "Uthros Research Craft", 0);
+        assert_eq!(consumed, vec![0]);
+        assert_eq!(triggers.len(), 1);
+        let counter = triggers[0]
+            .execute
+            .as_ref()
+            .expect("threshold trigger should have an execute ability")
+            .sub_ability
+            .as_ref()
+            .expect("draw trigger should chain into counter rider");
+        assert!(matches!(
+            counter.effect.as_ref(),
+            crate::types::ability::Effect::PutCounter {
+                counter_type: CounterType::Generic(name),
+                target: TargetFilter::SelfRef,
+                ..
+            } if name == STATION_COUNTER
         ));
     }
 

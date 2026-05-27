@@ -6420,6 +6420,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_ugin_labyrinth_exiled_card_mana_as_delta() {
+        let r = parse(
+            "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n{T}: Add {C}. If a card is exiled with Ugin's Labyrinth, add {C}{C} instead.",
+            "Ugin's Labyrinth",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        match ability.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected base colorless mana, got {other:?}"),
+        }
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional delta");
+        match sub.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected colorless mana delta, got {other:?}"),
+        }
+        match sub.condition.as_ref().expect("expected condition") {
+            AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected exiled-with-source condition, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_compound_activate_only_constraints() {
         let r = parse(
             "{T}: Add {R}. Activate only as a sorcery and only once each turn.",
@@ -10610,7 +10652,10 @@ mod tests {
             .iter()
             .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
         assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(r.statics[0].active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            r.statics[0].active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
         assert!(
             r.parse_warnings
                 .iter()

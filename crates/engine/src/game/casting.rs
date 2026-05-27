@@ -8177,14 +8177,14 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        AbilityCost, AbilityTag, ActivationRestriction, BasicLandType, CastPermissionConstraint,
-        CastVariantPaid, CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator,
-        ContinuousModification, ControllerRef, CostCategory, FilterProp, GainLifePlayer,
-        GameRestriction, KickerVariant, ManaContribution, ManaProduction, ManaSpendPermission,
-        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
-        ProhibitedActivity, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        AbilityCost, AbilityTag, ActivationRestriction, AggregateFunction, BasicLandType,
+        CastPermissionConstraint, CastVariantPaid, CastingPermission, ChosenAttribute,
+        ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef, CostCategory,
+        FilterProp, GainLifePlayer, GameRestriction, KickerVariant, ManaContribution,
+        ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
+        ModalSelectionConstraint, ObjectProperty, ProhibitedActivity, PtValue, QuantityExpr,
+        QuantityRef, RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint,
+        StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -9413,6 +9413,143 @@ mod tests {
         assert_eq!(state.objects[&source].zone, Zone::Graveyard);
         assert!(state.objects[&alternate].tapped);
         assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(931),
+            PlayerId(0),
+            "Arcade Cabinet".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Double {
+                        target_kind: crate::types::ability::DoubleTarget::Counters {
+                            counter_type: None,
+                        },
+                        target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic: 2,
+                            },
+                        },
+                        AbilityCost::Tap,
+                        AbilityCost::Sacrifice {
+                            target: TargetFilter::Typed(
+                                TypedFilter::permanent().properties(vec![FilterProp::Token]),
+                            ),
+                            count: 1,
+                        },
+                    ],
+                }),
+            );
+        }
+        let token = create_object(
+            &mut state,
+            CardId(932),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.is_token = true;
+        }
+        let creature = create_object(
+            &mut state,
+            CardId(933),
+            PlayerId(0),
+            "Countered Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters
+                .insert(crate::types::counter::CounterType::Plus1Plus1, 2);
+        }
+        let other_creature = create_object(
+            &mut state,
+            CardId(934),
+            PlayerId(1),
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let waiting = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+            .expect("activation should ask for the token sacrifice cost first");
+        state.waiting_for = waiting;
+        let WaitingFor::SacrificeForCost {
+            permanents, count, ..
+        } = &state.waiting_for
+        else {
+            panic!("expected SacrificeForCost, got {:?}", state.waiting_for);
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(permanents, &vec![token]);
+
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![token] })
+            .expect("sacrificing the token should resume activation");
+        let WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("expected TargetSelection, got {:?}", state.waiting_for);
+        };
+        assert_eq!(target_slots.len(), 1);
+        assert!(
+            selection
+                .current_legal_targets
+                .contains(&TargetRef::Object(creature)),
+            "the post-cost target prompt must include the target creature"
+        );
+        assert!(
+            selection
+                .current_legal_targets
+                .contains(&TargetRef::Object(other_creature)),
+            "the post-cost target prompt must include each legal target creature"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(creature)),
+            },
+        )
+        .expect("target creature should be selectable");
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&crate::types::counter::CounterType::Plus1Plus1),
+            Some(&4)
+        );
     }
 
     #[test]
@@ -11737,7 +11874,7 @@ mod tests {
     /// CR 117.7 + CR 601.2f: A self-spell cost reduction printed on the card itself
     /// ("This spell costs {1} less to cast for each instant and sorcery card in your
     /// graveyard.") must fire while the card is in hand. Verifies the parser-emitted
-    /// static (affected = SelfRef, active_zones = [Hand, Stack]) is picked up by the
+    /// static (affected = SelfRef, active_zones = [Hand, Stack, Command]) is picked up by the
     /// casting-time scanner and reduces the spell's generic cost.
     #[test]
     fn tolarian_terror_self_cost_reduction_applies_from_hand() {
@@ -11759,7 +11896,7 @@ mod tests {
                 generic: 6,
             };
             // Self-spell cost reduction as the parser emits it: 1 generic per qualifying
-            // card in the graveyard, affected = SelfRef, active in Hand/Stack.
+            // card in the graveyard, affected = SelfRef, active in Hand/Stack/Command.
             use crate::types::ability::{CountScope, QuantityRef, ZoneRef};
             let mut def = StaticDefinition::new(StaticMode::ReduceCost {
                 amount: ManaCost::generic(1),
@@ -11771,7 +11908,7 @@ mod tests {
                 }),
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack];
+            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
             obj.static_definitions.push(def);
         }
 
@@ -11811,6 +11948,77 @@ mod tests {
                 generic, 3,
                 "3 qualifying graveyard cards should reduce generic from 6 to 3, got {generic}"
             ),
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+    }
+
+    /// CR 903.8 + CR 601.2f: A commander cast from the command zone still uses
+    /// self-spell cost modifications printed on that card. Ghalta's "This
+    /// spell costs {X} less..." must therefore function from Command as well
+    /// as Hand/Stack.
+    #[test]
+    fn self_cost_reduction_applies_from_command_zone() {
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+        let ghalta = create_object(
+            &mut state,
+            CardId(991),
+            PlayerId(0),
+            "Ghalta, Primal Hunger".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&ghalta).unwrap();
+            obj.is_commander = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 10,
+            };
+            let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+                amount: ManaCost::generic(1),
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::Aggregate {
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                }),
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+            obj.static_definitions.push(def);
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(992),
+            PlayerId(0),
+            "Charging Baloth".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(5);
+            obj.power = Some(5);
+        }
+
+        let mut mana_cost = state.objects.get(&ghalta).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers(
+            &state,
+            PlayerId(0),
+            ghalta,
+            &mut mana_cost,
+        );
+
+        match mana_cost {
+            ManaCost::Cost { generic, shards } => {
+                assert_eq!(generic, 5);
+                assert_eq!(shards, vec![ManaCostShard::Green, ManaCostShard::Green]);
+            }
             other => panic!("expected ManaCost::Cost, got {other:?}"),
         }
     }
@@ -12138,7 +12346,7 @@ mod tests {
                 dynamic_count: None,
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack];
+            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
             obj.static_definitions.push(def);
         }
 
@@ -12855,6 +13063,116 @@ mod tests {
         assert!(
             !ability.context.additional_cost_paid,
             "alternative costs are not additional costs"
+        );
+    }
+
+    #[test]
+    fn cast_without_mana_cost_option_checks_commander_control() {
+        let mut state = setup_game_at_main_phase();
+
+        let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+        let spell = state.objects.get_mut(&spell_id).unwrap();
+        spell.name = "Deadly Rollick Stand-In".to_string();
+        spell.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 3,
+        };
+        let abilities = Arc::make_mut(&mut spell.abilities);
+        abilities.clear();
+        abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        ));
+        spell.casting_options.push(
+            crate::types::ability::SpellCastingOption::free_cast().condition(
+                crate::types::ability::ParsedCondition::YouControlSubtypeCountAtLeast {
+                    subtype: "commander".to_string(),
+                    count: 1,
+                },
+            ),
+        );
+
+        let target_id = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), spell_id),
+            "without mana and without a commander, the printed-cost branch is not payable"
+        );
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(23),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Battlefield,
+        );
+        let commander = state.objects.get_mut(&commander_id).unwrap();
+        commander.card_types.core_types.push(CoreType::Artifact);
+        commander.is_commander = true;
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), spell_id),
+            "controlling a commander should make the free-cast option payable"
+        );
+
+        let mut events = Vec::new();
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(10), &mut events)
+            .expect("cast should reach the free-cast choice");
+        state.waiting_for = waiting;
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(
+                    AbilityCost::Mana {
+                        cost: ManaCost::NoCost
+                    },
+                    _
+                ),
+                ..
+            }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalCost { pay: true },
+        )
+        .expect("choosing the free-cast branch should cast the spell");
+
+        assert_eq!(state.stack.len(), 1);
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell on stack");
+        };
+        assert_eq!(
+            ability.targets,
+            vec![crate::types::ability::TargetRef::Object(target_id)]
         );
     }
 
@@ -16647,6 +16965,165 @@ mod tests {
             }
             _ => panic!("expected Spell on stack"),
         }
+    }
+
+    #[test]
+    fn modal_x_target_legality_chooses_x_before_targets() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(0),
+            "Test Kozilek Command".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::X,
+                    ManaCostShard::Colorless,
+                    ManaCostShard::Colorless,
+                ],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: "Eldrazi Spawn".to_string(),
+                    power: PtValue::Fixed(0),
+                    toughness: PtValue::Fixed(1),
+                    types: vec![
+                        "Creature".to_string(),
+                        "Eldrazi".to_string(),
+                        "Spawn".to_string(),
+                    ],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            ));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                        },
+                    ])),
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            ));
+            obj.modal = Some(crate::types::ability::ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 2,
+                mode_descriptions: vec![
+                    "Create X Eldrazi Spawn tokens.".to_string(),
+                    "Exile target creature with mana value X or less.".to_string(),
+                ],
+                ..Default::default()
+            });
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(1),
+            "Two Drop".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let other_creature = create_object(
+            &mut state,
+            CardId(63),
+            PlayerId(1),
+            "Other Two Drop".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 4);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(61), &mut events).unwrap();
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![0, 1], &mut events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "X must be chosen before building target slots whose legality depends on X"
+        );
+
+        state.waiting_for = apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
+            .unwrap()
+            .waiting_for;
+        match &state.waiting_for {
+            WaitingFor::TargetSelection { target_slots, .. } => {
+                assert_eq!(target_slots.len(), 1);
+                assert!(target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(creature)));
+                assert!(target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(other_creature)));
+            }
+            other => panic!("expected target selection after choosing X, got {other:?}"),
+        }
+
+        state.waiting_for = apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(creature)],
+            },
+        )
+        .unwrap()
+        .waiting_for;
+
+        stack::resolve_top(&mut state, &mut events);
+        assert_eq!(state.objects[&creature].zone, Zone::Exile);
+        let spawn_count = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].name == "Eldrazi Spawn")
+            .count();
+        assert_eq!(spawn_count, 2);
     }
 
     #[test]
@@ -22311,10 +22788,10 @@ mod tests {
         use crate::types::mana::ManaCost;
         use crate::types::statics::StaticMode;
 
-        /// Attach a fixed self-spell `ReduceCost` static (active in Hand) to a
-        /// hand card. With `affected = SelfRef` and `dynamic_count = None`, this
-        /// reduces the generic component of whatever base cost is being computed
-        /// — printed OR alternative — mirroring a flat cost reduction.
+        /// Attach a fixed self-spell `ReduceCost` static to a hand card. With
+        /// `affected = SelfRef` and `dynamic_count = None`, this reduces the
+        /// generic component of whatever base cost is being computed — printed
+        /// OR alternative — mirroring a flat cost reduction.
         fn add_self_cost_reduction(state: &mut GameState, obj_id: ObjectId, generic: u32) {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             let mut def = StaticDefinition::new(StaticMode::ReduceCost {
@@ -22323,7 +22800,7 @@ mod tests {
                 dynamic_count: None,
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack];
+            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
             obj.static_definitions.push(def);
         }
 

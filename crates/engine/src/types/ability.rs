@@ -1805,6 +1805,22 @@ fn is_default_shared_quality_relation(value: &SharedQualityRelation) -> bool {
     matches!(value, SharedQualityRelation::Shares)
 }
 
+/// Combat relationship required by `FilterProp::CombatRelation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatRelation {
+    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it.
+    BlockingOrBlockedBy,
+}
+
+/// Context object for a combat relationship filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatRelationSubject {
+    /// The source object of the resolving spell or ability.
+    Source,
+    /// The first selected object target of the resolving spell or ability.
+    ParentTarget,
+}
+
 /// Individual filter properties that can be combined in a Typed filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -1819,6 +1835,12 @@ pub enum FilterProp {
     /// CR 509.1g: Matches creatures currently blocking the filter source.
     /// Used for "creature(s) blocking it" source-relative quantities and filters.
     BlockingSource,
+    /// CR 509.1g/509.1h: Matches creatures in a combat relationship with a
+    /// source or selected parent target.
+    CombatRelation {
+        relation: CombatRelation,
+        subject: CombatRelationSubject,
+    },
     /// CR 509.1h: Matches attacking creatures with no blockers assigned.
     Unblocked,
     Tapped,
@@ -6997,6 +7019,18 @@ impl TargetFilter {
         }
     }
 
+    pub fn contains_source_attachment_host(&self) -> bool {
+        match self {
+            TargetFilter::Typed(TypedFilter { properties, .. }) => properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::EnchantedBy | FilterProp::EquippedBy)),
+            TargetFilter::And { filters } => filters
+                .iter()
+                .any(TargetFilter::contains_source_attachment_host),
+            _ => false,
+        }
+    }
+
     /// CR 115.1: Returns true for filters that are NOT player-chosen targets —
     /// context references (triggering event participants per CR 603.7c),
     /// parent target anaphora, and self-references resolve automatically
@@ -9589,6 +9623,9 @@ pub enum ReplacementCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_player_req: Option<ControllerRef>,
     },
+    /// CR 702.178a + CR 702.179e: "Max speed — [replacement]" applies only
+    /// while the replacement source's controller has max speed.
+    HasMaxSpeed,
     /// CR 702.138c: "escapes with" — replacement applies only when the creature
     /// entered the battlefield via escape.
     CastViaEscape,
@@ -9754,6 +9791,8 @@ impl OriginConstraint {
     }
 }
 
+pub type DestinationConstraint = OriginConstraint;
+
 /// CR 603.6 + CR 603.2: one clause of a disjunctive zone-change trigger.
 /// A zone-change event satisfies the trigger if it matches ANY clause
 /// (CR 603.2 — a game event matching the trigger condition fires the ability).
@@ -9765,6 +9804,14 @@ pub struct ZoneChangeClause {
     /// (CR 603.10a) where the destination is unconstrained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<Zone>,
+    /// CR 700.4: destination-zone predicate for LTB forms such as
+    /// "without dying" (`NotEquals(Graveyard)`). `destination` remains the
+    /// compact exact-match field for existing JSON and builder call sites.
+    #[serde(
+        default = "OriginConstraint::any_default",
+        skip_serializing_if = "OriginConstraint::is_any"
+    )]
+    pub destination_constraint: DestinationConstraint,
     /// Filter the moved card must satisfy for this clause to match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_card: Option<TargetFilter>,
@@ -9819,6 +9866,14 @@ pub struct TriggerDefinition {
     pub zone_change_clauses: Vec<ZoneChangeClause>,
     #[serde(default)]
     pub destination: Option<Zone>,
+    /// CR 700.4: destination-zone predicate for zone-change triggers whose
+    /// destination is described by exclusion, e.g. "leaves the battlefield
+    /// without dying" = leaves battlefield to a non-graveyard zone.
+    #[serde(
+        default = "OriginConstraint::any_default",
+        skip_serializing_if = "OriginConstraint::is_any"
+    )]
+    pub destination_constraint: DestinationConstraint,
     #[serde(default)]
     pub trigger_zones: Vec<Zone>,
     #[serde(default)]
@@ -9898,6 +9953,7 @@ impl TriggerDefinition {
             origin_zones: vec![],
             zone_change_clauses: vec![],
             destination: None,
+            destination_constraint: DestinationConstraint::Any,
             trigger_zones: vec![],
             phase: None,
             optional: false,
@@ -11932,6 +11988,7 @@ mod tests {
             origin_zones: vec![],
             zone_change_clauses: vec![],
             destination: Some(Zone::Graveyard),
+            destination_constraint: DestinationConstraint::Any,
             trigger_zones: vec![Zone::Battlefield],
             phase: None,
             optional: false,
@@ -12340,6 +12397,10 @@ mod tests {
             FilterProp::AttackingController,
             FilterProp::Blocking,
             FilterProp::BlockingSource,
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockingOrBlockedBy,
+                subject: CombatRelationSubject::ParentTarget,
+            },
             FilterProp::Unblocked,
             FilterProp::Tapped,
             FilterProp::Untapped,

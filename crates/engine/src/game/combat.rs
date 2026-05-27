@@ -2311,7 +2311,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
-    use crate::types::ability::StaticDefinition;
+    use crate::types::ability::{
+        Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
@@ -3442,6 +3445,54 @@ mod tests {
         assert!(
             can_block_pair(&state, blue_blocker, granted),
             "blue blocker should be able to block (color differs from chosen)"
+        );
+    }
+
+    #[test]
+    fn source_power_block_restriction_scopes_to_attackers_you_control() {
+        let mut state = setup();
+        let champion = create_creature(&mut state, PlayerId(0), "Champion", 3, 3);
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 1, 1);
+        let other_attacker = create_creature(&mut state, PlayerId(1), "Other Attacker", 1, 1);
+        let small_blocker = create_creature(&mut state, PlayerId(1), "Small Blocker", 2, 2);
+        let large_blocker = create_creature(&mut state, PlayerId(1), "Large Blocker", 4, 4);
+
+        state
+            .objects
+            .get_mut(&champion)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantBeBlockedBy {
+                    filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LT,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Power {
+                                    scope: ObjectScope::Source,
+                                },
+                            },
+                        },
+                    ])),
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            );
+
+        assert!(
+            !can_block_pair(&state, small_blocker, attacker),
+            "blockers with power less than the source's power cannot block creatures its controller controls"
+        );
+        assert!(
+            can_block_pair(&state, large_blocker, attacker),
+            "blockers with power at least the source's power remain legal"
+        );
+        assert!(
+            can_block_pair(&state, small_blocker, other_attacker),
+            "the restriction only protects creatures controlled by the static source controller"
         );
     }
 

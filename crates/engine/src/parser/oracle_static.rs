@@ -36,9 +36,9 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, AttachmentKind,
     BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator, ContinuousModification,
-    ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition,
-    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-    TypedFilter,
+    ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -175,6 +175,50 @@ fn parse_min_blockers_phrase(input: &str) -> OracleResult<'_, u32> {
     let (rest, n) = nom_primitives::parse_number(input)?;
     let (rest, _) = tag(" or more creatures").parse(rest)?;
     Ok((rest, n))
+}
+
+fn parse_source_power_block_restriction(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creatures with power less than ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("~'s power"),
+        tag("this creature's power"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" can't block ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creatures you control")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::CantBeBlockedBy {
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LT,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                },
+            ])),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .description(text.to_string()),
+    )
 }
 
 /// CR 509.1b: classify the remainder after "can't be blocked except by " into a
@@ -1796,6 +1840,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     if let Some(def) = parse_subject_combat_rule_static(&text) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_source_power_block_restriction(&text) {
         return Some(def);
     }
 
@@ -5751,6 +5799,17 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let descriptor = if let Some(prefix) = descriptor_text.strip_suffix(" creatures") {
         prefix.trim()
     } else if !descriptor_text.contains(' ') && descriptor_text.to_lowercase().ends_with('s') {
+        if descriptor_text.eq_ignore_ascii_case("creatures") {
+            // CR 205.2a: "creatures" names the creature card type, not a creature subtype.
+            let mut typed = TypedFilter::creature();
+            if let Some(controller) = controller {
+                typed = typed.controller(controller);
+            }
+            if has_other {
+                typed = typed.properties(vec![FilterProp::Another]);
+            }
+            return Some(TargetFilter::Typed(typed));
+        }
         // CR 205.3m: Use parse_subtype for irregular plurals (Elves→Elf, Dwarves→Dwarf)
         if let Some((canonical, _)) = parse_subtype(descriptor_text) {
             let mut typed = TypedFilter::creature().subtype(canonical);
@@ -5766,6 +5825,18 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     } else {
         return None;
     };
+
+    if descriptor.eq_ignore_ascii_case("creature") {
+        // CR 205.2a: "creature" names the creature card type, not a creature subtype.
+        let mut typed = TypedFilter::creature();
+        if let Some(controller) = controller {
+            typed = typed.controller(controller);
+        }
+        if has_other {
+            typed = typed.properties(vec![FilterProp::Another]);
+        }
+        return Some(TargetFilter::Typed(typed));
+    }
 
     if descriptor.is_empty() {
         return None;
@@ -9981,7 +10052,7 @@ fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
 /// a spell reduces/raises its own cast cost (e.g., Tolarian Terror:
 /// "This spell costs {1} less to cast for each instant and sorcery card in
 /// your graveyard."). Callers use this to flag self-reference so the static
-/// is emitted with `affected = SelfRef` and `active_zones = [Hand, Stack]`
+/// is emitted with `affected = SelfRef` and `active_zones = [Hand, Stack, Command]`
 /// instead of the default battlefield scope.
 fn parse_self_spell_cost_subject(lower: &str) -> Option<()> {
     nom_on_lower(lower, lower, |i| {
@@ -10170,7 +10241,7 @@ fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefinition> {
 /// 3. Global taxing: "Noncreature spells cost {1} more to cast" (Thalia)
 /// 4. Broad: "Spells you cast cost {1} less to cast"
 /// 5. Self-spell: "This spell costs {N} less to cast for each ..." (Tolarian Terror)
-///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack]`.
+///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack, Command]`.
 ///
 /// Dynamic "for each" counts are extracted when present.
 fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
@@ -10186,8 +10257,10 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     // Distinct from battlefield cost modification (e.g., "creature spells you cast cost {1} less")
     // because the static must apply to the card while it is in hand (or on the stack during
     // casting), not once it has entered the battlefield. The caller wires this into
-    // `active_zones = [Hand, Stack]` with `affected = SelfRef` so the casting-time scanner
-    // finds it on the spell being cast.
+    // `active_zones = [Hand, Stack, Command]` with `affected = SelfRef` so
+    // the casting-time scanner finds it on the spell being cast from normal
+    // hand casting, the cost-determination stack step, and commander casting
+    // from the command zone.
     let is_self_spell = parse_self_spell_cost_subject(lower).is_some();
 
     let amount_is_variable_x = nom_primitives::scan_contains(lower, "{x}");
@@ -10464,12 +10537,13 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         .description(text.to_string());
 
     // CR 117.7 + CR 601.2f: A self-spell cost reduction must apply while the
-    // card is in hand (pre-cast affordability checks) and on the stack (final
-    // cost determination during casting). Without opting in via `active_zones`,
-    // layer collection would ignore the static outside the battlefield, and
-    // the card would never reduce its own cost.
+    // card is in hand (pre-cast affordability checks), in the command zone
+    // (commander casting), and on the stack (final cost determination during
+    // casting). Without opting in via `active_zones`, layer collection would
+    // ignore the static outside the battlefield, and the card would never
+    // reduce its own cost.
     if is_self_spell {
-        definition.active_zones = vec![Zone::Hand, Zone::Stack];
+        definition.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
     }
     if let Some(filter) = first_qualified_spell_filter.as_ref() {
         definition.condition = Some(first_qualified_spell_condition(filter));
@@ -11056,8 +11130,9 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope, PtStat,
-        PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, ObjectProperty,
+        PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter,
+        ZoneRef,
     };
 
     /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
@@ -11388,6 +11463,43 @@ mod tests {
     }
 
     #[test]
+    fn static_source_power_cant_block_creatures_you_control() {
+        let def = parse_static_line(
+            "Creatures with power less than ~'s power can't block creatures you control.",
+        )
+        .expect("Champion of Lambholt static should parse");
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(ref tf))
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.controller == Some(ControllerRef::You)
+        ));
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::CantBeBlockedBy { ref filter }
+                    if matches!(
+                        filter,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                                && tf.properties.contains(&FilterProp::PtComparison {
+                                    stat: PtStat::Power,
+                                    scope: PtValueScope::Current,
+                                    comparator: Comparator::LT,
+                                    value: QuantityExpr::Ref {
+                                        qty: QuantityRef::Power {
+                                            scope: ObjectScope::Source
+                                        }
+                                    }
+                                })
+                    )
+            ),
+            "expected CantBeBlockedBy with source-power LT blocker filter, got {:?}",
+            def.mode
+        );
+    }
+
+    #[test]
     fn static_creatures_you_control() {
         let def = parse_static_line("Creatures you control get +1/+1.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
@@ -11594,11 +11706,11 @@ mod tests {
     }
 
     /// CR 117.7 + CR 601.2f: "This spell costs {N} less ..." must parse into a
-    /// self-scoped static — affected = SelfRef, active_zones = [Hand, Stack] —
+    /// self-scoped static — affected = SelfRef, active_zones = [Hand, Stack, Command] —
     /// so the cast-time scanner finds it on the spell itself (not on the
     /// battlefield). Regression guard for Tolarian Terror class.
     #[test]
-    fn static_this_spell_cost_less_self_scoped_in_hand_and_stack() {
+    fn static_this_spell_cost_less_self_scoped_in_castable_zones() {
         let def = parse_static_line(
             "This spell costs {1} less to cast for each instant and sorcery card in your graveyard.",
         )
@@ -11612,7 +11724,36 @@ mod tests {
             }
         ));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
+    }
+
+    #[test]
+    fn ghalta_self_cost_reduction_is_active_from_command_zone() {
+        let def = parse_static_line(
+            "This spell costs {X} less to cast, where X is the total power of creatures you control.",
+        )
+        .unwrap();
+
+        let StaticMode::ReduceCost {
+            dynamic_count:
+                Some(QuantityRef::Aggregate {
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                    ..
+                }),
+            ..
+        } = def.mode
+        else {
+            panic!("expected dynamic self-spell ReduceCost, got {:?}", def.mode);
+        };
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11642,7 +11783,10 @@ mod tests {
             .iter()
             .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11661,7 +11805,10 @@ mod tests {
             }
         ));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11720,7 +11867,10 @@ mod tests {
             })
         );
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11813,7 +11963,10 @@ mod tests {
             }
         )));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -12728,7 +12881,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
-        assert!(matches!(def.affected, Some(TargetFilter::Typed(_))));
+        let Some(TargetFilter::Typed(tf)) = def.affected else {
+            panic!("expected typed affected filter, got {:?}", def.affected);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.get_subtype().is_none(),
+            "generic creatures must not become a Creature subtype filter: {:?}",
+            tf
+        );
     }
 
     #[test]
@@ -15131,7 +15297,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_creature_subject_filter_irregular_plurals() {
+    fn parse_creature_subject_filter_generic_and_irregular_plurals() {
+        let filter = super::parse_creature_subject_filter("Creatures you control").unwrap();
+        if let TargetFilter::Typed(tf) = &filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.get_subtype(), None);
+        } else {
+            panic!("Expected generic Creature filter, got {:?}", filter);
+        }
+
+        let filter = super::parse_creature_subject_filter("Other creatures you control").unwrap();
+        if let TargetFilter::Typed(tf) = &filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.get_subtype(), None);
+            assert!(tf.properties.contains(&FilterProp::Another));
+        } else {
+            panic!("Expected generic other Creature filter, got {:?}", filter);
+        }
+
         // Single-word plural subtypes should resolve via parse_subtype
         let filter = super::parse_creature_subject_filter("Elves").unwrap();
         if let TargetFilter::Typed(tf) = &filter {

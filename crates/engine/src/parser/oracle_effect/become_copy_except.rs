@@ -65,7 +65,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::char;
-use nom::combinator::opt;
+use nom::combinator::{opt, value};
 use nom::Parser;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
@@ -73,7 +73,9 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, split_keyword_list};
 use super::super::oracle_util::canonicalize_subtype_name;
 use crate::parser::oracle_ir::context::ParseContext;
-use crate::types::ability::{ContinuousModification, QuantityExpr};
+use crate::types::ability::{
+    ContinuousModification, ObjectScope, QuantityExpr, QuantityRef, RoundingMode,
+};
 use crate::types::card_type::{CoreType, Supertype};
 
 /// CR 707.9a: ", except {except_body} [and {except_body}]*[.]"
@@ -146,6 +148,8 @@ pub(crate) fn parse_except_clause<'a>(
 ///   - `<possessive> name is ~`                                → SetName(card_name)
 ///   - `<subject>'s N/M {type list} in addition to its other types`
 ///     → SetPower + SetToughness + AddType/AddSubtype per word
+///   - `<subject> power/toughness is half <copy source> power/toughness`
+///     → SetPowerDynamic + SetToughnessDynamic using copied source values
 ///   - `<subject pronoun> has this ability`
 ///     → RetainPrintedTriggerFromSource (when ctx provides the index)
 ///   - `it's a(n) {core_type} in addition to its other types`  → AddType
@@ -159,6 +163,9 @@ pub(crate) fn parse_except_body<'a>(
 ) -> Option<(&'a str, Vec<ContinuousModification>)> {
     if let Some((rest, name_mod)) = parse_name_override(input, card_name) {
         return Some((rest, vec![name_mod]));
+    }
+    if let Some((rest, mods)) = parse_half_pt_override(input) {
+        return Some((rest, mods));
     }
     if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
         return Some((rest, mods));
@@ -223,6 +230,114 @@ fn parse_name_override<'a>(
             name: card_name.to_string(),
         },
     ))
+}
+
+/// CR 707.9b + CR 107.1a: "their power is half that creature's power and
+/// their toughness is half that creature's toughness" — Saw in Half class.
+///
+/// Token-copy exceptions are applied after the copied copiable values have
+/// been stamped onto the new token, so `ObjectScope::Source` deliberately
+/// points at the synthesized token. At that point its source P/T equals the
+/// copied object's copiable P/T, which is the value the exception halves.
+fn parse_half_pt_override(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = parse_possessive_subject(input).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" power is half ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = parse_copy_source_power_reference(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" and ").parse(rest).ok()?;
+    let (rest, _) = parse_possessive_subject(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" toughness is half ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = parse_copy_source_toughness_reference(rest).ok()?;
+
+    let (rest, rounding) = parse_rounding_sentence(rest).unwrap_or((rest, RoundingMode::Up));
+    let power = QuantityExpr::DivideRounded {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        }),
+        divisor: 2,
+        rounding,
+    };
+    let toughness = QuantityExpr::DivideRounded {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+        }),
+        divisor: 2,
+        rounding,
+    };
+
+    Some((
+        rest,
+        vec![
+            ContinuousModification::SetPowerDynamic { value: power },
+            ContinuousModification::SetToughnessDynamic { value: toughness },
+        ],
+    ))
+}
+
+fn parse_possessive_subject(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("its"),
+            tag("their"),
+            tag("his"),
+            tag("her"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_copy_source_power_reference(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("that creature's power"),
+            tag("that card's power"),
+            tag("its power"),
+            tag("their power"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_copy_source_toughness_reference(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("that creature's toughness"),
+            tag("that card's toughness"),
+            tag("its toughness"),
+            tag("their toughness"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_rounding_sentence(input: &str) -> Option<(&str, RoundingMode)> {
+    let (rest, rounding) = opt((
+        alt((
+            tag::<_, _, OracleError<'_>>(". round "),
+            tag(", rounded "),
+            tag(" rounded "),
+        )),
+        alt((
+            value(RoundingMode::Up, tag::<_, _, OracleError<'_>>("up")),
+            value(RoundingMode::Down, tag("down")),
+        )),
+        opt(tag(" each time")),
+    ))
+    .parse(input)
+    .ok()?;
+    rounding.map(|(_, rounding, _)| (rest, rounding))
 }
 
 /// CR 707.9b: "<subject> N/M {type list} in addition to its other types" where
@@ -412,28 +527,39 @@ fn split_single_quoted_ability(input: &str) -> Option<(&str, &str)> {
 }
 
 /// CR 205.4 + CR 707.9b: Match `"the token isn't <supertype>"` /
-/// `"it isn't <supertype>"` (and apostrophe-free / "is not" variants).
+/// `"it isn't <supertype>"` (and apostrophe-free, "is not", and contracted
+/// `"it's not"` variants).
 /// Emits [`ContinuousModification::RemoveSupertype`].
 ///
 /// Miirym, Sentinel Wyrm: `"create a token that's a copy of it, except the
 /// token isn't legendary"` is the canonical case. The arm is permissive about
 /// subject phrasing because both forms appear across token-copy and
 /// replacement-copy texts (Spark Double's `"and it isn't legendary"` is the
-/// replacement-form variant).
+/// replacement-form variant). The contracted negated-copula form `"it's not
+/// legendary"` (Delina, Wild Mage; Ember Island Production; Ratadrabik of
+/// Urborg; etc.) is also accepted with both ASCII and curly apostrophes.
 fn parse_isnt_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("the token isn't "),
         tag("the token isnt "),
         tag("the token is not "),
+        tag("the token's not "),
+        tag("the token\u{2019}s not "),
         tag("it isn't "),
         tag("it isnt "),
         tag("it is not "),
+        tag("it's not "),
+        tag("it\u{2019}s not "),
         tag("he isn't "),
         tag("he isnt "),
         tag("he is not "),
+        tag("he's not "),
+        tag("he\u{2019}s not "),
         tag("she isn't "),
         tag("she isnt "),
         tag("she is not "),
+        tag("she's not "),
+        tag("she\u{2019}s not "),
     ))
     .parse(input)
     .ok()?;
@@ -693,6 +819,7 @@ fn skip_to_next_conjunction(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{ObjectScope, QuantityRef, RoundingMode};
     use crate::types::keywords::Keyword;
 
     #[test]
@@ -726,6 +853,43 @@ mod tests {
                 name: "Test Card".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn half_power_toughness_override_emits_dynamic_setters() {
+        let (rest, mods) = parse_except_clause(
+            ", except their power is half that creature's power and their toughness is half that creature's toughness. round up each time",
+            "",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            mods.as_slice(),
+            [
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                    },
+                },
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::DivideRounded {
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                        ..
+                    },
+                },
+            ] if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    }
+                }
+            )
+        ));
     }
 
     // CR 707.9b: An empty `card_name` (no card name threaded through the
@@ -1022,6 +1186,128 @@ mod tests {
             vec![ContinuousModification::RemoveSupertype {
                 supertype: Supertype::Legendary,
             }]
+        );
+    }
+
+    /// CR 205.4 + CR 707.9b: contracted negated-copula form "it's not
+    /// legendary" (Delina, Wild Mage; Ratadrabik of Urborg; Jace, Mirror Mage;
+    /// etc.). Issue #685: previously fell through, leaving the token Legendary
+    /// and triggering the legend rule (CR 704.5j) against the original.
+    #[test]
+    fn it_is_not_legendary_contracted_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 205.4 + CR 707.9b: curly-apostrophe variant of the contracted
+    /// negated-copula form. Mirrors the apostrophe-pair parity used by
+    /// `parse_subject_pt_and_types` and `parse_is_supertype_in_addition`.
+    #[test]
+    fn its_not_legendary_curly_apostrophe_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except it\u{2019}s not legendary",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 707.9a + CR 707.9b: Delina, Wild Mage's full token-copy except clause
+    /// chains the contracted "it's not legendary" with a quoted triggered
+    /// ability. Both modifications must flow through together; previously the
+    /// contracted form was dropped, leaving the token Legendary. The granted
+    /// ability variant (GrantTrigger vs GrantAbility) depends on whether the
+    /// quoted body's trigger condition is recognised — either is acceptable
+    /// here; the assertion is that *some* granted-ability modification
+    /// accompanies the RemoveSupertype, not that the contracted form blocks
+    /// the trailing " and " conjunction.
+    #[test]
+    fn token_compound_clause_strips_legendary_and_grants_ability() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary and it has \"when ~ enters, draw a card.\"",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods.len(),
+            2,
+            "expected RemoveSupertype + a granted ability; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary
+                }
+            )),
+            "missing RemoveSupertype(Legendary); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::GrantTrigger { .. }
+                    | ContinuousModification::GrantAbility { .. }
+            )),
+            "missing granted ability (GrantTrigger or GrantAbility); got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b: Ember Island Production's first-mode body chains the
+    /// contracted "it's not legendary" with a P/T+subtype override. Both
+    /// halves are characteristic modifications (RemoveSupertype + SetPower +
+    /// SetToughness + AddSubtype), so 707.9b covers the full clause. Confirms
+    /// the contracted negated-copula does not block the
+    /// `parse_subject_pt_and_types` arm that follows the " and " conjunction.
+    #[test]
+    fn token_compound_clause_strips_legendary_and_sets_pt_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary and it's a 4/4 hero in addition to its other types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary
+                }
+            )),
+            "missing RemoveSupertype(Legendary); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "missing SetPower(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+            "missing SetToughness(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Hero"
+            )),
+            "missing AddSubtype(Hero); got {mods:?}"
         );
     }
 

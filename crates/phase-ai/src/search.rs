@@ -772,7 +772,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // happen but CancelCast is not valid here. Use empty selection.
         WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
+        | WaitingFor::ExileForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
