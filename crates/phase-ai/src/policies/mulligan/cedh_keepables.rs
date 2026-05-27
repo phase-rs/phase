@@ -17,13 +17,23 @@ use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 
+use crate::combo::ComboRegistry;
 use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
 use super::{MulliganPolicy, MulliganScore, TurnOrder};
 
-pub struct CedhKeepablesMulligan;
+#[derive(Default)]
+pub struct CedhKeepablesMulligan {
+    combo_registry: ComboRegistry,
+}
+
+impl CedhKeepablesMulligan {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 impl MulliganPolicy for CedhKeepablesMulligan {
     fn id(&self) -> PolicyId {
@@ -64,6 +74,21 @@ impl MulliganPolicy for CedhKeepablesMulligan {
             return MulliganScore::ForceMulligan {
                 reason: PolicyReason::new("cedh_keepables_too_many_lands")
                     .with_fact("lands", land_count as i64),
+            };
+        }
+
+        // Combo-in-hand check overrides the staple heuristics: if the AI has
+        // already drawn a complete in-hand combo (e.g., Thoracle + Consult),
+        // the hand is a strong keep regardless of whether a tutor / fast-mana
+        // staple is also present. Real cEDH mulligan policy: "keep hands
+        // that can win." This is the cheapest expression of that idea
+        // available without modeling pseudo-state mana progression.
+        let combo_lines = self.combo_registry.lines_with_pieces_in_hand(hand, state);
+        if !combo_lines.is_empty() {
+            return MulliganScore::Score {
+                delta: 5.0,
+                reason: PolicyReason::new("cedh_keepables_combo_in_hand")
+                    .with_fact("combo_lines", combo_lines.len() as i64),
             };
         }
 
@@ -203,7 +228,7 @@ mod tests {
 
     #[test]
     fn not_applicable_when_not_cedh() {
-        let policy = CedhKeepablesMulligan;
+        let policy = CedhKeepablesMulligan::new();
         let score = policy.evaluate(
             &[],
             &make_state(),
@@ -220,7 +245,7 @@ mod tests {
 
     #[test]
     fn empty_hand_is_cedh_force_mulligan_too_few_lands() {
-        let policy = CedhKeepablesMulligan;
+        let policy = CedhKeepablesMulligan::new();
         let score = policy.evaluate(
             &[],
             &make_state(),
@@ -240,7 +265,7 @@ mod tests {
     /// at a cEDH table without any clock or disruption piece.
     #[test]
     fn cedh_hand_with_no_acceleration_tutor_or_interaction_force_mulligans() {
-        let policy = CedhKeepablesMulligan;
+        let policy = CedhKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -290,7 +315,7 @@ mod tests {
     /// (Sol Ring) passes the gate and yields a positive Score.
     #[test]
     fn cedh_hand_with_fast_mana_baseline_keeps() {
-        let policy = CedhKeepablesMulligan;
+        let policy = CedhKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -350,7 +375,7 @@ mod tests {
     /// threat/combo density is diluted.
     #[test]
     fn cedh_hand_too_many_lands_force_mulligans() {
-        let policy = CedhKeepablesMulligan;
+        let policy = CedhKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -392,6 +417,59 @@ mod tests {
                 );
             }
             _ => panic!("expected ForceMulligan(cedh_keepables_too_many_lands), got {score:?}"),
+        }
+    }
+
+    /// Combo-in-hand path: hand contains both Thassa's Oracle and Demonic
+    /// Consultation. Returns a strong-keep Score with the `combo_in_hand`
+    /// reason, even though the hand has no fast-mana / tutor / interaction
+    /// staple.
+    #[test]
+    fn cedh_hand_with_complete_combo_returns_strong_keep() {
+        let policy = CedhKeepablesMulligan::new();
+        let mut state = GameState::new_two_player(42);
+        state.players[0].hand.clear();
+
+        let mut hand = Vec::new();
+        for i in 0..3 {
+            hand.push(add_hand_card(
+                &mut state,
+                i,
+                &format!("Island {i}"),
+                vec![CoreType::Land],
+            ));
+        }
+        hand.push(add_hand_card(
+            &mut state,
+            10,
+            "Thassa's Oracle",
+            vec![CoreType::Creature],
+        ));
+        hand.push(add_hand_card(
+            &mut state,
+            11,
+            "Demonic Consultation",
+            vec![CoreType::Instant],
+        ));
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+
+        match score {
+            MulliganScore::Score { delta, reason } => {
+                assert!(
+                    (delta - 5.0).abs() < f64::EPSILON,
+                    "expected delta 5.0 for combo-in-hand, got {delta}"
+                );
+                assert_eq!(reason.kind, "cedh_keepables_combo_in_hand");
+            }
+            _ => panic!("expected strong-keep Score, got {score:?}"),
         }
     }
 }

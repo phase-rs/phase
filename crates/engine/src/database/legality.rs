@@ -176,6 +176,14 @@ pub enum CedhBracketError {
         seat_index: u8,
         actual_tier: CommanderBracketTier,
     },
+    /// The proposed table has more than 4 seats. cEDH is exclusively played
+    /// at 4-player free-for-all tables; the difficulty preset's search
+    /// budgets are calibrated for that count, and the 5-6+ player scaling
+    /// path (`create_config_for_players`) silently clips them in a way that
+    /// breaks the preset's combat-lookahead + paranoid-skip contract.
+    /// Reject explicitly at setup so users see a clear error instead of an
+    /// AI that silently underperforms.
+    TooManyPlayers { count: u8 },
 }
 
 impl std::fmt::Display for CedhBracketError {
@@ -188,6 +196,9 @@ impl std::fmt::Display for CedhBracketError {
                 f,
                 "seat {seat_index} is not declared cEDH (actual tier: {actual_tier})"
             ),
+            Self::TooManyPlayers { count } => {
+                write!(f, "cEDH games are limited to 4 seats (table has {count})")
+            }
         }
     }
 }
@@ -216,10 +227,18 @@ pub fn any_ai_difficulty_is_cedh(ai_difficulties: &[String]) -> bool {
 /// algorithmically, so the declaration must come from the player at deck
 /// submission time.
 pub fn validate_cedh_bracket(decks: &[&PlayerDeckPayload]) -> Result<(), CedhBracketError> {
+    // Seat-count guard runs first: a 5+ seat cEDH table is invalid regardless
+    // of bracket declarations, and surfacing the structural error before the
+    // per-deck tag check is more actionable for the user.
+    if decks.len() > 4 {
+        return Err(CedhBracketError::TooManyPlayers {
+            count: decks.len().min(u8::MAX as usize) as u8,
+        });
+    }
     for (idx, deck) in decks.iter().enumerate() {
         if deck.bracket_tier != CommanderBracketTier::Cedh {
             return Err(CedhBracketError::DeckNotCedh {
-                // Commander has at most 4 seats; cast is always safe.
+                // Seat count is bounded by the guard above.
                 seat_index: idx as u8,
                 actual_tier: deck.bracket_tier,
             });
@@ -361,6 +380,34 @@ mod cedh_bracket_tests {
                 actual_tier: CommanderBracketTier::Core,
             })
         );
+    }
+
+    #[test]
+    fn validate_rejects_more_than_four_seats() {
+        // 5-seat cEDH table is structurally invalid — the preset is calibrated
+        // for 4-player free-for-all and the >4 scaling path clips its budgets.
+        let d = cedh_deck();
+        let result = validate_cedh_bracket(&[&d, &d, &d, &d, &d]);
+        assert_eq!(result, Err(CedhBracketError::TooManyPlayers { count: 5 }));
+    }
+
+    #[test]
+    fn validate_seat_count_guard_runs_before_tag_check() {
+        // 5 seats with mixed tiers: the structural guard fires first, not the
+        // (also-true) tag violation. That ordering keeps the surfaced error
+        // actionable.
+        let cedh = cedh_deck();
+        let non = non_cedh_deck(CommanderBracketTier::Optimized);
+        let result = validate_cedh_bracket(&[&cedh, &non, &cedh, &cedh, &cedh]);
+        assert_eq!(result, Err(CedhBracketError::TooManyPlayers { count: 5 }));
+    }
+
+    #[test]
+    fn cedh_bracket_too_many_players_display() {
+        let err = CedhBracketError::TooManyPlayers { count: 5 };
+        let msg = err.to_string();
+        assert!(msg.contains("4"), "expected seat-cap in message: {msg}");
+        assert!(msg.contains("5"), "expected actual count in message: {msg}");
     }
 
     #[test]

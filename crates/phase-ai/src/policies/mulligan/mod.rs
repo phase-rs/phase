@@ -112,7 +112,7 @@ impl Default for MulliganRegistry {
                 Box::new(TokensWideKeepablesMulligan),
                 Box::new(PlusOneCountersMulligan),
                 Box::new(SpellslingerKeepablesMulligan),
-                Box::new(CedhKeepablesMulligan),
+                Box::new(CedhKeepablesMulligan::new()),
             ],
         }
     }
