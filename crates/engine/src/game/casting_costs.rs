@@ -2588,27 +2588,7 @@ pub(super) fn pay_and_push_adventure(
     // CR 702.51a: Convoke lets players tap creatures to reduce mana cost.
     // CR 702.126a: Improvise lets players tap artifacts to pay generic mana.
     // Check for Convoke, Waterbend, or Improvise keyword on the spell.
-    let convoke_mode = state.objects.get(&object_id).and_then(|_| {
-        let effective_keywords = super::casting::effective_spell_keywords(state, player, object_id);
-        if effective_keywords
-            .iter()
-            .any(|k| matches!(k, Keyword::Convoke))
-        {
-            Some(ConvokeMode::Convoke)
-        } else if effective_keywords
-            .iter()
-            .any(|k| matches!(k, Keyword::Waterbend))
-        {
-            Some(ConvokeMode::Waterbend)
-        } else if effective_keywords
-            .iter()
-            .any(|k| matches!(k, Keyword::Improvise))
-        {
-            Some(ConvokeMode::Improvise)
-        } else {
-            None
-        }
-    });
+    let convoke_mode = super::casting::spell_tap_payment_mode(state, player, object_id);
     // Gate on eligible creatures/artifacts being present.
     let convoke_mode = convoke_mode.filter(|mode| {
         state.objects.values().any(|o| match mode {
@@ -3948,24 +3928,17 @@ pub(super) fn max_x_value_excluding(
     // predicate is spell-level (not per-object), so resolve it once here.
     let pred: Option<fn(&super::game_object::GameObject, PlayerId) -> bool> =
         object_id.and_then(|oid| {
-            let effective_keywords = super::casting::effective_spell_keywords(state, player, oid);
-            if effective_keywords
-                .iter()
-                .any(|k| matches!(k, Keyword::Improvise))
-            {
-                Some(super::game_object::GameObject::is_improvise_eligible as _)
-            } else if effective_keywords
-                .iter()
-                .any(|k| matches!(k, Keyword::Convoke))
-            {
-                Some(super::game_object::GameObject::is_convoke_eligible as _)
-            } else if effective_keywords
-                .iter()
-                .any(|k| matches!(k, Keyword::Waterbend))
-            {
-                Some(super::game_object::GameObject::is_waterbend_eligible as _)
-            } else {
-                None
+            match super::casting::spell_tap_payment_mode(state, player, oid) {
+                Some(ConvokeMode::Convoke) => {
+                    Some(super::game_object::GameObject::is_convoke_eligible as _)
+                }
+                Some(ConvokeMode::Waterbend) => {
+                    Some(super::game_object::GameObject::is_waterbend_eligible as _)
+                }
+                Some(ConvokeMode::Improvise) => {
+                    Some(super::game_object::GameObject::is_improvise_eligible as _)
+                }
+                None => None,
             }
         });
 
