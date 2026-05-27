@@ -7,17 +7,18 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
     AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration,
-    Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    RuntimeHandler, SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    Effect, FilterProp, GainLifePlayer, KickerVariant, ManaContribution, ManaProduction,
+    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
-use crate::types::mana::{ManaColor, ManaCost};
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
@@ -151,6 +152,8 @@ impl KeywordTriggerInstaller {
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
+            Keyword::Exalted => vec![build_exalted_trigger()],
+            Keyword::Extort => vec![build_extort_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
             Keyword::Soulbond => build_soulbond_triggers(),
             // CR 702.62a + CR 604.1: granted Suspend carries the same two
@@ -180,6 +183,8 @@ impl KeywordTriggerInstaller {
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
+            Keyword::Exalted => is_exalted_trigger(trigger),
+            Keyword::Extort => is_extort_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
             Keyword::Soulbond => is_soulbond_trigger(trigger),
             // CR 702.62a + CR 604.1: symmetric removal — `RemoveKeyword` strips
@@ -1789,12 +1794,29 @@ pub fn synthesize_persist(face: &mut CardFace) {
 pub fn synthesize_annihilator(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Annihilator(_)));
 }
+
+/// CR 702.83a: Exalted — an attack trigger that fires whenever a creature you
+/// control attacks alone, giving +1/+1 until end of turn. CR 702.83b: each
+/// instance triggers separately, so one trigger is synthesized per
+/// `Keyword::Exalted` instance.
+pub fn synthesize_exalted(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Exalted));
+}
+
+/// CR 702.101a: Extort — a spell-cast trigger that lets you pay {W/B} to drain
+/// each opponent for 1 life. CR 702.101b: each instance triggers separately,
+/// so one trigger is synthesized per `Keyword::Extort` instance.
+pub fn synthesize_extort(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Extort));
+}
+
 /// CR 702.105a: Dethrone — an attack trigger that fires whenever this creature
 /// attacks the player with the most life or tied for most life, putting a +1/+1
 /// counter on it. CR 702.105b: each instance triggers separately.
 pub fn synthesize_dethrone(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Dethrone));
 }
+
 /// CR 702.100a: Evolve — an ETB trigger that fires whenever another creature you
 /// control enters with greater power or toughness than the Evolve creature,
 /// putting a +1/+1 counter on it. CR 702.100d: each instance triggers
@@ -2204,6 +2226,102 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
             "CR 702.86a: Annihilator {n} — whenever ~ attacks, defending player sacrifices {n} permanent{}.",
             if n == 1 { "" } else { "s" }
         ))
+}
+
+/// CR 702.83a: Exalted — "Whenever a creature you control attacks alone,
+/// that creature gets +1/+1 until end of turn for each instance of exalted
+/// among permanents you control."
+///
+/// Each instance of Exalted triggers separately (CR 702.83b), so one trigger
+/// is synthesized per `Keyword::Exalted` instance. The +1/+1 stacking is
+/// automatic because each trigger resolves independently.
+fn is_exalted_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Attacks)
+        && matches!(t.condition, Some(TriggerCondition::Not { .. }))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                target: TargetFilter::TriggeringSource,
+                ..
+            })
+        )
+}
+
+fn build_exalted_trigger() -> TriggerDefinition {
+    let pump_effect = Effect::Pump {
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        target: TargetFilter::TriggeringSource,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, pump_effect)
+        .description("CR 702.83a: Exalted — +1/+1 until end of turn".to_string());
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .condition(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::MinCoAttackers { minimum: 1 }),
+        })
+        .execute(execute)
+        .description(
+            "CR 702.83a: Exalted — whenever a creature you control attacks alone, \
+             that creature gets +1/+1 until end of turn."
+                .to_string(),
+        )
+}
+
+/// CR 702.101a: Extort — "Whenever you cast a spell, you may pay {W/B}.
+/// If you do, each opponent loses 1 life and you gain that much life."
+///
+/// Each instance of Extort triggers separately (CR 702.101b), so one trigger
+/// is synthesized per `Keyword::Extort` instance.
+fn is_extort_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_target, Some(TargetFilter::Controller))
+        && t.execute
+            .as_deref()
+            .is_some_and(|a| a.optional && a.cost.is_some())
+}
+
+fn build_extort_trigger() -> TriggerDefinition {
+    // The drain effect: each opponent loses 1 life, you gain that much.
+    // Use player_scope to iterate over opponents for the LoseLife,
+    // then sub_ability for the controller's GainLife.
+    let drain_effect = Effect::LoseLife {
+        amount: QuantityExpr::Fixed { value: 1 },
+        target: None,
+    };
+    let gain_life = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount,
+            },
+            player: GainLifePlayer::Controller,
+        },
+    );
+    let execute = AbilityDefinition::new(AbilityKind::Spell, drain_effect)
+        .player_scope(PlayerFilter::Opponent)
+        .sub_ability(gain_life)
+        .optional()
+        .cost(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::WhiteBlack],
+                generic: 0,
+            },
+        })
+        .description(
+            "CR 702.101a: Extort — pay {W/B}, each opponent loses 1 life, you gain that much life"
+                .to_string(),
+        );
+    TriggerDefinition::new(TriggerMode::SpellCast)
+        .valid_target(TargetFilter::Controller)
+        .execute(execute)
+        .description(
+            "CR 702.101a: Extort — whenever you cast a spell, you may pay {W/B}. \
+             If you do, each opponent loses 1 life and you gain that much life."
+                .to_string(),
+        )
 }
 
 /// CR 702.105a: Dethrone — "Whenever a creature with dethrone attacks the
@@ -3348,6 +3466,13 @@ pub fn synthesize_all(face: &mut CardFace) {
     // separately. Defending player resolved per-attacker via
     // `ControllerRef::DefendingPlayer` (CR 508.5 / 508.5a).
     synthesize_annihilator(face);
+    // CR 702.83a: Exalted — attack trigger that gives +1/+1 until end of turn
+    // whenever a creature you control attacks alone. CR 702.83b: each instance
+    // triggers separately.
+    synthesize_exalted(face);
+    // CR 702.101a: Extort — spell-cast trigger that lets you pay {W/B} to drain
+    // each opponent for 1 life. CR 702.101b: each instance triggers separately.
+    synthesize_extort(face);
     // CR 702.105a: Dethrone — attack trigger that puts a +1/+1 counter on the
     // creature whenever it attacks the player with the most life or tied for
     // most life. CR 702.105b: each instance triggers separately.
@@ -5575,6 +5700,232 @@ mod annihilator_synthesis_tests {
 }
 
 #[cfg(test)]
+mod exalted_synthesis_tests {
+    //! CR 702.83a + CR 702.83b shape tests: the synthesized Exalted trigger
+    //! is an `Attacks` trigger gated on a creature-you-control filter with a
+    //! `Not(MinCoAttackers { minimum: 1 })` condition (= attacks alone) whose
+    //! execute body is `Effect::Pump` targeting `TriggeringSource`.
+    use super::*;
+
+    fn exalted_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Exalted);
+        face
+    }
+
+    #[test]
+    fn synthesize_exalted_adds_attack_trigger() {
+        let mut face = exalted_face();
+        synthesize_exalted(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_exalted_trigger(t))
+            .expect("exalted should add an Attacks trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::Attacks));
+        assert!(matches!(
+            trigger.condition,
+            Some(TriggerCondition::Not { .. })
+        ));
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("execute body must be Effect::Pump");
+        };
+        assert!(matches!(power, PtValue::Fixed(1)));
+        assert!(matches!(toughness, PtValue::Fixed(1)));
+        assert!(matches!(target, TargetFilter::TriggeringSource));
+    }
+
+    #[test]
+    fn synthesize_exalted_is_idempotent() {
+        let mut face = exalted_face();
+        synthesize_exalted(&mut face);
+        synthesize_exalted(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_exalted_trigger(t))
+            .count();
+        assert_eq!(count, 1, "exalted trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_exalted_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_exalted(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.83b: multiple instances trigger separately.
+    #[test]
+    fn synthesize_exalted_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Exalted);
+        face.keywords.push(Keyword::Exalted);
+        synthesize_exalted(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_exalted_trigger(t))
+            .count();
+        assert_eq!(count, 2);
+    }
+}
+
+#[cfg(test)]
+mod extort_synthesis_tests {
+    //! CR 702.101a + CR 702.101b shape tests: the synthesized Extort trigger
+    //! is a `SpellCast` trigger with `valid_target = Controller` whose execute
+    //! body is optional with a mana cost and a `LoseLife` effect scoped to
+    //! opponents. The chained `GainLife` uses `PreviousEffectAmount` because
+    //! CR 702.101a's "that much life" is the total life actually lost by all
+    //! opponents.
+    use super::*;
+    use crate::game::effects::resolve_ability_chain;
+    use crate::types::ability::ResolvedAbility;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+
+    fn extort_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Extort);
+        face
+    }
+
+    #[test]
+    fn synthesize_extort_adds_spell_cast_trigger() {
+        let mut face = extort_face();
+        synthesize_extort(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_extort_trigger(t))
+            .expect("extort should add a SpellCast trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::SpellCast));
+        assert!(matches!(
+            trigger.valid_target,
+            Some(TargetFilter::Controller)
+        ));
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        assert!(execute.optional, "extort must be optional (may pay)");
+        assert!(execute.cost.is_some(), "extort must have a mana cost");
+        assert!(
+            matches!(execute.player_scope, Some(PlayerFilter::Opponent)),
+            "drain must scope to opponents"
+        );
+        assert!(
+            matches!(&*execute.effect, Effect::LoseLife { .. }),
+            "primary effect must be LoseLife"
+        );
+
+        let Some(gain) = execute.sub_ability.as_deref() else {
+            panic!("extort must chain a gain-life rider");
+        };
+        let Effect::GainLife { amount, player } = &*gain.effect else {
+            panic!("extort rider must be GainLife");
+        };
+        assert!(matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount
+            }
+        ));
+        assert!(matches!(player, GainLifePlayer::Controller));
+    }
+
+    #[test]
+    fn synthesize_extort_is_idempotent() {
+        let mut face = extort_face();
+        synthesize_extort(&mut face);
+        synthesize_extort(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_extort_trigger(t))
+            .count();
+        assert_eq!(count, 1, "extort trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_extort_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_extort(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.101b: multiple instances trigger separately.
+    #[test]
+    fn synthesize_extort_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Extort);
+        face.keywords.push(Keyword::Extort);
+        synthesize_extort(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_extort_trigger(t))
+            .count();
+        assert_eq!(count, 2);
+    }
+
+    /// CR 702.101a: "you gain that much life" means the total life actually
+    /// lost by all opponents, not a fixed 1. In a three-player game one Extort
+    /// trigger drains two opponents for 1 each, so the controller gains 2.
+    #[test]
+    fn extort_gain_tracks_total_life_lost_across_opponents() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source_id = ObjectId(100);
+        let mut drain = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        drain.player_scope = Some(PlayerFilter::Opponent);
+        drain.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &drain, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].life, 22);
+        assert_eq!(state.players[1].life, 19);
+        assert_eq!(state.players[2].life, 19);
+    }
+}
+
+#[cfg(test)]
 mod dethrone_tests {
     //! CR 702.105a: Dethrone synthesis tests. The synthesized trigger must be
     //! `TriggerMode::Attacks` with `valid_card = SelfRef`, an intervening-if
@@ -5604,16 +5955,12 @@ mod dethrone_tests {
 
         assert!(
             matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
-            "valid_card must be SelfRef so the trigger fires only when this \
-             creature attacks"
+            "valid_card must be SelfRef so the trigger fires only when this creature attacks"
         );
-
-        // CR 702.105a: Dethrone only triggers when attacking a player.
         assert_eq!(
             trigger.attack_target_filter,
             Some(crate::types::triggers::AttackTargetFilter::Player),
-            "attack_target_filter must be Player so the trigger fires only \
-             when attacking a player, not a planeswalker or battle"
+            "attack_target_filter must be Player so the trigger fires only when attacking a player"
         );
 
         let Some(execute) = trigger.execute.as_deref() else {
@@ -5630,15 +5977,12 @@ mod dethrone_tests {
         assert_eq!(*counter_type, CounterType::Plus1Plus1);
         assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
         assert!(matches!(target, TargetFilter::SelfRef));
-
-        // Condition must be present (intervening-if).
         assert!(
             trigger.condition.is_some(),
             "dethrone trigger must have an intervening-if condition"
         );
     }
 
-    /// Repeated synthesis must not duplicate the trigger (idempotency).
     #[test]
     fn synthesize_dethrone_is_idempotent() {
         let mut face = dethrone_face();
@@ -5652,7 +5996,6 @@ mod dethrone_tests {
         assert_eq!(count, 1, "dethrone trigger should be deduped");
     }
 
-    /// Cards without Dethrone are unaffected.
     #[test]
     fn synthesize_dethrone_is_noop_without_keyword() {
         let mut face = CardFace::default();
@@ -5661,9 +6004,7 @@ mod dethrone_tests {
         assert!(face.triggers.is_empty());
     }
 
-    /// CR 702.105b: "If a creature has multiple instances of dethrone, each
-    /// triggers separately." Two `Keyword::Dethrone` entries synthesize two
-    /// distinct triggers.
+    /// CR 702.105b: multiple instances trigger separately.
     #[test]
     fn synthesize_dethrone_emits_one_trigger_per_instance() {
         let mut face = CardFace::default();
@@ -5675,10 +6016,7 @@ mod dethrone_tests {
             .iter()
             .filter(|t| is_dethrone_attack_trigger(t))
             .count();
-        assert_eq!(
-            count, 2,
-            "each Dethrone instance must produce its own trigger"
-        );
+        assert_eq!(count, 2);
     }
 }
 
