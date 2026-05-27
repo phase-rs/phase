@@ -2933,7 +2933,13 @@ pub(crate) fn check_trigger_condition(
                     .and_then(|id| state.objects.get(&id))
                     .is_some_and(|obj| match variant {
                         Some(kicker) => obj.kickers_paid.contains(kicker),
-                        None => obj.kickers_paid.len() >= *min_count as usize,
+                        None => {
+                            let min_count = (*min_count).max(1);
+                            obj.kickers_paid
+                                .len()
+                                .max(obj.additional_cost_payment_count as usize)
+                                >= min_count as usize
+                        }
                     })
             }
         }
@@ -3491,6 +3497,10 @@ fn build_triggered_ability(
                 // (no variant, min_count=1) so the default-shape evaluator
                 // remains correct on triggered abilities (the bool reads
                 // `additional_cost_paid` directly per the evaluator contract).
+                resolved.context.additional_cost_paid = true;
+            }
+            if obj.additional_cost_payment_count > 0 {
+                resolved.context.additional_cost_payment_count = obj.additional_cost_payment_count;
                 resolved.context.additional_cost_paid = true;
             }
         }

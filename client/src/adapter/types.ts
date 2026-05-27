@@ -929,6 +929,7 @@ export type CombatTaxPending =
 
 export type AdditionalCost =
   | { type: "Optional"; data: SerializedAbilityCost }
+  | { type: "Repeatable"; data: SerializedAbilityCost }
   | { type: "Kicker"; data: { costs: SerializedAbilityCost[]; repeatable?: boolean } }
   | { type: "Required"; data: SerializedAbilityCost }
   | { type: "Choice"; data: [SerializedAbilityCost, SerializedAbilityCost] };

@@ -3082,6 +3082,10 @@ pub enum QuantityRef {
     /// CR 702.33b + CR 702.33c: Number of kicker costs paid for the source
     /// spell. For multikicker, each repeated payment contributes one entry.
     KickerCount,
+    /// CR 601.2b/f/h + CR 702.157a: Number of non-kicker additional-cost
+    /// payments made for the source spell. Used by Squad so its payment count
+    /// remains distinct from Kicker's CR 702.33 payment model.
+    AdditionalCostPaymentCount,
     /// CR 702.51c: Number of creatures that convoked the source spell or the
     /// spell that became the source permanent. Reads `GameObject::convoked_creatures`;
     /// ETB replacement contexts resolve against the entering object.
@@ -4571,6 +4575,10 @@ pub enum AdditionalCost {
     /// "you may [cost]" — player decides whether to pay.
     /// If paid, `SpellContext::additional_cost_paid` is set to true.
     Optional(AbilityCost),
+    /// CR 601.2b/f + CR 702.157a: A non-kicker additional cost that may be
+    /// paid any number of times while casting the spell. Each payment
+    /// increments `SpellContext::additional_cost_payment_count`.
+    Repeatable(AbilityCost),
     /// CR 702.33a-c + CR 601.2b/f: Kicker costs announced during spell
     /// casting. `costs.len() == 1` is ordinary kicker, `costs.len() == 2`
     /// represents "Kicker [cost 1] and/or [cost 2]" (CR 702.33b), and
@@ -9081,6 +9089,11 @@ pub struct SpellContext {
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
+    /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
+    /// while casting this spell. Used by keyword abilities such as Squad
+    /// (CR 702.157a), whose repeatable payment count is not a kicker count.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub additional_cost_payment_count: u32,
     /// CR 702.33d + CR 702.33f: The list of kicker payments declared during
     /// casting, in payment order. For "Kicker {A} and/or {B}" cards (CR 702.33b),
     /// each chosen kicker pushes a corresponding `KickerVariant` entry. For
@@ -9138,11 +9151,12 @@ impl SpellContext {
         match variant {
             Some(kicker) => self.kickers_paid.contains(&kicker),
             None => {
-                if min_count <= 1 {
-                    self.additional_cost_paid
-                } else {
-                    self.kickers_paid.len() >= min_count as usize
-                }
+                let min_count = min_count.max(1);
+                let payment_count = self
+                    .kickers_paid
+                    .len()
+                    .max(self.additional_cost_payment_count as usize);
+                payment_count >= min_count as usize || (min_count <= 1 && self.additional_cost_paid)
             }
         }
     }

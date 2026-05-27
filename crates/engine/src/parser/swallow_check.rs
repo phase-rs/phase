@@ -862,6 +862,7 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
         || matches!(
             parsed.additional_cost,
             Some(crate::types::ability::AdditionalCost::Optional(_)
+                | crate::types::ability::AdditionalCost::Repeatable(_)
                 | crate::types::ability::AdditionalCost::Kicker { .. }
                 | crate::types::ability::AdditionalCost::Choice(_, _))
         )

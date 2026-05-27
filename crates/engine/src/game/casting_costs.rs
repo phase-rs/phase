@@ -117,10 +117,21 @@ pub(crate) fn handle_decide_additional_cost(
     ) {
         return handle_decide_kicker_cost(state, player, pending, pay, events);
     }
+    if matches!(
+        pending.additional_cost_flow,
+        Some(AdditionalCost::Repeatable(_))
+    ) {
+        return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+    }
     if matches!(additional_cost, AdditionalCost::Kicker { .. }) {
         let mut pending = pending;
         pending.additional_cost_flow = Some(additional_cost.clone());
         return handle_decide_kicker_cost(state, player, pending, pay, events);
+    }
+    if matches!(additional_cost, AdditionalCost::Repeatable(_)) {
+        let mut pending = pending;
+        pending.additional_cost_flow = Some(additional_cost.clone());
+        return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
     }
 
     let mut ability = pending.ability;
@@ -136,16 +147,15 @@ pub(crate) fn handle_decide_additional_cost(
         AdditionalCost::Optional(cost) => {
             if pay {
                 ability.context.additional_cost_paid = true;
+                ability.context.additional_cost_payment_count = 1;
                 optional_cost_paid = true;
-                // CR 702.175a: Offspring (and similar optional costs) synthesize
-                // ETB triggers conditioned on TriggerCondition::AdditionalCostPaid,
-                // which evaluates obj.kickers_paid.len(). Push First so the
-                // permanent carries evidence the trigger evaluator can read.
-                ability.context.kickers_paid.push(KickerVariant::First);
                 Some(cost.clone())
             } else {
                 None
             }
+        }
+        AdditionalCost::Repeatable(_) => {
+            unreachable!("repeatable costs are handled before generic optional costs")
         }
         AdditionalCost::Kicker { .. } => {
             unreachable!("kicker costs are handled before generic optional costs")
@@ -159,6 +169,7 @@ pub(crate) fn handle_decide_additional_cost(
                     .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
                 {
                     ability.context.additional_cost_paid = true;
+                    ability.context.additional_cost_payment_count = 1;
                 }
                 Some(preferred.clone())
             } else {
@@ -169,6 +180,7 @@ pub(crate) fn handle_decide_additional_cost(
             // Required costs are always paid — the choice prompt should not be reached,
             // but handle defensively by always paying.
             ability.context.additional_cost_paid = true;
+            ability.context.additional_cost_payment_count = 1;
             Some(cost.clone())
         }
     };
@@ -358,6 +370,45 @@ fn next_kicker_option(
     None
 }
 
+fn handle_decide_repeatable_additional_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    pay: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(cost) = next_repeatable_additional_cost(state, player, &pending) else {
+        pending.additional_cost_flow = None;
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    };
+
+    if !pay {
+        pending.additional_cost_flow = None;
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+
+    pending.ability.context.additional_cost_paid = true;
+    pending.ability.context.additional_cost_payment_count = pending
+        .ability
+        .context
+        .additional_cost_payment_count
+        .saturating_add(1);
+    pay_additional_cost(state, player, cost, pending, events)
+}
+
+fn next_repeatable_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+) -> Option<AbilityCost> {
+    let Some(AdditionalCost::Repeatable(cost)) = &pending.additional_cost_flow else {
+        return None;
+    };
+
+    cost.is_payable(state, player, pending.object_id)
+        .then_some(cost.clone())
+}
+
 fn finish_pending_cost_or_cast(
     state: &mut GameState,
     player: PlayerId,
@@ -383,6 +434,22 @@ fn finish_pending_cost_or_cast(
         if let Some(AdditionalCost::Required(cost)) = pending.additional_cost_flow.take() {
             return pay_additional_cost(state, player, cost, pending, events);
         }
+    }
+
+    if matches!(
+        pending.additional_cost_flow,
+        Some(AdditionalCost::Repeatable(_))
+    ) {
+        if let Some(current_cost) = next_repeatable_additional_cost(state, player, &pending) {
+            let times_kicked = pending.ability.context.additional_cost_payment_count;
+            return Ok(WaitingFor::OptionalCostChoice {
+                player,
+                cost: AdditionalCost::Repeatable(current_cost),
+                times_kicked,
+                pending_cast: Box::new(pending),
+            });
+        }
+        pending.additional_cost_flow = None;
     }
 
     if matches!(
@@ -454,7 +521,7 @@ fn finish_pending_cost_or_cast(
     if pending.deferred_target_selection
         && !matches!(
             pending.additional_cost_flow,
-            Some(AdditionalCost::Kicker { .. })
+            Some(AdditionalCost::Kicker { .. } | AdditionalCost::Repeatable(_))
         )
     {
         return begin_deferred_target_selection(state, player, pending, events);
@@ -1604,6 +1671,17 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                         .copied()
                         .collect();
                 }
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
+            AdditionalCost::Repeatable(repeatable_cost) => {
+                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                pending.casting_variant = casting_variant;
+                pending.cast_timing_permission = cast_timing_permission;
+                pending.distribute = distribute.clone();
+                pending.origin_zone = origin_zone;
+                pending.payment_mode = payment_mode;
+                pending.additional_cost_flow =
+                    Some(AdditionalCost::Repeatable(repeatable_cost.clone()));
                 return finish_pending_cost_or_cast(state, player, pending, events);
             }
             AdditionalCost::Optional(opt_cost) => {
@@ -2809,6 +2887,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     let cost_x_paid = ability.chosen_x;
     let kickers_paid = ability.context.kickers_paid.clone();
     let additional_cost_paid = ability.context.additional_cost_paid;
+    let additional_cost_payment_count = ability.context.additional_cost_payment_count;
     let convoked_creatures = state
         .pending_cast
         .as_ref()
@@ -2861,6 +2940,11 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     if !kickers_paid.is_empty() {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.kickers_paid.clone_from(&kickers_paid);
+        }
+    }
+    if additional_cost_payment_count > 0 {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.additional_cost_payment_count = additional_cost_payment_count;
         }
     }
     if let Some(permission) = cast_timing_permission {
@@ -2922,6 +3006,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             x_value: cost_x_paid,
             distinct_colors_spent,
             kickers_paid: kickers_paid.len(),
+            additional_cost_payment_count,
             additional_cost_paid,
             casting_variant,
             convoked_creatures: convoked_creature_count,
@@ -8301,6 +8386,27 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
         }
     }
 
+    fn fund_white(runner: &mut crate::game::scenario::GameRunner, count: usize) {
+        use crate::types::mana::ManaUnit;
+        let p0 = runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..count {
+            p0.mana_pool.add(ManaUnit {
+                color: ManaType::White,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
     fn charge_counters(state: &GameState, object_id: ObjectId) -> u32 {
         state
             .objects
@@ -8453,6 +8559,82 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
             runner.state().objects[&spell_id].zone,
             Zone::Battlefield,
             "the unkicked artifact must have resolved onto the battlefield"
+        );
+    }
+
+    /// CR 702.157a: Squad uses a repeatable non-kicker additional-cost flow,
+    /// then creates one copy token for each squad payment as the permanent
+    /// enters.
+    #[test]
+    fn squad_paid_twice_creates_two_copy_tokens() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::GameAction;
+
+        const ENDLESS_FOOT_ASSAULT_ORACLE: &str = "Squad {1}{W} (As an additional cost to cast \
+this spell, you may pay {1}{W} any number of times. When this enchantment enters, create that \
+many tokens that are copies of it.)";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+        let mut builder = scenario.add_creature_to_hand(PlayerId(0), "Endless Foot Assault", 0, 0);
+        builder.as_enchantment();
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        builder.from_oracle_text_with_keywords(&["squad:{1}{W}"], ENDLESS_FOOT_ASSAULT_ORACLE);
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+        let mut runner = scenario.build();
+        fund_white(&mut runner, 4);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting squad spell must be accepted");
+
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice {
+                cost, times_kicked, ..
+            } => {
+                assert!(matches!(
+                    cost,
+                    AdditionalCost::Repeatable(AbilityCost::Mana { .. })
+                ));
+                assert_eq!(times_kicked, 0);
+            }
+            other => panic!("expected first squad prompt, got {other:?}"),
+        }
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("first squad payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("second squad payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining further squad payments must finish the cast");
+        runner.advance_until_stack_empty();
+
+        let assault_permanents = runner
+            .state()
+            .battlefield
+            .iter()
+            .filter(|id| {
+                runner
+                    .state()
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.name == "Endless Foot Assault")
+            })
+            .count();
+        assert_eq!(
+            assault_permanents, 3,
+            "original permanent plus two squad copy tokens should be on the battlefield"
         );
     }
 

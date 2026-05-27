@@ -1664,6 +1664,11 @@ fn resolve_ref(
             .get(&ctx.self_object())
             .map(|obj| usize_to_i32_saturating(obj.kickers_paid.len()))
             .unwrap_or(0),
+        QuantityRef::AdditionalCostPaymentCount => state
+            .objects
+            .get(&ctx.self_object())
+            .map(|obj| u32_to_i32_saturating(obj.additional_cost_payment_count))
+            .unwrap_or(0),
         QuantityRef::ConvokedCreatureCount => state
             .objects
             .get(&ctx.self_object())

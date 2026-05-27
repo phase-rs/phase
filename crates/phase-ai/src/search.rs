@@ -1402,6 +1402,9 @@ pub(crate) fn deterministic_choice(
             engine::types::ability::AdditionalCost::Optional(
                 engine::types::ability::AbilityCost::Mana { cost: extra_mana },
             ) => affordable_mana_cost(extra_mana),
+            engine::types::ability::AdditionalCost::Repeatable(
+                engine::types::ability::AbilityCost::Mana { cost: extra_mana },
+            ) => affordable_mana_cost(extra_mana),
             // CR 702.33c: a multikicker / kicker re-prompt presents exactly one
             // live cost. When that cost is pure mana, apply the same
             // affordability + over-commit guard as Optional(Mana).
@@ -1440,6 +1443,7 @@ pub(crate) fn deterministic_choice(
                 life > resolved * 3
             }
             engine::types::ability::AdditionalCost::Optional(_) => true,
+            engine::types::ability::AdditionalCost::Repeatable(_) => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
             engine::types::ability::AdditionalCost::Choice(_, _) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,

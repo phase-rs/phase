@@ -397,6 +397,37 @@ export function additionalCostChoices(
           { id: "decline", label: "Skip" },
         ],
       };
+    case "Repeatable": {
+      const label = formatAbilityCost(cost.data);
+      if (timesKicked > 0) {
+        return {
+          title: `Additional cost — paid ${timesKicked}×. Pay ${label} again?`,
+          options: [
+            { id: "pay", label: `Pay ${label} again` },
+            {
+              id: "decline",
+              label: `Done — finish casting (paid ${timesKicked}×)`,
+              description: "Stop paying this additional cost and pay the total cost.",
+            },
+          ],
+        };
+      }
+      return {
+        title: `Pay additional cost: ${label}?`,
+        options: [
+          {
+            id: "pay",
+            label: `Pay ${label}`,
+            description: "You'll be asked again so you can pay it multiple times.",
+          },
+          {
+            id: "decline",
+            label: "Cast without paying",
+            description: "Finish casting now with 0 payments.",
+          },
+        ],
+      };
+    }
     case "Kicker": {
       const first = cost.data.costs[0];
       const label = first ? formatAbilityCost(first) : "kicker";

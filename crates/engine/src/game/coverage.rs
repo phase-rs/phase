@@ -1098,6 +1098,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::TargetZoneCardCount { .. } => "target zone card count".into(),
         QuantityRef::CostXPaid => "X paid for this spell".into(),
         QuantityRef::KickerCount => "kicker payments for this spell".into(),
+        QuantityRef::AdditionalCostPaymentCount => "additional cost payments for this spell".into(),
         QuantityRef::ConvokedCreatureCount => "creatures that convoked this spell".into(),
         QuantityRef::ManaSpentToCast { scope, metric } => {
             format!("mana spent to cast ({scope:?}, {metric:?})")
@@ -2828,7 +2829,9 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
 fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec<ParsedItem>) {
     if additional_cost_has_unimplemented(additional_cost) {
         match additional_cost {
-            AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+            AdditionalCost::Optional(cost)
+            | AdditionalCost::Repeatable(cost)
+            | AdditionalCost::Required(cost) => {
                 build_cost_item(cost, items);
             }
             AdditionalCost::Kicker { costs, .. } => {
@@ -2846,6 +2849,7 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 
     let label = match additional_cost {
         AdditionalCost::Optional(_) => "AdditionalCost:Optional",
+        AdditionalCost::Repeatable(_) => "AdditionalCost:Repeatable",
         AdditionalCost::Kicker { repeatable, .. } => {
             if *repeatable {
                 "AdditionalCost:Multikicker"
@@ -2869,9 +2873,9 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 /// Returns true if any leaf `AbilityCost` in the tree is `Unimplemented`.
 fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
-        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
-            ability_cost_has_unimplemented(cost)
-        }
+        AdditionalCost::Optional(cost)
+        | AdditionalCost::Repeatable(cost)
+        | AdditionalCost::Required(cost) => ability_cost_has_unimplemented(cost),
         AdditionalCost::Kicker { costs, .. } => costs.iter().any(ability_cost_has_unimplemented),
         AdditionalCost::Choice(first, second) => {
             ability_cost_has_unimplemented(first) || ability_cost_has_unimplemented(second)
@@ -4072,9 +4076,9 @@ fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
 
 fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
-        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
-            ability_cost_has_unimplemented_parts(cost)
-        }
+        AdditionalCost::Optional(cost)
+        | AdditionalCost::Repeatable(cost)
+        | AdditionalCost::Required(cost) => ability_cost_has_unimplemented_parts(cost),
         AdditionalCost::Kicker { costs, .. } => {
             costs.iter().any(ability_cost_has_unimplemented_parts)
         }
@@ -4123,7 +4127,9 @@ fn collect_additional_cost_missing_parts(
     missing: &mut Vec<String>,
 ) {
     match additional_cost {
-        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+        AdditionalCost::Optional(cost)
+        | AdditionalCost::Repeatable(cost)
+        | AdditionalCost::Required(cost) => {
             collect_ability_cost_missing_parts(cost, missing);
         }
         AdditionalCost::Kicker { costs, .. } => {
@@ -5173,6 +5179,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Handled),
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
+        QuantityRef::AdditionalCostPaymentCount => ("AdditionalCostPaymentCount", Handled),
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),

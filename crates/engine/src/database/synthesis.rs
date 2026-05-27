@@ -1593,6 +1593,108 @@ pub fn synthesize_offspring(face: &mut CardFace) {
     face.triggers.push(trigger);
 }
 
+/// CR 702.157a: Squad represents a repeatable optional additional cost and an
+/// ETB trigger that creates one copy token for each time the squad cost was paid.
+pub fn synthesize_squad(face: &mut CardFace) {
+    let squad_costs: Vec<_> = face
+        .keywords
+        .iter()
+        .filter_map(|k| match k {
+            Keyword::Squad(cost) => Some(cost.clone()),
+            _ => None,
+        })
+        .collect();
+    if squad_costs.is_empty() {
+        return;
+    }
+
+    // CR 702.157b: Multiple Squad instances are paid independently and each
+    // instance's linked trigger counts only its own payments. Do not collapse
+    // them into one repeatable cost; leave coverage unsupported until the
+    // linked-instance model exists.
+    if squad_costs.len() > 1 {
+        let already_deferred = face.abilities.iter().any(|ability| {
+            matches!(
+                &*ability.effect,
+                Effect::Unimplemented { name, .. } if name == "squad_multiple_instances"
+            )
+        });
+        if !already_deferred {
+            face.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "squad_multiple_instances".to_string(),
+                    description: Some(
+                        "CR 702.157b: multiple Squad instances require per-instance payment tracking"
+                            .to_string(),
+                    ),
+                },
+            ));
+        }
+        return;
+    }
+
+    let squad_cost = squad_costs[0].clone();
+
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(AdditionalCost::Repeatable(AbilityCost::Mana {
+            cost: squad_cost,
+        }));
+    }
+
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.condition,
+                Some(TriggerCondition::AdditionalCostPaid { .. })
+            )
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::CopyTokenOf {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::AdditionalCostPaymentCount,
+                    },
+                    ..
+                })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    let copy_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::AdditionalCostPaymentCount,
+            },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        })
+        .execute(copy_effect)
+        .description(
+            "CR 702.157a: When this permanent enters, if its squad cost was paid, create a token that's a copy of it for each time its squad cost was paid."
+                .to_string(),
+        );
+    face.triggers.push(trigger);
+}
+
 /// CR 702.123a: Fabricate N — "When this permanent enters, you may put N
 /// +1/+1 counters on it. If you don't, create N 1/1 colorless Servo artifact
 /// creature tokens."
@@ -3450,6 +3552,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_cumulative_upkeep(face);
     // CR 702.175a: Offspring — optional additional cost + ETB 1/1 copy trigger.
     synthesize_offspring(face);
+    // CR 702.157a: Squad — repeatable optional additional cost + ETB copy trigger.
+    synthesize_squad(face);
     // CR 702.123a: Fabricate N — ETB trigger with controller-chosen branch
     // between N +1/+1 counters or N 1/1 colorless Servo artifact creature
     // tokens. Modeled via `Effect::ChooseOneOf`.
@@ -8653,6 +8757,116 @@ mod offspring_synthesis_tests {
         assert_eq!(face.additional_cost, Some(existing));
         // Trigger is still synthesized
         assert_eq!(face.triggers.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod squad_synthesis_tests {
+    use super::*;
+    use crate::types::mana::ManaCostShard;
+
+    /// CR 702.157a: Squad synthesizes a repeatable optional additional cost and
+    /// an ETB trigger whose copy count is the number of squad payments.
+    #[test]
+    fn synthesize_squad_sets_repeatable_cost_and_payment_count_copy_trigger() {
+        let squad_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White],
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Squad(squad_cost.clone())],
+            ..CardFace::default()
+        };
+
+        synthesize_squad(&mut face);
+
+        match face.additional_cost.as_ref().expect("additional_cost set") {
+            AdditionalCost::Repeatable(AbilityCost::Mana { cost }) => {
+                assert_eq!(cost, &squad_cost);
+            }
+            other => panic!("expected repeatable additional cost, got {other:?}"),
+        }
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+                    && matches!(
+                        t.condition,
+                        Some(TriggerCondition::AdditionalCostPaid { .. })
+                    )
+            })
+            .expect("squad ETB trigger");
+        let effect = &trigger.execute.as_ref().expect("execute body").effect;
+        match &**effect {
+            Effect::CopyTokenOf { target, count, .. } => {
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::AdditionalCostPaymentCount
+                    }
+                ));
+            }
+            other => panic!("expected CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthesize_squad_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Squad(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })],
+            ..CardFace::default()
+        };
+
+        synthesize_squad(&mut face);
+        let first_cost = face.additional_cost.clone();
+        let first_trigger_count = face.triggers.len();
+        synthesize_squad(&mut face);
+
+        assert_eq!(face.additional_cost, first_cost);
+        assert_eq!(face.triggers.len(), first_trigger_count);
+    }
+
+    #[test]
+    fn synthesize_squad_defers_multiple_instances() {
+        let mut face = CardFace {
+            keywords: vec![
+                Keyword::Squad(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![],
+                }),
+                Keyword::Squad(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                }),
+            ],
+            ..CardFace::default()
+        };
+
+        synthesize_squad(&mut face);
+        synthesize_squad(&mut face);
+
+        assert!(face.additional_cost.is_none());
+        assert!(face.triggers.is_empty());
+        assert_eq!(
+            face.abilities
+                .iter()
+                .filter(|ability| {
+                    matches!(
+                        &*ability.effect,
+                        Effect::Unimplemented { name, .. }
+                            if name == "squad_multiple_instances"
+                    )
+                })
+                .count(),
+            1
+        );
     }
 }
 
