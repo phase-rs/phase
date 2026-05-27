@@ -5229,6 +5229,7 @@ fn try_parse_event(
         BecomesUntapped,
         TurnFaceUp,
         BecomesMonstrous,
+        BecomesRenowned,
         Mutates,
         ExploitsCreature,
         Exploits,
@@ -5306,6 +5307,11 @@ fn try_parse_event(
             value(
                 SimpleEvent::BecomesMonstrous,
                 (tag("becomes"), space1, tag("monstrous")),
+            ),
+            // CR 702.112b: "When [subject] becomes renowned" trigger event.
+            value(
+                SimpleEvent::BecomesRenowned,
+                (tag("becomes"), space1, tag("renowned")),
             ),
             value(SimpleEvent::Mutates, tag("mutates")),
             // CR 702.110b: "exploits a creature" — exploit trigger
@@ -5395,6 +5401,10 @@ fn try_parse_event(
             }
             SimpleEvent::BecomesMonstrous => {
                 def.mode = TriggerMode::BecomeMonstrous;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesRenowned => {
+                def.mode = TriggerMode::BecomeRenowned;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Mutates => {
@@ -15666,6 +15676,21 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::BecomeMonstrous);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_becomes_renowned_mode_with_subject_filter() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control becomes renowned, draw a card.",
+            "Valeron Wardens",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeRenowned);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You)
+            ))
+        );
     }
 
     #[test]

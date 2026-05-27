@@ -4,6 +4,7 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::zones::Zone;
 
 /// CR 702.112a: Renown N.
 ///
@@ -24,10 +25,11 @@ pub fn resolve(
 
     let source_id = ability.source_id;
 
-    // CR 702.112a: If already renowned, do nothing. This is the resolution-time
-    // intervening-if check for multiple renown instances.
+    // CR 702.112a-b: only permanents can become renowned. If the source is no
+    // longer on the battlefield or is already renowned, do nothing. This is the
+    // resolution-time intervening-if check for multiple renown instances.
     if let Some(obj) = state.objects.get(&source_id) {
-        if obj.is_renowned {
+        if obj.zone != Zone::Battlefield || obj.is_renowned {
             return Ok(());
         }
     } else {
@@ -129,6 +131,24 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+    }
+
+    #[test]
+    fn renown_does_nothing_if_source_left_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_creature(&mut state);
+        let ability = make_renown_ability(id, QuantityExpr::Fixed { value: 2 });
+        let mut events = Vec::new();
+
+        zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        events.clear();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&id).unwrap();
+        assert!(!obj.is_renowned);
+        assert_eq!(obj.counters.get(&CounterType::Plus1Plus1).copied(), None);
+        assert!(events.is_empty());
     }
 
     #[test]
