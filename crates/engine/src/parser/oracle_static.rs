@@ -16267,6 +16267,44 @@ mod tests {
     }
 
     #[test]
+    fn static_self_ref_exact_base_power_object_count_filter() {
+        let def = parse_static_line(
+            "~ gets +X/+0, where X is the number of other creatures you control with base power 1.",
+        )
+        .expect("Zinnia-style static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+        let dyn_pow = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower for the X scaling");
+
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(typed),
+                },
+        } = dyn_pow
+        else {
+            panic!("expected ObjectCount over Typed filter, got {dyn_pow:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::Another));
+        assert!(typed.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 1 },
+        }));
+    }
+
+    #[test]
     fn static_strong_back_attached_to_recipient_emits_attached_to_recipient_prop() {
         // CR 301.5 + CR 303.4 + CR 613.4c: Strong Back's third static —
         // "Enchanted creature gets +2/+2 for each Aura and Equipment attached

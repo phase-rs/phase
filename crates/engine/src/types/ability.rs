@@ -9320,6 +9320,10 @@ pub enum TriggerCondition {
     /// CR 701.57a: Used by Discover ETB triggers.
     /// Negation ("if it wasn't cast") is expressed via `Not { Box::new(WasCast) }`.
     WasCast,
+    /// CR 305.1 + CR 603.4: Intervening/event condition for zone-change
+    /// triggers whose subject must have been played as a land. Negation
+    /// ("without being played") is expressed via `Not { Box::new(WasPlayed) }`.
+    WasPlayed,
     /// CR 603.4 + CR 702.33d-f: Intervening-if for "if it was kicked" /
     /// "if it was kicked with its [A] kicker" / "if it was kicked twice".
     /// Evaluates the triggering zone-change object when present, otherwise the

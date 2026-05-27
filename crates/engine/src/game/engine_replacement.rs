@@ -45,11 +45,16 @@ pub(super) fn handle_replacement_choice(
                     enter_transformed,
                     ..
                 } => {
+                    let played_from_zone = state
+                        .objects
+                        .get(&object_id)
+                        .and_then(|obj| obj.played_from_zone);
                     zones::move_to_zone(state, object_id, to, events);
                     // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
                     // defaults. Override only when the replacement pipeline changed them.
                     if to == Zone::Battlefield {
                         if let Some(obj) = state.objects.get_mut(&object_id) {
+                            obj.played_from_zone = played_from_zone;
                             if enter_tapped.resolve(false) {
                                 obj.tapped = true;
                             }
@@ -999,6 +1004,36 @@ mod tests {
             state.objects[&target].tapped,
             "Tap accepted after replacement choice must tap the target"
         );
+    }
+
+    #[test]
+    fn zone_change_replacement_choice_preserves_land_play_provenance() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Test Land".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.played_from_zone = Some(Zone::Hand);
+        install_optional_replacement(&mut state, ReplacementEvent::Moved);
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(land, Zone::Hand, Zone::Battlefield, None);
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&land].played_from_zone, Some(Zone::Hand));
     }
 
     /// CR 615.1: When the player declines (or the replacement pipeline returns

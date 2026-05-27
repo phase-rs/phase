@@ -182,7 +182,7 @@ fn parse_cost_paid_object_copy_target(lower: &str) -> bool {
     )
 }
 
-/// CR 707.2 + CR 707.9: Split off a trailing `, except <body>` clause from a
+/// CR 707.2 + CR 707.9: Split off a trailing `[, ]except <body>` clause from a
 /// copy-of-target phrase, channeling both keyword grants and non-keyword
 /// modifications through the shared `parse_except_clause` building block.
 ///
@@ -205,18 +205,14 @@ fn split_token_except_clause<'a>(
     ctx: &ParseContext,
 ) -> (&'a str, Vec<Keyword>, Vec<ContinuousModification>) {
     let lower = text.to_lowercase();
-    // structural: not dispatch — locate the `, except ` boundary on the
-    // lower-cased copy to compute the cut byte index in the original-case text.
-    const NEEDLE: &str = ", except ";
-    let Some(pos) = lower.find(NEEDLE) else {
+    let Ok((except_input, head_lower)) = parse_token_except_boundary(&lower) else {
         return (text, Vec::new(), Vec::new());
     };
-    let head = &text[..pos];
-    // Pass the lowercase suffix starting at `, except ` to the shared
+    let head = &text[..head_lower.len()];
+    // Pass the lowercase suffix starting at `[, ]except ` to the shared
     // building block. The except parser is the single authority for the
     // grammar (CR 707.9 + CR 707.2): keyword lists, supertype additions /
     // removals, conditional counter placement, etc.
-    let except_input = &lower[pos..];
     let card_name = ""; // SetName cannot apply to token-copy (source unknown at parse time).
     let (_, modifications) =
         match super::become_copy_except::parse_except_clause(except_input, card_name, ctx) {
@@ -233,6 +229,14 @@ fn split_token_except_clause<'a>(
         }
     }
     (head, extra_keywords, additional_modifications)
+}
+
+fn parse_token_except_boundary(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        take_until::<_, _, OracleError<'_>>(", except "),
+        take_until::<_, _, OracleError<'_>>(" except "),
+    ))
+    .parse(input)
 }
 
 pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
@@ -980,6 +984,7 @@ pub(super) fn push_unique_string(values: &mut Vec<String>, value: impl Into<Stri
 mod tests {
     use super::*;
     use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode};
+    use crate::types::card_type::CoreType;
 
     #[test]
     fn copy_tokens_of_exiled_cost_card_use_cost_paid_object_source() {
@@ -1042,6 +1047,31 @@ mod tests {
             panic!("expected CopyTokenOf, got {effect:?}");
         };
         assert_eq!(target, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn copy_token_exception_without_comma_adds_artifact_type() {
+        let effect = try_parse_token(
+            "create a token that's a copy of that creature except it's an artifact in addition to its other types",
+            "Create a token that's a copy of that creature except it's an artifact in addition to its other types",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::ParentTarget);
+        assert_eq!(
+            additional_modifications,
+            vec![ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            }]
+        );
     }
 
     #[test]

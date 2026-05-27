@@ -6537,6 +6537,7 @@ fn try_parse_verb_and_target<'a>(
             rem = dest_remainder;
         }
         let origin = infer_origin_zone(rest_lower);
+        let target = add_inferred_origin_constraints_to_target(target, origin, rest_lower);
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
                 if is_mass && d.enter_with_counters.is_empty() {
@@ -7704,23 +7705,27 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 /// each <body>" into a 2-element AbilityDefinition chain whose halves apply
 /// `<body>` to two different players.
 ///
-/// Currently restricted to the form "you and that player each Y" — produced by
-/// "For each player who chose <choice>, you and that player each <body>"
-/// patterns inside Council's-dilemma vote effects (Master of Ceremonies). The
-/// first half is targeted at `OriginalController` (the printed ability
+/// Recognized forms:
+/// - "you and that player each Y" — produced by "For each player who chose
+///   <choice>, you and that player each <body>" patterns inside
+///   Council's-dilemma vote effects (Master of Ceremonies).
+/// - "you and target opponent/player each Y" — the chosen player is a normal
+///   target slot (Bloodroot Apothecary class).
+///
+/// The first half is targeted at `OriginalController` (the printed ability
 /// controller, fixed even when `player_scope` iteration rebinds the acting
-/// controller per-voter); the second half is targeted at `ScopedPlayer` (the
-/// iterated voter for `PlayerFilter::VotedFor`). The two halves resolve in
-/// printed order via the `sub_ability` chain.
+/// controller per-voter); the second half is targeted at either `ScopedPlayer`
+/// (the iterated voter for `PlayerFilter::VotedFor`) or `Player` (the chosen
+/// target player). The two halves resolve in printed order via the
+/// `sub_ability` chain.
 ///
 /// Generality: the parser shape is parameterized to accept any single-effect
 /// body that has a `TargetFilter`-typed recipient slot (Token's `owner`,
 /// Draw's `target`, etc.). Effects without a recipient slot in the AST are
 /// not supported here — return `None` and let the caller fall through.
 ///
-/// Other compound-subject forms ("you and target opponent", "you and an
-/// opponent of your choice") are deliberately out of scope for this entry
-/// point and will produce `None`.
+/// Other compound-subject forms ("you and an opponent of your choice") are
+/// deliberately out of scope for this entry point and will produce `None`.
 fn try_parse_compound_subject_each(
     text: &str,
     ctx: &mut ParseContext,
@@ -7728,13 +7733,14 @@ fn try_parse_compound_subject_each(
     let lower = text.to_lowercase();
     // Compose the prefix from independent dimensions:
     //   first-subject × " and " × second-subject × " each " × <body>
-    // Today only "you" / "that player" are recognized; the alt() arms expand
-    // when we add other compound forms (target opponent, an opponent of your
-    // choice, etc.). Each axis is one alt() call; we never enumerate the
-    // permutations.
+    // Each subject axis is one alt() call; we never enumerate permutations.
     let parser: nom::IResult<&str, (TargetFilter, TargetFilter), OracleError<'_>> = (
         alt((value(TargetFilter::OriginalController, tag("you and ")),)),
-        alt((value(TargetFilter::ScopedPlayer, tag("that player ")),)),
+        alt((
+            value(TargetFilter::ScopedPlayer, tag("that player ")),
+            value(TargetFilter::Player, tag("target opponent ")),
+            value(TargetFilter::Player, tag("target player ")),
+        )),
         value((), tag("each ")),
     )
         .parse(lower.as_str())
@@ -11051,6 +11057,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_balance_equalization(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
@@ -11071,10 +11080,74 @@ pub(crate) fn parse_effect_chain_with_context(
     if let Some(def) = try_parse_balance_equalization(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, ctx);
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
     def
+}
+
+fn try_parse_return_target_and_same_name_from_your_graveyard(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_ascii_lowercase();
+    let (_, rest) = nom_on_lower(text, &lower, |input| value((), tag("return ")).parse(input))?;
+    let rest_lower = &lower[lower.len() - rest.len()..];
+    let rest_tp = TextPair::new(rest, rest_lower);
+    let marker =
+        " and all other cards with the same name as that card from your graveyard to the battlefield";
+    let (target_tp, after_marker) = rest_tp.split_around(marker)?;
+    let (_, (enter_tapped, _)) = all_consuming((
+        opt(value(true, tag::<_, _, OracleError<'_>>("tapped"))),
+        opt(tag(".")),
+    ))
+    .parse(after_marker.lower.trim())
+    .ok()?;
+
+    let target_phrase = format!("{} in your graveyard", target_tp.original.trim());
+    let (target, remainder) = parse_target(&target_phrase);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    let target =
+        add_inferred_origin_constraints_to_target(target, Some(Zone::Graveyard), rest_lower);
+    let enter_tapped = enter_tapped.unwrap_or(false);
+    let mut def = AbilityDefinition::new(
+        kind,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+        },
+    );
+    def.sub_ability = Some(Box::new(AbilityDefinition::new(
+        kind,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::SameNameAsParentTarget,
+            ])),
+            enter_tapped,
+        },
+    )));
+    Some(def)
 }
 
 /// CR 702.179c-d: Fold a trailing "This effect can't reduce their speed below
@@ -17792,6 +17865,75 @@ fn infer_origin_zone(lower: &str) -> Option<Zone> {
         Some(Zone::Graveyard)
     } else {
         None
+    }
+}
+
+fn add_inferred_origin_constraints_to_target(
+    target: TargetFilter,
+    origin: Option<Zone>,
+    lower: &str,
+) -> TargetFilter {
+    let Some(zone) = origin else {
+        return target;
+    };
+    if target.extract_in_zone().is_some() && origin_is_your_zone(lower, zone) {
+        return add_filter_props(
+            target,
+            &[FilterProp::Owned {
+                controller: ControllerRef::You,
+            }],
+        );
+    }
+    if target.extract_in_zone().is_some() {
+        return target;
+    }
+    let mut props = vec![FilterProp::InZone { zone }];
+    if origin_is_your_zone(lower, zone) {
+        props.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        });
+    }
+    add_filter_props(target, &props)
+}
+
+fn origin_is_your_zone(lower: &str, zone: Zone) -> bool {
+    match zone {
+        Zone::Graveyard => scan_contains_phrase(lower, "from your graveyard"),
+        Zone::Hand => scan_contains_phrase(lower, "from your hand"),
+        Zone::Library => scan_contains_phrase(lower, "from your library"),
+        Zone::Exile => scan_contains_phrase(lower, "from your exile"),
+        _ => false,
+    }
+}
+
+fn add_filter_props(target: TargetFilter, props: &[FilterProp]) -> TargetFilter {
+    match target {
+        TargetFilter::Typed(mut typed) => {
+            for prop in props {
+                if !typed.properties.contains(prop) {
+                    typed.properties.push(prop.clone());
+                }
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_filter_props(filter, props))
+                .collect(),
+        },
+        TargetFilter::And { mut filters } => {
+            filters.push(TargetFilter::Typed(
+                TypedFilter::default().properties(props.to_vec()),
+            ));
+            TargetFilter::And { filters }
+        }
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::default().properties(props.to_vec())),
+            ],
+        },
     }
 }
 
@@ -38545,6 +38687,67 @@ mod snapshot_tests {
             AbilityKind::Spell,
         );
         assert_json_snapshot!("assembly_create_token_put_counter", def);
+    }
+
+    #[test]
+    fn return_target_and_same_name_from_your_graveyard_carries_zone_and_mass_tail() {
+        let def = parse_effect_chain(
+            "Return target creature card and all other cards with the same name as that card from your graveyard to the battlefield tapped.",
+            AbilityKind::Activated,
+        );
+
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            enter_tapped,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected primary ChangeZone, got {:?}", def.effect);
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Battlefield);
+        assert!(*enter_tapped);
+        let TargetFilter::Typed(primary) = target else {
+            panic!("expected typed primary target, got {target:?}");
+        };
+        assert!(primary.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert!(
+            primary.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::You
+            }),
+            "from your graveyard should be owner-scoped, got {:?}",
+            primary.properties
+        );
+
+        let same_name = def.sub_ability.as_ref().expect("expected same-name tail");
+        let Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enter_tapped,
+        } = &*same_name.effect
+        else {
+            panic!("expected ChangeZoneAll tail, got {:?}", same_name.effect);
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Battlefield);
+        assert!(*enter_tapped);
+        let TargetFilter::Typed(tail) = target else {
+            panic!("expected typed same-name tail, got {target:?}");
+        };
+        assert!(tail.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert!(tail.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::You
+        }));
+        assert!(tail
+            .properties
+            .contains(&FilterProp::SameNameAsParentTarget));
     }
 
     #[test]

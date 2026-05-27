@@ -34,6 +34,25 @@ import type { DeckCardCount, MatchConfig, MatchScore } from "../adapter/types";
  */
 export const DRAFT_PROTOCOL_VERSION = 4 as const;
 
+/**
+ * Typed reason for a draft pause, used over the wire and on the i18n key path.
+ *
+ * Wire shape mirrors the Rust `DraftPauseReason` enum (default PascalCase
+ * serde). The TS i18n key path also uses PascalCase
+ * (`pauseReason.PlayerDisconnected`) so wire = lookup with no boundary
+ * conversion.
+ */
+export type DraftPauseReason =
+  | "PlayerDisconnected"
+  | "PausedByHost"
+  | "DisconnectGraceExpired";
+
+export const DraftPauseReason = {
+  PlayerDisconnected: "PlayerDisconnected" as const,
+  PausedByHost: "PausedByHost" as const,
+  DisconnectGraceExpired: "DisconnectGraceExpired" as const,
+};
+
 export interface DraftDeckPayload {
   main_deck: string[];
   sideboard: string[];
@@ -171,7 +190,7 @@ export type DraftP2PMessage =
     }
   | {
       type: "draft_paused";
-      reason: string;
+      reason: DraftPauseReason;
     }
   | {
       type: "draft_resumed";

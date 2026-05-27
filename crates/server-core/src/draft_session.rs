@@ -131,7 +131,10 @@ impl DraftSessionManager {
         let mut display_names = vec![String::new(); pod_size];
         display_names[0] = display_name.clone();
 
-        // Build draft-core seats -- creator is seat 0, rest are empty humans
+        // Build draft-core seats -- creator is seat 0, rest are empty humans.
+        // Runtime connection state lives in `inner.connected_seats` (post-init
+        // mutation below); the wrapper `connected: Vec<bool>` retains its
+        // legacy operational role as the local truth.
         let seats: Vec<DraftSeat> = (0..pod_size)
             .map(|i| DraftSeat::Human {
                 player_id: PlayerId(i as u8),
@@ -140,11 +143,23 @@ impl DraftSessionManager {
                 } else {
                     String::new()
                 },
-                connected: i == 0,
             })
             .collect();
 
-        let inner = draft_core::types::DraftSession::new(config.clone(), seats, draft_code.clone());
+        let mut inner =
+            draft_core::types::DraftSession::new(config.clone(), seats, draft_code.clone());
+        // Mirror the initial "only the creator is connected" state into the
+        // engine bitmap so `DraftPlayerView.seats[*].connected` reflects it.
+        for i in 0..pod_size {
+            let _ = draft_core::session::apply(
+                &mut inner,
+                draft_core::types::DraftAction::SetSeatConnected {
+                    seat: i as u8,
+                    connected: i == 0,
+                },
+                None,
+            );
+        }
 
         let session = DraftSession {
             draft_code: draft_code.clone(),
@@ -193,8 +208,18 @@ impl DraftSessionManager {
         session.session.seats[seat] = DraftSeat::Human {
             player_id: PlayerId(seat as u8),
             display_name,
-            connected: true,
         };
+        // Mirror the connection state into the engine bitmap so the view
+        // layer reflects it. Best-effort; the wrapper `connected` is the
+        // local operational source.
+        let _ = draft_core::session::apply(
+            &mut session.session,
+            draft_core::types::DraftAction::SetSeatConnected {
+                seat: seat as u8,
+                connected: true,
+            },
+            None,
+        );
 
         self.token_to_draft
             .insert(player_token.clone(), draft_code.to_string());
@@ -266,6 +291,15 @@ impl DraftSessionManager {
     pub fn handle_disconnect(&mut self, draft_code: &str, seat: usize) {
         if let Some(session) = self.sessions.get_mut(draft_code) {
             session.connected[seat] = false;
+            // Mirror into the engine bitmap so the view reflects it.
+            let _ = draft_core::session::apply(
+                &mut session.session,
+                draft_core::types::DraftAction::SetSeatConnected {
+                    seat: seat as u8,
+                    connected: false,
+                },
+                None,
+            );
             let fake_pid = PlayerId(seat as u8);
             let default_grace = self.reconnect.grace_period;
             self.reconnect
@@ -294,6 +328,15 @@ impl DraftSessionManager {
             crate::reconnect::ReconnectResult::Ok { .. }
             | crate::reconnect::ReconnectResult::NotFound => {
                 session.connected[seat] = true;
+                // Mirror into the engine bitmap so the view reflects it.
+                let _ = draft_core::session::apply(
+                    &mut session.session,
+                    draft_core::types::DraftAction::SetSeatConnected {
+                        seat: seat as u8,
+                        connected: true,
+                    },
+                    None,
+                );
                 Ok(session.view_for_seat(seat))
             }
             crate::reconnect::ReconnectResult::Expired => {

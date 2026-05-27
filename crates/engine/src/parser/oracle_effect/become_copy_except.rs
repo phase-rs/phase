@@ -78,7 +78,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 
-/// CR 707.9a: ", except {except_body} [and {except_body}]*[.]"
+/// CR 707.9a: "[,] except {except_body} [and {except_body}]*[.]"
 ///
 /// Each `except_body` independently contributes typed modifications. Bodies
 /// that don't match a known shape are silently skipped so we still keep the
@@ -93,14 +93,14 @@ use crate::types::card_type::{CoreType, Supertype};
 /// - `card_name` is the *original* card name spelling, used to populate
 ///   `ContinuousModification::SetName` so the override matches printed casing.
 ///
-/// Returns `None` only when the leading ", except " tag is absent.
+/// Returns `None` only when the leading except tag is absent.
 pub(crate) fn parse_except_clause<'a>(
     input: &'a str,
     card_name: &str,
     ctx: &ParseContext,
 ) -> Option<(&'a str, Vec<ContinuousModification>)> {
-    // ", except " — if missing, there are no modifications to extract.
-    let (mut rest, _) = tag::<_, _, OracleError<'_>>(", except ")
+    // "[,] except " — if missing, there are no modifications to extract.
+    let (mut rest, _) = alt((tag::<_, _, OracleError<'_>>(", except "), tag(" except ")))
         .parse(input)
         .ok()?;
     let mut modifications = Vec::new();

@@ -14,7 +14,7 @@ import type { DraftPlayerView, PairingView, PodPolicy, SeatPublicView, Tournamen
 import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
-import type { DraftMatchLaunch } from "../network/draftProtocol";
+import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
 import { loadDraftHostSession } from "../services/draftPersistence";
 
@@ -44,12 +44,12 @@ export type DraftPodHostEvent =
   | { type: "draftComplete" }
   | { type: "deckSubmitted"; seatIndex: number }
   | { type: "allDecksSubmitted" }
-  | { type: "draftPaused"; reason: string }
+  | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
   | { type: "seatJoined"; seatIndex: number; displayName: string }
   | { type: "seatReconnected"; seatIndex: number }
   | { type: "seatDisconnected"; seatIndex: number }
-  | { type: "seatKicked"; seatIndex: number; reason: string }
+  | { type: "seatKicked"; seatIndex: number; reason: DraftPauseReason | string }
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
   | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }

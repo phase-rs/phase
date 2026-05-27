@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useMultiplayerDraftStore } from "../multiplayerDraftStore";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
+import { DraftPauseReason } from "../../network/draftProtocol";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -342,12 +343,12 @@ describe("multiplayerDraftStore", () => {
 
       capturedGuestEventHandler!({
         type: "draftPaused",
-        reason: "Player disconnected",
+        reason: DraftPauseReason.PlayerDisconnected,
       });
 
       let state = useMultiplayerDraftStore.getState();
       expect(state.paused).toBe(true);
-      expect(state.pauseReason).toBe("Player disconnected");
+      expect(state.pauseReason).toBe(DraftPauseReason.PlayerDisconnected);
 
       capturedGuestEventHandler!({ type: "draftResumed" });
       state = useMultiplayerDraftStore.getState();
