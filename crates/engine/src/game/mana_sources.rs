@@ -789,6 +789,20 @@ pub(crate) fn feasible_mana_capacity(
                 // mana sub-cost, so `mana_sub_cost_of` returns `None` and the
                 // net equals the gross (e.g., KCI activation cost is one
                 // sacrificed artifact, no mana — full 2 colorless yield).
+                //
+                // Caveat: collapsing mana sub-cost to a single `mana_value`
+                // assumes the sub-cost is paid from the SAME color domain as
+                // the produced mana (filter-land case: pay {1} or any color,
+                // produce {U/W}). For exotic abilities whose mana sub-cost is
+                // a different color than what they produce — e.g. a
+                // hypothetical `{T}, Pay {U}: Add {2}{R}` — this net of 2 is
+                // pessimistic-but-safe in one direction (we never claim
+                // capacity we can't produce) but over-states feasibility in
+                // the other (the {U} sub-cost has to come from another
+                // source, which this scan doesn't model). Such cards are
+                // vanishingly rare in real Magic; if one is added the
+                // sub-cost color domain should be threaded through here
+                // rather than collapsed to `mana_value`.
                 let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
                     .map_or(0, |cost| cost.mana_value());
                 Some(gross.saturating_sub(activation_cost))

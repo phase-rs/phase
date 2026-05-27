@@ -3888,7 +3888,9 @@ pub(super) fn max_x_value_excluding(
     // only `max_mana_yield`) so sacrifice-/discard-/life-cost mana abilities
     // the controller could activate manually are counted. Without this, KCI
     // (and similar non-tap mana sources) understate the X cap for X-spells
-    // — see #562.
+    // — see #562. The per-permanent sum can over-count chain-sacrifice
+    // configurations (tracked in #1235); colored-shard non-tap feasibility
+    // is deferred separately (tracked in #1234).
     let capacity: u32 = state
         .battlefield
         .iter()
@@ -7947,18 +7949,28 @@ mod tests {
             generic: 0,
         };
 
-        // Without the fix, `max_mana_yield` would return 0 for KCI (no
-        // `{T}` cost component) and the cap would be 0 (1 Mountain − 1 fixed
-        // {R} shard). With the fix, KCI's `feasible_mana_capacity` returns 2,
-        // so the cap is at least 2 (1 Mountain + 2 from one KCI activation,
-        // minus the 1 fixed {R}). Assert > 0 as the load-bearing regression
-        // proof that KCI counts at all — exact arithmetic is an implementation
-        // detail of how many sources the engine treats as concurrent.
+        // Without the fix, `max_mana_yield` would return 0 for KCI (no `{T}`
+        // cost component) and the cap would be 0 (1 Mountain − 1 fixed {R}
+        // shard). With the fix, KCI's `feasible_mana_capacity` returns 2.
+        //
+        // Arithmetic (deterministic):
+        //   - Mountain: feasible_mana_capacity = 1 ({R} via `{T}`)
+        //   - KCI:      feasible_mana_capacity = 2 ({C}{C} via one Sacrifice)
+        //   - 3 fodder: feasible_mana_capacity = 0 each (no mana abilities)
+        //   - pool = 0, fixed_portion = 1 (the {R})
+        //   - capacity = 1 + 2 = 3, remaining = 3 − 1 = 2
+        //   - x_count = 1, so max X = 2 / 1 = 2.
+        //
+        // The tight `assert_eq!(max, 2)` is a falsifiable expectation in
+        // both directions: an *under-count* regression (the original #562
+        // bug) would report max == 0, and an *over-count* regression
+        // (e.g. counting fodder or chain-sacrificing the same mana source
+        // twice) would report max >= 3.
         let max = max_x_value(&state, player, &cost, None);
-        assert!(
-            max > 0,
+        assert_eq!(
+            max, 2,
             "Issue #562: KCI's non-tap mana ability must be counted by max_x_value. \
-             Expected > 0 affordable X, got {max}",
+             Expected exactly 2 (1 Mountain + 2 KCI − 1 fixed {{R}}), got {max}",
         );
     }
 

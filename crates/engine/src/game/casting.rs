@@ -5468,6 +5468,8 @@ pub fn can_pay_cost_after_auto_tap(
 /// if any colored shard remains after the existing pool is subtracted, this
 /// predicate returns `false`. Pure-generic feasibility is sufficient for the
 /// principal repro (Krark-Clan Ironworks producing `{C}{C}` — issue #562).
+/// Colored-shard widening — covering Phyrexian Altar, Lion's Eye Diamond, and
+/// other any-color non-tap mana abilities — is tracked in issue #1234.
 //
 // CR 117.1d + CR 601.2g: Mana abilities (including sacrifice-cost,
 // discard-cost, and pay-life mana abilities) may be activated during cost
@@ -5523,8 +5525,9 @@ pub(super) fn can_feasibly_pay_mana_cost(
     };
 
     // CR 117.1: Colored-shard feasibility under non-tap mana sources is
-    // deferred (see #562 follow-up). Pure-generic residual is sufficient for
-    // the principal repro (KCI sacrificing artifacts for `{C}{C}`).
+    // deferred (see issue #1234 — Phyrexian Altar, Lion's Eye Diamond, etc.).
+    // Pure-generic residual is sufficient for the principal repro (KCI
+    // sacrificing artifacts for `{C}{C}`).
     if !residual_shards.is_empty() {
         return false;
     }
@@ -5537,6 +5540,13 @@ pub(super) fn can_feasibly_pay_mana_cost(
     // Each contribution is the largest single mana-ability output the
     // controller could currently activate (covering Sacrifice / Discard /
     // PayLife costs that auto-tap cannot simulate).
+    //
+    // The per-permanent sum over-counts in chain-sacrifice configurations
+    // (e.g. 2× KCI + 1 fodder reports cap=4 when the actual reachable yield
+    // is 2). The trade-off — over-count rather than under-count, since
+    // under-count was the original #562 bug — is intentional. A bounded-
+    // flow model that respects sacrifice/discard/life supply is tracked in
+    // issue #1235.
     let excluded = source_id;
     let capacity: u32 = state
         .battlefield

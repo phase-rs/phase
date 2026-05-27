@@ -21,14 +21,16 @@
 // CR 117.1d + CR 605.3a + CR 601.2g — mana abilities (including non-tap-cost
 // ones) may be activated during cost payment.
 
+use engine::game::apply_as_current;
 use engine::game::casting::{can_cast_object_now, spell_objects_available_to_cast};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, QuantityExpr,
     TargetFilter, TypeFilter, TypedFilter,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -238,5 +240,148 @@ fn castability_gate_rejects_spell_when_capacity_below_cost() {
     assert!(
         can_cast_object_now(&state, P0, small_artifact),
         "Sanity: a {{2}} cost is still affordable via one KCI activation",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (d) End-to-end Manual-payment regression. Tests the FULL action chain the
+//     castability gate unblocks:
+//
+//       CastSpellWithPaymentMode { Manual }
+//         -> ManaPayment
+//         -> ActivateAbility { KCI }
+//         -> SacrificeForManaAbility
+//         -> SelectCards { the fodder creature }
+//         -> ManaPayment (now with {C}{C} in the pool)
+//         -> PassPriority   (finalize cost payment)
+//         -> Priority       (spell stays on stack, cost paid)
+//
+// The castability-gate test (a) proves the spell is OFFERED. This test proves
+// the downstream Manual-mode flow can actually CONSUME a KCI activation to
+// satisfy the cost — i.e. that the gate isn't a vacuous green light. A
+// breaking change to the `WaitingFor::ManaPayment` -> `SacrificeForManaAbility`
+// -> `ManaPayment` handoff, to `is_active_tap_mana_ability` ignoring non-tap
+// mana abilities at cost-payment time, or to `mana_payment::reduce_cost_by_pool`
+// colorless resolution would all pass test (a) and fail this one.
+// ---------------------------------------------------------------------------
+//
+// CR 117.1d + CR 601.2g + CR 605.3a + CR 605.3b: A player may activate mana
+// abilities (including sacrifice-cost ones) during the cost-payment step;
+// each activation resolves immediately, adding its produced mana to the pool
+// before the player confirms payment.
+#[test]
+fn manual_payment_flow_resolves_kci_sacrifice_to_pay_spell_cost() {
+    let mut state = GameState::new_two_player(42);
+    priority_main_phase(&mut state, P0);
+
+    let kci = add_kci(&mut state, P0);
+    let retriever = add_artifact_creature(&mut state, P0, 2001, "Myr Retriever");
+    let _trawler = add_artifact_creature(&mut state, P0, 2002, "Scrap Trawler");
+    let wellspring = add_two_cost_artifact_to_hand(&mut state, P0, 3001, "Ichor Wellspring");
+    let wellspring_card_id = state.objects[&wellspring].card_id;
+
+    // Step 1: Cast Ichor Wellspring with Manual payment mode. The engine
+    // moves the object to the stack (CR 601.2a) and pauses on ManaPayment
+    // for the caster to activate mana abilities (CR 601.2g).
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpellWithPaymentMode {
+            object_id: wellspring,
+            card_id: wellspring_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        },
+    )
+    .expect("CastSpellWithPaymentMode { Manual } must succeed when KCI can feasibly pay {2}");
+
+    match &state.waiting_for {
+        WaitingFor::ManaPayment { player, .. } => assert_eq!(*player, P0),
+        other => panic!("Expected WaitingFor::ManaPayment after Manual cast, got {other:?}"),
+    }
+    // CR 601.2a: the spell has moved from hand to the stack at announcement time.
+    assert!(
+        state.stack.iter().any(|entry| entry.id == wellspring),
+        "Wellspring should be on the stack after announcement"
+    );
+
+    // Step 2: Activate KCI's `Sacrifice an artifact: Add {C}{C}` ability.
+    // The sacrifice target is the only choice surfaced — KCI has no other
+    // cost components — so the engine transitions to SacrificeForManaAbility.
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: kci,
+            ability_index: 0,
+        },
+    )
+    .expect("ActivateAbility(KCI) during ManaPayment must succeed");
+
+    match &state.waiting_for {
+        WaitingFor::SacrificeForManaAbility {
+            player,
+            count,
+            permanents,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*count, 1);
+            // CR 117.1: legal sacrifice candidates are artifacts (per the
+            // ability's TargetFilter). All three artifacts the controller owns
+            // are eligible — including KCI itself, which is the worst case
+            // for chain-sacrifice analysis but legal here.
+            assert!(
+                permanents.contains(&retriever),
+                "Retriever must appear as a legal sacrifice candidate"
+            );
+        }
+        other => panic!("Expected SacrificeForManaAbility after activating KCI, got {other:?}"),
+    }
+
+    // Step 3: Sacrifice the Retriever. KCI resolves and adds {C}{C} to the
+    // pool (CR 605.3b), the state transitions back to ManaPayment for the
+    // caster to confirm.
+    apply_as_current(
+        &mut state,
+        GameAction::SelectCards {
+            cards: vec![retriever],
+        },
+    )
+    .expect("SelectCards for sacrifice target must succeed");
+
+    match &state.waiting_for {
+        WaitingFor::ManaPayment { player, .. } => assert_eq!(*player, P0),
+        other => panic!("Expected ManaPayment after KCI resolution, got {other:?}"),
+    }
+    // CR 605.3b: KCI's resolution put {C}{C} (two colorless mana) into the pool.
+    let pool_total = state.players[P0.0 as usize].mana_pool.total();
+    assert_eq!(
+        pool_total, 2,
+        "KCI activation must add {{C}}{{C}} to the mana pool — got {pool_total} total mana"
+    );
+    // CR 117.1 + CR 701.16a: Retriever should now be in the graveyard
+    // (sacrificed as the activation cost).
+    assert!(
+        state.players[P0.0 as usize].graveyard.contains(&retriever),
+        "Retriever must be in graveyard after being sacrificed for KCI"
+    );
+
+    // Step 4: Pass priority to finalize the mana payment. The engine debits
+    // {2} from the pool, leaves the spell on the stack, and returns priority
+    // to the caster (CR 117.3a).
+    apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("PassPriority during ManaPayment must finalize payment");
+
+    // After cost payment: pool empty, spell still on stack waiting for both
+    // players to pass priority for resolution. We don't drive resolution
+    // here — the load-bearing assertion for #562 is that the cost was paid
+    // via Manual mode + KCI, not that Wellspring entered the battlefield.
+    let pool_after_pay = state.players[P0.0 as usize].mana_pool.total();
+    assert_eq!(
+        pool_after_pay, 0,
+        "Mana pool should be empty after the {{2}} cost is debited — got {pool_after_pay}",
+    );
+    assert!(
+        state.stack.iter().any(|entry| entry.id == wellspring),
+        "Wellspring should still be on the stack after cost is paid (awaiting resolution)"
     );
 }
