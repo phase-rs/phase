@@ -56,7 +56,9 @@
   "seat": {
     "label": "Miejsce {{number}}",
     "passingLeft": "→ Przekazywanie w lewo →",
-    "passingRight": "← Przekazywanie w prawo ←"
+    "passingRight": "← Przekazywanie w prawo ←",
+    "connected": "Connected",
+    "disconnected": "Disconnected"
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
@@ -281,7 +283,12 @@
     "reviewPool": "Przejrzyj pulę",
     "roundComplete": "Runda zakończona",
     "waitingNextRound": "Oczekiwanie, aż gospodarz rozpocznie następną rundę...",
-    "nextRoundShortly": "Następna runda rozpocznie się wkrótce..."
+    "nextRoundShortly": "Następna runda rozpocznie się wkrótce...",
+    "pauseReason": {
+      "PlayerDisconnected": "Draft paused — a player disconnected.",
+      "PausedByHost": "Draft paused by host.",
+      "DisconnectGraceExpired": "A player did not return in time."
+    }
   },
   "betweenGames": {
     "game": "Gra {{number}}",

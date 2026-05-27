@@ -560,6 +560,7 @@ function BetweenGamesView() {
 }
 
 function DraftingPhaseContent() {
+  const { t } = useTranslation("draft");
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const podSize = useDraftPodStore((s) => s.config.podSize);
@@ -568,13 +569,28 @@ function DraftingPhaseContent() {
   const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
   const confirmPick = useMultiplayerDraftStore((s) => s.confirmPick);
   const autoPickCard = useMultiplayerDraftStore((s) => s.autoPickCard);
+  const paused = useMultiplayerDraftStore((s) => s.paused);
+  const pauseReason = useMultiplayerDraftStore((s) => s.pauseReason);
 
   if (!introDismissed) {
     return <DraftIntro mode="pod" podSize={podSize} onContinue={() => setIntroDismissed(true)} />;
   }
 
+  // Wire `pauseReason` is `DraftPauseReason` (PascalCase) — same shape as the
+  // i18n key path, so no boundary conversion. Falls back to a generic key if
+  // the engine ever emits an unknown reason (defensive only).
+  const pauseKey = pauseReason ?? "PausedByHost";
+
   return (
     <>
+      {paused && (
+        <div
+          role="status"
+          className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+        >
+          ⚠ {t(`podPhaseView.pauseReason.${pauseKey}`)}
+        </div>
+      )}
       <div className="flex gap-4">
         <div className="flex min-w-0 flex-1 flex-col">
           <SeatStatusRing />

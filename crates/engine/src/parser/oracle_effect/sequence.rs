@@ -1012,15 +1012,15 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 /// expansion axis in `try_parse_compound_subject_each`; new compound forms
 /// are added by extending both sites in lockstep.
 ///
-/// Currently restricted to "that player each" — the only form produced by
-/// the Council's-dilemma "for each player who chose <choice>" body. Other
-/// compound forms ("target opponent each", "an opponent each") are noted
-/// follow-ups; until they parse on the body side, the chunk splitter can
-/// safely suppress them too.
+/// Recognized forms mirror `try_parse_compound_subject_each`.
 fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool {
     let lower = remainder.to_ascii_lowercase();
-    let result: nom::IResult<&str, (), OracleError<'_>> =
-        alt((value((), tag("that player each ")),)).parse(lower.as_str());
+    let result: nom::IResult<&str, (), OracleError<'_>> = alt((
+        value((), tag("that player each ")),
+        value((), tag("target opponent each ")),
+        value((), tag("target player each ")),
+    ))
+    .parse(lower.as_str());
     result.is_ok()
 }
 
@@ -1454,7 +1454,7 @@ pub(super) fn apply_clause_continuation(
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped,
                     enters_attacking: false,
                     up_to: false,
@@ -1680,7 +1680,7 @@ pub(super) fn apply_clause_continuation(
                         },
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: is_up_to,
@@ -1765,7 +1765,7 @@ pub(super) fn apply_clause_continuation(
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
@@ -1780,7 +1780,7 @@ pub(super) fn apply_clause_continuation(
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,

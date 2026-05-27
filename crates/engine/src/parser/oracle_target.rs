@@ -5764,6 +5764,25 @@ mod tests {
     }
 
     #[test]
+    fn creature_you_control_with_exact_base_power() {
+        let (f, rest) = parse_type_phrase("creature you control with base power 1");
+        assert_eq!(rest, "");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Fixed { value: 1 }
+                    }])
+            )
+        );
+    }
+
+    #[test]
     fn creature_with_power_x_or_less() {
         // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
         // `Variable("X")` marker so it can resolve against `chosen_x` at effect time.

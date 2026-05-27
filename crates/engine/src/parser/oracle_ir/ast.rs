@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, ControllerRef,
     CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction, ManaSpendRestriction,
     ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost, PlayerFilter, PtValue,
     QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition,
@@ -620,8 +620,10 @@ pub(crate) enum TargetedImperativeAst {
         origin: Option<Zone>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
-        /// CR 110.2: "under your control" — controller override.
-        under_your_control: bool,
+        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
+        /// to the player resolved from `ref`. `None` leaves the object under
+        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
+        enters_under: Option<ControllerRef>,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
@@ -867,8 +869,10 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2: "under your control" — controller override on ETB.
-        under_your_control: bool,
+        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
+        /// to the player resolved from `ref`. `None` leaves the object under
+        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
+        enters_under: Option<ControllerRef>,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
         /// CR 701.28c: "transformed" — enters with its back face up.

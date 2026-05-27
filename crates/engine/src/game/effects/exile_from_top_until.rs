@@ -571,7 +571,7 @@ mod tests {
                             target: TargetFilter::Any,
                             owner_library: false,
                             enter_transformed: false,
-                            under_your_control: false,
+                            enters_under: None,
                             enter_tapped: false,
                             enters_attacking: false,
                             up_to: false,

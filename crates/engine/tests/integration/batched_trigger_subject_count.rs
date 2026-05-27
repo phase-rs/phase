@@ -66,7 +66,7 @@ fn build_batched_attack_trigger() -> TriggerDefinition {
                 target: permanent_in_hand,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,

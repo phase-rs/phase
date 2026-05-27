@@ -1291,8 +1291,7 @@ fn collect_pending_triggers(
                 .objects
                 .get(cast_obj_id)
                 .map(|obj| {
-                    let n = obj
-                        .keywords
+                    let n = super::casting::effective_spell_keywords(state, *caster, *cast_obj_id)
                         .iter()
                         .filter(|k| matches!(k, Keyword::Cascade))
                         .count();
@@ -2820,23 +2819,33 @@ fn check_trigger_constraint(
                 GameEvent::SpellCast { controller: c, .. } => *c,
                 _ => return false,
             };
-            let count = state
-                .spells_cast_this_turn_by_player
-                .get(&caster)
-                .map_or(0, |spells| match filter {
-                    None => spells.len() as u32,
-                    Some(filter) => spells
-                        .iter()
-                        .filter(|record| {
-                            spell_record_matches_filter(
-                                record,
-                                filter,
-                                caster,
-                                &state.all_creature_types,
-                            )
-                        })
-                        .count() as u32,
-                });
+            let spells = state.spells_cast_this_turn_by_player.get(&caster);
+            if let (Some(filter), Some(current_record)) =
+                (filter.as_ref(), spells.and_then(|spells| spells.back()))
+            {
+                if !spell_record_matches_filter(
+                    current_record,
+                    filter,
+                    caster,
+                    &state.all_creature_types,
+                ) {
+                    return false;
+                }
+            }
+            let count = spells.map_or(0, |spells| match filter {
+                None => spells.len() as u32,
+                Some(filter) => spells
+                    .iter()
+                    .filter(|record| {
+                        spell_record_matches_filter(
+                            record,
+                            filter,
+                            caster,
+                            &state.all_creature_types,
+                        )
+                    })
+                    .count() as u32,
+            });
             count == *n
         }
         // CR 121.2: Use the ordinal stamped onto the individual draw event
@@ -2986,6 +2995,19 @@ pub(crate) fn check_trigger_condition(
             checked_id
                 .and_then(|id| state.objects.get(&id))
                 .is_some_and(|obj| obj.cast_from_zone.is_some())
+        }
+        // CR 305.1 + CR 603.4: "without being played" is encoded as
+        // `Not(WasPlayed)` and checks the triggering zone-change object first.
+        TriggerCondition::WasPlayed => {
+            let checked_id = trigger_event
+                .and_then(|e| match e {
+                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .or(source_id);
+            checked_id
+                .and_then(|id| state.objects.get(&id))
+                .is_some_and(|obj| obj.played_from_zone.is_some())
         }
         // CR 603.4 + CR 702.33d-f: "if it was kicked" intervening-if.
         // ETB/LTB trigger conditions refer to the triggering zone-change
@@ -3842,6 +3864,57 @@ pub mod tests {
         assert!(check_trigger_condition(
             &state,
             &TriggerCondition::ActivatedAbilityIsNonMana,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
+    }
+
+    #[test]
+    fn was_played_condition_checks_zone_change_object_play_provenance() {
+        let mut state = setup();
+        let land = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Test Plains".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.played_from_zone = Some(Zone::Hand);
+
+        let event = GameEvent::ZoneChanged {
+            object_id: land,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                land,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::WasPlayed,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::WasPlayed),
+            },
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
+
+        state.objects.get_mut(&land).unwrap().played_from_zone = None;
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::WasPlayed,
             PlayerId(0),
             None,
             Some(&event),
@@ -6050,7 +6123,7 @@ pub mod tests {
                                 ),
                                 owner_library: false,
                                 enter_transformed: false,
-                                under_your_control: false,
+                                enters_under: None,
                                 enter_tapped: false,
                                 enters_attacking: false,
                                 up_to: false,
@@ -6311,7 +6384,7 @@ pub mod tests {
                     }),
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -6416,7 +6489,7 @@ pub mod tests {
                 }),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -6612,7 +6685,7 @@ pub mod tests {
                     }),
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -6725,7 +6798,7 @@ pub mod tests {
                                 ),
                                 owner_library: false,
                                 enter_transformed: false,
-                                under_your_control: false,
+                                enters_under: None,
                                 enter_tapped: false,
                                 enters_attacking: false,
                                 up_to: false,
@@ -6799,7 +6872,7 @@ pub mod tests {
                             ),
                             owner_library: false,
                             enter_transformed: false,
-                            under_your_control: false,
+                            enters_under: None,
                             enter_tapped: false,
                             enters_attacking: false,
                             up_to: false,
@@ -6859,7 +6932,7 @@ pub mod tests {
                             ),
                             owner_library: false,
                             enter_transformed: false,
-                            under_your_control: false,
+                            enters_under: None,
                             enter_tapped: false,
                             enters_attacking: false,
                             up_to: false,
@@ -7009,7 +7082,7 @@ pub mod tests {
                     target: TargetFilter::SelfRef,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -7082,7 +7155,7 @@ pub mod tests {
                     target: TargetFilter::SelfRef,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: true,
                     enters_attacking: false,
                     up_to: false,
@@ -7354,7 +7427,7 @@ pub mod tests {
                                     target: TargetFilter::Any,
                                     owner_library: false,
                                     enter_transformed: false,
-                                    under_your_control: false,
+                                    enters_under: None,
                                     enter_tapped: false,
                                     enters_attacking: false,
                                     up_to: false,
@@ -8578,7 +8651,7 @@ pub mod tests {
             ),
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: true,
             enters_attacking: false,
             up_to: false,
@@ -8600,7 +8673,7 @@ pub mod tests {
             target: TargetFilter::Typed(TypedFilter::creature()),
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -9980,7 +10053,44 @@ pub mod tests {
             "second X-spell this turn must NOT fire the first-X-spell trigger"
         );
 
-        // Case D: intervening non-X spell does NOT reset the count — second X-spell still fails.
+        // Case D: current spell is non-qualifying after an earlier qualifying
+        // spell. The filtered count is still 1, but the event spell itself
+        // does not match the trigger's filter.
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                SpellCastRecord {
+                    name: String::new(),
+                    core_types: vec![CoreType::Sorcery],
+                    supertypes: vec![],
+                    subtypes: vec![],
+                    keywords: vec![],
+                    colors: vec![],
+                    mana_value: 2,
+                    has_x_in_cost: true,
+                    from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
+                },
+                SpellCastRecord {
+                    name: String::new(),
+                    core_types: vec![CoreType::Instant],
+                    supertypes: vec![],
+                    subtypes: vec![],
+                    keywords: vec![],
+                    colors: vec![],
+                    mana_value: 1,
+                    has_x_in_cost: false,
+                    from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
+                },
+            ]),
+        );
+        assert!(
+            !check_trigger_constraint(&state, &trig_def, source, 0, PlayerId(0), &spell_event),
+            "non-qualifying current spell must NOT fire an Nth qualifying spell trigger"
+        );
+
+        // Case E: intervening non-X spell does NOT reset the count — second X-spell still fails.
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
             crate::im::Vector::from(vec![
@@ -10818,6 +10928,64 @@ pub mod tests {
             Some(cast_spell),
             None,
         ));
+    }
+
+    #[test]
+    fn statically_granted_cascade_triggers_for_cast_spell() {
+        let mut state = setup();
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Cascade Grant Source".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Sorcery).controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Granted Cascade Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(2),
+            }],
+        );
+
+        assert!(
+            state.stack.iter().any(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if matches!(ability.effect, Effect::Cascade)
+                )
+            }),
+            "cascade granted by a static ability should enqueue a Cascade trigger"
+        );
     }
 
     #[test]

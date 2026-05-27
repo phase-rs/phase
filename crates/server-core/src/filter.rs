@@ -317,7 +317,7 @@ mod tests {
             destination: Some(Zone::Battlefield),
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,

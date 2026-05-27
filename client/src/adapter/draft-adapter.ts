@@ -258,6 +258,15 @@ export class DraftAdapter {
     return wasm.get_view_for_seat(seat) as DraftPlayerView;
   }
 
+  /**
+   * Mark a human seat as connected or disconnected. Drives the
+   * `seats[*].connected` field on subsequent views.
+   */
+  async setSeatConnected(seat: number, connected: boolean): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.set_seat_connected(seat, connected) as DraftPlayerView;
+  }
+
   async exportSession(): Promise<string> {
     const wasm = await ensureDraftWasm();
     return wasm.export_draft_session();

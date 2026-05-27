@@ -4292,6 +4292,12 @@ fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>)
     state.exile_play_permissions_used.insert(source_id);
 }
 
+fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.played_from_zone = Some(zone);
+    }
+}
+
 fn handle_play_land(
     state: &mut GameState,
     object_id: ObjectId,
@@ -4509,6 +4515,7 @@ fn handle_play_land(
             } = event
             {
                 zones::move_to_zone(state, object_id, to, events);
+                mark_land_played_from_zone(state, object_id, origin_zone);
                 // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
                 // defaults. Override only when the replacement pipeline changed them.
                 if let Some(obj) = state.objects.get_mut(&object_id) {
@@ -4559,6 +4566,7 @@ fn handle_play_land(
                     )
                 {
                     state.lands_played_this_turn += 1;
+                    mark_land_played_from_zone(state, object_id, origin_zone);
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     record_exile_play_permission(state, exile_permission_source);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
@@ -4586,6 +4594,7 @@ fn handle_play_land(
             // Increment counters now — the land play is committed, only the ETB
             // effect is pending.
             state.lands_played_this_turn += 1;
+            mark_land_played_from_zone(state, object_id, origin_zone);
             // CR 604.2: Record once-per-turn graveyard play permission usage.
             record_graveyard_play_permission(state, gy_permission_source, object_id);
             record_exile_play_permission(state, exile_permission_source);
@@ -4609,6 +4618,7 @@ fn handle_play_land(
 
     // Increment land counter
     state.lands_played_this_turn += 1;
+    mark_land_played_from_zone(state, object_id, origin_zone);
     // CR 604.2: Record once-per-turn graveyard play permission usage.
     record_graveyard_play_permission(state, gy_permission_source, object_id);
     record_exile_play_permission(state, exile_permission_source);
@@ -11935,7 +11945,7 @@ mod trigger_target_tests {
                 ),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -12034,7 +12044,7 @@ mod trigger_target_tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -12891,7 +12901,7 @@ mod exile_return_tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -13551,7 +13561,7 @@ mod phase_trigger_regression_tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -15058,7 +15068,7 @@ mod phase_trigger_regression_tests {
             destination: None,
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -15126,7 +15136,7 @@ mod phase_trigger_regression_tests {
             destination: None,
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -15170,7 +15180,7 @@ mod phase_trigger_regression_tests {
             destination: None,
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -16274,7 +16284,7 @@ mod phase_trigger_regression_tests {
                     target: TargetFilter::ParentTarget,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -16464,7 +16474,7 @@ mod phase_trigger_regression_tests {
                         target: TargetFilter::ParentTarget,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
