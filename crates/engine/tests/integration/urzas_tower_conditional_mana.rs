@@ -36,13 +36,28 @@ use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
+const URZA_LAND_KEYS: [&str; 3] = ["urza's tower", "urza's mine", "urza's power plant"];
+
 fn load_db() -> Option<&'static CardDatabase> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
     if !path.exists() {
         return None;
     }
     static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
+    Some(DB.get_or_init(|| {
+        let raw = std::fs::read_to_string(&path).expect("card-data.json should be readable");
+        let export: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&raw).expect("card-data.json should be a JSON object");
+        let mut selected = serde_json::Map::new();
+        for key in URZA_LAND_KEYS {
+            let value = export
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} should be in card-data.json"));
+            selected.insert(key.to_string(), value.clone());
+        }
+        CardDatabase::from_json_str(&serde_json::Value::Object(selected).to_string())
+            .expect("Urza land export records should load")
+    }))
 }
 
 /// With all three Urza lands on the battlefield, tapping Urza's Tower for mana
