@@ -16661,6 +16661,7 @@ mod tests {
         obj.modal.as_mut().unwrap().constraints.push(
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Any,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,

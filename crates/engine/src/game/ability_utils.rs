@@ -320,10 +320,16 @@ fn modal_selection_condition_matches(
             super::layers::evaluate_condition(state, condition, player, source_id)
         }
         ModalSelectionCondition::AdditionalCostPaid {
+            source,
             variant,
             kicker_cost,
             min_count,
-        } => context.additional_cost_paid_matches(*variant, kicker_cost.as_ref(), *min_count),
+        } => context.additional_cost_paid_matches(
+            *source,
+            *variant,
+            kicker_cost.as_ref(),
+            *min_count,
+        ),
     }
 }
 

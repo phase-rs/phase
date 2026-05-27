@@ -928,7 +928,7 @@ export type CombatTaxPending =
 // ── Additional Costs (kicker, blight, "or pay") ─────────────────────────
 
 export type AdditionalCost =
-  | { type: "Optional"; data: SerializedAbilityCost }
+  | { type: "Optional"; data: { cost: SerializedAbilityCost; repeatable?: boolean } }
   | { type: "Kicker"; data: { costs: SerializedAbilityCost[]; repeatable?: boolean } }
   | { type: "Required"; data: SerializedAbilityCost }
   | { type: "Choice"; data: [SerializedAbilityCost, SerializedAbilityCost] };

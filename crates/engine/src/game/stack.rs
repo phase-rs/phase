@@ -446,6 +446,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         .map(|o| o.kickers_paid.clone())
                         .unwrap_or_default()
                 });
+            let additional_cost_payment_count = ability
+                .as_ref()
+                .map(|a| a.context.additional_cost_payment_count)
+                .unwrap_or_else(|| {
+                    state
+                        .objects
+                        .get(&entry.id)
+                        .map(|o| o.additional_cost_payment_count)
+                        .unwrap_or_default()
+                });
             let cast_timing_permission = state
                 .objects
                 .get(&entry.id)
@@ -547,6 +557,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             // — because placeholder permanent spells have
                             // `ability == None` and would otherwise lose the data.
                             obj.kickers_paid = kickers_paid;
+                            obj.additional_cost_payment_count = additional_cost_payment_count;
                         }
                         if let Some(exiled_id) = ability
                             .as_ref()
@@ -632,6 +643,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 .map(|o| o.kickers_paid.clone())
                                 .unwrap_or_default()
                         });
+                    let additional_cost_payment_count = ability
+                        .as_ref()
+                        .map(|a| a.context.additional_cost_payment_count)
+                        .unwrap_or_else(|| {
+                            state
+                                .objects
+                                .get(&entry.id)
+                                .map(|o| o.additional_cost_payment_count)
+                                .unwrap_or_default()
+                        });
                     state.pending_spell_resolution =
                         Some(crate::types::game_state::PendingSpellResolution {
                             object_id: entry.id,
@@ -642,6 +663,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             spell_targets: spell_targets.clone(),
                             actual_mana_spent,
                             kickers_paid,
+                            additional_cost_payment_count,
                             convoked_creatures,
                         });
                     state.waiting_for =
