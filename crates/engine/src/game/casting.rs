@@ -5315,19 +5315,25 @@ fn can_cast_prepared_now(
         }
     }
 
-    // CR 702.172: Spree spells must afford at least one mode to be castable
+    // CR 702.172: Spree spells must afford at least one mode to be castable.
+    // CR 117.1d + CR 601.2g: Use the feasibility predicate so non-tap mana
+    // abilities (Sacrifice / Discard / PayLife) the controller could activate
+    // manually during cost payment are counted as castable mana sources.
     if let Some(ref modal) = prepared.modal {
         if !modal.mode_costs.is_empty() {
             return modal.mode_costs.iter().any(|mode_cost| {
                 let total = restrictions::add_mana_cost(&prepared.mana_cost, mode_cost);
-                can_pay_cost_after_auto_tap(state, player, prepared.object_id, &total)
+                can_feasibly_pay_mana_cost(state, player, Some(prepared.object_id), &total)
             });
         }
     }
 
+    // CR 117.1d + CR 601.2g: Feasibility, not just auto-tap, gates castability —
+    // a player may activate sacrifice-/discard-/life-cost mana abilities during
+    // payment (issue #562: KCI must expose Ichor Wellspring as castable).
     let creature_face_ok = (prepared.modal.is_some()
         || spell_has_legal_targets(state, obj, player))
-        && can_pay_cost_after_auto_tap(state, player, prepared.object_id, &prepared.mana_cost);
+        && can_feasibly_pay_mana_cost(state, player, Some(prepared.object_id), &prepared.mana_cost);
 
     if creature_face_ok {
         return true;
@@ -5418,7 +5424,188 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
         .find(|p| p.id == player)
         .is_some_and(|player_data| {
             mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, permissions)
+                || ctx.is_some_and(|ctx| {
+                    matches!(ctx, PaymentContext::Spell(_))
+                        && can_pay_with_spell_tap_payments(
+                            &simulated,
+                            player,
+                            source_id,
+                            cost,
+                            Some(ctx),
+                            permissions,
+                        )
+                })
         })
+}
+
+/// CR 702.51a: Convoke functions on the spell being cast.
+/// CR 702.126a: Improvise functions on the spell being cast.
+/// Resolve the active tap-payment mode once from the spell's effective keyword set.
+pub(super) fn spell_tap_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> Option<ConvokeMode> {
+    if !state.objects.contains_key(&source_id) {
+        return None;
+    }
+    let effective_keywords = effective_spell_keywords(state, player, source_id);
+    if effective_keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Convoke))
+    {
+        Some(ConvokeMode::Convoke)
+    } else if effective_keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Waterbend))
+    {
+        Some(ConvokeMode::Waterbend)
+    } else if effective_keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Improvise))
+    {
+        Some(ConvokeMode::Improvise)
+    } else {
+        None
+    }
+}
+
+fn can_pay_with_spell_tap_payments(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+    permissions: crate::types::mana::CostPermissionContext,
+) -> bool {
+    let Some(mode) = spell_tap_payment_mode(state, player, source_id) else {
+        return false;
+    };
+    let Some(player_data) = state.players.iter().find(|p| p.id == player) else {
+        return false;
+    };
+
+    // CR 601.2h: This is an affordability preview only. The real payment still
+    // flows through ManaPayment and the shared mana-payment algorithm.
+    match mode {
+        ConvokeMode::Improvise => {
+            // CR 702.126a: Improvise lets players tap untapped artifacts to pay generic mana.
+            let mut pool = player_data.mana_pool.clone();
+            for (&object_id, obj) in &state.objects {
+                if obj.is_improvise_eligible(player) {
+                    pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                        crate::types::mana::ManaType::Colorless,
+                        object_id,
+                    ));
+                }
+            }
+            mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
+        }
+        ConvokeMode::Waterbend => {
+            let mut pool = player_data.mana_pool.clone();
+            for (&object_id, obj) in &state.objects {
+                if obj.is_waterbend_eligible(player) {
+                    pool.add(crate::types::mana::ManaUnit::new(
+                        crate::types::mana::ManaType::Colorless,
+                        object_id,
+                        false,
+                        Vec::new(),
+                    ));
+                }
+            }
+            mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
+        }
+        ConvokeMode::Convoke => {
+            // CR 702.51a: Convoke lets players tap untapped creatures to pay colored or generic mana.
+            let options = state
+                .objects
+                .iter()
+                .filter_map(|(_, obj)| {
+                    if !obj.is_convoke_eligible(player) {
+                        return None;
+                    }
+                    let mut choices = vec![crate::types::mana::ManaType::Colorless];
+                    for color in &obj.color {
+                        let mana_type = super::mana_sources::mana_color_to_type(color);
+                        if !choices.contains(&mana_type) {
+                            choices.push(mana_type);
+                        }
+                    }
+                    Some(choices)
+                })
+                .collect::<Vec<_>>();
+            can_pay_with_convoke_options(&player_data.mana_pool, cost, ctx, permissions, &options)
+        }
+    }
+}
+
+// CR 702.51a: Evaluate valid creature-tap choices that can satisfy a convoke cost.
+fn can_pay_with_convoke_options(
+    base_pool: &crate::types::mana::ManaPool,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+    permissions: crate::types::mana::CostPermissionContext,
+    options: &[Vec<crate::types::mana::ManaType>],
+) -> bool {
+    if options.is_empty() {
+        return false;
+    }
+    let max_taps = cost.mana_value() as usize;
+    if max_taps == 0 {
+        return false;
+    }
+
+    let mut states = HashSet::from([[0u8; 6]]);
+    for choices in options {
+        let mut next = states.clone();
+        for state in &states {
+            if state.iter().map(|count| *count as usize).sum::<usize>() >= max_taps {
+                continue;
+            }
+            for choice in choices {
+                let mut candidate = *state;
+                let index = mana_type_index(*choice);
+                candidate[index] = candidate[index].saturating_add(1);
+                next.insert(candidate);
+            }
+        }
+        states = next;
+    }
+
+    states.into_iter().any(|counts| {
+        let mut pool = base_pool.clone();
+        for (index, count) in counts.into_iter().enumerate() {
+            for _ in 0..count {
+                pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                    mana_type_from_index(index),
+                    ObjectId(0),
+                ));
+            }
+        }
+        mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
+    })
+}
+
+fn mana_type_index(mana_type: crate::types::mana::ManaType) -> usize {
+    match mana_type {
+        crate::types::mana::ManaType::White => 0,
+        crate::types::mana::ManaType::Blue => 1,
+        crate::types::mana::ManaType::Black => 2,
+        crate::types::mana::ManaType::Red => 3,
+        crate::types::mana::ManaType::Green => 4,
+        crate::types::mana::ManaType::Colorless => 5,
+    }
+}
+
+fn mana_type_from_index(index: usize) -> crate::types::mana::ManaType {
+    match index {
+        0 => crate::types::mana::ManaType::White,
+        1 => crate::types::mana::ManaType::Blue,
+        2 => crate::types::mana::ManaType::Black,
+        3 => crate::types::mana::ManaType::Red,
+        4 => crate::types::mana::ManaType::Green,
+        _ => crate::types::mana::ManaType::Colorless,
+    }
 }
 
 pub fn can_pay_cost_after_auto_tap(
@@ -5442,6 +5629,114 @@ pub fn can_pay_cost_after_auto_tap(
         spell_ctx.as_ref(),
         &HashSet::new(),
     )
+}
+
+/// Castability-gate feasibility predicate. Returns true if `player` could pay
+/// `cost` for casting `source_id` by **any** combination of auto-taps PLUS
+/// manual activation of non-tap mana abilities (Sacrifice — KCI, Phyrexian
+/// Altar, Ashnod's Altar; Discard — Lion's Eye Diamond; Pay Life; etc.) during
+/// the cost-payment step.
+///
+/// This is at least as permissive as [`can_pay_cost_after_auto_tap`]: it short-
+/// circuits to that path first and only attempts the manual extension when the
+/// auto-tap simulator alone cannot cover the cost. Callers that must require
+/// pure auto-payability (`pay_mana_cost`, the `Auto`-mode auto-finalize check
+/// in `casting_costs::enter_payment_step`) must continue to call the auto-tap
+/// predicate directly — only the castability/legal-actions surface widens to
+/// "manual is reachable."
+///
+/// Colored-shard feasibility under non-tap sources is conservatively rejected:
+/// if any colored shard remains after the existing pool is subtracted, this
+/// predicate returns `false`. Pure-generic feasibility is sufficient for the
+/// principal repro (Krark-Clan Ironworks producing `{C}{C}` — issue #562).
+/// Colored-shard widening — covering Phyrexian Altar, Lion's Eye Diamond, and
+/// other any-color non-tap mana abilities — is tracked in issue #1234.
+//
+// CR 117.1d + CR 601.2g: Mana abilities (including sacrifice-cost,
+// discard-cost, and pay-life mana abilities) may be activated during cost
+// payment. Castability must account for them, or spells with feasibly payable
+// costs are never offered (the original #562 bug).
+pub(super) fn can_feasibly_pay_mana_cost(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    // CR 117.1d: Auto-tap path remains the fast path. Anything that can be
+    // paid with only `{T}` activations was castable before this predicate
+    // existed and must continue to be castable now.
+    if let Some(sid) = source_id {
+        if can_pay_cost_after_auto_tap(state, player, sid, cost) {
+            return true;
+        }
+    }
+
+    let crate::types::mana::ManaCost::Cost { .. } = cost else {
+        // NoCost / SelfManaCost are unconditionally payable (they have no
+        // mana shards to cover); the auto-tap path already returned true above
+        // when `source_id` was `Some`, so this only fires for the rare
+        // `source_id == None` callers.
+        return true;
+    };
+
+    // Reduce the cost by the current floating mana pool. `reduce_cost_by_pool`
+    // is the dry-run twin of the real payment path — it respects spell
+    // restrictions and any-color permissions exactly as the real pay does.
+    let Some(player_data) = state.players.iter().find(|p| p.id == player) else {
+        return false;
+    };
+
+    let spell_meta = source_id.and_then(|sid| build_spell_meta(state, player, sid));
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    let any_color = source_id.is_some_and(|sid| {
+        player_can_spend_as_any_color_for_payment(state, player, sid, spell_ctx.as_ref())
+    });
+    let residual = mana_payment::reduce_cost_by_pool(
+        &player_data.mana_pool,
+        cost,
+        spell_ctx.as_ref(),
+        any_color,
+    );
+
+    let (residual_shards, residual_generic) = match &residual {
+        crate::types::mana::ManaCost::NoCost | crate::types::mana::ManaCost::SelfManaCost => {
+            return true
+        }
+        crate::types::mana::ManaCost::Cost { shards, generic } => (shards, *generic),
+    };
+
+    // CR 117.1: Colored-shard feasibility under non-tap mana sources is
+    // deferred (see issue #1234 — Phyrexian Altar, Lion's Eye Diamond, etc.).
+    // Pure-generic residual is sufficient for the principal repro (KCI
+    // sacrificing artifacts for `{C}{C}`).
+    if !residual_shards.is_empty() {
+        return false;
+    }
+    if residual_generic == 0 {
+        return true;
+    }
+
+    // CR 117.1d + CR 605.3a: Sum the per-permanent feasible mana capacity
+    // across the controller's untapped non-excluded battlefield permanents.
+    // Each contribution is the largest single mana-ability output the
+    // controller could currently activate (covering Sacrifice / Discard /
+    // PayLife costs that auto-tap cannot simulate).
+    //
+    // The per-permanent sum over-counts in chain-sacrifice configurations
+    // (e.g. 2× KCI + 1 fodder reports cap=4 when the actual reachable yield
+    // is 2). The trade-off — over-count rather than under-count, since
+    // under-count was the original #562 bug — is intentional. A bounded-
+    // flow model that respects sacrifice/discard/life supply is tracked in
+    // issue #1235.
+    let excluded = source_id;
+    let capacity: u32 = state
+        .battlefield
+        .iter()
+        .filter(|id| Some(**id) != excluded)
+        .map(|&id| super::mana_sources::feasible_mana_capacity(state, id, player))
+        .sum();
+
+    capacity >= residual_generic
 }
 
 /// Returns true if the player can pay this activated-ability mana cost after
@@ -8177,10 +8472,10 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        AbilityCost, AbilityTag, ActivationRestriction, AggregateFunction, BasicLandType,
-        CastPermissionConstraint, CastVariantPaid, CastingPermission, ChosenAttribute,
-        ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef, CostCategory,
-        FilterProp, GainLifePlayer, GameRestriction, KickerVariant, ManaContribution,
+        AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
+        BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
+        ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
+        CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant, ManaContribution,
         ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
         ModalSelectionConstraint, ObjectProperty, ProhibitedActivity, PtValue, QuantityExpr,
         QuantityRef, RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint,
@@ -12766,6 +13061,92 @@ mod tests {
     }
 
     #[test]
+    fn required_pay_x_life_additional_cost_sets_chosen_x_for_resolution() {
+        let mut state = setup_game_at_main_phase();
+        let own_creature = create_object(
+            &mut state,
+            CardId(12360),
+            PlayerId(0),
+            "Own Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opposing_creature = create_object(
+            &mut state,
+            CardId(12361),
+            PlayerId(1),
+            "Opposing Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for creature in [own_creature, opposing_creature] {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(5);
+            obj.base_toughness = Some(5);
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(12362),
+            PlayerId(0),
+            "Synthetic Deluge".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::NoCost;
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PumpAll {
+                    power: PtValue::Variable("-X".to_string()),
+                    toughness: PtValue::Variable("-X".to_string()),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ));
+        }
+
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CardId(12362),
+            &mut Vec::new(),
+        )
+        .expect("pay-X-life additional cost should prompt for X");
+        state.waiting_for = waiting;
+        match state.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 20),
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+        assert_eq!(state.players[0].life, 17);
+        assert_eq!(state.stack.len(), 1);
+
+        for _ in 0..5 {
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&own_creature].power, Some(2));
+        assert_eq!(state.objects[&own_creature].toughness, Some(2));
+        assert_eq!(state.objects[&opposing_creature].power, Some(2));
+        assert_eq!(state.objects[&opposing_creature].toughness, Some(2));
+    }
+
+    #[test]
     fn cant_pay_cost_sacrifice_filters_forbidden_permanents_only() {
         let mut state = setup_game_at_main_phase();
         let spell = create_object(
@@ -13850,6 +14231,82 @@ mod tests {
             result,
             WaitingFor::ManaPayment {
                 convoke_mode: Some(ConvokeMode::Convoke),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn improvise_castability_preview_counts_untapped_artifacts_for_generic_cost() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_object(
+            &mut state,
+            CardId(29),
+            PlayerId(0),
+            "Kappa Cannoneer".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Improvise);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 5,
+            };
+        }
+        for index in 0..5 {
+            let artifact = create_object(
+                &mut state,
+                CardId(30 + index),
+                PlayerId(0),
+                format!("Artifact {}", index),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&artifact)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+        assert!(can_pay_cost_after_auto_tap(
+            &state,
+            PlayerId(0),
+            spell,
+            &state.objects[&spell].mana_cost
+        ));
+        assert!(can_cast_object_now(&state, PlayerId(0), spell));
+        let legal_actions = crate::ai_support::legal_actions(&state);
+        assert!(
+            legal_actions.iter().any(|action| matches!(
+                action,
+                GameAction::CastSpell {
+                    object_id,
+                    card_id,
+                    ..
+                } if *object_id == spell && *card_id == CardId(29)
+            )),
+            "legal actions must offer the Improvise cast when artifacts cover generic mana"
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(29),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Improvise),
                 ..
             }
         ));
