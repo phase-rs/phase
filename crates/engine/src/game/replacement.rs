@@ -18,7 +18,7 @@ use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{EtbTapState, ProposedEvent, ReplacementId};
+use crate::types::proposed_event::{CounterMoveStage, EtbTapState, ProposedEvent, ReplacementId};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -1160,7 +1160,17 @@ fn lose_life_applier(
 // --- 7. AddCounter ---
 
 fn add_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    matches!(event, ProposedEvent::AddCounter { .. })
+    matches!(
+        event,
+        ProposedEvent::AddCounter { count, .. } if *count > 0
+    ) || matches!(
+        event,
+        ProposedEvent::MoveCounter {
+            stage: CounterMoveStage::Add,
+            add_count,
+            ..
+        } if *add_count > 0
+    )
 }
 
 fn add_counter_applier(
@@ -1178,41 +1188,71 @@ fn add_counter_applier(
     let Some(modification) = modification else {
         return ApplyResult::Modified(event);
     };
-    if let ProposedEvent::AddCounter {
-        actor,
-        object_id,
-        counter_type,
-        count,
-        applied,
-    } = event
-    {
-        // CR 614.1a: Modify counter count per replacement effect.
-        let new_count = match modification {
-            QuantityModification::Double => count.saturating_mul(2),
-            QuantityModification::Plus { value } => count.saturating_add(value),
-            QuantityModification::Minus { value } => count.saturating_sub(value),
-            // CR 614.6 + CR 614.7 + CR 122.1: "~ can't have counters put on it."
-            // — the proposed counter-placement event never happens
-            // (Melira's Keepers class). The replacement fires, but its outcome
-            // is to fully suppress the event rather than scale the count.
-            QuantityModification::Prevent => return ApplyResult::Prevented,
-        };
-        ApplyResult::Modified(ProposedEvent::AddCounter {
+    if matches!(modification, QuantityModification::Prevent) {
+        // CR 614.6 + CR 614.7 + CR 122.1: "~ can't have counters put on it."
+        // — the proposed counter-placement event never happens
+        // (Melira's Keepers class). The replacement fires, but its outcome
+        // is to fully suppress the event rather than scale the count.
+        return ApplyResult::Prevented;
+    }
+    let new_count = |count: u32| match modification {
+        QuantityModification::Double => count.saturating_mul(2),
+        QuantityModification::Plus { value } => count.saturating_add(value),
+        QuantityModification::Minus { value } => count.saturating_sub(value),
+        QuantityModification::Prevent => unreachable!(),
+    };
+
+    match event {
+        ProposedEvent::AddCounter {
             actor,
             object_id,
             counter_type,
-            count: new_count,
+            count,
             applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
+        } => ApplyResult::Modified(ProposedEvent::AddCounter {
+            actor,
+            object_id,
+            counter_type,
+            count: new_count(count),
+            applied,
+        }),
+        ProposedEvent::MoveCounter {
+            actor,
+            source_id,
+            destination_id,
+            counter_type,
+            remove_count,
+            add_count,
+            stage: CounterMoveStage::Add,
+            applied,
+        } => ApplyResult::Modified(ProposedEvent::MoveCounter {
+            actor,
+            source_id,
+            destination_id,
+            counter_type,
+            remove_count,
+            add_count: new_count(add_count),
+            stage: CounterMoveStage::Add,
+            applied,
+        }),
+        event => ApplyResult::Modified(event),
     }
 }
 
 // --- 8. RemoveCounter ---
 
 fn remove_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    matches!(event, ProposedEvent::RemoveCounter { .. })
+    matches!(
+        event,
+        ProposedEvent::RemoveCounter { count, .. } if *count > 0
+    ) || matches!(
+        event,
+        ProposedEvent::MoveCounter {
+            stage: CounterMoveStage::Remove,
+            remove_count,
+            ..
+        } if *remove_count > 0
+    )
 }
 
 fn remove_counter_applier(
@@ -2788,14 +2828,40 @@ pub fn find_applicable_replacements(
                     // the discriminator, so the engine honors that here.
                     // `None` and `Some(CounterMatch::Any)` accept any counter
                     // type (Doubling Season, modern wording).
-                    if let (
-                        Some(m),
-                        ProposedEvent::AddCounter {
-                            counter_type: ev_ct,
-                            ..
-                        },
-                    ) = (&repl_def.counter_match, event)
-                    {
+                    let event_counter_type = match (&repl_def.event, event) {
+                        (
+                            ReplacementEvent::AddCounter,
+                            ProposedEvent::AddCounter {
+                                counter_type: ev_ct,
+                                ..
+                            },
+                        )
+                        | (
+                            ReplacementEvent::AddCounter,
+                            ProposedEvent::MoveCounter {
+                                stage: CounterMoveStage::Add,
+                                counter_type: ev_ct,
+                                ..
+                            },
+                        )
+                        | (
+                            ReplacementEvent::RemoveCounter,
+                            ProposedEvent::RemoveCounter {
+                                counter_type: ev_ct,
+                                ..
+                            },
+                        )
+                        | (
+                            ReplacementEvent::RemoveCounter,
+                            ProposedEvent::MoveCounter {
+                                stage: CounterMoveStage::Remove,
+                                counter_type: ev_ct,
+                                ..
+                            },
+                        ) => Some(ev_ct),
+                        _ => None,
+                    };
+                    if let (Some(m), Some(ev_ct)) = (&repl_def.counter_match, event_counter_type) {
                         if !m.matches(ev_ct) {
                             continue;
                         }

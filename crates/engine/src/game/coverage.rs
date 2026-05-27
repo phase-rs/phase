@@ -1976,6 +1976,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             counter_type,
             count,
             mode,
+            selection: _,
             target,
         } => {
             d.push(("source".into(), fmt_target(source)));
@@ -9032,6 +9033,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: Some(QuantityExpr::Fixed { value: 1 }),
                     mode: CounterTransferMode::Move,
+                    selection: crate::types::ability::CounterMoveSelection::StackTarget,
                     target: TargetFilter::Any,
                 },
             )

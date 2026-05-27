@@ -1302,6 +1302,7 @@ impl GameRunner {
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",
+            WaitingFor::MoveCountersDistribution { .. } => "MoveCountersDistribution",
             WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",
             WaitingFor::RetargetChoice { .. } => "RetargetChoice",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",

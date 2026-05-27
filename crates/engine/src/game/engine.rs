@@ -3944,6 +3944,35 @@ fn apply_action(
                 state.waiting_for.clone()
             }
         }
+        (
+            WaitingFor::MoveCountersDistribution {
+                player,
+                source_id,
+                available,
+                destinations,
+                pending_effect,
+                ..
+            },
+            GameAction::ChooseCounterMoveDistribution { selections },
+        ) => {
+            let p = *player;
+            effects::counters::validate_and_queue_counter_move_distribution(
+                state,
+                &selections,
+                *source_id,
+                available,
+                destinations,
+                pending_effect,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            effects::counters::drain_pending_counter_moves(state, &mut events);
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                effects::drain_pending_continuation(state, &mut events);
+            }
+            state.waiting_for.clone()
+        }
         // CR 115.7: Retarget a spell or ability on the stack via the dialog
         // path — the multi-target (`All`-scope) UI submits every new target at
         // once.

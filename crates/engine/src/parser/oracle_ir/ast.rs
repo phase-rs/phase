@@ -1038,6 +1038,7 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: Option<QuantityExpr>,
         mode: crate::types::ability::CounterTransferMode,
+        selection: crate::types::ability::CounterMoveSelection,
         target: TargetFilter,
     },
 }

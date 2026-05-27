@@ -346,6 +346,10 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// than rolling their own `take + resolve_ability_chain`, so the parent
 /// event is never silently dropped.
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    counters::drain_pending_counter_moves(state, events);
+    if waits_for_resolution_choice(&state.waiting_for) {
+        return;
+    }
     if let Some(cont) = state.pending_continuation.take() {
         let PendingContinuation { chain, parent_kind } = cont;
         let source_id = chain.source_id;
@@ -769,6 +773,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ExploreChoice { .. }
             | WaitingFor::CopyRetarget { .. }
             | WaitingFor::DistributeAmong { .. }
+            | WaitingFor::MoveCountersDistribution { .. }
             | WaitingFor::PayAmountChoice { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }

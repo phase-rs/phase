@@ -13,7 +13,9 @@ use crate::types::actions::{
 };
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::{ConvokeMode, GameState, TargetSelectionSlot, WaitingFor};
+use crate::types::game_state::{
+    ConvokeMode, CounterMoveChoice, GameState, TargetSelectionSlot, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
 use crate::types::match_config::DeckCardCount;
@@ -198,6 +200,87 @@ fn order_triggers_candidates(player: PlayerId, len: usize) -> Vec<CandidateActio
         .collect()
 }
 
+fn counter_move_distribution_candidates(
+    player: PlayerId,
+    available: &[(crate::types::counter::CounterType, u32)],
+    destinations: &[ObjectId],
+) -> Vec<CandidateAction> {
+    let mut actions = vec![candidate(
+        GameAction::ChooseCounterMoveDistribution { selections: vec![] },
+        TacticalClass::Selection,
+        Some(player),
+    )];
+    let Some((counter_type, count)) = available.iter().find(|(_, count)| *count > 0) else {
+        return actions;
+    };
+    let Some(&first_destination) = destinations.first() else {
+        return actions;
+    };
+    let all_to_first: Vec<CounterMoveChoice> = available
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(counter_type, count)| CounterMoveChoice {
+            destination_id: first_destination,
+            counter_type: counter_type.clone(),
+            count: *count,
+        })
+        .collect();
+    if !all_to_first.is_empty() {
+        actions.push(candidate(
+            GameAction::ChooseCounterMoveDistribution {
+                selections: all_to_first,
+            },
+            TacticalClass::Selection,
+            Some(player),
+        ));
+    }
+    actions.push(candidate(
+        GameAction::ChooseCounterMoveDistribution {
+            selections: vec![CounterMoveChoice {
+                destination_id: first_destination,
+                counter_type: counter_type.clone(),
+                count: *count,
+            }],
+        },
+        TacticalClass::Selection,
+        Some(player),
+    ));
+    actions.push(candidate(
+        GameAction::ChooseCounterMoveDistribution {
+            selections: vec![CounterMoveChoice {
+                destination_id: first_destination,
+                counter_type: counter_type.clone(),
+                count: 1,
+            }],
+        },
+        TacticalClass::Selection,
+        Some(player),
+    ));
+    if *count >= 2 {
+        if let Some(&second_destination) = destinations.get(1) {
+            actions.push(candidate(
+                GameAction::ChooseCounterMoveDistribution {
+                    selections: vec![
+                        CounterMoveChoice {
+                            destination_id: first_destination,
+                            counter_type: counter_type.clone(),
+                            count: 1,
+                        },
+                        CounterMoveChoice {
+                            destination_id: second_destination,
+                            counter_type: counter_type.clone(),
+                            count: count.saturating_sub(1),
+                        },
+                    ],
+                },
+                TacticalClass::Selection,
+                Some(player),
+            ));
+        }
+    }
+    actions
+}
+
 fn permute_into(
     items: &[usize],
     current: &mut Vec<usize>,
@@ -243,6 +326,12 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::MoveCountersDistribution {
+            player,
+            available,
+            destinations,
+            ..
+        } => counter_move_distribution_candidates(*player, available, destinations),
         // CR 603.3b: Trigger ordering enumeration. Full n! permutations explode
         // (8! = 40320) so cap at n <= 4 (24 perms); larger groups generate only
         // identity + reverse, which is enough variety for search lookahead to
@@ -507,6 +596,12 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             convoke_mode,
         } => mana_payment_actions(state, *player, *convoke_mode),
+        WaitingFor::MoveCountersDistribution {
+            player,
+            available,
+            destinations,
+            ..
+        } => counter_move_distribution_candidates(*player, available, destinations),
         WaitingFor::TargetSelection {
             player,
             target_slots,

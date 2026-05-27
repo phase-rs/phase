@@ -1,9 +1,9 @@
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, CardTypeSetSource, CastManaSpentMetric,
-    CombatRelationSubject, ControllerRef, Effect, FilterProp, GameRestriction, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, ObjectScope, PlayerFilter, QuantityExpr,
-    QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext, TargetChoiceTiming,
-    TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, FilterProp,
+    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, ObjectScope,
+    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
+    TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -18,6 +18,19 @@ use super::players;
 use super::quantity::resolve_quantity_with_targets;
 use super::targeting;
 use super::triggers;
+
+fn move_counter_stack_target_filters<'a>(
+    source: &'a TargetFilter,
+    target: &'a TargetFilter,
+    selection: CounterMoveSelection,
+) -> Vec<&'a TargetFilter> {
+    match selection {
+        CounterMoveSelection::StackTarget | CounterMoveSelection::StackTargetAnyNumber => {
+            vec![source, target]
+        }
+        CounterMoveSelection::ResolutionDistributionAnyNumber => vec![source],
+    }
+}
 
 /// CR 113.1a: Build a resolved ability from its definition, preserving sub-ability chains,
 /// conditions, durations, and targeting configuration.
@@ -879,9 +892,15 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
     let mut validated = ability.clone();
     validated.targets = if is_per_opponent_target_fanout(&validated) {
         validate_per_opponent_target_fanout_targets(state, &validated)
-    } else if let Effect::MoveCounters { source, target, .. } = &validated.effect {
-        [source, target]
-            .iter()
+    } else if let Effect::MoveCounters {
+        source,
+        target,
+        selection,
+        ..
+    } = &validated.effect
+    {
+        move_counter_stack_target_filters(source, target, *selection)
+            .into_iter()
             .filter(|filter| !filter.is_context_ref())
             .zip(validated.targets.iter())
             .filter_map(|(filter, target_ref)| {
@@ -1012,8 +1031,14 @@ fn collect_target_slots(
         return Ok(());
     }
 
-    if let Effect::MoveCounters { source, target, .. } = &ability.effect {
-        for filter in [source, target] {
+    if let Effect::MoveCounters {
+        source,
+        target,
+        selection,
+        ..
+    } = &ability.effect
+    {
+        for filter in move_counter_stack_target_filters(source, target, *selection) {
             if filter.is_context_ref() {
                 continue;
             }
@@ -1766,8 +1791,14 @@ fn collect_target_slot_specs(
         return;
     }
 
-    if let Effect::MoveCounters { source, target, .. } = &ability.effect {
-        for filter in [source, target] {
+    if let Effect::MoveCounters {
+        source,
+        target,
+        selection,
+        ..
+    } = &ability.effect
+    {
+        for filter in move_counter_stack_target_filters(source, target, *selection) {
             if !filter.is_context_ref() {
                 specs.push(TargetSlotSpec {
                     filter: filter.clone(),
@@ -2906,8 +2937,14 @@ fn assign_targets_recursive(
         }
     }
 
-    if let Effect::MoveCounters { source, target, .. } = &ability.effect {
-        for filter in [source, target] {
+    if let Effect::MoveCounters {
+        source,
+        target,
+        selection,
+        ..
+    } = &ability.effect
+    {
+        for filter in move_counter_stack_target_filters(source, target, *selection) {
             if !filter.is_context_ref() {
                 if let Some(target) = targets.get(*next_target) {
                     ability.targets.push(target.clone());
@@ -3092,8 +3129,14 @@ fn assign_selected_slots_recursive(
         }
     }
 
-    if let Effect::MoveCounters { source, target, .. } = &ability.effect {
-        for filter in [source, target] {
+    if let Effect::MoveCounters {
+        source,
+        target,
+        selection,
+        ..
+    } = &ability.effect
+    {
+        for filter in move_counter_stack_target_filters(source, target, *selection) {
             if !filter.is_context_ref() {
                 let Some(selected_slot) = selected_slots.get(*next_slot) else {
                     return Err(EngineError::InvalidAction(
@@ -3474,13 +3517,18 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     } else {
         0
     };
-    let move_counter_targets = if let Effect::MoveCounters { source, target, .. } = &ability.effect
+    let move_counter_targets = if let Effect::MoveCounters {
+        source,
+        target,
+        selection,
+        ..
+    } = &ability.effect
     {
         if ability.optional_targeting {
             0
         } else {
-            [source, target]
-                .iter()
+            move_counter_stack_target_filters(source, target, *selection)
+                .into_iter()
                 .filter(|filter| !filter.is_context_ref())
                 .count()
         }
@@ -6357,6 +6405,7 @@ mod tests {
                 counter_type: None,
                 count: Some(QuantityExpr::Fixed { value: 1 }),
                 mode: CounterTransferMode::Move,
+                selection: CounterMoveSelection::StackTarget,
                 target: controlled_creature,
             },
             vec![],
@@ -6395,6 +6444,7 @@ mod tests {
                 counter_type: None,
                 count: Some(QuantityExpr::Fixed { value: 1 }),
                 mode: CounterTransferMode::Move,
+                selection: CounterMoveSelection::StackTarget,
                 target: controlled_creature,
             },
             vec![],
@@ -6428,6 +6478,7 @@ mod tests {
                 counter_type: None,
                 count: Some(QuantityExpr::Fixed { value: 1 }),
                 mode: CounterTransferMode::Move,
+                selection: CounterMoveSelection::StackTarget,
                 target: controlled_creature,
             },
             vec![],

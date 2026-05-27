@@ -810,6 +810,14 @@ pub enum CounterTransferMode {
     Put,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CounterMoveSelection {
+    #[default]
+    StackTarget,
+    StackTargetAnyNumber,
+    ResolutionDistributionAnyNumber,
+}
+
 /// CR 701.6 + CR 608.2c: A follow-up instruction carried by `Effect::Counter`
 /// that acts on the *source permanent* of an ability countered by the effect.
 ///
@@ -5599,6 +5607,8 @@ pub enum Effect {
         /// Whether to remove counters from the source or only put matching counters.
         #[serde(default = "default_counter_transfer_mode")]
         mode: CounterTransferMode,
+        #[serde(default)]
+        selection: CounterMoveSelection,
         /// Where counters go.
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,

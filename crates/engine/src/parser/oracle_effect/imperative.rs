@@ -6174,6 +6174,7 @@ pub(super) fn parse_zone_counter_ast(
                 counter_type,
                 count,
                 mode,
+                selection,
                 target,
             },
             _rem,
@@ -6184,6 +6185,7 @@ pub(super) fn parse_zone_counter_ast(
                 counter_type,
                 count,
                 mode,
+                selection,
                 target,
             });
         }
@@ -6262,6 +6264,7 @@ pub(super) fn parse_zone_counter_ast(
             counter_type,
             count,
             mode,
+            selection,
             target,
         }) = try_parse_move_counters_from(lower, ctx)
         {
@@ -6270,6 +6273,7 @@ pub(super) fn parse_zone_counter_ast(
                 counter_type,
                 count,
                 mode,
+                selection,
                 target,
             });
         }
@@ -6416,12 +6420,14 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             counter_type,
             count,
             mode,
+            selection,
             target,
         } => Effect::MoveCounters {
             source,
             counter_type,
             count,
             mode,
+            selection,
             target,
         },
     }

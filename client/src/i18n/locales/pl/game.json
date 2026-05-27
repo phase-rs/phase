@@ -1374,5 +1374,9 @@
     "PostCombatMain": "Główna faza 2",
     "End": "Krok końcowy",
     "Cleanup": "Sprzątanie"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }
