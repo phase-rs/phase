@@ -65,7 +65,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::char;
-use nom::combinator::opt;
+use nom::combinator::{opt, value};
 use nom::Parser;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
@@ -73,7 +73,9 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, split_keyword_list};
 use super::super::oracle_util::canonicalize_subtype_name;
 use crate::parser::oracle_ir::context::ParseContext;
-use crate::types::ability::{ContinuousModification, QuantityExpr};
+use crate::types::ability::{
+    ContinuousModification, ObjectScope, QuantityExpr, QuantityRef, RoundingMode,
+};
 use crate::types::card_type::{CoreType, Supertype};
 
 /// CR 707.9a: ", except {except_body} [and {except_body}]*[.]"
@@ -146,6 +148,8 @@ pub(crate) fn parse_except_clause<'a>(
 ///   - `<possessive> name is ~`                                → SetName(card_name)
 ///   - `<subject>'s N/M {type list} in addition to its other types`
 ///     → SetPower + SetToughness + AddType/AddSubtype per word
+///   - `<subject> power/toughness is half <copy source> power/toughness`
+///     → SetPowerDynamic + SetToughnessDynamic using copied source values
 ///   - `<subject pronoun> has this ability`
 ///     → RetainPrintedTriggerFromSource (when ctx provides the index)
 ///   - `it's a(n) {core_type} in addition to its other types`  → AddType
@@ -159,6 +163,9 @@ pub(crate) fn parse_except_body<'a>(
 ) -> Option<(&'a str, Vec<ContinuousModification>)> {
     if let Some((rest, name_mod)) = parse_name_override(input, card_name) {
         return Some((rest, vec![name_mod]));
+    }
+    if let Some((rest, mods)) = parse_half_pt_override(input) {
+        return Some((rest, mods));
     }
     if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
         return Some((rest, mods));
@@ -223,6 +230,114 @@ fn parse_name_override<'a>(
             name: card_name.to_string(),
         },
     ))
+}
+
+/// CR 707.9b + CR 107.1a: "their power is half that creature's power and
+/// their toughness is half that creature's toughness" — Saw in Half class.
+///
+/// Token-copy exceptions are applied after the copied copiable values have
+/// been stamped onto the new token, so `ObjectScope::Source` deliberately
+/// points at the synthesized token. At that point its source P/T equals the
+/// copied object's copiable P/T, which is the value the exception halves.
+fn parse_half_pt_override(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = parse_possessive_subject(input).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" power is half ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = parse_copy_source_power_reference(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" and ").parse(rest).ok()?;
+    let (rest, _) = parse_possessive_subject(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" toughness is half ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = parse_copy_source_toughness_reference(rest).ok()?;
+
+    let (rest, rounding) = parse_rounding_sentence(rest).unwrap_or((rest, RoundingMode::Up));
+    let power = QuantityExpr::DivideRounded {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        }),
+        divisor: 2,
+        rounding,
+    };
+    let toughness = QuantityExpr::DivideRounded {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+        }),
+        divisor: 2,
+        rounding,
+    };
+
+    Some((
+        rest,
+        vec![
+            ContinuousModification::SetPowerDynamic { value: power },
+            ContinuousModification::SetToughnessDynamic { value: toughness },
+        ],
+    ))
+}
+
+fn parse_possessive_subject(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("its"),
+            tag("their"),
+            tag("his"),
+            tag("her"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_copy_source_power_reference(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("that creature's power"),
+            tag("that card's power"),
+            tag("its power"),
+            tag("their power"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_copy_source_toughness_reference(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("that creature's toughness"),
+            tag("that card's toughness"),
+            tag("its toughness"),
+            tag("their toughness"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_rounding_sentence(input: &str) -> Option<(&str, RoundingMode)> {
+    let (rest, rounding) = opt((
+        alt((
+            tag::<_, _, OracleError<'_>>(". round "),
+            tag(", rounded "),
+            tag(" rounded "),
+        )),
+        alt((
+            value(RoundingMode::Up, tag::<_, _, OracleError<'_>>("up")),
+            value(RoundingMode::Down, tag("down")),
+        )),
+        opt(tag(" each time")),
+    ))
+    .parse(input)
+    .ok()?;
+    rounding.map(|(_, rounding, _)| (rest, rounding))
 }
 
 /// CR 707.9b: "<subject> N/M {type list} in addition to its other types" where
@@ -704,6 +819,7 @@ fn skip_to_next_conjunction(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{ObjectScope, QuantityRef, RoundingMode};
     use crate::types::keywords::Keyword;
 
     #[test]
@@ -737,6 +853,43 @@ mod tests {
                 name: "Test Card".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn half_power_toughness_override_emits_dynamic_setters() {
+        let (rest, mods) = parse_except_clause(
+            ", except their power is half that creature's power and their toughness is half that creature's toughness. round up each time",
+            "",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            mods.as_slice(),
+            [
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                    },
+                },
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::DivideRounded {
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                        ..
+                    },
+                },
+            ] if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    }
+                }
+            )
+        ));
     }
 
     // CR 707.9b: An empty `card_name` (no card name threaded through the

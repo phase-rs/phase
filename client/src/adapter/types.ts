@@ -1037,7 +1037,7 @@ export type WaitingFor =
   | { type: "BeholdForCost"; data: { player: PlayerId; count: number; choices: ObjectId[]; action: "ChooseOrReveal" | "ExileChosen"; pending_cast: PendingCast } }
   | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "DiscardForManaAbility"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_mana_ability: unknown } }
-  | { type: "ExileFromBattlefieldForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
+  | { type: "ExileForManaAbility"; data: { player: PlayerId; count: number; zone: Zone; cards: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "SacrificeForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
   | {

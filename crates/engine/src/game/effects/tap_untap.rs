@@ -1,13 +1,15 @@
 use std::collections::HashSet;
 
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::zones::Zone;
 
 /// CR 603.7e + CR 608.2c: Resolve the objects a `Tap`/`Untap` effect acts on.
 ///
@@ -66,34 +68,18 @@ pub fn resolve_tap(
     let Effect::Tap { target } = &ability.effect else {
         return Err(EffectError::MissingParam("Tap".to_string()));
     };
+    if prompt_resolution_tap_untap_choice(state, ability, target, EffectKind::Tap, events) {
+        return Ok(());
+    }
     let target_ids = tap_untap_target_ids(state, ability, target);
     for obj_id in target_ids {
-        let proposed = ProposedEvent::Tap {
-            object_id: obj_id,
-            applied: HashSet::new(),
+        if let TapUntapOutcome::NeedsChoice(player) =
+            process_one_tap(state, obj_id, ability.source_id, events)?
+        {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
         };
-
-        match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(event) => {
-                if let ProposedEvent::Tap { object_id, .. } = event {
-                    let obj = state
-                        .objects
-                        .get_mut(&object_id)
-                        .ok_or(EffectError::ObjectNotFound(object_id))?;
-                    obj.tapped = true;
-                    events.push(GameEvent::PermanentTapped {
-                        object_id,
-                        caused_by: Some(ability.source_id),
-                    });
-                }
-            }
-            ReplacementResult::Prevented => {}
-            ReplacementResult::NeedsChoice(player) => {
-                state.waiting_for =
-                    crate::game::replacement::replacement_choice_waiting_for(player, state);
-                return Ok(());
-            }
-        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -124,31 +110,16 @@ pub fn resolve_untap(
     let Effect::Untap { target } = &ability.effect else {
         return Err(EffectError::MissingParam("Untap".to_string()));
     };
+    if prompt_resolution_tap_untap_choice(state, ability, target, EffectKind::Untap, events) {
+        return Ok(());
+    }
     let target_ids = tap_untap_target_ids(state, ability, target);
     for obj_id in target_ids {
-        let proposed = ProposedEvent::Untap {
-            object_id: obj_id,
-            applied: HashSet::new(),
+        if let TapUntapOutcome::NeedsChoice(player) = process_one_untap(state, obj_id, events)? {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
         };
-
-        match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(event) => {
-                if let ProposedEvent::Untap { object_id, .. } = event {
-                    let obj = state
-                        .objects
-                        .get_mut(&object_id)
-                        .ok_or(EffectError::ObjectNotFound(object_id))?;
-                    obj.tapped = false;
-                    events.push(GameEvent::PermanentUntapped { object_id });
-                }
-            }
-            ReplacementResult::Prevented => {}
-            ReplacementResult::NeedsChoice(player) => {
-                state.waiting_for =
-                    crate::game::replacement::replacement_choice_waiting_for(player, state);
-                return Ok(());
-            }
-        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -157,6 +128,127 @@ pub fn resolve_untap(
     });
 
     Ok(())
+}
+
+pub(crate) enum TapUntapOutcome {
+    Complete,
+    NeedsChoice(crate::types::player::PlayerId),
+}
+
+pub(crate) fn process_one_tap(
+    state: &mut GameState,
+    object_id: ObjectId,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<TapUntapOutcome, EffectError> {
+    let proposed = ProposedEvent::Tap {
+        object_id,
+        applied: HashSet::new(),
+    };
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::Tap { object_id, .. } = event {
+                let obj = state
+                    .objects
+                    .get_mut(&object_id)
+                    .ok_or(EffectError::ObjectNotFound(object_id))?;
+                obj.tapped = true;
+                events.push(GameEvent::PermanentTapped {
+                    object_id,
+                    caused_by: Some(source_id),
+                });
+            }
+            Ok(TapUntapOutcome::Complete)
+        }
+        ReplacementResult::Prevented => Ok(TapUntapOutcome::Complete),
+        ReplacementResult::NeedsChoice(player) => Ok(TapUntapOutcome::NeedsChoice(player)),
+    }
+}
+
+pub(crate) fn process_one_untap(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<TapUntapOutcome, EffectError> {
+    let proposed = ProposedEvent::Untap {
+        object_id,
+        applied: HashSet::new(),
+    };
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if let ProposedEvent::Untap { object_id, .. } = event {
+                let obj = state
+                    .objects
+                    .get_mut(&object_id)
+                    .ok_or(EffectError::ObjectNotFound(object_id))?;
+                obj.tapped = false;
+                events.push(GameEvent::PermanentUntapped { object_id });
+            }
+            Ok(TapUntapOutcome::Complete)
+        }
+        ReplacementResult::Prevented => Ok(TapUntapOutcome::Complete),
+        ReplacementResult::NeedsChoice(player) => Ok(TapUntapOutcome::NeedsChoice(player)),
+    }
+}
+
+fn prompt_resolution_tap_untap_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+    effect_kind: EffectKind,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if ability.target_choice_timing != TargetChoiceTiming::Resolution || !ability.targets.is_empty()
+    {
+        return false;
+    }
+    let Some(spec) = ability.multi_target.as_ref() else {
+        return false;
+    };
+
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let eligible: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| crate::game::filter::matches_target_filter(state, *id, target, &ctx))
+        .collect();
+    let max_count = spec
+        .max
+        .as_ref()
+        .map(|qty| resolve_quantity_with_targets(state, qty, ability).max(0) as usize)
+        .unwrap_or(eligible.len())
+        .min(eligible.len());
+
+    if max_count == 0 && spec.min == 0 {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return true;
+    }
+
+    state.waiting_for = WaitingFor::EffectZoneChoice {
+        player: ability.controller,
+        cards: eligible,
+        count: max_count,
+        min_count: spec.min.min(max_count),
+        up_to: spec.min == 0,
+        source_id: ability.source_id,
+        effect_kind,
+        zone: Zone::Battlefield,
+        destination: None,
+        enter_tapped: false,
+        enter_transformed: false,
+        under_your_control: false,
+        enters_attacking: false,
+        owner_library: false,
+        track_exiled_by_source: false,
+        count_param: 0,
+    };
+    true
 }
 
 /// CR 701.26a: Tap all permanents matching the filter.
@@ -276,7 +368,11 @@ pub fn resolve_untap_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::{
+        Effect, MultiTargetSpec, QuantityExpr, TargetChoiceTiming, TargetFilter, TypeFilter,
+        TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -413,6 +509,96 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentUntapped { .. })));
+    }
+
+    #[test]
+    fn resolution_timed_multi_untap_prompts_for_battlefield_lands() {
+        let mut state = GameState::new_two_player(42);
+        let land_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        let land_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land_a)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state
+            .objects
+            .get_mut(&land_b)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Untap {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Land],
+                    controller: None,
+                    properties: vec![],
+                }),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }));
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        let mut events = Vec::new();
+
+        resolve_untap(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                up_to,
+                effect_kind,
+                zone,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 2);
+                assert_eq!(*min_count, 0);
+                assert!(*up_to);
+                assert_eq!(*effect_kind, EffectKind::Untap);
+                assert_eq!(*zone, Zone::Battlefield);
+                assert!(cards.contains(&land_a));
+                assert!(cards.contains(&land_b));
+                assert!(!cards.contains(&creature));
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+        assert!(events.is_empty());
     }
 
     #[test]

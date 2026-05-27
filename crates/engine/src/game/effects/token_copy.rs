@@ -104,6 +104,25 @@ pub fn resolve(
             .ok_or_else(|| {
                 EffectError::MissingParam("CopyTokenOf requires a cost-paid object".to_string())
             })?
+    } else if matches!(
+        target_filter,
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+    ) {
+        let effective_filter =
+            crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
+        let id = match &effective_filter {
+            TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
+            _ => unreachable!("tracked-set filter resolved to non-tracked filter"),
+        };
+        let filter_ctx = FilterContext::from_ability(ability);
+        state
+            .tracked_object_sets
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| matches_target_filter(state, *id, &effective_filter, &filter_ctx))
+            .collect()
     } else {
         // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so
         // `SelfRef` always resolves to the source object (the LTB
@@ -531,7 +550,7 @@ mod tests {
         TypedFilter,
     };
     use crate::types::card_type::{CardType, CoreType, Supertype};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
@@ -997,6 +1016,65 @@ mod tests {
         assert_eq!(token.toughness, Some(6));
         // Source remains in graveyard (we only copy it, we don't move it).
         assert_eq!(state.objects[&source_id].zone, Zone::Graveyard);
+    }
+
+    /// CR 603.7 + CR 707.2: "copy of that card" after an exile instruction
+    /// must read the tracked set published by the prior zone change. Copy
+    /// sources are zone-agnostic, so an exiled card is a valid source.
+    #[test]
+    fn copy_token_of_tracked_set_source_from_exile() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kheru Goldkeeper".to_string(),
+            Zone::Exile,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(3);
+            source.base_toughness = Some(3);
+            source.power = Some(3);
+            source.toughness = Some(3);
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Zombie".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![source_id]);
+
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(1),
+                },
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: true,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert!(token.tapped);
+        assert_eq!(token.name, "Kheru Goldkeeper");
+        assert_eq!(token.power, Some(3));
+        assert_eq!(token.toughness, Some(3));
     }
 
     #[test]
