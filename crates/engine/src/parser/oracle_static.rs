@@ -6392,20 +6392,46 @@ fn parse_filter_scoped_cant_be_activated(
 /// - "Players can't search libraries." / "Each player can't search libraries."
 ///   (Mindlock Orb class)
 fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    fn parse_search_negation_prefix(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = alt((
+            value((), tag::<_, _, OracleError<'_>>("can't ")),
+            value((), tag("cannot ")),
+            value((), tag("may not ")),
+        ))
+        .parse(input)?;
+        Ok((input, ()))
+    }
+
+    fn parse_cause_controller_search_their_library(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = parse_search_negation_prefix(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>("cause their controller to ").parse(input)?;
+        let (input, _) = tag("search ").parse(input)?;
+        let (input, _) = tag("their library").parse(input)?;
+        Ok((input, ()))
+    }
+
+    fn parse_search_libraries(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = parse_search_negation_prefix(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;
+        let (input, _) = tag("libraries").parse(input)?;
+        Ok((input, ()))
+    }
+
     // Ashiok class: "Spells and abilities <scope> can't cause their controller to
     // search their library."
     if let Some(rest_tp) = nom_tag_tp(tp, "spells and abilities ") {
         // Strip the controller suffix — scope identifier rides on the possessive phrase.
         let (cause, predicate) = strip_controller_possessive_scope(rest_tp.original)?;
-        // Require the exact predicate so we don't match unrelated
-        // "spells and abilities ... can't ..." lines.
         let predicate_lower = predicate.to_lowercase();
-        let tail = nom_tag_lower(
-            predicate,
-            &predicate_lower,
-            "can't cause their controller to search their library",
-        )?;
-        if !tail.trim_end_matches('.').trim().is_empty() {
+        // Compose as modal + causal clause + search target; avoid verbatim phrase matching.
+        if nom_on_lower(predicate, &predicate_lower, |i| {
+            let (i, _) = parse_cause_controller_search_their_library(i)?;
+            let (i, _) = opt(tag(".")).parse(i)?;
+            let (i, _) = eof(i)?;
+            Ok((i, ()))
+        })
+        .is_none()
+        {
             return None;
         }
         return Some(
@@ -6421,10 +6447,15 @@ fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         return None;
     }
     let predicate_lower = predicate.to_lowercase();
-    let tail = nom_tag_lower(predicate, &predicate_lower, "can't search libraries")
-        .or_else(|| nom_tag_lower(predicate, &predicate_lower, "cannot search libraries"))
-        .or_else(|| nom_tag_lower(predicate, &predicate_lower, "may not search libraries"))?;
-    if !tail.trim_end_matches('.').trim().is_empty() {
+    // Compose as modal + "search" + object noun, not a single full-string tag.
+    if nom_on_lower(predicate, &predicate_lower, |i| {
+        let (i, _) = parse_search_libraries(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof(i)?;
+        Ok((i, ()))
+    })
+    .is_none()
+    {
         return None;
     }
 
