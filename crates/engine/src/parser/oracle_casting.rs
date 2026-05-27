@@ -529,7 +529,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         BeholdCostAction, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr,
-        TargetFilter, TypeFilter,
+        QuantityRef, TargetFilter, TypeFilter,
     };
     use crate::types::mana::ManaCost;
     use crate::types::zones::Zone;
@@ -977,6 +977,23 @@ mod tests {
             result,
             Some(AdditionalCost::Required(AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 3 }
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_additional_cost_pay_x_life() {
+        let lower = "as an additional cost to cast this spell, pay x life.";
+        let raw = "As an additional cost to cast this spell, pay X life.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
             }))
         );
     }
