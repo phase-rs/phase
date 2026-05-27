@@ -5134,6 +5134,9 @@ fn try_parse_event(
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
             value(SimpleEvent::BecomesBlocked, tag("becomes blocked")),
+            // CR 509.1h: Plural form for batched "one or more creatures … become
+            // blocked" triggers (Hezrou, etc.).
+            value(SimpleEvent::BecomesBlocked, tag("become blocked")),
             // CR 702.171b: Mount becomes saddled (saddled designation acquired).
             value(SimpleEvent::BecomesSaddled, tag("becomes saddled")),
             // CR 702.122d: "Whenever [this Vehicle] becomes crewed" — trigger fires
@@ -12306,6 +12309,45 @@ mod tests {
                 );
             }
             other => panic!("expected Pump, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_one_or_more_creatures_become_blocked() {
+        // Hezrou (CLB): "Whenever one or more creatures you control become blocked,
+        // each blocking creature gets -1/-1 until end of turn."
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control become blocked, each blocking creature gets -1/-1 until end of turn.",
+            "Hezrou",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+        assert!(def.batched, "one or more triggers must be batched");
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed creature filter with controller You, got {other:?}"),
+        }
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+        match execute.effect.as_ref() {
+            Effect::PumpAll {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(*power, PtValue::Fixed(-1));
+                assert_eq!(*toughness, PtValue::Fixed(-1));
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                        assert!(tf.properties.contains(&FilterProp::Blocking));
+                    }
+                    other => panic!("expected Typed blocking creature filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected PumpAll, got {other:?}"),
         }
     }
 
