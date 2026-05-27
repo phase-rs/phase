@@ -245,7 +245,13 @@ fn pt_modifications(
         PtValue::Fixed(n) if *n != 0 => {
             mods.push(ContinuousModification::AddPower { value: *n });
         }
-        PtValue::Variable(_) => {} // X-spell: value determined at cast time (TODO)
+        PtValue::Variable(value) => {
+            if let Some(resolved) = resolve_variable_pt(value, ability) {
+                if resolved != 0 {
+                    mods.push(ContinuousModification::AddPower { value: resolved });
+                }
+            }
+        }
         PtValue::Quantity(expr) => {
             let resolved = resolve_quantity_with_targets(state, expr, ability);
             if resolved != 0 {
@@ -258,7 +264,13 @@ fn pt_modifications(
         PtValue::Fixed(n) if *n != 0 => {
             mods.push(ContinuousModification::AddToughness { value: *n });
         }
-        PtValue::Variable(_) => {}
+        PtValue::Variable(value) => {
+            if let Some(resolved) = resolve_variable_pt(value, ability) {
+                if resolved != 0 {
+                    mods.push(ContinuousModification::AddToughness { value: resolved });
+                }
+            }
+        }
         PtValue::Quantity(expr) => {
             let resolved = resolve_quantity_with_targets(state, expr, ability);
             if resolved != 0 {
@@ -268,6 +280,15 @@ fn pt_modifications(
         _ => {}
     }
     mods
+}
+
+fn resolve_variable_pt(value: &str, ability: &ResolvedAbility) -> Option<i32> {
+    let chosen = i32::try_from(ability.chosen_x?).unwrap_or(i32::MAX);
+    match value {
+        "X" | "x" => Some(chosen),
+        "-X" | "-x" => Some(chosen.saturating_neg()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +366,31 @@ mod tests {
 
         assert_eq!(state.objects[&obj_id].power, Some(1));
         assert_eq!(state.objects[&obj_id].toughness, Some(1));
+    }
+
+    #[test]
+    fn pump_resolves_variable_pt_against_chosen_x() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = make_creature(&mut state, "Bear", 5, 5, PlayerId(0));
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Variable("-X".to_string()),
+                toughness: PtValue::Variable("-X".to_string()),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(3);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&obj_id].power, Some(2));
+        assert_eq!(state.objects[&obj_id].toughness, Some(2));
     }
 
     #[test]

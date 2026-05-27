@@ -327,6 +327,22 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             };
         }
         if scan_contains(&rest_lower, "life") {
+            let life_amount_text = take_till::<_, _, E<'_>>(|c| c == '.' || c == '(')
+                .parse(rest_lower.as_str())
+                .map(|(_, amount)| amount.trim())
+                .unwrap_or(rest_lower.as_str());
+            if all_consuming(tag::<_, _, E<'_>>("x life"))
+                .parse(life_amount_text)
+                .is_ok()
+            {
+                return AbilityCost::PayLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                };
+            }
             if let Some((n, after_n)) = parse_number(&rest_lower) {
                 // CR 119.4 + CR 122.1: "Pay N life for each <clause>" — a
                 // per-object multiplier on the life cost (e.g. Tornado's
