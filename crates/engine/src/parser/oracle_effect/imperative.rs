@@ -9472,6 +9472,23 @@ mod tests {
         }
     }
 
+    /// Regression: "shuffle their hand and graveyard into their library"
+    /// (Echo of Eons after subject-stripping + deconjugation) must still route
+    /// to `ChangeZoneAllToLibrary`, NOT the descriptive-target path.
+    #[test]
+    fn parse_shuffle_their_hand_and_graveyard_into_their_library() {
+        let text = "shuffle their hand and graveyard into their library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
+                assert_eq!(origins, vec![Zone::Hand, Zone::Graveyard]);
+            }
+            other => {
+                panic!("Expected ChangeZoneAllToLibrary Hand+Graveyard, got {other:?}")
+            }
+        }
+    }
+
     /// CR 701.24c + CR 400.3: "shuffle enchanted creature into its owner's
     /// library" — the descriptive-target path for Aura-based shuffle effects
     /// (Dramatic Accusation, Stay Hidden Stay Silent). The target is parsed by
