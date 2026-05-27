@@ -235,6 +235,10 @@ pub(crate) enum ContinuationAst {
     /// library-to-hand search continuation are already represented by the intrinsic
     /// SearchDestination + reveal flag and should be absorbed.
     SearchResultClauseHandled,
+    /// "reveal it" immediately after a SearchLibrary whose destination is handled
+    /// by a later conditional branch. Patches SearchLibrary.reveal without adding
+    /// a default ChangeZone.
+    SearchRevealResult,
     /// "Put the rest on the bottom of your library ..." after a tracked-set choice that
     /// already moved chosen cards out of the library. Appends a library-bottom placement
     /// step onto the preceding ChangeZone so the unchosen cards are handled by that chain.
@@ -874,6 +878,12 @@ pub(crate) enum PutImperativeAst {
         /// having been declared as one). Set by the inline-tail patcher in
         /// `try_parse_put_zone_change` for the Kaalia / Ilharg class.
         enters_attacking: bool,
+        /// "Up to one" resolution-choice zone changes may move zero matching objects.
+        up_to: bool,
+        /// CR 107.1c + CR 608.2c: Cardinality for non-targeted zone-change
+        /// choices made during resolution, e.g. "put any number of creature
+        /// cards from your hand onto the battlefield."
+        choice_count: Option<MultiTargetSpec>,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.

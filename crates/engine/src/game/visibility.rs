@@ -317,6 +317,29 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 400.2: Hand and library are hidden zones. Mana-ability exile costs
+    // can choose from hand/graveyard/battlefield depending on the printed cost;
+    // redact hidden-zone choices for opponents while preserving public-zone
+    // graveyard/battlefield choices.
+    if let WaitingFor::ExileForManaAbility {
+        player,
+        zone,
+        count,
+        cards: _,
+        ref pending_mana_ability,
+    } = state.waiting_for
+    {
+        if matches!(zone, Zone::Hand | Zone::Library) && !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::ExileForManaAbility {
+                player,
+                zone,
+                count,
+                cards: vec![ObjectId(0); count],
+                pending_mana_ability: pending_mana_ability.clone(),
+            };
+        }
+    }
+
     if let WaitingFor::BeholdForCost {
         player,
         count,
@@ -485,8 +508,8 @@ mod tests {
     use crate::types::ability::{BeholdCostAction, Effect, ResolvedAbility};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, CastPaymentMode, CastingVariant, MayTriggerAutoChoiceKey, MayTriggerOrigin,
-        PendingBeginGameAbility, PendingCast,
+        AutoMayChoice, CastPaymentMode, CastingVariant, ManaAbilityResume, MayTriggerAutoChoiceKey,
+        MayTriggerOrigin, PendingBeginGameAbility, PendingCast, PendingManaAbility,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -525,6 +548,26 @@ mod tests {
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
             payment_mode: CastPaymentMode::Auto,
+        })
+    }
+
+    fn dummy_pending_mana_ability(
+        player: PlayerId,
+        source_id: ObjectId,
+    ) -> Box<PendingManaAbility> {
+        Box::new(PendingManaAbility {
+            player,
+            source_id,
+            ability_index: 0,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            batch_siblings: Vec::new(),
         })
     }
 
@@ -1014,6 +1057,56 @@ mod tests {
     }
 
     #[test]
+    fn exile_for_mana_ability_from_hand_is_hidden_from_non_controller() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Hidden mana cost card".to_string(),
+            Zone::Hand,
+        );
+        let other_card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Other hidden mana cost card".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::ExileForManaAbility {
+            player: PlayerId(1),
+            zone: Zone::Hand,
+            count: 1,
+            cards: vec![card_id, other_card_id],
+            pending_mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+        };
+
+        let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
+        match filtered_self.waiting_for {
+            WaitingFor::ExileForManaAbility {
+                zone, cards, count, ..
+            } => {
+                assert_eq!(zone, Zone::Hand);
+                assert_eq!(cards, vec![card_id, other_card_id]);
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected ExileForManaAbility, got {other:?}"),
+        }
+
+        let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
+        match filtered_opp.waiting_for {
+            WaitingFor::ExileForManaAbility {
+                zone, cards, count, ..
+            } => {
+                assert_eq!(zone, Zone::Hand);
+                assert_eq!(cards, vec![ObjectId(0)]);
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected ExileForManaAbility, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn behold_for_cost_hides_matching_hand_choices_from_non_controller() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
         let public_choice = create_object(
@@ -1146,6 +1239,38 @@ mod tests {
                 );
             }
             other => panic!("expected ExileForCost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exile_for_mana_ability_graveyard_is_not_redacted() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Titans' Nest filler".to_string(),
+            Zone::Graveyard,
+        );
+        state.waiting_for = WaitingFor::ExileForManaAbility {
+            player: PlayerId(1),
+            zone: Zone::Graveyard,
+            count: 1,
+            cards: vec![card_id],
+            pending_mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+        };
+
+        let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
+        match filtered_opp.waiting_for {
+            WaitingFor::ExileForManaAbility { zone, cards, .. } => {
+                assert_eq!(zone, Zone::Graveyard);
+                assert_eq!(
+                    cards,
+                    vec![card_id],
+                    "graveyard mana ability cost choices must NOT be redacted"
+                );
+            }
+            other => panic!("expected ExileForManaAbility, got {other:?}"),
         }
     }
 

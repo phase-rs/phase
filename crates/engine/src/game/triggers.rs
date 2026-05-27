@@ -79,6 +79,44 @@ pub struct PendingTrigger {
     pub subject_match_count: Option<u32>,
 }
 
+pub(super) struct TriggerEventContextSnapshot {
+    current_trigger_event: Option<GameEvent>,
+    current_trigger_events: Vec<GameEvent>,
+    current_trigger_match_count: Option<u32>,
+}
+
+pub(super) fn push_trigger_event_context(
+    state: &mut GameState,
+    trigger_event: Option<&GameEvent>,
+    trigger_events: &[GameEvent],
+    subject_match_count: Option<u32>,
+) -> TriggerEventContextSnapshot {
+    let snapshot = TriggerEventContextSnapshot {
+        current_trigger_event: state.current_trigger_event.clone(),
+        current_trigger_events: state.current_trigger_events.clone(),
+        current_trigger_match_count: state.current_trigger_match_count,
+    };
+    state.current_trigger_event = trigger_event
+        .cloned()
+        .or_else(|| trigger_events.first().cloned());
+    state.current_trigger_events = if trigger_events.is_empty() {
+        trigger_event.cloned().into_iter().collect()
+    } else {
+        trigger_events.to_vec()
+    };
+    state.current_trigger_match_count = subject_match_count;
+    snapshot
+}
+
+pub(super) fn restore_trigger_event_context(
+    state: &mut GameState,
+    snapshot: TriggerEventContextSnapshot,
+) {
+    state.current_trigger_event = snapshot.current_trigger_event;
+    state.current_trigger_events = snapshot.current_trigger_events;
+    state.current_trigger_match_count = snapshot.current_trigger_match_count;
+}
+
 /// CR 702.21a + CR 118.12: Convert a WardCost to an `AbilityCost` for the
 /// counter effect's `unless_pay` modifier. Post-fold, ward and counter share
 /// the unified `AbilityCost` taxonomy.
@@ -2127,9 +2165,21 @@ fn dispatch_pending_trigger_context(
         return true;
     }
 
+    let trigger_event = trigger.trigger_event.clone();
+    let subject_match_count = trigger.subject_match_count;
+    let context_snapshot = push_trigger_event_context(
+        state,
+        trigger_event.as_ref(),
+        &trigger_events,
+        subject_match_count,
+    );
+
     let target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
         Ok(target_slots) => target_slots,
-        Err(_) => return false,
+        Err(_) => {
+            restore_trigger_event_context(state, context_snapshot);
+            return false;
+        }
     };
 
     if target_slots.is_empty() {
@@ -2147,9 +2197,11 @@ fn dispatch_pending_trigger_context(
                 trigger.trigger_event.as_ref(),
                 events_out,
             );
+            restore_trigger_event_context(state, context_snapshot);
             return false;
         }
         push_pending_trigger_to_stack_with_event_batch(state, trigger, trigger_events, events_out);
+        restore_trigger_event_context(state, context_snapshot);
         return false;
     }
 
@@ -2180,6 +2232,7 @@ fn dispatch_pending_trigger_context(
             if super::ability_utils::assign_targets_in_chain(state, &mut trigger.ability, &targets)
                 .is_err()
             {
+                restore_trigger_event_context(state, context_snapshot);
                 return false;
             }
             super::casting::emit_targeting_events(
@@ -2208,6 +2261,7 @@ fn dispatch_pending_trigger_context(
                             targets: assigned_targets,
                             unit,
                         };
+                        restore_trigger_event_context(state, context_snapshot);
                         return true;
                     }
                 }
@@ -2218,14 +2272,19 @@ fn dispatch_pending_trigger_context(
                 trigger_events,
                 events_out,
             );
+            restore_trigger_event_context(state, context_snapshot);
             false
         }
         Ok(None) => {
             state.pending_trigger_event_batch = trigger_events;
             state.pending_trigger = Some(trigger);
+            restore_trigger_event_context(state, context_snapshot);
             true
         }
-        Err(_) => false,
+        Err(_) => {
+            restore_trigger_event_context(state, context_snapshot);
+            false
+        }
     }
 }
 
@@ -6275,6 +6334,111 @@ pub mod tests {
         }
         // Silence unused-var warnings for the graveyard object IDs.
         let _ = (gy1, gy2, gy3);
+    }
+
+    #[test]
+    fn damage_trigger_dynamic_multi_target_uses_trigger_event_amount() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let froghemoth = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Froghemoth".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&froghemoth)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let card_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Damaged player's graveyard card A".to_string(),
+            Zone::Graveyard,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Damaged player's graveyard card B".to_string(),
+            Zone::Graveyard,
+        );
+        let mut execute = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::ScopedPlayer,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        );
+        execute.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }));
+        state
+            .objects
+            .get_mut(&froghemoth)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::DamageDone)
+                    .execute(execute)
+                    .valid_source(TargetFilter::SelfRef)
+                    .valid_target(TargetFilter::Player)
+                    .damage_kind(crate::types::ability::DamageKindFilter::CombatOnly),
+            );
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::DamageDealt {
+                source_id: froghemoth,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+                is_combat: true,
+                excess: 0,
+            }],
+        );
+
+        let waiting = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+            .expect("target selection should build")
+            .expect("trigger should require target selection");
+        let WaitingFor::TriggerTargetSelection { target_slots, .. } = waiting else {
+            panic!("expected trigger target selection, got {waiting:?}");
+        };
+        assert_eq!(
+            target_slots.len(),
+            2,
+            "combat damage amount 2 should surface two optional target slots"
+        );
+        for slot in target_slots {
+            assert!(slot.optional);
+            assert!(slot.legal_targets.contains(&TargetRef::Object(card_a)));
+            assert!(slot.legal_targets.contains(&TargetRef::Object(card_b)));
+        }
     }
 
     /// CR 603.3 + CR 115.1b: Nurturing Pixie's ETB uses "up to one target

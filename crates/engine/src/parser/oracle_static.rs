@@ -36,9 +36,9 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, AttachmentKind,
     BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator, ContinuousModification,
-    ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition,
-    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-    TypedFilter,
+    ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -175,6 +175,50 @@ fn parse_min_blockers_phrase(input: &str) -> OracleResult<'_, u32> {
     let (rest, n) = nom_primitives::parse_number(input)?;
     let (rest, _) = tag(" or more creatures").parse(rest)?;
     Ok((rest, n))
+}
+
+fn parse_source_power_block_restriction(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creatures with power less than ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("~'s power"),
+        tag("this creature's power"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" can't block ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creatures you control")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::CantBeBlockedBy {
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LT,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                },
+            ])),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .description(text.to_string()),
+    )
 }
 
 /// CR 509.1b: classify the remainder after "can't be blocked except by " into a
@@ -1796,6 +1840,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     if let Some(def) = parse_subject_combat_rule_static(&text) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_source_power_block_restriction(&text) {
         return Some(def);
     }
 
@@ -6384,23 +6432,73 @@ fn parse_filter_scoped_cant_be_activated(
     )
 }
 
-/// CR 701.23 + CR 609.3: Parse "Spells and abilities <scope> can't cause their
-/// controller to search their library" — Ashiok, Dream Render's first static.
+/// CR 701.23 + CR 609.3: Parse CantSearchLibrary statics.
 ///
-/// The scope on the `cause` axis identifies whose spells/abilities are muzzled.
-/// For Ashiok the phrasing is "your opponents control" so `cause = Opponents`.
+/// Supported Oracle classes:
+/// - "Spells and abilities <scope> can't cause their controller to search their
+///   library." (Ashiok class)
+/// - "Players can't search libraries." / "Each player can't search libraries."
+///   (Mindlock Orb class)
 fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
-    let rest_tp = nom_tag_tp(tp, "spells and abilities ")?;
-    // Strip the controller suffix — scope identifier rides on the possessive phrase.
-    let (cause, predicate) = strip_controller_possessive_scope(rest_tp.original)?;
-    // Verify the predicate continues with "can't cause their controller to search
-    // their library" — require the exact full phrase so we don't match unrelated
-    // "spells and abilities your opponents control can't ..." Oracle texts.
-    let predicate_lower = predicate.to_lowercase();
-    let trimmed_lower = predicate_lower.trim_end_matches('.').trim_end();
-    if trimmed_lower != "can't cause their controller to search their library" {
+    fn parse_search_negation_prefix(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = alt((
+            value((), tag::<_, _, OracleError<'_>>("can't ")),
+            value((), tag("cannot ")),
+            value((), tag("may not ")),
+        ))
+        .parse(input)?;
+        Ok((input, ()))
+    }
+
+    fn parse_cause_controller_search_their_library(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = parse_search_negation_prefix(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>("cause their controller to ").parse(input)?;
+        let (input, _) = tag("search ").parse(input)?;
+        let (input, _) = tag("their library").parse(input)?;
+        Ok((input, ()))
+    }
+
+    fn parse_search_libraries(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = parse_search_negation_prefix(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;
+        let (input, _) = tag("libraries").parse(input)?;
+        Ok((input, ()))
+    }
+
+    // Ashiok class: "Spells and abilities <scope> can't cause their controller to
+    // search their library."
+    if let Some(rest_tp) = nom_tag_tp(tp, "spells and abilities ") {
+        // Strip the controller suffix — scope identifier rides on the possessive phrase.
+        let (cause, predicate) = strip_controller_possessive_scope(rest_tp.original)?;
+        let predicate_lower = predicate.to_lowercase();
+        // Compose as modal + causal clause + search target; avoid verbatim phrase matching.
+        nom_on_lower(predicate, &predicate_lower, |i| {
+            let (i, _) = parse_cause_controller_search_their_library(i)?;
+            let (i, _) = opt(tag(".")).parse(i)?;
+            let (i, _) = eof(i)?;
+            Ok((i, ()))
+        })?;
+        return Some(
+            StaticDefinition::new(StaticMode::CantSearchLibrary { cause })
+                .description(text.to_string()),
+        );
+    }
+
+    // Mindlock Orb class: "Players can't search libraries." / "Each player can't
+    // search libraries." Keep this branch all-players only.
+    let (cause, predicate) = strip_casting_prohibition_subject(tp.lower)?;
+    if cause != ProhibitionScope::AllPlayers {
         return None;
     }
+    let predicate_lower = predicate.to_lowercase();
+    // Compose as modal + "search" + object noun, not a single full-string tag.
+    nom_on_lower(predicate, &predicate_lower, |i| {
+        let (i, _) = parse_search_libraries(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof(i)?;
+        Ok((i, ()))
+    })?;
+
     Some(
         StaticDefinition::new(StaticMode::CantSearchLibrary { cause })
             .description(text.to_string()),
@@ -9931,7 +10029,7 @@ fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
 /// a spell reduces/raises its own cast cost (e.g., Tolarian Terror:
 /// "This spell costs {1} less to cast for each instant and sorcery card in
 /// your graveyard."). Callers use this to flag self-reference so the static
-/// is emitted with `affected = SelfRef` and `active_zones = [Hand, Stack]`
+/// is emitted with `affected = SelfRef` and `active_zones = [Hand, Stack, Command]`
 /// instead of the default battlefield scope.
 fn parse_self_spell_cost_subject(lower: &str) -> Option<()> {
     nom_on_lower(lower, lower, |i| {
@@ -10120,7 +10218,7 @@ fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefinition> {
 /// 3. Global taxing: "Noncreature spells cost {1} more to cast" (Thalia)
 /// 4. Broad: "Spells you cast cost {1} less to cast"
 /// 5. Self-spell: "This spell costs {N} less to cast for each ..." (Tolarian Terror)
-///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack]`.
+///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack, Command]`.
 ///
 /// Dynamic "for each" counts are extracted when present.
 fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
@@ -10136,8 +10234,10 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     // Distinct from battlefield cost modification (e.g., "creature spells you cast cost {1} less")
     // because the static must apply to the card while it is in hand (or on the stack during
     // casting), not once it has entered the battlefield. The caller wires this into
-    // `active_zones = [Hand, Stack]` with `affected = SelfRef` so the casting-time scanner
-    // finds it on the spell being cast.
+    // `active_zones = [Hand, Stack, Command]` with `affected = SelfRef` so
+    // the casting-time scanner finds it on the spell being cast from normal
+    // hand casting, the cost-determination stack step, and commander casting
+    // from the command zone.
     let is_self_spell = parse_self_spell_cost_subject(lower).is_some();
 
     let amount_is_variable_x = nom_primitives::scan_contains(lower, "{x}");
@@ -10414,12 +10514,13 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         .description(text.to_string());
 
     // CR 117.7 + CR 601.2f: A self-spell cost reduction must apply while the
-    // card is in hand (pre-cast affordability checks) and on the stack (final
-    // cost determination during casting). Without opting in via `active_zones`,
-    // layer collection would ignore the static outside the battlefield, and
-    // the card would never reduce its own cost.
+    // card is in hand (pre-cast affordability checks), in the command zone
+    // (commander casting), and on the stack (final cost determination during
+    // casting). Without opting in via `active_zones`, layer collection would
+    // ignore the static outside the battlefield, and the card would never
+    // reduce its own cost.
     if is_self_spell {
-        definition.active_zones = vec![Zone::Hand, Zone::Stack];
+        definition.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
     }
     if let Some(filter) = first_qualified_spell_filter.as_ref() {
         definition.condition = Some(first_qualified_spell_condition(filter));
@@ -11006,8 +11107,9 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope, PtStat,
-        PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, ObjectProperty,
+        PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter,
+        ZoneRef,
     };
 
     /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
@@ -11338,6 +11440,43 @@ mod tests {
     }
 
     #[test]
+    fn static_source_power_cant_block_creatures_you_control() {
+        let def = parse_static_line(
+            "Creatures with power less than ~'s power can't block creatures you control.",
+        )
+        .expect("Champion of Lambholt static should parse");
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(ref tf))
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.controller == Some(ControllerRef::You)
+        ));
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::CantBeBlockedBy { ref filter }
+                    if matches!(
+                        filter,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                                && tf.properties.contains(&FilterProp::PtComparison {
+                                    stat: PtStat::Power,
+                                    scope: PtValueScope::Current,
+                                    comparator: Comparator::LT,
+                                    value: QuantityExpr::Ref {
+                                        qty: QuantityRef::Power {
+                                            scope: ObjectScope::Source
+                                        }
+                                    }
+                                })
+                    )
+            ),
+            "expected CantBeBlockedBy with source-power LT blocker filter, got {:?}",
+            def.mode
+        );
+    }
+
+    #[test]
     fn static_creatures_you_control() {
         let def = parse_static_line("Creatures you control get +1/+1.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
@@ -11544,11 +11683,11 @@ mod tests {
     }
 
     /// CR 117.7 + CR 601.2f: "This spell costs {N} less ..." must parse into a
-    /// self-scoped static — affected = SelfRef, active_zones = [Hand, Stack] —
+    /// self-scoped static — affected = SelfRef, active_zones = [Hand, Stack, Command] —
     /// so the cast-time scanner finds it on the spell itself (not on the
     /// battlefield). Regression guard for Tolarian Terror class.
     #[test]
-    fn static_this_spell_cost_less_self_scoped_in_hand_and_stack() {
+    fn static_this_spell_cost_less_self_scoped_in_castable_zones() {
         let def = parse_static_line(
             "This spell costs {1} less to cast for each instant and sorcery card in your graveyard.",
         )
@@ -11562,7 +11701,36 @@ mod tests {
             }
         ));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
+    }
+
+    #[test]
+    fn ghalta_self_cost_reduction_is_active_from_command_zone() {
+        let def = parse_static_line(
+            "This spell costs {X} less to cast, where X is the total power of creatures you control.",
+        )
+        .unwrap();
+
+        let StaticMode::ReduceCost {
+            dynamic_count:
+                Some(QuantityRef::Aggregate {
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                    ..
+                }),
+            ..
+        } = def.mode
+        else {
+            panic!("expected dynamic self-spell ReduceCost, got {:?}", def.mode);
+        };
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11592,7 +11760,10 @@ mod tests {
             .iter()
             .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11611,7 +11782,10 @@ mod tests {
             }
         ));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11670,7 +11844,10 @@ mod tests {
             })
         );
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11763,7 +11940,10 @@ mod tests {
             }
         )));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -20193,6 +20373,39 @@ mod tests {
                 cause: ProhibitionScope::Controller,
             }
         );
+    }
+
+    #[test]
+    fn cant_search_library_mindlock_orb_players() {
+        // CR 701.23 + CR 609.3: Mindlock Orb — blanket all-players search prohibition.
+        let def = parse_static_line("Players can't search libraries.")
+            .expect("Mindlock Orb Oracle text should parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::AllPlayers,
+            }
+        );
+    }
+
+    #[test]
+    fn cant_search_library_each_player_may_not_variant() {
+        // Variant phrasing uses identical all-players scope.
+        let def = parse_static_line("Each player may not search libraries.")
+            .expect("each-player variant should parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::AllPlayers,
+            }
+        );
+    }
+
+    #[test]
+    fn cant_search_library_opponents_form_deferred() {
+        // Opponent-scoped direct-search phrasing remains deferred until the runtime
+        // cause-vs-searcher axis is split.
+        assert!(parse_static_line("Your opponents can't search libraries.").is_none());
     }
 
     // --- CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers (Torpor Orb / Hushbringer) ---
