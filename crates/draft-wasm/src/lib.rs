@@ -168,7 +168,6 @@ pub fn start_quick_draft(
     let mut seats = vec![DraftSeat::Human {
         player_id: engine::types::player::PlayerId(0),
         display_name: "Player".to_string(),
-        connected: true,
     }];
     for i in 1..8u8 {
         seats.push(DraftSeat::Bot {
@@ -269,7 +268,6 @@ pub fn start_quick_cube_draft(
     let mut seats = vec![DraftSeat::Human {
         player_id: engine::types::player::PlayerId(0),
         display_name: "Player".to_string(),
-        connected: true,
     }];
     for i in 1..pod_size {
         seats.push(DraftSeat::Bot {
@@ -545,7 +543,6 @@ pub fn start_multiplayer_draft(
         .map(|(i, name)| DraftSeat::Human {
             player_id: engine::types::player::PlayerId(i as u8),
             display_name: name.clone(),
-            connected: true,
         })
         .collect();
 
@@ -584,6 +581,25 @@ pub fn submit_pick_for_seat(seat: u8, card_instance_id: &str) -> Result<JsValue,
         .map_err(|e| JsValue::from_str(&format!("Pick failed for seat {seat}: {e}")))?;
 
         Ok(to_js(&filter_for_player(draft_session, seat)))
+    })
+}
+
+/// Mark a human seat as connected or disconnected. The host adapter calls
+/// this on guest disconnect/reconnect so `DraftPlayerView.seats[*].connected`
+/// reflects the runtime state. Rejects bot seats with `SeatIsBot`.
+///
+/// Returns the DraftPlayerView for seat 0 (the host) after the update.
+#[wasm_bindgen]
+pub fn set_seat_connected(seat: u8, connected: bool) -> Result<JsValue, JsValue> {
+    with_draft_mut(|session| {
+        session::apply(
+            session,
+            DraftAction::SetSeatConnected { seat, connected },
+            None,
+        )
+        .map_err(|e| JsValue::from_str(&format!("SetSeatConnected failed: {e}")))?;
+
+        Ok(to_js(&filter_for_player(session, 0)))
     })
 }
 
@@ -774,7 +790,6 @@ pub fn create_multiplayer_draft(
             } => DraftSeat::Human {
                 player_id: engine::types::player::PlayerId(player_id),
                 display_name,
-                connected: true,
             },
             SeatDescriptor::Bot { name } => DraftSeat::Bot { name },
         })

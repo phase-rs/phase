@@ -12,7 +12,7 @@
 
 import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
 import { P2PDraftGuest, type DraftGuestEvent } from "./p2p-draft-guest";
-import type { DraftMatchLaunch } from "../network/draftProtocol";
+import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
 import { joinRoom, type JoinResult } from "../network/connection";
 import { loadDraftGuestSession } from "../services/draftPersistence";
 
@@ -37,7 +37,7 @@ export type DraftPodGuestEvent =
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
-  | { type: "draftPaused"; reason: string }
+  | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
   | {
       type: "pairing";

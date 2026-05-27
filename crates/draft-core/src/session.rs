@@ -25,7 +25,8 @@ impl DraftSession {
             pass_direction: PassDirection::for_pack(0),
             current_pack_number: 0,
             pick_number: 0,
-            picks_this_round: 0,
+            seats_picked_this_round: SeatFlags::all_false(pod_size as u8),
+            connected_seats: SeatFlags::all_true(pod_size as u8),
             packs_by_seat: vec![vec![]; pod_size],
             current_pack: vec![None; pod_size],
             pools: vec![vec![]; pod_size],
@@ -66,6 +67,9 @@ pub fn apply(
         DraftAction::AdvanceRound => apply_advance_round(session),
         DraftAction::ReplaceSeatWithBot { seat, name } => {
             apply_replace_seat_with_bot(session, seat, name)
+        }
+        DraftAction::SetSeatConnected { seat, connected } => {
+            apply_set_seat_connected(session, seat, connected)
         }
     }
 }
@@ -493,6 +497,27 @@ fn apply_replace_seat_with_bot(
     Ok(vec![DraftDelta::SeatReplacedWithBot { seat }])
 }
 
+/// Mark a human seat as connected or disconnected. The new flag becomes the
+/// authoritative source for `DraftPlayerView.seats[*].connected` via
+/// [`crate::view::filter_for_player`]. Bot seats reject — flipping a bot
+/// connection bit is nonsensical (bots are always connected by construction).
+fn apply_set_seat_connected(
+    session: &mut DraftSession,
+    seat: u8,
+    connected: bool,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    let pod_size = session.seats.len() as u8;
+    if seat >= pod_size {
+        return Err(DraftError::SeatOutOfRange { seat, pod_size });
+    }
+    if matches!(session.seats[seat as usize], DraftSeat::Bot { .. }) {
+        return Err(DraftError::SeatIsBot { seat });
+    }
+    session.connected_seats.ensure_len(pod_size, true);
+    session.connected_seats.set(seat, connected);
+    Ok(vec![DraftDelta::SeatConnectionChanged { seat, connected }])
+}
+
 fn apply_start_draft(
     session: &mut DraftSession,
     pack_source: Option<&dyn PackSource>,
@@ -519,7 +544,9 @@ fn apply_start_draft(
     session.pass_direction = PassDirection::for_pack(0);
     session.current_pack_number = 0;
     session.pick_number = 0;
-    session.picks_this_round = 0;
+    // Reset per-round pick tracking; `connected_seats` is left intact so any
+    // pre-draft disconnects persist into the drafting phase.
+    session.seats_picked_this_round = SeatFlags::all_false(pod_size);
 
     Ok(vec![DraftDelta::DraftStarted])
 }
@@ -631,7 +658,6 @@ mod tests {
             .map(|i| DraftSeat::Human {
                 player_id: PlayerId(i),
                 display_name: format!("Player {i}"),
-                connected: true,
             })
             .collect();
         let source = FixturePackSource {
@@ -767,7 +793,6 @@ mod tests {
             DraftSeat::Human {
                 player_id: PlayerId(0),
                 display_name: "Player 0".to_string(),
-                connected: true,
             },
             DraftSeat::Bot {
                 name: "Bot 1".to_string(),
@@ -1086,7 +1111,6 @@ mod tests {
             .map(|i| DraftSeat::Human {
                 player_id: PlayerId(i),
                 display_name: format!("Player {i}"),
-                connected: true,
             })
             .collect();
         let mut session = DraftSession::new(config, seats, "SE-TEST".to_string());
@@ -1131,7 +1155,6 @@ mod tests {
             .map(|i| DraftSeat::Human {
                 player_id: PlayerId(i),
                 display_name: format!("Player {i}"),
-                connected: true,
             })
             .collect();
         let mut session = DraftSession::new(config, seats, "SE-TEST".to_string());
@@ -1613,5 +1636,89 @@ mod tests {
             None,
         );
         assert!(matches!(result, Err(DraftError::PairingNotFound { .. })));
+    }
+
+    // ── SetSeatConnected coverage ────────────────────────────────────────
+
+    #[test]
+    fn set_seat_connected_updates_state_and_emits_delta() {
+        let (mut session, _) = test_session(4);
+
+        let deltas = apply(
+            &mut session,
+            DraftAction::SetSeatConnected {
+                seat: 1,
+                connected: false,
+            },
+            None,
+        )
+        .unwrap();
+
+        assert!(deltas.contains(&DraftDelta::SeatConnectionChanged {
+            seat: 1,
+            connected: false,
+        }));
+        assert!(!session.connected_seats.get(1));
+        // The other seats remain connected (default true).
+        assert!(session.connected_seats.get(0));
+        assert!(session.connected_seats.get(2));
+
+        // View now reflects the change.
+        let view = crate::view::filter_for_player(&session, 0);
+        assert!(!view.seats[1].connected);
+        assert!(view.seats[0].connected);
+    }
+
+    #[test]
+    fn set_seat_connected_out_of_range_errors() {
+        let (mut session, _) = test_session(4);
+
+        let result = apply(
+            &mut session,
+            DraftAction::SetSeatConnected {
+                seat: 99,
+                connected: false,
+            },
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(DraftError::SeatOutOfRange {
+                seat: 99,
+                pod_size: 4
+            })
+        ));
+    }
+
+    #[test]
+    fn set_seat_connected_on_bot_seat_errors() {
+        let (mut session, _) = test_session(4);
+        session.seats[2] = DraftSeat::Bot {
+            name: "TestBot".to_string(),
+        };
+
+        let result = apply(
+            &mut session,
+            DraftAction::SetSeatConnected {
+                seat: 2,
+                connected: false,
+            },
+            None,
+        );
+        assert!(matches!(result, Err(DraftError::SeatIsBot { seat: 2 })));
+    }
+
+    #[test]
+    fn seat_flags_resize_preserves_existing_entries() {
+        // SeatFlags::ensure_len uses Vec::resize semantics — existing entries
+        // survive on grow, new slots default to the passed-in default.
+        let mut flags = SeatFlags::all_false(2);
+        flags.set(0, true);
+        flags.ensure_len(4, true);
+
+        assert!(flags.get(0)); // preserved
+        assert!(!flags.get(1)); // preserved
+        assert!(flags.get(2)); // new slot, default true
+        assert!(flags.get(3)); // new slot, default true
     }
 }

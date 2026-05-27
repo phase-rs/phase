@@ -109,6 +109,15 @@ export function init_panic_hook(): void;
 export function load_card_database(json_str: string): number;
 
 /**
+ * Mark a human seat as connected or disconnected. The host adapter calls
+ * this on guest disconnect/reconnect so `DraftPlayerView.seats[*].connected`
+ * reflects the runtime state. Rejects bot seats with `SeatIsBot`.
+ *
+ * Returns the DraftPlayerView for seat 0 (the host) after the update.
+ */
+export function set_seat_connected(seat: number, connected: boolean): any;
+
+/**
  * Start a multiplayer draft session (Premier or Traditional).
  *
  * - `set_pool_json`: serialized LimitedSetPool
@@ -199,6 +208,7 @@ export interface InitOutput {
     readonly get_view_for_seat: (a: number) => [number, number, number];
     readonly import_draft_session: (a: number, b: number, c: number) => [number, number, number];
     readonly load_card_database: (a: number, b: number) => [number, number, number];
+    readonly set_seat_connected: (a: number, b: number) => [number, number, number];
     readonly start_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly start_quick_cube_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly start_quick_draft: (a: number, b: number, c: number, d: number) => [number, number, number];

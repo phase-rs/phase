@@ -22,7 +22,7 @@ import type {
   StandingEntry,
 } from "../adapter/draft-adapter";
 import type { EngineAdapter, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
-import type { DraftMatchLaunch } from "../network/draftProtocol";
+import type { DraftMatchLaunch, DraftPauseReason } from "../network/draftProtocol";
 import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
 import { processRemoteUpdate } from "../game/dispatch";
 import { legalResultState, useGameStore } from "./gameStore";
@@ -85,7 +85,7 @@ interface MultiplayerDraftState {
   joined: number;
   total: number;
   paused: boolean;
-  pauseReason: string | null;
+  pauseReason: DraftPauseReason | null;
   pairing: PairingInfo | null;
   error: string | null;
   selectedCard: string | null;

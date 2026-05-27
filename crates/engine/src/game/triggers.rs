@@ -2819,23 +2819,33 @@ fn check_trigger_constraint(
                 GameEvent::SpellCast { controller: c, .. } => *c,
                 _ => return false,
             };
-            let count = state
-                .spells_cast_this_turn_by_player
-                .get(&caster)
-                .map_or(0, |spells| match filter {
-                    None => spells.len() as u32,
-                    Some(filter) => spells
-                        .iter()
-                        .filter(|record| {
-                            spell_record_matches_filter(
-                                record,
-                                filter,
-                                caster,
-                                &state.all_creature_types,
-                            )
-                        })
-                        .count() as u32,
-                });
+            let spells = state.spells_cast_this_turn_by_player.get(&caster);
+            if let (Some(filter), Some(current_record)) =
+                (filter.as_ref(), spells.and_then(|spells| spells.back()))
+            {
+                if !spell_record_matches_filter(
+                    current_record,
+                    filter,
+                    caster,
+                    &state.all_creature_types,
+                ) {
+                    return false;
+                }
+            }
+            let count = spells.map_or(0, |spells| match filter {
+                None => spells.len() as u32,
+                Some(filter) => spells
+                    .iter()
+                    .filter(|record| {
+                        spell_record_matches_filter(
+                            record,
+                            filter,
+                            caster,
+                            &state.all_creature_types,
+                        )
+                    })
+                    .count() as u32,
+            });
             count == *n
         }
         // CR 121.2: Use the ordinal stamped onto the individual draw event
@@ -10043,7 +10053,44 @@ pub mod tests {
             "second X-spell this turn must NOT fire the first-X-spell trigger"
         );
 
-        // Case D: intervening non-X spell does NOT reset the count — second X-spell still fails.
+        // Case D: current spell is non-qualifying after an earlier qualifying
+        // spell. The filtered count is still 1, but the event spell itself
+        // does not match the trigger's filter.
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                SpellCastRecord {
+                    name: String::new(),
+                    core_types: vec![CoreType::Sorcery],
+                    supertypes: vec![],
+                    subtypes: vec![],
+                    keywords: vec![],
+                    colors: vec![],
+                    mana_value: 2,
+                    has_x_in_cost: true,
+                    from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
+                },
+                SpellCastRecord {
+                    name: String::new(),
+                    core_types: vec![CoreType::Instant],
+                    supertypes: vec![],
+                    subtypes: vec![],
+                    keywords: vec![],
+                    colors: vec![],
+                    mana_value: 1,
+                    has_x_in_cost: false,
+                    from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
+                },
+            ]),
+        );
+        assert!(
+            !check_trigger_constraint(&state, &trig_def, source, 0, PlayerId(0), &spell_event),
+            "non-qualifying current spell must NOT fire an Nth qualifying spell trigger"
+        );
+
+        // Case E: intervening non-X spell does NOT reset the count — second X-spell still fails.
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
             crate::im::Vector::from(vec![

@@ -7705,23 +7705,27 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 /// each <body>" into a 2-element AbilityDefinition chain whose halves apply
 /// `<body>` to two different players.
 ///
-/// Currently restricted to the form "you and that player each Y" — produced by
-/// "For each player who chose <choice>, you and that player each <body>"
-/// patterns inside Council's-dilemma vote effects (Master of Ceremonies). The
-/// first half is targeted at `OriginalController` (the printed ability
+/// Recognized forms:
+/// - "you and that player each Y" — produced by "For each player who chose
+///   <choice>, you and that player each <body>" patterns inside
+///   Council's-dilemma vote effects (Master of Ceremonies).
+/// - "you and target opponent/player each Y" — the chosen player is a normal
+///   target slot (Bloodroot Apothecary class).
+///
+/// The first half is targeted at `OriginalController` (the printed ability
 /// controller, fixed even when `player_scope` iteration rebinds the acting
-/// controller per-voter); the second half is targeted at `ScopedPlayer` (the
-/// iterated voter for `PlayerFilter::VotedFor`). The two halves resolve in
-/// printed order via the `sub_ability` chain.
+/// controller per-voter); the second half is targeted at either `ScopedPlayer`
+/// (the iterated voter for `PlayerFilter::VotedFor`) or `Player` (the chosen
+/// target player). The two halves resolve in printed order via the
+/// `sub_ability` chain.
 ///
 /// Generality: the parser shape is parameterized to accept any single-effect
 /// body that has a `TargetFilter`-typed recipient slot (Token's `owner`,
 /// Draw's `target`, etc.). Effects without a recipient slot in the AST are
 /// not supported here — return `None` and let the caller fall through.
 ///
-/// Other compound-subject forms ("you and target opponent", "you and an
-/// opponent of your choice") are deliberately out of scope for this entry
-/// point and will produce `None`.
+/// Other compound-subject forms ("you and an opponent of your choice") are
+/// deliberately out of scope for this entry point and will produce `None`.
 fn try_parse_compound_subject_each(
     text: &str,
     ctx: &mut ParseContext,
@@ -7729,13 +7733,14 @@ fn try_parse_compound_subject_each(
     let lower = text.to_lowercase();
     // Compose the prefix from independent dimensions:
     //   first-subject × " and " × second-subject × " each " × <body>
-    // Today only "you" / "that player" are recognized; the alt() arms expand
-    // when we add other compound forms (target opponent, an opponent of your
-    // choice, etc.). Each axis is one alt() call; we never enumerate the
-    // permutations.
+    // Each subject axis is one alt() call; we never enumerate permutations.
     let parser: nom::IResult<&str, (TargetFilter, TargetFilter), OracleError<'_>> = (
         alt((value(TargetFilter::OriginalController, tag("you and ")),)),
-        alt((value(TargetFilter::ScopedPlayer, tag("that player ")),)),
+        alt((
+            value(TargetFilter::ScopedPlayer, tag("that player ")),
+            value(TargetFilter::Player, tag("target opponent ")),
+            value(TargetFilter::Player, tag("target player ")),
+        )),
         value((), tag("each ")),
     )
         .parse(lower.as_str())

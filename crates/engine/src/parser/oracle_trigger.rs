@@ -859,6 +859,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     if modifiers.first_time_each_turn && def.constraint.is_none() {
         def.constraint = Some(TriggerConstraint::OncePerTurn);
     }
+    constrain_triggering_spell_with_nth_filter(&mut def);
 
     // Preserve original oracle text for coverage/UI annotation.
     def.description = Some(ir.source_text.clone());
@@ -1070,7 +1071,66 @@ fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
             }
         }
     }
+    if let Some((_, constraint, _)) = scan_preceded(lower, parse_nth_spell_this_turn_intervening_if)
+    {
+        return Some(constraint);
+    }
     None
+}
+
+fn parse_nth_spell_this_turn_intervening_if(input: &str) -> OracleResult<'_, TriggerConstraint> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("if it's the "),
+        tag("if it is the "),
+    ))
+    .parse(input)?;
+    let (n, rest) = parse_ordinal(rest).ok_or_else(|| oracle_err(rest))?;
+    let rest = rest.trim_start();
+
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("spell you cast this turn"),
+        tag("spell you've cast this turn"),
+    ))
+    .parse(rest)
+    {
+        return Ok((
+            rest,
+            TriggerConstraint::NthSpellThisTurn { n, filter: None },
+        ));
+    }
+
+    let (rest, type_text) = take_until(" spell ").parse(rest)?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" spell you cast this turn"),
+        tag(" spell you've cast this turn"),
+    ))
+    .parse(rest)?;
+    let filter = type_only_filter(type_text.trim()).ok_or_else(|| oracle_err(type_text))?;
+    Ok((
+        rest,
+        TriggerConstraint::NthSpellThisTurn {
+            n,
+            filter: Some(filter),
+        },
+    ))
+}
+
+fn constrain_triggering_spell_with_nth_filter(def: &mut TriggerDefinition) {
+    let filter = match &def.constraint {
+        Some(TriggerConstraint::NthSpellThisTurn {
+            filter: Some(filter),
+            ..
+        }) => filter.clone(),
+        _ => return,
+    };
+
+    def.valid_card = Some(match def.valid_card.take() {
+        None | Some(TargetFilter::Any) => filter,
+        Some(existing) if existing == filter => existing,
+        Some(existing) => TargetFilter::And {
+            filters: vec![existing, filter],
+        },
+    });
 }
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
@@ -13985,6 +14045,44 @@ mod tests {
             def.constraint,
             Some(TriggerConstraint::NthSpellThisTurn { n: 2, filter: None })
         );
+    }
+
+    #[test]
+    fn trigger_nth_spell_with_filter_constrains_triggering_spell() {
+        let def = parse_trigger_line(
+            "Whenever you cast your second creature spell each turn, draw a card.",
+            "Some Card",
+        );
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_card, Some(filter.clone()));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::NthSpellThisTurn {
+                n: 2,
+                filter: Some(filter),
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_vengevine_intervening_if_maps_to_nth_creature_spell_constraint() {
+        let def = parse_trigger_line(
+            "Whenever you cast a spell, if it's the second creature spell you cast this turn, you may return this card from your graveyard to the battlefield.",
+            "Vengevine",
+        );
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_card, Some(filter.clone()));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::NthSpellThisTurn {
+                n: 2,
+                filter: Some(filter),
+            })
+        );
+        assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+        assert!(def.optional);
     }
 
     #[test]

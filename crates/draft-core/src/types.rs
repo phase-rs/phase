@@ -231,17 +231,90 @@ pub struct DraftCardInstance {
 pub struct DraftPack(pub Vec<DraftCardInstance>);
 
 /// A seat in the draft pod — either a human player or a bot.
+///
+/// Runtime connection state lives in `DraftSession.connected_seats` — do NOT
+/// add a `connected: bool` field here. The seat enum only describes who
+/// occupies the slot; presence/absence is tracked separately so the view
+/// layer has one authoritative source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DraftSeat {
     Human {
         player_id: PlayerId,
         display_name: String,
-        connected: bool,
     },
     Bot {
         name: String,
     },
+}
+
+/// Per-seat bitmap indexed by seat. Length grows to `pod_size` on first
+/// access via [`SeatFlags::ensure_len`], which uses [`Vec::resize`] semantics
+/// (preserves existing entries on grow; pads new slots with `default`).
+/// Does NOT shrink — pod size is immutable mid-session.
+///
+/// All seats — including bots — occupy a slot for index alignment with
+/// [`DraftSession::seats`]. Bot slots are not consulted by the view layer
+/// (it short-circuits to `true`), but are written-through to keep the
+/// index invariant intact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SeatFlags(Vec<bool>);
+
+impl SeatFlags {
+    pub fn all_true(pod_size: u8) -> Self {
+        Self(vec![true; pod_size as usize])
+    }
+
+    pub fn all_false(pod_size: u8) -> Self {
+        Self(vec![false; pod_size as usize])
+    }
+
+    /// Grow to `pod_size` if shorter, padding with `default`. Never shrinks.
+    /// Existing entries are preserved on grow.
+    pub fn ensure_len(&mut self, pod_size: u8, default: bool) {
+        if self.0.len() < pod_size as usize {
+            self.0.resize(pod_size as usize, default);
+        }
+    }
+
+    pub fn get(&self, seat: u8) -> bool {
+        self.0.get(seat as usize).copied().unwrap_or(false)
+    }
+
+    pub fn set(&mut self, seat: u8, value: bool) {
+        if let Some(slot) = self.0.get_mut(seat as usize) {
+            *slot = value;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for flag in &mut self.0 {
+            *flag = false;
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Typed reason for a draft pause, used over the wire and on the i18n key path.
+///
+/// Spelling note: every other enum in this file uses default PascalCase variant
+/// serialization (`DraftAction`, `DraftDelta`, `DraftStatus`, etc.). We keep
+/// that convention here — wire shape is `"PlayerDisconnected"` etc. The TS
+/// i18n key path also uses PascalCase (`pauseReason.PlayerDisconnected`) so
+/// wire = lookup with no boundary conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DraftPauseReason {
+    PlayerDisconnected,
+    PausedByHost,
+    DisconnectGraceExpired,
 }
 
 /// Actions that can be performed on a draft session.
@@ -271,6 +344,12 @@ pub enum DraftAction {
         seat: u8,
         #[serde(default)]
         name: Option<String>,
+    },
+    /// Host-side runtime: mark a human seat as connected or disconnected.
+    /// The bitmap drives `DraftPlayerView.seats[*].connected`. Rejects bot seats.
+    SetSeatConnected {
+        seat: u8,
+        connected: bool,
     },
 }
 
@@ -306,6 +385,10 @@ pub enum DraftDelta {
     SeatReplacedWithBot {
         seat: u8,
     },
+    SeatConnectionChanged {
+        seat: u8,
+        connected: bool,
+    },
 }
 
 /// Errors that can occur during draft operations.
@@ -337,6 +420,10 @@ pub enum DraftError {
     },
     #[error("draft source has {available} cards, but {required} cards are required")]
     InsufficientCards { available: usize, required: usize },
+    #[error("seat {seat} has already picked this round")]
+    SeatAlreadyPickedThisRound { seat: u8 },
+    #[error("seat {seat} is a bot — operation not applicable")]
+    SeatIsBot { seat: u8 },
 }
 
 /// Configuration for a draft session.
@@ -445,7 +532,17 @@ pub struct DraftSession {
     pub seats: Vec<DraftSeat>,
     pub current_pack_number: u8,
     pub pick_number: u8,
-    pub picks_this_round: u8,
+    /// Per-seat flag, `true` once that seat has submitted a pick for the
+    /// current pick number. Cleared when the round advances. Replaces the
+    /// pre-fix `picks_this_round: u8` counter, which did not track seat
+    /// identity and allowed a single seat to force pack-passing.
+    #[serde(default)]
+    pub seats_picked_this_round: SeatFlags,
+    /// Runtime per-seat connection flag set via [`DraftAction::SetSeatConnected`].
+    /// Defaults to all-true at session creation. Bots occupy a slot for index
+    /// alignment but are short-circuited to `true` by [`crate::view::filter_for_player`].
+    #[serde(default)]
+    pub connected_seats: SeatFlags,
     pub pass_direction: PassDirection,
     pub packs_by_seat: Vec<Vec<DraftPack>>,
     pub current_pack: Vec<Option<DraftPack>>,
