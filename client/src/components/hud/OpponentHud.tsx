@@ -16,6 +16,7 @@ import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
+import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
@@ -558,6 +559,42 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   // Hoisted above the early return (rules-of-hooks).
   const designations = usePlayerDesignations(playerId);
 
+  // Player-attached Auras (Curses, Faith's Fetters, Dictate of Kruphix…).
+  // Surfaced as a top-right corner badge so it stays visible in both
+  // density modes and never competes with the inline `statusCluster` for
+  // width on 3-4 player rails. Hover → portaled `AurasHoverPreview`
+  // (same component the 1v1 EnchantmentsBadge uses); click → opens the
+  // full `PlayerEnchantmentsDialog` via `setEnchantmentsDialogPlayer`.
+  // The badge is a `role="button"` span — `OpponentTab` is itself a
+  // `<button>`, so a real nested `<button>` would be invalid HTML.
+  // Mirrors the kick-affordance pattern (lines ~640).
+  const auraIds = useGameStore(
+    (s) => s.gameState?.derived?.auras_attached_to_player?.[String(playerId)] ?? EMPTY_OBJECT_IDS,
+  );
+  const setEnchantmentsDialogPlayer = useUiStore((s) => s.setEnchantmentsDialogPlayer);
+  const auraBadgeRef = useRef<HTMLSpanElement>(null);
+  const [auraHoverOpen, setAuraHoverOpen] = useState(false);
+  const auraCloseTimerRef = useRef<number | null>(null);
+  const onAuraEnter = useCallback(() => {
+    if (auraCloseTimerRef.current != null) {
+      window.clearTimeout(auraCloseTimerRef.current);
+      auraCloseTimerRef.current = null;
+    }
+    setAuraHoverOpen(true);
+  }, []);
+  const onAuraLeave = useCallback(() => {
+    if (auraCloseTimerRef.current != null) window.clearTimeout(auraCloseTimerRef.current);
+    // Same 80ms tolerance the 1v1 EnchantmentsBadge uses to absorb cursor
+    // jitter on the badge edge.
+    auraCloseTimerRef.current = window.setTimeout(() => {
+      setAuraHoverOpen(false);
+      auraCloseTimerRef.current = null;
+    }, 80);
+  }, []);
+  useEffect(() => () => {
+    if (auraCloseTimerRef.current != null) window.clearTimeout(auraCloseTimerRef.current);
+  }, []);
+
   if (!player) return null;
 
   const handCount = player.hand.length;
@@ -799,6 +836,37 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
         >
           ⚔×{incomingAttackerIds.length}
         </span>
+      )}
+      {auraIds.length > 0 && (
+        <span
+          ref={auraBadgeRef}
+          role="button"
+          tabIndex={0}
+          aria-label={t("enchantmentsBadge.ariaLabel", { count: auraIds.length })}
+          title={t("enchantmentsBadge.tooltip", { count: auraIds.length })}
+          onClick={(e) => {
+            e.stopPropagation();
+            setEnchantmentsDialogPlayer(playerId);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.stopPropagation();
+              e.preventDefault();
+              setEnchantmentsDialogPlayer(playerId);
+            }
+          }}
+          onMouseEnter={onAuraEnter}
+          onMouseLeave={onAuraLeave}
+          onFocus={onAuraEnter}
+          onBlur={onAuraLeave}
+          className={`absolute -right-1.5 z-10 flex h-5 min-w-5 cursor-pointer items-center justify-center rounded-full bg-gradient-to-b from-violet-500 to-violet-700 px-1 text-[10px] font-bold text-violet-50 shadow ring-2 ring-violet-300/70 transition-all hover:from-violet-400 hover:to-violet-600 ${compact ? "-bottom-5" : "-bottom-1.5"}`}
+        >
+          <span aria-hidden className="text-[11px] leading-none">✧</span>
+          {auraIds.length > 1 ? <span className="ml-0.5 tabular-nums">×{auraIds.length}</span> : null}
+        </span>
+      )}
+      {auraHoverOpen && auraBadgeRef.current && (
+        <AurasHoverPreview anchorEl={auraBadgeRef.current} attachmentIds={auraIds} />
       )}
       {hoverPopover === "incoming" && tabRef.current && (
         <PortaledPopover anchorEl={tabRef.current}>

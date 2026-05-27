@@ -5792,6 +5792,94 @@ fn parse_damage_amount_quantifier(input: &str) -> OracleResult<'_, (Comparator, 
     alt((parse_exactly, parse_or_more)).parse(input)
 }
 
+/// CR 601.2a + CR 707.10: "When[ever] {actor} cast[s] or cop[ies] a[n] [type] spell"
+/// — unified parser for all SpellCastOrCopy trigger variants. `match_spell_cast`
+/// in trigger_matchers.rs validates the caster against `valid_target`, so:
+/// - "you cast or copy"       → `TargetFilter::Controller`
+/// - "an opponent casts or copies" → `TypedFilter` with `ControllerRef::Opponent`
+///   (evaluates as `source_controller != player_id` in the current engine model)
+/// - "a player casts or copies" → `TargetFilter::Player` (any player, CR 102.1)
+///
+/// Covers Storm-Kiln Artist (you), Mage Hunter (opponent), and any future card
+/// that triggers on any player casting or copying a spell.
+fn try_parse_casts_or_copies_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // CR 603.1: "When"/"Whenever" trigger keyword.
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Actor + verb phrase — encodes caster identity in valid_target.
+    // `terminated` binds each actor tag to its conjugated verb so the two
+    // dimensions (who + action) are parsed as a single atomic combinator arm.
+    let (rest, caster_filter) = alt((
+        // "you cast or copy " — controller of the triggered permanent.
+        terminated(
+            value(
+                TargetFilter::Controller,
+                tag::<_, _, OracleError<'_>>("you"),
+            ),
+            tag(" cast or copy "),
+        ),
+        // "An opponent" uses the engine's existing opponent controller filter.
+        terminated(
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag::<_, _, OracleError<'_>>("an opponent"),
+            ),
+            tag(" casts or copies "),
+        ),
+        // "a player" in Oracle means any player including the controller (CR 102.1).
+        terminated(
+            value(TargetFilter::Player, tag("a player")),
+            tag(" casts or copies "),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // CR 601.2a + CR 707.10: optional spell-type restriction.
+    // `terminated(..., tag(" spell"))` avoids repeating the trailing word across arms.
+    let (_, spell_filter) = terminated(
+        alt((
+            value(
+                Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+                tag::<_, _, OracleError<'_>>("an instant or sorcery"),
+            ),
+            value(
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+                tag("a creature"),
+            ),
+            value(
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+                tag("an instant"),
+            ),
+            value(
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery))),
+                tag("a sorcery"),
+            ),
+            // Generic — any spell, no type restriction.
+            value(None, tag("a")),
+        )),
+        tag(" spell"),
+    )
+    .parse(rest)
+    .ok()?;
+
+    let mut def = make_base();
+    def.mode = TriggerMode::SpellCastOrCopy;
+    def.valid_card = spell_filter;
+    def.valid_target = Some(caster_filter);
+    Some((TriggerMode::SpellCastOrCopy, def))
+}
+
 fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     if let Some(result) = try_parse_self_or_another_controlled_subtype_enters(lower) {
         return Some(result);
@@ -5994,24 +6082,10 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
-    for prefix in ["whenever you cast or copy ", "when you cast or copy "] {
-        if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) {
-            if matches!(
-                rest,
-                "an instant or sorcery spell" | "a instant or sorcery spell"
-            ) {
-                let mut def = make_base();
-                def.mode = TriggerMode::SpellCastOrCopy;
-                def.valid_card = Some(TargetFilter::Or {
-                    filters: vec![
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
-                    ],
-                });
-                def.valid_target = Some(TargetFilter::Controller);
-                return Some((TriggerMode::SpellCastOrCopy, def));
-            }
-        }
+    // CR 601.2a + CR 707.10: all "cast or copy a spell" trigger variants —
+    // covers "you", "an opponent", and "a player" actor phrases.
+    if let Some(result) = try_parse_casts_or_copies_trigger(lower) {
+        return Some(result);
     }
 
     // CR 700.4 + CR 120.1: "a creature dealt damage by ~ this turn dies"
@@ -15401,6 +15475,61 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::SpellCastOrCopy);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // CR 601.2a + CR 707.10: try_parse_casts_or_copies_trigger — all actor variants.
+
+    #[test]
+    fn trigger_opponent_casts_or_copies_instant_or_sorcery() {
+        // Mage Hunter: "Whenever an opponent casts or copies an instant or sorcery spell,
+        // they lose 1 life." — SpellCastOrCopy with opponent-controller restriction.
+        let def = parse_trigger_line(
+            "Whenever an opponent casts or copies an instant or sorcery spell, that player loses 1 life.",
+            "Mage Hunter",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCastOrCopy);
+        assert!(
+            matches!(
+                def.valid_target,
+                Some(TargetFilter::Typed(ref t)) if matches!(t.controller, Some(ControllerRef::Opponent))
+            ),
+            "expected Opponent-controller TypedFilter in valid_target, got {:?}",
+            def.valid_target
+        );
+        assert!(
+            matches!(def.valid_card, Some(TargetFilter::Or { .. })),
+            "expected Or{{Instant, Sorcery}} in valid_card, got {:?}",
+            def.valid_card
+        );
+    }
+
+    #[test]
+    fn trigger_opponent_casts_or_copies_any_spell() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts or copies a spell, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCastOrCopy);
+        assert!(
+            matches!(
+                def.valid_target,
+                Some(TargetFilter::Typed(ref t)) if matches!(t.controller, Some(ControllerRef::Opponent))
+            ),
+            "expected Opponent-controller TypedFilter, got {:?}",
+            def.valid_target
+        );
+        assert_eq!(def.valid_card, None);
+    }
+
+    #[test]
+    fn trigger_a_player_casts_or_copies_a_spell() {
+        let def = parse_trigger_line(
+            "Whenever a player casts or copies a spell, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCastOrCopy);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert_eq!(def.valid_card, None);
     }
 
     #[test]

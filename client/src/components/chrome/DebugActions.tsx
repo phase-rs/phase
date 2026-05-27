@@ -30,15 +30,28 @@ export function DebugActions() {
   const localPlayerId = usePlayerId();
   // Single-player / AI / local games leave `debug_permitted` empty, in which
   // case `debug_mode` itself is the engine gate and the panel renders as
-  // before. In a multiplayer sandbox the set is populated and only members
-  // see the action tabs.
+  // before. In a multiplayer sandbox every seat is seeded into the set by
+  // default — the grant/revoke panel only appears once a seat has been
+  // explicitly revoked, surfacing the re-grant escape hatch without making
+  // the host's default screen look like an admin console.
   const debugPermitted = useGameStore((s) => s.gameState?.debug_permitted);
+  const playerCount = useGameStore((s) => s.gameState?.players?.length ?? 0);
   const allowDebug = useGameStore(
     (s) => s.gameState?.format_config?.allow_debug_actions === true,
   );
   const isHost = localPlayerId === 0;
   const hasPermission =
     !debugPermitted || debugPermitted.length === 0 || debugPermitted.includes(localPlayerId);
+  // A revocation is present when the set was populated and then someone
+  // was removed. The empty-set case is "seeding never ran" (single-player
+  // local sandbox) and is treated as "no admin console needed", not as a
+  // revocation. The panel stays hidden in the all-permitted default; once
+  // anyone is missing from a populated set, the host sees it to re-grant.
+  const hasRevocation =
+    allowDebug &&
+    debugPermitted != null &&
+    debugPermitted.length > 0 &&
+    debugPermitted.length < playerCount;
 
   const handleDispatch = async (action: DebugAction) => {
     setStatus(null);
@@ -61,7 +74,7 @@ export function DebugActions() {
 
   return (
     <div>
-      {allowDebug && isHost && <GrantDebugPermissionPanel />}
+      {isHost && hasRevocation && <GrantDebugPermissionPanel />}
       <div className="mb-1 flex items-center justify-between">
         <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
           Debug Actions
