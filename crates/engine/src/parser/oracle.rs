@@ -10767,6 +10767,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn roiling_vortex_parses_trigger_lines_and_opponent_life_lock_activation() {
+        use crate::types::statics::StaticMode;
+
+        let r = parse(
+            "At the beginning of each player's upkeep, this enchantment deals 1 damage to them.\nWhenever a player casts a spell, if no mana was spent to cast that spell, this enchantment deals 5 damage to that player.\n{R}: Your opponents can't gain life this turn.",
+            "Roiling Vortex",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+
+        assert_eq!(r.triggers.len(), 2, "expected both printed trigger lines");
+        assert_eq!(r.abilities.len(), 1, "expected one activated ability");
+
+        let ab = &r.abilities[0];
+        assert_eq!(ab.kind, AbilityKind::Activated);
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*ab.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", ab.effect);
+        };
+
+        assert_eq!(*target, None);
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn)
+        );
+        assert!(static_abilities
+            .iter()
+            .any(|s| s.mode == StaticMode::CantGainLife));
+        assert!(static_abilities.iter().any(|s| {
+            matches!(
+                s.affected,
+                Some(TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                }))
+            )
+        }));
+    }
+
     // CR 104.2b + CR 104.3b + CR 119.7 + CR 119.8 + CR 611.2b:
     // Everybody Lives! prints three sentences, the third of which is a
     // conjunction joining two player-subject restriction clauses
