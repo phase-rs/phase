@@ -2051,6 +2051,29 @@ fn pay_additional_cost(
     pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if pending.ability.chosen_x.is_none() {
+        if let Some(max) = additional_cost_x_max(state, player, &cost) {
+            let min = pending.ability.min_x_value;
+            if min > max {
+                super::casting::handle_cancel_cast(state, &pending, events);
+                return Err(EngineError::ActionNotAllowed(format!(
+                    "Minimum legal X value {min} exceeds maximum payable X value {max}"
+                )));
+            }
+            let mut pending = pending;
+            let cost = prepend_deferred_required_cost(cost, &mut pending);
+            pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
+            state.pending_cast = Some(Box::new(pending.clone()));
+            return Ok(WaitingFor::ChooseXValue {
+                player,
+                min,
+                max,
+                pending_cast: Box::new(pending),
+                convoke_mode: None,
+            });
+        }
+    }
+
     match cost {
         AbilityCost::PayLife { amount } => {
             // CR 118.3 + CR 119.4 + CR 119.8: Pay life as an additional cost via
@@ -2058,8 +2081,8 @@ fn pay_additional_cost(
             // CR 119.4 + CR 903.4: `amount` is a QuantityExpr so dynamic refs
             // (e.g. commander color identity count) resolve at cast time.
             let resolved =
-                super::quantity::resolve_quantity(state, &amount, player, pending.object_id).max(0)
-                    as u32;
+                super::quantity::resolve_quantity_with_targets(state, &amount, &pending.ability)
+                    .max(0) as u32;
             match super::life_costs::pay_life_as_cast_or_activation_cost(
                 state, player, resolved, events,
             ) {
@@ -2368,6 +2391,71 @@ fn pay_additional_cost(
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+fn prepend_deferred_required_cost(cost: AbilityCost, pending: &mut PendingCast) -> AbilityCost {
+    match pending.additional_cost_flow.take() {
+        Some(AdditionalCost::Required(AbilityCost::Composite { costs })) => {
+            let mut combined = Vec::with_capacity(costs.len() + 1);
+            combined.push(cost);
+            combined.extend(costs);
+            AbilityCost::Composite { costs: combined }
+        }
+        Some(AdditionalCost::Required(next)) => AbilityCost::Composite {
+            costs: vec![cost, next],
+        },
+        Some(other) => {
+            pending.additional_cost_flow = Some(other);
+            cost
+        }
+        None => cost,
+    }
+}
+
+fn additional_cost_x_max(state: &GameState, player: PlayerId, cost: &AbilityCost) -> Option<u32> {
+    match cost {
+        AbilityCost::PayLife { amount } if quantity_expr_contains_x(amount) => {
+            Some(max_pay_life_x(state, player))
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .filter_map(|cost| additional_cost_x_max(state, player, cost))
+            .min(),
+        AbilityCost::PerCounter { base, .. } => additional_cost_x_max(state, player, base),
+        _ => None,
+    }
+}
+
+fn max_pay_life_x(state: &GameState, player: PlayerId) -> u32 {
+    if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, 1) {
+        return 0;
+    }
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| u32::try_from(p.life.max(0)).unwrap_or(0))
+        .unwrap_or(0)
+}
+
+fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } => name == "X",
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_contains_x(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_contains_x),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_contains_x(left) || quantity_expr_contains_x(right)
+        }
+        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
+    }
 }
 
 pub(super) fn effective_casualty_additional_cost(
@@ -3969,6 +4057,19 @@ pub fn enter_payment_step(
                 convoke_mode,
             });
         }
+    }
+
+    if state.pending_cast.as_ref().is_some_and(|pending| {
+        matches!(
+            pending.additional_cost_flow,
+            Some(AdditionalCost::Required(_))
+        )
+    }) {
+        let pending = *state
+            .pending_cast
+            .take()
+            .expect("checked pending cast presence");
+        return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
     if state
