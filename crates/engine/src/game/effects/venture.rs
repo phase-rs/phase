@@ -146,7 +146,7 @@ fn start_dungeon_and_enter(
         room_name: room_name(dungeon, 0).to_string(),
     });
 
-    queue_room_trigger(state, player, dungeon, 0);
+    queue_room_trigger(state, player, dungeon, 0, events);
 }
 
 /// CR 309.7: Complete a dungeon — remove from game, record completion.
@@ -190,7 +190,7 @@ fn advance_to_room(
         });
 
         // CR 309.4c: Queue room trigger.
-        queue_room_trigger(state, player, dungeon, room);
+        queue_room_trigger(state, player, dungeon, room, events);
 
         Ok(())
     } else {
@@ -211,13 +211,20 @@ fn advance_to_room(
     }
 }
 
-/// CR 309.4c: Queue a room's triggered ability onto the pending trigger list.
-/// Room abilities are triggered abilities ("When you move your venture marker
-/// into this room, [effect].") — they go on the stack.
+/// CR 309.4c: Queue and dispatch a room's triggered ability — for no-target
+/// rooms this pushes directly to the stack; for targeted rooms (Forge /
+/// Lost Well / Trap! / Arena) this opens the standard trigger-target-selection
+/// prompt.
 ///
 /// Uses a synthetic ObjectId (dungeon sentinel) so the SBA (CR 704.5t) can
 /// identify pending room abilities when checking dungeon completion.
-fn queue_room_trigger(state: &mut GameState, player: PlayerId, dungeon: DungeonId, room: u8) {
+fn queue_room_trigger(
+    state: &mut GameState,
+    player: PlayerId,
+    dungeon: DungeonId,
+    room: u8,
+    events: &mut Vec<GameEvent>,
+) {
     let source_id = dungeon_sentinel_id(player);
     let name = room_name(dungeon, room);
 
@@ -225,16 +232,7 @@ fn queue_room_trigger(state: &mut GameState, player: PlayerId, dungeon: DungeonI
     let (room_ability, target_constraints) =
         dungeon::room_effects(dungeon, room, source_id, player);
 
-    // Room triggers set pending_trigger. In normal flow, it should already be None
-    // because the engine consumes it before dispatching the next venture action.
-    // If this assertion fires, the call site needs to consume the existing trigger first.
-    debug_assert!(
-        state.pending_trigger.is_none(),
-        "queue_room_trigger: pending_trigger already set — previous trigger not consumed"
-    );
-
-    // Push as a pending trigger so it goes on the stack properly.
-    state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+    let pending = crate::game::triggers::PendingTrigger {
         source_id,
         controller: player,
         condition: None,
@@ -253,7 +251,12 @@ fn queue_room_trigger(state: &mut GameState, player: PlayerId, dungeon: DungeonI
         description: Some(format!("{}: {name}", dungeon::get_definition(dungeon).name)),
         may_trigger_origin: None,
         subject_match_count: None,
-    });
+    };
+
+    // CR 603.2 + CR 309.4c: Dispatch through the standard
+    // trigger pipeline so no-target room triggers land on the stack and
+    // targeted ones open the target-selection prompt.
+    crate::game::triggers::dispatch_synthetic_trigger(state, pending, events);
 }
 
 /// Called by the engine handler when the player chooses a dungeon.
@@ -286,7 +289,7 @@ pub fn handle_choose_room(
     });
 
     // CR 309.4c: Queue room trigger.
-    queue_room_trigger(state, player, dungeon, room_index);
+    queue_room_trigger(state, player, dungeon, room_index, events);
 }
 
 #[cfg(test)]
@@ -348,8 +351,12 @@ mod tests {
             }
         )));
 
-        // Must queue a room trigger (pending_trigger set).
-        assert!(state.pending_trigger.is_some());
+        // Room trigger must reach the stack via the standard dispatch
+        // pipeline (no orphan pending_trigger). Secret Entrance has no
+        // target slots, so it pushes directly to the stack.
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.stack[0].source_id, dungeon_sentinel_id(PlayerId(0)));
+        assert!(state.pending_trigger.is_none());
     }
 
     #[test]
@@ -467,6 +474,13 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::InitiativeTaken { .. })));
+
+        // Room trigger must reach the stack via the standard dispatch
+        // pipeline (no orphan pending_trigger). Secret Entrance has no
+        // target slots, so it pushes directly to the stack.
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.stack[0].source_id, dungeon_sentinel_id(PlayerId(0)));
+        assert!(state.pending_trigger.is_none());
     }
 
     #[test]
@@ -493,5 +507,9 @@ mod tests {
             }
             other => panic!("Expected ChooseDungeonRoom on retake, got {other:?}"),
         }
+
+        // Branch-point retake never reaches `queue_room_trigger`, so no
+        // pending trigger should be left orphaned (regression guard for #587).
+        assert!(state.pending_trigger.is_none());
     }
 }
