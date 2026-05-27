@@ -253,7 +253,12 @@ pub(crate) fn copy_count_with_replacements(
     // was a narrowing cast that could truncate on 64-bit targets.
     let mut count = base;
     for (_idx, obj, def) in crate::game::functioning_abilities::active_replacements(state) {
-        if def.event != ReplacementEvent::CopySpell || obj.controller != controller {
+        let source_functions =
+            obj.zone == Zone::Battlefield || (obj.zone == Zone::Command && obj.is_emblem);
+        if def.event != ReplacementEvent::CopySpell
+            || obj.controller != controller
+            || !source_functions
+        {
             continue;
         }
         count = match def.quantity_modification {
@@ -1276,7 +1281,12 @@ mod tests {
 
     /// Put a Twinning Staff–style permanent (a `CopySpell` replacement with
     /// `Plus { value: 1 }`) onto the battlefield under `controller`.
-    fn push_twinning_staff(state: &mut GameState, obj_id: ObjectId, controller: PlayerId) {
+    fn push_twinning_staff_in_zone(
+        state: &mut GameState,
+        obj_id: ObjectId,
+        controller: PlayerId,
+        zone: Zone,
+    ) {
         use crate::types::ability::{QuantityModification, ReplacementDefinition};
         use crate::types::replacements::ReplacementEvent;
 
@@ -1285,13 +1295,21 @@ mod tests {
             CardId(900),
             controller,
             "Twinning Staff".to_string(),
-            Zone::Battlefield,
+            zone,
         );
         obj.controller = controller;
         obj.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::CopySpell)
             .quantity_modification(QuantityModification::Plus { value: 1 })]
         .into();
         state.objects.insert(obj_id, obj);
+        if zone == Zone::Battlefield {
+            state.battlefield.push_back(obj_id);
+        }
+    }
+
+    /// Put a Twinning Staff-style permanent on the battlefield under `controller`.
+    fn push_twinning_staff(state: &mut GameState, obj_id: ObjectId, controller: PlayerId) {
+        push_twinning_staff_in_zone(state, obj_id, controller, Zone::Battlefield);
     }
 
     /// Build a `CopySpell` ability (no targets → copies top of stack) for `controller`.
@@ -1374,6 +1392,37 @@ mod tests {
     fn copy_count_with_replacements_ignores_opponents_staff() {
         let mut state = GameState::new_two_player(42);
         push_twinning_staff(&mut state, ObjectId(50), PlayerId(1));
+
+        let spell = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Divination",
+            spell,
+            CastingVariant::Normal,
+        );
+
+        let copy = copy_top_ability(PlayerId(0));
+        assert_eq!(copy_count_with_replacements(&state, &copy, 1), 1);
+    }
+
+    /// CR 113.6: Twinning Staff's static replacement functions only while the
+    /// permanent is on the battlefield. The copy-count hook must not treat a card
+    /// in a hidden or non-battlefield zone as an active replacement source.
+    #[test]
+    fn copy_count_with_replacements_ignores_staff_in_hand() {
+        let mut state = GameState::new_two_player(42);
+        push_twinning_staff_in_zone(&mut state, ObjectId(50), PlayerId(0), Zone::Hand);
 
         let spell = ResolvedAbility::new(
             Effect::Draw {

@@ -433,10 +433,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // copies a copy-a-spell effect produces, modeled as a `CopySpell`
     // replacement carrying a `QuantityModification` — the same shape as the
     // token / counter doubling family above.
-    if nom_primitives::scan_contains(&lower, "would copy a spell") {
-        if let Some(def) = parse_copy_count_replacement(&lower, &text) {
-            return Some(def);
-        }
+    if let Some(def) = parse_copy_count_replacement(&lower, &text) {
+        return Some(def);
     }
 
     // --- Counter addition replacement: "if one or more ... counters would be put on..." ---
@@ -3774,8 +3772,10 @@ fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<Repl
     // singular/plural `time(s)` noun — rather than enumerating full-phrase tags,
     // so "plus an additional time" and "plus N additional times" both parse.
     let additional = nom_on_lower(lower, lower, |i| {
-        let (i, _) = take_until::<_, _, OracleError<'_>>("plus ").parse(i)?;
-        let (i, _) = tag("plus ").parse(i)?;
+        let (i, _) = tag(
+            "if you would copy a spell one or more times, instead copy it that many times plus ",
+        )
+        .parse(i)?;
         let (i, n) = alt((value(1u32, tag("an")), nom_primitives::parse_number)).parse(i)?;
         let (i, _) = tag(" additional ").parse(i)?;
         let (i, _) = alt((tag("times"), tag("time"))).parse(i)?;
@@ -9939,6 +9939,17 @@ mod snapshot_tests {
         assert_eq!(
             def.quantity_modification,
             Some(QuantityModification::Plus { value: 2 })
+        );
+    }
+
+    #[test]
+    fn copy_count_replacement_requires_full_copy_count_shape() {
+        let text = "If you would copy a spell, instead copy target spell plus an additional time.";
+        let lower = text.to_lowercase();
+
+        assert!(
+            super::parse_copy_count_replacement(&lower, text).is_none(),
+            "copy-count replacement must not be gated by loose substring matching"
         );
     }
 }
