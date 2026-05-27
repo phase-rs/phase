@@ -1120,7 +1120,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
@@ -1409,7 +1409,7 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1851,8 +1851,8 @@ pub fn synthesize_fabricate(face: &mut CardFace) {
 ///     against `state.lki_cache` for the source's pre-death counter map.
 ///   * Execute body: `Effect::ChangeZone` from `Graveyard` → `Battlefield`
 ///     targeting `SelfRef`, with `enter_with_counters = [("P1P1", 1)]`. The
-///     default `under_your_control = false` matches the rule's "under its
-///     owner's control" exactly.
+///     default `enters_under = None` matches the rule's "under its owner's
+///     control" exactly (CR 110.2a).
 ///
 /// Per CR 113.2c ("If an object has multiple instances of the same ability,
 /// each instance functions independently") combined with the absence of a
@@ -2597,7 +2597,7 @@ fn build_dies_return_with_counter_trigger(
         // CR 702.93a / CR 702.79a: "under its owner's control" — default
         // (false) sends the object to its owner's control. `true` would
         // override to the ability controller's control.
-        under_your_control: false,
+        enters_under: None,
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
@@ -3718,7 +3718,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -5148,7 +5148,7 @@ mod undying_persist_synthesis_tests {
             origin,
             destination,
             target,
-            under_your_control,
+            enters_under,
             enter_with_counters,
             ..
         } = &*execute.effect
@@ -5160,7 +5160,7 @@ mod undying_persist_synthesis_tests {
         assert!(matches!(target, TargetFilter::SelfRef));
         // CR 702.93a: "under its owner's control" — default routing (no
         // override) places the object under its owner.
-        assert!(!*under_your_control);
+        assert_eq!(*enters_under, None);
         assert_eq!(enter_with_counters.len(), 1);
         let (ct, qty) = &enter_with_counters[0];
         assert_eq!(ct, &CounterType::Plus1Plus1);
@@ -5557,30 +5557,31 @@ mod undying_persist_runtime_tests {
     /// the routing implicitly depends on, instead of poking `obj.controller`
     /// directly.
     ///
-    /// Discrimination mechanism (`under_your_control: false` vs a
-    /// `true`-regression): when the creature dies, `apply_zone_exit_cleanup`
-    /// (`zones.rs`) prunes the `SpecificObject`-bound control effect via
-    /// `prune_affected_object_left_effects` regardless of duration, but does
-    /// NOT reset `obj.controller` — only `reset_for_battlefield_exit` resets
-    /// `base_controller`. So the graveyard object still reads
-    /// `controller = P1`, and the dies-trigger captures
-    /// `ability.controller = P1`. With `under_your_control: false`,
+    /// Discrimination mechanism (`enters_under: None` vs a
+    /// `Some(ControllerRef::You)`-regression): when the creature dies,
+    /// `apply_zone_exit_cleanup` (`zones.rs`) prunes the `SpecificObject`-
+    /// bound control effect via `prune_affected_object_left_effects` regardless
+    /// of duration, but does NOT reset `obj.controller` — only
+    /// `reset_for_battlefield_exit` resets `base_controller`. So the graveyard
+    /// object still reads `controller = P1`, and the dies-trigger captures
+    /// `ability.controller = P1`. With `enters_under: None`,
     /// `ctrl_override = None` → `reset_for_battlefield_entry` sets
     /// `controller`/`base_controller` to the owner → Layer 2 yields P0
-    /// (test passes). With a `true`-regression,
+    /// (test passes). With a `Some(ControllerRef::You)`-regression,
     /// `apply_battlefield_entry_controller_override` writes
     /// `base_controller = Some(P1)`, which Layer 2 preserves → P1 (test fails).
     /// The mutation check (flipping the synthesized Persist trigger's
-    /// `under_your_control` to `true`) was performed during implementation and
-    /// confirmed to make this test fail — proof the assertion discriminates.
+    /// `enters_under` to `Some(ControllerRef::You)`) was performed during
+    /// implementation and confirmed to make this test fail — proof the
+    /// assertion discriminates.
     ///
     /// The post-return lookup uses `state.objects.get(&obj_id)` directly:
     /// Persist's return does not create a new object — `move_to_zone` mutates
     /// the existing `GameObject` in place, keeping the same `ObjectId` across
     /// Battlefield→Graveyard→Battlefield.
     ///
-    /// This pins the `under_your_control: false` field's "send to owner"
-    /// semantics: without it, a control-grab would steal the Persist /
+    /// This pins the `enters_under: None` field's "send to owner" semantics
+    /// (CR 110.2a): without it, a control-grab would steal the Persist /
     /// Undying creature permanently on death.
     #[test]
     fn persist_returns_under_owner_not_controller_after_control_grab() {
@@ -5641,7 +5642,7 @@ mod undying_persist_runtime_tests {
             "persist returns the permanent to the battlefield"
         );
         // CR 702.79a "under its owner's control" — owner wins over the
-        // pre-death controller. `under_your_control: false` on the
+        // pre-death controller. `enters_under: None` on the
         // `Effect::ChangeZone` causes `move_to_zone` not to write any
         // controller override; CR 613.1b then resets controller to owner
         // during the next layers pass.

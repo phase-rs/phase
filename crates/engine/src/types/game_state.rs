@@ -701,7 +701,13 @@ pub struct PendingChangeZoneIteration {
     pub destination: crate::types::zones::Zone,
     pub enter_transformed: bool,
     pub enter_tapped: bool,
-    pub under_your_control: bool,
+    /// CR 110.2a: Resolved-once controller override on ETB. `Some(pid)`
+    /// routes the object to `pid`. `None` leaves the object under its
+    /// owner's control. Resolved from `Effect::ChangeZone.enters_under`
+    /// at resolver entry, so the carrier never re-evaluates a `ControllerRef`
+    /// across an interactive pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_under_player: Option<PlayerId>,
     pub enters_attacking: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
@@ -1777,8 +1783,12 @@ pub enum WaitingFor {
         enter_tapped: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_transformed: bool,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        under_your_control: bool,
+        /// CR 110.2a: Resolved-once controller override carried through the
+        /// `EffectZoneChoice` round-trip. `Some(pid)` routes the chosen
+        /// object(s) to `pid` on battlefield entry; `None` leaves them
+        /// under their owner's control.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under_player: Option<PlayerId>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enters_attacking: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -5390,7 +5400,7 @@ mod tests {
             destination: None,
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -5622,7 +5632,7 @@ mod tests {
             destination: Some(Zone::Battlefield),
             enter_tapped: true,
             enter_transformed: false,
-            under_your_control: true,
+            enters_under_player: Some(PlayerId(0)),
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
