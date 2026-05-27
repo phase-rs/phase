@@ -29,7 +29,8 @@ use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::draft_session::DraftSessionManager;
 use server_core::lobby::RegisterGameRequest;
 use server_core::protocol::{
-    build_commit, ClientMessage, ServerMessage, ServerMode, PROTOCOL_VERSION,
+    build_commit, ClientMessage, ServerMessage, ServerMode, MIN_SUPPORTED_PROTOCOL,
+    PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::session::{ActionResult, GameSession, SessionManager};
@@ -317,7 +318,7 @@ enum HelloGateOutcome {
 fn classify_hello_gate(
     hello_received: bool,
     msg: &ClientMessage,
-    server_protocol: u32,
+    server_protocol_range: std::ops::RangeInclusive<u32>,
 ) -> HelloGateOutcome {
     match (hello_received, msg) {
         (
@@ -328,10 +329,13 @@ fn classify_hello_gate(
                 protocol_version,
             },
         ) => {
-            if *protocol_version != server_protocol {
+            // Accept any client in the supported range. The `server` field on
+            // RejectProtocol surfaces the *current* protocol version so the
+            // error message tells the client what to upgrade (or downgrade) to.
+            if !server_protocol_range.contains(protocol_version) {
                 HelloGateOutcome::RejectProtocol {
                     client: *protocol_version,
-                    server: server_protocol,
+                    server: *server_protocol_range.end(),
                 }
             } else {
                 HelloGateOutcome::Accept(ClientHelloInfo {
@@ -1722,6 +1726,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
             DeckChoice::Random => server_core::starter_decks::random_starter_deck(),
             DeckChoice::Named(name) => server_core::starter_decks::find_starter_deck(name)
                 .ok_or_else(|| format!("Starter deck not found: {name}"))?,
+            DeckChoice::DeckList(deck) => deck.as_ref().clone(),
         };
         server_core::resolve_deck(self.db, &deck)
     }
@@ -1811,7 +1816,7 @@ async fn handle_client_message(
     match classify_hello_gate(
         identity.client_hello.is_some(),
         &client_msg,
-        PROTOCOL_VERSION,
+        MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
     ) {
         HelloGateOutcome::Accept(info) => {
             info!(
@@ -1828,9 +1833,18 @@ async fn handle_client_message(
                 server_protocol = server,
                 "protocol version mismatch at ClientHello"
             );
+            // Branch on which side is older so the user-facing remedy points at
+            // the right party. "Please update" is wrong when the *server* is
+            // the older one (post-bump preview server rolled back, or operator
+            // running a stale build behind a freshly-deployed client).
+            let remedy = if client < server {
+                "Please update your client."
+            } else {
+                "This server is older than your client; wait for the rollout to complete."
+            };
             let msg = ServerMessage::Error {
                 message: format!(
-                    "Protocol version mismatch (client={client} server={server}). Please update."
+                    "Protocol version mismatch (client={client} server={server}). {remedy}"
                 ),
             };
             if let Ok(json) = serde_json::to_string(&msg) {
@@ -2504,16 +2518,25 @@ async fn handle_client_message(
                 if seat.seat_index == 0 || seat.seat_index >= pc {
                     continue;
                 }
-                let ai_deck_data = match &seat.deck_name {
-                    Some(name) if name.eq_ignore_ascii_case("random") => {
-                        server_core::starter_decks::random_starter_deck()
-                    }
-                    Some(name) => server_core::starter_decks::find_starter_deck(name)
-                        .unwrap_or_else(|| {
+                let ai_deck_data = match &seat.deck {
+                    Some(DeckChoice::DeckList(deck)) => deck.as_ref().clone(),
+                    Some(DeckChoice::Named(name)) => {
+                        server_core::starter_decks::find_starter_deck(name).unwrap_or_else(|| {
                             warn!(deck = %name, "unknown AI deck name, using random");
                             server_core::starter_decks::random_starter_deck()
-                        }),
-                    None => server_core::starter_decks::random_starter_deck(),
+                        })
+                    }
+                    Some(DeckChoice::Random) | None => match &seat.deck_name {
+                        Some(name) if name.eq_ignore_ascii_case("random") => {
+                            server_core::starter_decks::random_starter_deck()
+                        }
+                        Some(name) => server_core::starter_decks::find_starter_deck(name)
+                            .unwrap_or_else(|| {
+                                warn!(deck = %name, "unknown AI deck name, using random");
+                                server_core::starter_decks::random_starter_deck()
+                            }),
+                        None => server_core::starter_decks::random_starter_deck(),
+                    },
                 };
                 if let Some(ref fc) = format_config {
                     if let Err(reasons) = validate_name_deck_for_format(
@@ -4070,7 +4093,7 @@ mod handshake_tests {
                 build_commit: "abc1234".into(),
                 protocol_version: PROTOCOL_VERSION,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(
             outcome,
@@ -4078,6 +4101,49 @@ mod handshake_tests {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
             })
+        );
+    }
+
+    #[test]
+    fn accepts_min_supported_protocol_below_current() {
+        // Range hello gate: a client one version behind (e.g., release after
+        // the server has rolled forward to preview) must still be admitted to
+        // the lobby. Cross-version game interop is gated separately at join
+        // boundaries (per-game protocol-version filtering, follow-up work).
+        // `MIN_SUPPORTED_PROTOCOL < PROTOCOL_VERSION` is true by construction
+        // (MIN derives from PROTOCOL_VERSION.saturating_sub(1)) whenever
+        // PROTOCOL_VERSION > 0; no runtime assert needed.
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.10".into(),
+                build_commit: "old1234".into(),
+                protocol_version: MIN_SUPPORTED_PROTOCOL,
+            },
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        );
+        assert!(matches!(outcome, HelloGateOutcome::Accept(_)));
+    }
+
+    #[test]
+    fn rejects_client_hello_below_min_supported() {
+        // Two versions behind is outside the supported window; reject.
+        let too_old = MIN_SUPPORTED_PROTOCOL.saturating_sub(1);
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.0".into(),
+                build_commit: "ancient1".into(),
+                protocol_version: too_old,
+            },
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::RejectProtocol {
+                client: too_old,
+                server: PROTOCOL_VERSION,
+            }
         );
     }
 
@@ -4090,7 +4156,7 @@ mod handshake_tests {
                 build_commit: "abc1234".into(),
                 protocol_version: 0,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(
             outcome,
@@ -4110,7 +4176,7 @@ mod handshake_tests {
                 build_commit: "def5678".into(),
                 protocol_version: PROTOCOL_VERSION + 1,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert!(matches!(outcome, HelloGateOutcome::RejectProtocol { .. }));
     }
@@ -4122,24 +4188,28 @@ mod handshake_tests {
             &ClientMessage::Action {
                 action: GameAction::PassPriority,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
 
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::CreateGame { deck: empty_deck() },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
 
-        let outcome = classify_hello_gate(false, &ClientMessage::SubscribeLobby, PROTOCOL_VERSION);
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::SubscribeLobby,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
 
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::Ping { timestamp: 1 },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
     }
@@ -4153,7 +4223,7 @@ mod handshake_tests {
                 build_commit: "abc1234".into(),
                 protocol_version: PROTOCOL_VERSION,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::IgnoreRedundantHello);
     }
@@ -4165,7 +4235,7 @@ mod handshake_tests {
             &ClientMessage::Action {
                 action: GameAction::PassPriority,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::PassThrough);
     }

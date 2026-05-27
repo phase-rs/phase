@@ -41,6 +41,30 @@ export const QUICK_DRAFT_KEY_PREFIX = "phase-quick-draft:";
 /** Prefix for draft run state in IndexedDB. Full key: `${DRAFT_RUN_KEY_PREFIX}${draftId}` */
 export const DRAFT_RUN_KEY_PREFIX = "phase-draft-run:";
 
+/** localStorage key for the Zustand-persisted preferences store. */
+export const PREFERENCES_KEY = "phase-preferences";
+
+/**
+ * Single authority for "is this localStorage key part of the user's portable
+ * profile?" — the decks, preferences, metadata, active-deck pointer, and feed
+ * state that `buildBackup`/`applyBackup` round-trip and that cloud sync mirrors.
+ *
+ * Deliberately excludes transient/rehydratable keys (per-game state, draft
+ * blobs, IndexedDB caches): those regenerate at runtime and must NOT trigger a
+ * cloud push. Consumed by `backup.ts` (export/import) and the cloud-sync
+ * storage watcher so all three share one definition and cannot drift.
+ */
+export function isUserOwnedStorageKey(key: string): boolean {
+  return (
+    key === PREFERENCES_KEY ||
+    key === DECK_METADATA_KEY ||
+    key === ACTIVE_DECK_KEY ||
+    key === FEED_SUBSCRIPTIONS_KEY ||
+    key === FEED_DECK_ORIGINS_KEY ||
+    key.startsWith(STORAGE_KEY_PREFIX)
+  );
+}
+
 export interface DeckMeta {
   addedAt: number;
   lastPlayedAt?: number;
@@ -109,6 +133,16 @@ export function listSavedDeckNames(): string[] {
   return names.sort();
 }
 
+/**
+ * Read a saved deck and return its repaired in-memory form.
+ *
+ * Pure read: never writes to localStorage. The repair-on-disk concern is
+ * owned by the one-shot `migrateSavedDecks()` boot migration — doing the
+ * write here used to fire during JSX render (`DeckTile` calls this), which
+ * is a React-rule violation AND ping-pongs cloud sync between tabs. Repairs
+ * still run on every read (cheap) so the in-memory shape is always
+ * well-formed even if the migration hasn't run yet.
+ */
 export function loadSavedDeck(deckName: string): ParsedDeck | null {
   const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
   if (!raw) return null;
@@ -117,15 +151,6 @@ export function loadSavedDeck(deckName: string): ParsedDeck | null {
     const repaired = repairParsedDeck(parsed);
     if (parsed.companion && !repaired.sideboard.some((e) => e.name === parsed.companion)) {
       repaired.sideboard.push({ count: 1, name: parsed.companion });
-    }
-
-    const repairedPayload = {
-      ...parsed,
-      ...repaired,
-    };
-    const repairedRaw = JSON.stringify(repairedPayload);
-    if (repairedRaw !== raw) {
-      localStorage.setItem(STORAGE_KEY_PREFIX + deckName, repairedRaw);
     }
     return repaired;
   } catch {

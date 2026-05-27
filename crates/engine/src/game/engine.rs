@@ -40,6 +40,7 @@ use super::priority;
 use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty, sync_waiting_for,
 };
+use super::sba;
 use super::triggers;
 use super::turn_control;
 use super::turns;
@@ -158,6 +159,21 @@ pub fn apply(
 }
 
 fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
+    // Safety net (fixes #962): If a player-loss SBA would eliminate a player,
+    // run SBAs now. CR 704.3 normally checks SBAs when a player would receive
+    // priority, but skipping them here can leave the engine waiting on a dead
+    // player for a non-priority choice.
+    //
+    // The predicate lives in `sba` so it shares the same CR 101.2 "can't lose"
+    // exception as the real player-loss SBA checks, and stays narrower than the
+    // full SBA loop to avoid unrelated mid-resolution SBA prompts.
+    if sba::has_pending_player_loss_sba(state) {
+        sba::check_state_based_actions(state, &mut result.events);
+        // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
+        // the next living player). Sync the result.
+        result.waiting_for = state.waiting_for.clone();
+    }
+
     super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         match_flow::handle_game_over_transition(state);
@@ -3245,6 +3261,7 @@ fn apply_action(
                 mode_abilities: vec![],
                 description: Some("Miracle — you may cast this card".to_string()),
                 may_trigger_origin: None,
+                subject_match_count: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -3660,10 +3677,17 @@ fn apply_action(
             // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
             // resolves the payer correctly — the trigger's resolution is still
             // in flight.
+            // CR 603.2c + CR 608.2: the batched-trigger subject count is also
+            // part of the trigger's resolution scope — mirror its save/restore
+            // so an `EventContextAmount` inside the resumed continuation reads
+            // the original "that many" instead of `None`.
             let previous_trigger_event = state.current_trigger_event.clone();
+            let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_event = pending_event;
+            state.current_trigger_match_count = state.pending_optional_trigger_match_count.take();
             effects::drain_pending_continuation(state, &mut events);
             state.current_trigger_event = previous_trigger_event;
+            state.current_trigger_match_count = previous_trigger_match_count;
             state.waiting_for.clone()
         }
         // CR 707.10c: Copy retarget — player chose target for the current slot
@@ -4017,7 +4041,7 @@ pub(super) fn begin_pending_trigger_target_selection(
         return Ok(None);
     };
 
-    // CR 700.2a: Modal trigger — prompt for mode selection before stack.
+    // CR 700.2b: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
             let modal = modal_choice_for_player(
@@ -4027,10 +4051,19 @@ pub(super) fn begin_pending_trigger_target_selection(
                 modal,
                 &crate::types::ability::SpellContext::default(),
             );
-            let unavailable_modes = compute_unavailable_modes(state, trigger.source_id, &modal);
+            let mut unavailable_modes = compute_unavailable_modes(state, trigger.source_id, &modal);
+            super::ability_utils::filter_modes_by_target_legality(
+                state,
+                trigger.source_id,
+                trigger.controller,
+                &trigger.mode_abilities,
+                &modal,
+                &mut unavailable_modes,
+            );
 
-            // CR 700.2: All modes already chosen — ability cannot be put on the stack
-            // without a mode selection. Clear pending trigger and skip.
+            // CR 700.2b: All modes unavailable (previously chosen OR no legal
+            // targets) — ability cannot be put on the stack. Clear pending
+            // trigger and skip.
             if unavailable_modes.len() >= modal.mode_count {
                 state.pending_trigger = None;
                 return Ok(None);
@@ -5483,11 +5516,13 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ControllerRef, Effect,
         GainLifePlayer, ManaContribution, ManaProduction, ManaSpendRestriction, QuantityExpr,
-        ResolvedAbility, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CardType;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::TriggerMode;
@@ -5518,6 +5553,105 @@ mod tests {
         remember_public_reveals(&mut state, &events);
 
         assert!(state.public_revealed_cards.contains(&card_id));
+    }
+
+    #[test]
+    fn terminal_reconcile_does_not_run_sbas_for_cant_lose_player() {
+        let mut state = GameState::new(FormatConfig::commander(), 2, 42);
+        let protected = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Platinum Angel".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&protected)
+            .expect("protected source exists")
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantLoseTheGame).affected(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ));
+
+        let commander = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Kaalia".to_string(),
+            Zone::Command,
+        );
+        let commander_obj = state
+            .objects
+            .get_mut(&commander)
+            .expect("commander object exists");
+        commander_obj.is_commander = true;
+        commander_obj.card_types.core_types.push(CoreType::Creature);
+        let mut move_events = Vec::new();
+        zones::move_to_zone(&mut state, commander, Zone::Battlefield, &mut move_events);
+        zones::move_to_zone(&mut state, commander, Zone::Graveyard, &mut move_events);
+
+        // CR 101.2 + CR 704.5a: Platinum Angel means P0 cannot lose from
+        // 0-or-less life. The
+        // non-priority DiscardChoice should therefore remain active; otherwise
+        // the full SBA loop would notice the unrelated dead commander and
+        // replace the choice with CommanderZoneChoice.
+        state.players[0].life = 0;
+        state.waiting_for = WaitingFor::DiscardChoice {
+            player: PlayerId(0),
+            count: 1,
+            cards: Vec::new(),
+            source_id: ObjectId(999),
+            effect_kind: EffectKind::DiscardCard,
+            up_to: false,
+            unless_filter: None,
+        };
+        let original_waiting_for = state.waiting_for.clone();
+        let mut result = ActionResult {
+            events: Vec::new(),
+            waiting_for: original_waiting_for.clone(),
+            log_entries: Vec::new(),
+        };
+
+        reconcile_terminal_result(&mut state, &mut result);
+
+        assert_eq!(state.waiting_for, original_waiting_for);
+        assert_eq!(result.waiting_for, original_waiting_for);
+        assert!(!state.players[0].is_eliminated);
+        assert_eq!(state.objects[&commander].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn terminal_reconcile_runs_player_loss_sba_for_unprotected_player() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 0;
+        state.waiting_for = WaitingFor::DiscardChoice {
+            player: PlayerId(0),
+            count: 1,
+            cards: Vec::new(),
+            source_id: ObjectId(999),
+            effect_kind: EffectKind::DiscardCard,
+            up_to: false,
+            unless_filter: None,
+        };
+        let mut result = ActionResult {
+            events: Vec::new(),
+            waiting_for: state.waiting_for.clone(),
+            log_entries: Vec::new(),
+        };
+
+        reconcile_terminal_result(&mut state, &mut result);
+
+        // CR 704.5a: An unprotected player at 0 life loses before the engine
+        // keeps waiting for that player's non-priority discard choice.
+        assert!(state.players[0].is_eliminated);
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(1)),
+                ..
+            }
+        ));
     }
 
     /// Create a DealDamage ability for testing.
@@ -11003,6 +11137,7 @@ mod trigger_target_tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
@@ -11094,6 +11229,7 @@ mod trigger_target_tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -11164,6 +11300,7 @@ mod trigger_target_tests {
             )],
             description: Some("Choose two target players".to_string()),
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -11271,6 +11408,7 @@ mod trigger_target_tests {
             ],
             description: Some("Whenever you cast your second spell each turn".to_string()),
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -11387,6 +11525,7 @@ mod trigger_target_tests {
             ],
             description: Some("Choose one or both with commander".to_string()),
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let waiting = begin_pending_trigger_target_selection(&mut state)
@@ -11456,6 +11595,7 @@ mod trigger_target_tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -11574,6 +11714,7 @@ mod trigger_target_tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -11666,6 +11807,7 @@ mod trigger_target_tests {
             )],
             description: Some("Choose different target players".to_string()),
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -11767,12 +11909,13 @@ mod trigger_target_tests {
             ],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         // Call the private function via the engine path.
         let result = begin_pending_trigger_target_selection(&mut state).unwrap();
 
-        // CR 700.2: All modes exhausted — no AbilityModeChoice produced.
+        // CR 700.2b: All modes exhausted — no AbilityModeChoice produced.
         assert!(result.is_none());
         // Pending trigger should be cleared.
         assert!(state.pending_trigger.is_none());
@@ -12442,6 +12585,7 @@ mod exile_return_tests {
                 condition: None,
                 trigger_event: None,
                 source_name: String::new(),
+                subject_match_count: None,
             },
         });
 
@@ -13534,7 +13678,7 @@ mod phase_trigger_regression_tests {
             PlayerId(0),
         );
         let mut draw = draw_that_many(source_id, PlayerId(0));
-        draw.condition = Some(AbilityCondition::IfYouDo);
+        draw.condition = Some(AbilityCondition::effect_performed());
         ability.sub_ability = Some(Box::new(draw));
 
         state.pending_optional_effect = Some(Box::new(ability));
@@ -13691,7 +13835,7 @@ mod phase_trigger_regression_tests {
             source_id,
             PlayerId(0),
         );
-        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        alternative.condition = Some(AbilityCondition::effect_performed());
         primary.sub_ability = Some(Box::new(alternative));
 
         // Player 1 (the unless payer) starts with 20 life and 2 energy to pay.
@@ -13749,7 +13893,7 @@ mod phase_trigger_regression_tests {
             source_id,
             PlayerId(0),
         );
-        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        alternative.condition = Some(AbilityCondition::effect_performed());
         primary.sub_ability = Some(Box::new(alternative));
 
         state.waiting_for = WaitingFor::UnlessPayment {
@@ -13853,7 +13997,7 @@ mod phase_trigger_regression_tests {
             source_id,
             PlayerId(0),
         );
-        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        alternative.condition = Some(AbilityCondition::effect_performed());
         primary.sub_ability = Some(Box::new(alternative));
 
         state.players[1].energy = 2;

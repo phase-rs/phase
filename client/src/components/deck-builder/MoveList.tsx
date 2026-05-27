@@ -35,6 +35,9 @@ export interface MoveListProps {
   density?: "comfortable" | "compact";
   /** Forwarded to each row's alternate-art badge. See `CardEntryRowProps`. */
   onOpenArtPicker?: (name: string) => void;
+  /** Forwarded to each row's move button as the destination label. See
+   *  `CardEntryRowProps.moveTargetLabel`. */
+  moveTargetLabel?: string;
 }
 
 export function MoveList({
@@ -53,6 +56,7 @@ export function MoveList({
   isCommanderEligible,
   density = "compact",
   onOpenArtPicker,
+  moveTargetLabel,
 }: MoveListProps) {
   const { t } = useTranslation("deck-builder");
   if (entries.length === 0 && !alwaysShow) return null;
@@ -91,6 +95,7 @@ export function MoveList({
             isCommanderEligible={isCommanderEligible}
             density={density}
             onOpenArtPicker={onOpenArtPicker}
+            moveTargetLabel={moveTargetLabel}
           />
         ))
       )}

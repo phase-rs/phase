@@ -68,6 +68,15 @@ pub struct PendingTrigger {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub may_trigger_origin: Option<MayTriggerOrigin>,
+    /// CR 603.2c: For batched triggers with a `valid_card` filter, the count
+    /// of subjects in the firing event batch that satisfied the filter. Flows
+    /// from `collect_matching_triggers` →
+    /// `push_pending_trigger_to_stack_with_event_batch` →
+    /// `StackEntryKind::TriggeredAbility.subject_match_count`. `None` for
+    /// non-batched triggers and for batched triggers without a `valid_card`
+    /// filter (or `valid_card: SelfRef`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_match_count: Option<u32>,
 }
 
 /// CR 702.21a + CR 118.12: Convert a WardCost to an `AbilityCost` for the
@@ -409,6 +418,22 @@ fn collect_matching_triggers(
                     .first()
                     .cloned()
                     .expect("trigger event batch is never empty");
+                // CR 603.2c: For batched triggers, stash the filtered subject
+                // count so the resolved ability's `EventContextAmount` reads
+                // "that many" as the number of matching subjects (Dragons that
+                // attacked, creatures that ETB'd, etc.). `None` for
+                // non-batched triggers and for batched triggers without a
+                // concrete `valid_card` filter.
+                let subject_match_count = if trig_def.batched {
+                    super::trigger_matchers::count_trigger_subjects_in_batch(
+                        state,
+                        trig_def.valid_card.as_ref(),
+                        obj_id,
+                        &trigger_events,
+                    )
+                } else {
+                    None
+                };
                 pending.push(MatchedTrigger {
                     trig_idx,
                     pending: PendingTrigger {
@@ -436,6 +461,7 @@ fn collect_matching_triggers(
                                 trigger_index: trig_idx,
                             },
                         }),
+                        subject_match_count,
                     },
                     trigger_events,
                     batched: trig_def.batched,
@@ -816,6 +842,7 @@ fn collect_pending_triggers(
                             mode_abilities: vec![],
                             description: prowess_trig_def.description,
                             may_trigger_origin: None,
+                            subject_match_count: None,
                         }));
                     }
                 }
@@ -861,6 +888,7 @@ fn collect_pending_triggers(
                             mode_abilities: vec![],
                             description: ravenous_trigger.description,
                             may_trigger_origin: None,
+                            subject_match_count: None,
                         }));
                     }
                 }
@@ -902,6 +930,7 @@ fn collect_pending_triggers(
                             may_trigger_origin: Some(MayTriggerOrigin::Keyword {
                                 keyword: KeywordKind::Firebending,
                             }),
+                            subject_match_count: None,
                         }));
                     }
                 }
@@ -945,6 +974,7 @@ fn collect_pending_triggers(
                         mode_abilities: vec![],
                         description: decayed_trigger.description,
                         may_trigger_origin: None,
+                        subject_match_count: None,
                     }));
                 }
             }
@@ -989,6 +1019,7 @@ fn collect_pending_triggers(
                             may_trigger_origin: Some(MayTriggerOrigin::Keyword {
                                 keyword: KeywordKind::Exploit,
                             }),
+                            subject_match_count: None,
                         }));
                     }
                 }
@@ -1054,6 +1085,7 @@ fn collect_pending_triggers(
                                         mode_abilities: vec![],
                                         description: Some("Ward".to_string()),
                                         may_trigger_origin: None,
+                                        subject_match_count: None,
                                     }));
                                 }
                             }
@@ -1212,6 +1244,7 @@ fn collect_pending_triggers(
                         mode_abilities: vec![],
                         description: storm_trig_def.description,
                         may_trigger_origin: None,
+                        subject_match_count: None,
                     }));
                 }
             }
@@ -1253,6 +1286,7 @@ fn collect_pending_triggers(
                     mode_abilities: vec![],
                     description: cascade_trig_def.description,
                     may_trigger_origin: None,
+                    subject_match_count: None,
                 }));
             }
 
@@ -1334,6 +1368,7 @@ fn collect_pending_triggers(
                     mode_abilities: vec![],
                     description: Some("Casualty".to_string()),
                     may_trigger_origin: None,
+                    subject_match_count: None,
                 }));
             }
         }
@@ -1364,6 +1399,7 @@ fn collect_pending_triggers(
                         mode_abilities: vec![],
                         description: trig_def.description,
                         may_trigger_origin: None,
+                        subject_match_count: None,
                     }));
                 }
             }
@@ -1397,6 +1433,7 @@ fn collect_pending_triggers(
                         mode_abilities: vec![],
                         description: trig_def.description,
                         may_trigger_origin: None,
+                        subject_match_count: None,
                     }));
                 }
             }
@@ -1438,6 +1475,7 @@ fn collect_pending_triggers(
                             mode_abilities: vec![],
                             description: trig_def.description,
                             may_trigger_origin: None,
+                            subject_match_count: None,
                         }));
                     }
                 }
@@ -1478,6 +1516,7 @@ fn collect_pending_triggers(
                             mode_abilities: vec![],
                             description: trig_def.description,
                             may_trigger_origin: None,
+                            subject_match_count: None,
                         }));
                     }
                 }
@@ -1521,6 +1560,7 @@ fn collect_pending_triggers(
                     mode_abilities: vec![],
                     description: trig_def.description,
                     may_trigger_origin: None,
+                    subject_match_count: None,
                 }));
                 mark_speed_trigger_used(state, trigger_controller);
             }
@@ -1566,6 +1606,7 @@ fn collect_pending_triggers(
                     mode_abilities: vec![],
                     description: trig_def.description,
                     may_trigger_origin: None,
+                    subject_match_count: None,
                 }));
             }
         }
@@ -2014,6 +2055,7 @@ fn push_pending_trigger_to_stack_with_event_batch(
         trigger_event,
         description,
         may_trigger_origin,
+        subject_match_count,
         ..
     } = trigger;
 
@@ -2049,6 +2091,7 @@ fn push_pending_trigger_to_stack_with_event_batch(
             trigger_event,
             description,
             source_name,
+            subject_match_count,
         },
     };
     stack::push_to_stack(state, entry, events);
@@ -2425,6 +2468,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     mode_abilities: vec![],
                     description: trigger.description.clone(),
                     may_trigger_origin: None,
+                    subject_match_count: None,
                 });
             }
         }
@@ -2518,6 +2562,7 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         };
         push_pending_trigger_to_stack(state, pending, &mut new_events);
     }
@@ -3871,7 +3916,7 @@ pub mod tests {
                 target: TargetFilter::Controller,
             },
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
         let pay_then_draw = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PayCost {
@@ -12880,6 +12925,7 @@ pub mod tests {
                 mode_abilities: vec![],
                 description: None,
                 may_trigger_origin: None,
+                subject_match_count: None,
             },
             &mut Vec::new(),
         );
@@ -13123,6 +13169,7 @@ pub mod tests {
                 mode_abilities: vec![],
                 description: None,
                 may_trigger_origin: None,
+                subject_match_count: None,
             },
             &mut Vec::new(),
         );
@@ -13221,6 +13268,7 @@ pub mod tests {
                 mode_abilities: vec![],
                 description: None,
                 may_trigger_origin: None,
+                subject_match_count: None,
             },
             &mut Vec::new(),
         );
@@ -13342,6 +13390,7 @@ pub mod tests {
                 mode_abilities: vec![],
                 description: None,
                 may_trigger_origin: None,
+                subject_match_count: None,
             },
             &mut Vec::new(),
         );
@@ -13430,6 +13479,7 @@ pub mod tests {
                 mode_abilities: vec![],
                 description: None,
                 may_trigger_origin: None,
+                subject_match_count: None,
             },
             &mut Vec::new(),
         );

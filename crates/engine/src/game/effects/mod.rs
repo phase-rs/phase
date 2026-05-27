@@ -5,9 +5,9 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CostPaidObjectSnapshot, Effect,
-    EffectError, EffectKind, FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink,
-    TargetFilter, TargetRef,
+    EffectError, EffectKind, EffectOutcomeSignal, FilterProp, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, SharedQuality,
+    SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -836,19 +836,25 @@ pub(super) fn resolve_optional_effect_decision(
     Ok(())
 }
 
-/// Whether a sub-ability condition references a "was the effect performed" gate
-/// (`IfYouDo` / `IfAPlayerDoes`), including a `Not`-wrapped form or a composite
-/// `And`/`Or` that contains one. Such conditions cannot be evaluated while the
-/// parent effect is suspended for a player choice — the answer is not yet
-/// known — so the sub-ability must be deferred as a continuation rather than
-/// gated eagerly. A composite like `Or { [IfYouDo, QuantityCheck] }` (Armored
-/// Kincaller) also qualifies: declining the optional effect leaves `IfYouDo`
-/// false, but the sibling disjunct may still be satisfied, so the sub-ability
-/// must be re-evaluated rather than dropped. Predicate helper, not
-/// rule-implementing code.
+/// Whether a sub-ability condition references a per-iteration outcome gate —
+/// "was the effect performed" (`IfYouDo` / `IfAPlayerDoes`, CR 118.12
+/// optional-cost branch) or "did the current scope iteration succeed"
+/// (`IfCurrentScopeSucceeded`, CR 101.3 + CR 118.12 mandatory-cost branch),
+/// including a `Not`-wrapped form or a composite `And`/`Or` that contains
+/// one. Such conditions cannot be evaluated while the parent effect is
+/// suspended for a player choice — the answer is not yet known — so the
+/// sub-ability must be deferred as a continuation rather than gated eagerly.
+/// They are also load-bearing for `detach_after_player_scope_local_chain`:
+/// a per-iteration outcome gate has meaning ONLY relative to its surrounding
+/// scoped iteration, so the sub-ability must stay inside the scoped template
+/// rather than detach as an unscoped post-loop tail. A composite like
+/// `Or { [IfYouDo, QuantityCheck] }` (Armored Kincaller) also qualifies:
+/// declining the optional effect leaves `IfYouDo` false, but the sibling
+/// disjunct may still be satisfied, so the sub-ability must be re-evaluated
+/// rather than dropped. Predicate helper, not rule-implementing code.
 fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
     match condition {
-        AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => true,
+        AbilityCondition::EffectOutcome { .. } => true,
         AbilityCondition::Not { condition } => condition_depends_on_effect_performed(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(condition_depends_on_effect_performed)
@@ -859,10 +865,12 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
 
 fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> bool {
     match ability.condition {
-        Some(AbilityCondition::Not { ref condition }) => matches!(
-            condition.as_ref(),
-            AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes
-        ),
+        Some(AbilityCondition::Not { ref condition })
+            if condition.is_optional_effect_performed() =>
+        {
+            true
+        }
+        Some(AbilityCondition::Not { .. }) => false,
         // CR 609.3: An `IfYouDo` sub-ability is a valid decline branch when it
         // carries an alternative for the "you didn't" case — either as an
         // explicit `else_ability` ("If you do X. Otherwise Y.") OR as a nested
@@ -872,16 +880,15 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
         // Selecting the `IfYouDo` head here lets `resolve_ability_chain`'s
         // condition-false path descend into the `Not(IfYouDo)` tail so the
         // Insect token is still created when the optional pay is declined.
-        Some(AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes) => {
+        Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        }) => {
             ability.else_ability.is_some()
                 || ability.sub_ability.as_ref().is_some_and(|s| {
                     matches!(
                         &s.condition,
                         Some(AbilityCondition::Not { condition })
-                            if matches!(
-                                condition.as_ref(),
-                                AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes
-                            )
+                            if condition.is_optional_effect_performed()
                     )
                 })
         }
@@ -906,6 +913,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
         | Some(
             AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::EventOutcomeWon
             | AbilityCondition::WhenYouDo
             | AbilityCondition::CastFromZone { .. }
             | AbilityCondition::CastDuringPhase { .. }
@@ -937,7 +945,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::NthResolutionThisTurn { .. }
-            | AbilityCondition::SourceLacksKeyword { .. },
+            | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::CurrentScopeSucceeded,
+            },
         ) => false,
     }
 }
@@ -2559,6 +2570,19 @@ fn resolve_chain_body(
         capture_clause_minimum_snapshot(state, &scoped_template);
         for (i, pid) in matching_players.iter().enumerate() {
             let mut scoped = scoped_template.clone();
+            // CR 608.2c + CR 101.3: Each scoped iteration is a fresh
+            // sub-resolution of the scoped template — read the whole
+            // instruction per iteration. The cost-payment-failed signal is
+            // per-iteration; this is the missing fourth resumption boundary
+            // alongside the three at engine_payment_choices.rs:30
+            // (OptionalEffectChoice), :97 (OpponentMayChoice), and :661
+            // (UnlessPay success). Without this, an earlier opponent's
+            // mandatory failure leaks into a later opponent's
+            // `IfCurrentScopeSucceeded` read for cards like Refurbished
+            // Familiar and Aclazotz, Deepest Betrayal. Audit-2 verified
+            // safety: no corpus card relies on cross-iteration carry-over
+            // of this flag.
+            state.cost_payment_failed_flag = false;
             scoped.set_original_controller_recursive(controller);
             scoped.controller = *pid;
             scoped.set_scoped_player_recursive(*pid);
@@ -2897,6 +2921,11 @@ fn resolve_chain_body(
         // optional ("may") trigger's effect resolves `TriggeringPlayer` and
         // other event-context refs exactly as a non-optional trigger would.
         state.pending_optional_trigger_event = state.current_trigger_event.clone();
+        // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
+        // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
+        // permanent-from-hand sub-effect) resumes with the same
+        // `EventContextAmount` the pre-pause resolution observed.
+        state.pending_optional_trigger_match_count = state.current_trigger_match_count;
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: prompt_player,
             source_id: ability.source_id,
@@ -3561,6 +3590,7 @@ fn resolve_chain_body(
                         mode_abilities: vec![],
                         description: trigger_description.clone(),
                         may_trigger_origin: None,
+                        subject_match_count: None,
                     });
                     state.waiting_for = WaitingFor::TriggerTargetSelection {
                         player: ability.controller,
@@ -3737,9 +3767,22 @@ pub(crate) fn evaluate_condition(
                 .context
                 .additional_cost_paid_matches(*variant, kicker_cost.as_ref(), *min_count)
         }
-        AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
-            ability.context.optional_effect_performed && !state.cost_payment_failed_flag
-        }
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        } => ability.context.optional_effect_performed && !state.cost_payment_failed_flag,
+        // CR 101.3 + CR 608.2c: "For each opponent who can't ..." reads the
+        // current player-scope iteration's mandatory-success bit. The flag is
+        // reset per scope iteration and set by mandatory-impossible handlers
+        // during that iteration.
+        AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::CurrentScopeSucceeded,
+        } => !state.cost_payment_failed_flag,
+        AbilityCondition::EventOutcomeWon => state
+            .current_trigger_event
+            .as_ref()
+            .map_or(ability.context.optional_effect_performed, |event| {
+                event_outcome_was_won_by_controller(event, ability.controller)
+            }),
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
         // the resolution" of the parent. For a cost-payment parent
@@ -4074,6 +4117,23 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&ability.source_id)
             .is_some_and(|obj| !obj.has_keyword(keyword)),
+    }
+}
+
+fn event_outcome_was_won_by_controller(event: &GameEvent, controller: PlayerId) -> bool {
+    match event {
+        GameEvent::Clash {
+            controller: clash_controller,
+            opponent,
+            result,
+            ..
+        } => match result {
+            crate::types::events::ClashResult::Won => *clash_controller == controller,
+            crate::types::events::ClashResult::Lost => *opponent == controller,
+            crate::types::events::ClashResult::Tied => false,
+        },
+        GameEvent::CoinFlipped { player_id, won } => *player_id == controller && *won,
+        _ => false,
     }
 }
 
@@ -9996,6 +10056,47 @@ mod tests {
         assert!(evaluate_condition(&cond, &state, &ability));
     }
 
+    /// CR 701.30d + CR 608.2c: "if you won" on a triggered clash ability reads
+    /// the triggering clash result for the ability controller, not the unrelated
+    /// `IfYouDo` flag used by optional costs in the same effect chain.
+    #[test]
+    fn event_outcome_won_reads_clash_result_for_ability_controller() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.context.optional_effect_performed = false;
+        let cond = AbilityCondition::EventOutcomeWon;
+
+        state.current_trigger_event = Some(GameEvent::Clash {
+            controller: PlayerId(1),
+            opponent: PlayerId(0),
+            controller_mana_value: Some(1),
+            opponent_mana_value: Some(3),
+            result: crate::types::events::ClashResult::Lost,
+        });
+        assert!(evaluate_condition(&cond, &state, &ability));
+
+        state.current_trigger_event = Some(GameEvent::Clash {
+            controller: PlayerId(1),
+            opponent: PlayerId(0),
+            controller_mana_value: Some(3),
+            opponent_mana_value: Some(1),
+            result: crate::types::events::ClashResult::Won,
+        });
+        assert!(!evaluate_condition(&cond, &state, &ability));
+
+        state.current_trigger_event = None;
+        ability.context.optional_effect_performed = true;
+        assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
     /// CR 702.33f: variant gating reads `kickers_paid` membership. Mirrors
     /// Ana Battlemage's per-kicker triggers.
     #[test]
@@ -10836,7 +10937,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
 
         let mut ability = ResolvedAbility::new(
             Effect::Discard {
@@ -10942,7 +11043,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
 
         let mut ability = ResolvedAbility::new(
             Effect::Discard {
@@ -11045,7 +11146,7 @@ mod tests {
             source_id,
             PlayerId(0),
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
                 cost: crate::types::ability::PaymentCost::AbilityCost {
@@ -11135,7 +11236,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
-        .condition(AbilityCondition::IfYouDo);
+        .condition(AbilityCondition::effect_performed());
 
         let mut ability = ResolvedAbility::new(
             Effect::Discard {

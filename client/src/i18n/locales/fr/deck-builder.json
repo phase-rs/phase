@@ -68,7 +68,8 @@
     "unsupportedExpand_one": "{{count}} mécanique non prise en charge ; développer les détails",
     "unsupportedExpand_other": "{{count}} mécaniques non prises en charge ; développer les détails",
     "unsupportedTitle_one": "{{count}} mécanique non prise en charge — cliquez pour développer",
-    "unsupportedTitle_other": "{{count}} mécaniques non prises en charge — cliquez pour développer"
+    "unsupportedTitle_other": "{{count}} mécaniques non prises en charge — cliquez pour développer",
+    "moveToTarget": "Déplacer un {{name}} vers {{target}}"
   },
   "grid": {
     "allFormats": "Tous",
@@ -102,7 +103,15 @@
     "exportModalTitle": "Exporter le deck",
     "saveToFile": "Enregistrer dans un fichier",
     "copied": "Copié !",
-    "copy": "Copier"
+    "copy": "Copier",
+    "maybeboardTab": "Maybeboard ({{count}})",
+    "mainName": "Principal",
+    "sideboardName": "Réserve",
+    "maybeboardName": "Maybeboard",
+    "maybeboard": "Maybeboard ({{count}})",
+    "maybeboardEmptyHint": "Cartes que vous envisagez. Touchez → Maybeboard sur une carte du deck pour la placer ici.",
+    "commanderHeading": "Commandant",
+    "removeCommander": "Retirer {{name}} comme commandant"
   },
   "moveList": {
     "empty": "Vide"
@@ -132,7 +141,13 @@
     "addOne": "Ajouter un {{name}}",
     "copyLimit": "{{name}} est à la limite de copies",
     "removeOne": "Retirer un {{name}}",
-    "removeCommander": "Retirer {{name}} comme commandant"
+    "removeCommander": "Retirer {{name}} comme commandant",
+    "maybeboardBadge": "Maybeboard {{count}}",
+    "mainName": "Principal",
+    "sideboardName": "Réserve",
+    "maybeboardName": "Maybeboard",
+    "mainMaybeBadge": "{{main}} principal + {{side}} maybe",
+    "maybeboardGroup": "Maybeboard"
   },
   "printingPicker": {
     "title": "Choisir l'illustration",

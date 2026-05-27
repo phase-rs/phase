@@ -68,7 +68,8 @@
     "unsupportedExpand_one": "{{count}} mecânica não suportada; expandir detalhes",
     "unsupportedExpand_other": "{{count}} mecânicas não suportadas; expandir detalhes",
     "unsupportedTitle_one": "{{count}} mecânica não suportada — clique para expandir",
-    "unsupportedTitle_other": "{{count}} mecânicas não suportadas — clique para expandir"
+    "unsupportedTitle_other": "{{count}} mecânicas não suportadas — clique para expandir",
+    "moveToTarget": "Mover um {{name}} para {{target}}"
   },
   "grid": {
     "allFormats": "Todos",
@@ -102,7 +103,15 @@
     "exportModalTitle": "Exportar Deck",
     "saveToFile": "Salvar em Arquivo",
     "copied": "Copiado!",
-    "copy": "Copiar"
+    "copy": "Copiar",
+    "maybeboardTab": "Maybeboard ({{count}})",
+    "mainName": "Principal",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
+    "maybeboard": "Maybeboard ({{count}})",
+    "maybeboardEmptyHint": "Cartas que você está considerando. Toque em → Maybeboard em uma carta do deck para guardá-la aqui.",
+    "commanderHeading": "Comandante",
+    "removeCommander": "Remover {{name}} como comandante"
   },
   "moveList": {
     "empty": "Vazio"
@@ -132,7 +141,13 @@
     "addOne": "Adicionar um {{name}}",
     "copyLimit": "{{name}} está no limite de cópias",
     "removeOne": "Remover um {{name}}",
-    "removeCommander": "Remover {{name}} como comandante"
+    "removeCommander": "Remover {{name}} como comandante",
+    "maybeboardBadge": "Maybeboard {{count}}",
+    "mainName": "Principal",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
+    "mainMaybeBadge": "{{main}} principal + {{side}} maybe",
+    "maybeboardGroup": "Maybeboard"
   },
   "printingPicker": {
     "title": "Escolher Arte",

@@ -1,0 +1,43 @@
+# Cloudflare Pages cache headers.
+#
+# Lives outside client/public/ so GitHub Pages (preview) does not serve this
+# file at /_headers — it is consumed only by the production Cloudflare Pages
+# deploy, which copies it into the dist/ root before `pages deploy`. See
+# .github/workflows/release.yml (deploy-production job).
+#
+# Strategy:
+# - Service worker, registration shim, manifest, and entry HTML MUST revalidate
+#   every request. They are the entry points that decide which bundle the user
+#   ends up on; if a stale copy is served from the edge or browser cache the
+#   user is stuck on the old version until the cache TTL expires, requiring a
+#   manual hard refresh to unstick. `max-age=0, must-revalidate` forces a
+#   conditional GET (fast 304 in the common case) without disabling caching.
+# - Hashed assets under /assets/ are content-addressed (filename changes when
+#   content changes), so they are safe to cache forever. `immutable` tells the
+#   browser to skip revalidation entirely — even on reload — which both
+#   tightens the post-deploy story (no chance of mixed-version assets sneaking
+#   through) and reduces request volume.
+#
+# When a new entry-point file is added (e.g. a new top-level worker script),
+# add its path here too.
+
+/sw.js
+  Cache-Control: public, max-age=0, must-revalidate
+
+/registerSW.js
+  Cache-Control: public, max-age=0, must-revalidate
+
+/manifest.webmanifest
+  Cache-Control: public, max-age=0, must-revalidate
+
+/workbox-*.js
+  Cache-Control: public, max-age=0, must-revalidate
+
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

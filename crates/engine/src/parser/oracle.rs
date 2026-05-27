@@ -271,7 +271,7 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
 ///   1. CR 122.1: an optional "with [N] [type] counter(s) on it" clause →
 ///      populates `Effect::ChangeZone::enter_with_counters`.
 ///   2. An optional "If you do, [effect]" follow-up sentence → becomes a
-///      `sub_ability` gated by `AbilityCondition::IfYouDo`, so the dependent
+///      `sub_ability` gated by `AbilityCondition::effect_performed()`, so the dependent
 ///      effect only fires when the player accepts the begin-game opt-in.
 ///
 /// Mirrors `try_parse_opening_hand_reveal_delayed_trigger` end-to-end shape and
@@ -345,7 +345,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
         if has_unimplemented(&sub) {
             return None;
         }
-        def = def.sub_ability(sub.condition(AbilityCondition::IfYouDo));
+        def = def.sub_ability(sub.condition(AbilityCondition::effect_performed()));
     }
 
     Some(def)
@@ -5328,7 +5328,7 @@ mod tests {
             .sub_ability
             .as_deref()
             .expect("'If you do, exile a card from your hand' must create a sub-ability");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
         assert!(
             !has_unimplemented(sub),
             "exile-from-hand sub-ability must not be Unimplemented: {:?}",
@@ -8103,6 +8103,74 @@ mod tests {
             }
         ));
         assert_eq!(def.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
+    }
+
+    // ── Phthisis: destroy + lose life equal to power plus toughness ──────
+
+    /// CR 119.3 + CR 208.1: Phthisis — "Destroy target creature. Its controller
+    /// loses life equal to its power plus its toughness." The second clause is a
+    /// chained LoseLife whose amount is Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+    /// The destroy effect sets `effect_context_object` to the destroyed creature's
+    /// LKI, supplying the Anaphoric referent at runtime.
+    #[test]
+    fn phthisis_destroy_then_lose_life_power_plus_toughness() {
+        let oracle = "Destroy target creature. Its controller loses life equal to its power plus its toughness.";
+        let def = parse_effect_chain(oracle, AbilityKind::Spell);
+        // The root effect is Destroy.
+        assert!(
+            matches!(&*def.effect, Effect::Destroy { .. }),
+            "root effect should be Destroy, got {:?}",
+            def.effect,
+        );
+        // The chained sub-ability must be LoseLife.
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("Phthisis must have a chained sub_ability for the life loss");
+        assert!(
+            matches!(&*sub.effect, Effect::LoseLife { .. }),
+            "sub_ability effect should be LoseLife, got {:?}",
+            sub.effect,
+        );
+        // The life-loss amount must be Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+        let Effect::LoseLife { amount, .. } = &*sub.effect else {
+            panic!("expected LoseLife");
+        };
+        match amount {
+            QuantityExpr::Sum { exprs } => {
+                assert_eq!(exprs.len(), 2, "Sum must have exactly two operands");
+                assert!(
+                    matches!(
+                        exprs[0],
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Anaphoric
+                            }
+                        }
+                    ),
+                    "first operand must be Power(Anaphoric), got {:?}",
+                    exprs[0]
+                );
+                assert!(
+                    matches!(
+                        exprs[1],
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Toughness {
+                                scope: ObjectScope::Anaphoric
+                            }
+                        }
+                    ),
+                    "second operand must be Toughness(Anaphoric), got {:?}",
+                    exprs[1]
+                );
+            }
+            other => panic!("amount must be Sum, got {other:?}"),
+        }
+        // No Unimplemented anywhere in the chain.
+        assert!(
+            !matches!(&*sub.effect, Effect::Unimplemented { .. }),
+            "LoseLife sub-effect must not be Unimplemented"
+        );
     }
 
     // ── Coverage batch: gold tokens ──────────────────────────────────

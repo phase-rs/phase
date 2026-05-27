@@ -1,8 +1,7 @@
-import { listSavedDeckNames } from "../../constants/storage";
+import { useEffect } from "react";
 import { useNavigate, useLocation } from "react-router";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { loadDeck } from "../menu/deckHelpers";
 
 import {
   useMultiplayerStore,
@@ -11,30 +10,21 @@ import {
   type SeatMutation,
   type SeatKind,
 } from "../../stores/multiplayerStore";
+import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { expandParsedDeck } from "../../services/deckParser";
 
 const AI_DIFFICULTIES = ["Easy", "Medium", "Hard", "VeryHard"] as const;
 const RANDOM_DECK: DeckChoice = { type: "Random" };
 
-function compatibleDeckChoices(
-  minDeckSize: number,
-  commandZone: boolean,
-  t: TFunction,
-): Array<{ label: string; choice: DeckChoice }> {
-  const choices: Array<{ label: string; choice: DeckChoice }> = [
-    { label: t("hostControl.random"), choice: RANDOM_DECK },
-  ];
-
-  for (const deckName of listSavedDeckNames()) {
-    const deck = loadDeck(deckName);
-    if (!deck) continue;
-    const mainCount = deck.main.reduce((sum, entry) => sum + entry.count, 0);
-    const hasCommander = (deck.commander?.length ?? 0) > 0;
-    if (mainCount < minDeckSize) continue;
-    if (hasCommander !== commandZone) continue;
-    choices.push({ label: deckName, choice: { type: "Named", data: deckName } });
+function deckChoiceKey(choice: DeckChoice): string {
+  switch (choice.type) {
+    case "Random":
+      return "Random";
+    case "Named":
+      return `Named:${choice.data}`;
+    case "DeckList":
+      return JSON.stringify(choice.data);
   }
-
-  return choices;
 }
 
 function seatLabel(kind: SeatKind, t: TFunction): string {
@@ -69,6 +59,7 @@ function SeatRow({
   seatCount,
   canEdit,
   deckChoices,
+  defaultAiDeck,
   mutate,
 }: {
   slot: PlayerSlot;
@@ -76,12 +67,14 @@ function SeatRow({
   seatCount: number;
   canEdit: boolean;
   deckChoices: Array<{ label: string; choice: DeckChoice }>;
+  defaultAiDeck: DeckChoice | null;
   mutate: (mutation: SeatMutation) => void;
 }) {
   const { t } = useTranslation();
   const isOpen = slot.kind.type === "WaitingHuman";
   const kickLabel = slot.name || t("hostControl.fallbackPlayerName", { number: slot.playerId + 1 });
   const aiSeat = slot.kind.type === "Ai" ? slot.kind : null;
+  const selectedDeckKey = aiSeat ? deckChoiceKey(aiSeat.data.deck) : "";
   return (
     <div className="py-1">
       <div className="flex items-center justify-between gap-2">
@@ -98,19 +91,20 @@ function SeatRow({
             <>
               <button
                 type="button"
+                disabled={!defaultAiDeck}
                 onClick={() =>
-                  mutate({
+                  defaultAiDeck && mutate({
                     type: "SetKind",
                     data: {
                       seatIndex: slot.playerId,
                       kind: {
                         type: "Ai",
-                        data: { difficulty: "Medium", deck: RANDOM_DECK },
+                        data: { difficulty: "Medium", deck: defaultAiDeck },
                       },
                     },
                   })
                 }
-                className="rounded border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300"
+                className="rounded border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {t("hostControl.addAi")}
               </button>
@@ -153,7 +147,7 @@ function SeatRow({
                 ))}
               </select>
               <select
-                value={aiSeat?.data.deck.type === "Named" ? aiSeat.data.deck.data : ""}
+                value={selectedDeckKey}
                 onChange={(e) =>
                   mutate({
                     type: "SetKind",
@@ -163,9 +157,8 @@ function SeatRow({
                         type: "Ai",
                         data: {
                           difficulty: aiSeat?.data.difficulty ?? "Medium",
-                          deck: e.target.value
-                            ? { type: "Named", data: e.target.value }
-                            : RANDOM_DECK,
+                          deck: deckChoices.find(({ choice }) => deckChoiceKey(choice) === e.target.value)
+                            ?.choice ?? aiSeat?.data.deck ?? RANDOM_DECK,
                         },
                       },
                     },
@@ -175,8 +168,8 @@ function SeatRow({
               >
                 {deckChoices.map(({ label, choice }) => (
                   <option
-                    key={choice.type === "Named" ? choice.data : "Random"}
-                    value={choice.type === "Named" ? choice.data : ""}
+                    key={deckChoiceKey(choice)}
+                    value={deckChoiceKey(choice)}
                   >
                     {label}
                   </option>
@@ -222,22 +215,24 @@ function SeatRow({
               </button>
               <button
                 type="button"
+                disabled={!defaultAiDeck}
                 onClick={() => {
                   if (!window.confirm(t("hostControl.replaceConfirm", { name: kickLabel }))) {
                     return;
                   }
+                  if (!defaultAiDeck) return;
                   mutate({
                     type: "SetKind",
                     data: {
                       seatIndex: slot.playerId,
                       kind: {
                         type: "Ai",
-                        data: { difficulty: "Medium", deck: RANDOM_DECK },
+                        data: { difficulty: "Medium", deck: defaultAiDeck },
                       },
                     },
                   });
                 }}
-                className="rounded border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300"
+                className="rounded border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {t("hostControl.replaceAi")}
               </button>
@@ -259,21 +254,45 @@ export function HostControlTile() {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
+  const aiDeckCatalog = useAiDeckCatalog({
+    selectedFormat: hostSession?.formatConfig.format,
+    selectedMatchType: hostSession?.matchType,
+  });
+
+  const isConnecting = hostingStatus === "connecting";
+  const minPlayers = hostSession?.formatConfig.min_players ?? 2;
+  const deckChoices = aiDeckCatalog.candidates.map((candidate) => ({
+    label: candidate.name,
+    choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
+  }));
+  const defaultAiDeck = deckChoices[0]?.choice ?? null;
+  const waitingSeats = playerSlots.filter((slot) => slot.kind.type === "WaitingHuman");
+  const occupiedSeats = playerSlots.length - waitingSeats.length;
+  const canEditSeats = hostingStatus === "waiting";
+
+  useEffect(() => {
+    if (!canEditSeats || !defaultAiDeck) return;
+    for (const slot of playerSlots) {
+      if (slot.kind.type !== "Ai" || slot.kind.data.deck.type === "DeckList") continue;
+      seatMutate({
+        type: "SetKind",
+        data: {
+          seatIndex: slot.playerId,
+          kind: {
+            type: "Ai",
+            data: {
+              difficulty: slot.kind.data.difficulty,
+              deck: defaultAiDeck,
+            },
+          },
+        },
+      });
+    }
+  }, [canEditSeats, defaultAiDeck, playerSlots, seatMutate]);
 
   if (hostingStatus === "idle") {
     return null;
   }
-
-  const isConnecting = hostingStatus === "connecting";
-  const minPlayers = hostSession?.formatConfig.min_players ?? 2;
-  const deckChoices = compatibleDeckChoices(
-    hostSession?.formatConfig.deck_size ?? 60,
-    hostSession?.formatConfig.command_zone ?? false,
-    t,
-  );
-  const waitingSeats = playerSlots.filter((slot) => slot.kind.type === "WaitingHuman");
-  const occupiedSeats = playerSlots.length - waitingSeats.length;
-  const canEditSeats = hostingStatus === "waiting";
 
   const startWithCurrentPlayers = () => {
     for (const slot of [...waitingSeats].sort((a, b) => b.playerId - a.playerId)) {
@@ -283,12 +302,13 @@ export function HostControlTile() {
   };
 
   const fillWithAiAndStart = () => {
+    if (!defaultAiDeck) return;
     for (const slot of waitingSeats) {
       seatMutate({
         type: "SetKind",
         data: {
           seatIndex: slot.playerId,
-          kind: { type: "Ai", data: { difficulty: "Medium", deck: RANDOM_DECK } },
+          kind: { type: "Ai", data: { difficulty: "Medium", deck: defaultAiDeck } },
         },
       });
     }
@@ -297,8 +317,7 @@ export function HostControlTile() {
 
   return (
     <div
-      className="fixed right-3 z-30 w-72"
-      style={{ top: "calc(env(titlebar-area-height, 0px) + 0.75rem)" }}
+      className="fixed inset-x-3 top-[calc(env(safe-area-inset-top)+4.75rem)] z-40 sm:left-auto sm:right-3 sm:top-[calc(env(titlebar-area-height,0px)+0.75rem)] sm:w-72"
     >
       <div className="rounded-xl border border-white/10 bg-black/70 shadow-lg shadow-black/40 backdrop-blur-md">
         {/* Header */}
@@ -360,6 +379,7 @@ export function HostControlTile() {
                 seatCount={playerSlots.length}
                 canEdit={canEditSeats}
                 deckChoices={deckChoices}
+                defaultAiDeck={defaultAiDeck}
                 mutate={seatMutate}
               />
             ))}
@@ -393,7 +413,8 @@ export function HostControlTile() {
                   <button
                     type="button"
                     onClick={fillWithAiAndStart}
-                    className="rounded border border-cyan-500/20 px-2 py-1 text-xs font-medium text-cyan-300"
+                    disabled={!defaultAiDeck}
+                    className="rounded border border-cyan-500/20 px-2 py-1 text-xs font-medium text-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {t("hostControl.fillWithAi")}
                   </button>

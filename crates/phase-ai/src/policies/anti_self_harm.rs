@@ -2739,6 +2739,7 @@ mod tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let config = AiConfig::default();
@@ -2844,6 +2845,7 @@ mod tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let config = AiConfig::default();
