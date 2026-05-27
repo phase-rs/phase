@@ -21,7 +21,6 @@ use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
 use engine::types::{GameAction, GameState, PlayerId};
 
-use engine::game::deck_loading::PlayerDeckPayload;
 use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
@@ -498,73 +497,125 @@ pub fn initialize_game(
         MatchConfig::default()
     };
 
-    // Load deck data if provided — resolve names via the loaded card database
+    // Load deck data if provided — resolve names via the loaded card database.
+    //
+    // Each failure mode below MUST surface as a hard error: a game that enters
+    // MatchPhase::InGame with empty libraries triggers CR 704.5b on the first
+    // draw step and eliminates every player in turn order. The frontend
+    // (wasm-adapter.ts:701) already throws on `{ error: true, reasons }`, so
+    // returning that envelope here gives the user a real failure message
+    // instead of a silently-broken match.
     if !deck_data.is_null() && !deck_data.is_undefined() {
-        if let Ok(deck_list) = serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
-            let validation_error: Option<Vec<String>> = CARD_DB.with(|cell| {
-                let borrow = cell.borrow();
-                let db = borrow.as_ref()?;
-
-                for (seat, deck) in [
-                    ("Player".to_string(), &deck_list.player),
-                    ("AI opponent".to_string(), &deck_list.opponent),
-                ] {
-                    if let Err(reasons) = validate_name_deck_for_format(
-                        db,
-                        &deck.main_deck,
-                        &deck.sideboard,
-                        &deck.commander,
-                        game_format,
-                        Some(state.match_config.match_type),
-                    ) {
-                        return Some(
-                            reasons
-                                .into_iter()
-                                .map(|reason| format!("{seat} deck: {reason}"))
-                                .collect(),
-                        );
-                    }
-                }
-                for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
-                    let seat = format!("AI player {}", idx + 2);
-                    if let Err(reasons) = validate_name_deck_for_format(
-                        db,
-                        &deck.main_deck,
-                        &deck.sideboard,
-                        &deck.commander,
-                        game_format,
-                        Some(state.match_config.match_type),
-                    ) {
-                        return Some(
-                            reasons
-                                .into_iter()
-                                .map(|reason| format!("{seat} deck: {reason}"))
-                                .collect(),
-                        );
-                    }
-                }
-
-                let mut payload = resolve_deck_list(db, &deck_list);
-
-                // When player_count > 2 and no explicit AI decks provided,
-                // replicate the opponent deck for all additional AI players.
-                if count > 2 && payload.ai_decks.is_empty() {
-                    for _ in 2..count {
-                        payload.ai_decks.push(payload.opponent.clone());
-                    }
-                }
-
-                load_and_hydrate_decks(&mut state, &payload, Some(db));
-                state.all_card_names = db.card_names().into();
-                None
-            });
-
-            if let Some(reasons) = validation_error {
+        let deck_list = match serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
+            Ok(d) => d,
+            Err(e) => {
                 return to_js(&serde_json::json!({
                     "error": true,
-                    "reasons": reasons,
+                    "reasons": [format!("Deck payload deserialization failed: {e}")],
                 }));
             }
+        };
+
+        let card_db_missing = CARD_DB.with(|cell| cell.borrow().is_none());
+        if card_db_missing {
+            return to_js(&serde_json::json!({
+                "error": true,
+                "reasons": [
+                    "Card database not loaded in engine worker. \
+                     Call load_card_database before initialize_game.".to_string(),
+                ],
+            }));
+        }
+
+        let validation_error: Option<Vec<String>> = CARD_DB.with(|cell| {
+            let borrow = cell.borrow();
+            let db = borrow.as_ref().expect("CARD_DB presence checked above");
+
+            for (seat, deck) in [
+                ("Player".to_string(), &deck_list.player),
+                ("AI opponent".to_string(), &deck_list.opponent),
+            ] {
+                if let Err(reasons) = validate_name_deck_for_format(
+                    db,
+                    &deck.main_deck,
+                    &deck.sideboard,
+                    &deck.commander,
+                    game_format,
+                    Some(state.match_config.match_type),
+                ) {
+                    return Some(
+                        reasons
+                            .into_iter()
+                            .map(|reason| format!("{seat} deck: {reason}"))
+                            .collect(),
+                    );
+                }
+            }
+            for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
+                let seat = format!("AI player {}", idx + 2);
+                if let Err(reasons) = validate_name_deck_for_format(
+                    db,
+                    &deck.main_deck,
+                    &deck.sideboard,
+                    &deck.commander,
+                    game_format,
+                    Some(state.match_config.match_type),
+                ) {
+                    return Some(
+                        reasons
+                            .into_iter()
+                            .map(|reason| format!("{seat} deck: {reason}"))
+                            .collect(),
+                    );
+                }
+            }
+
+            // Resolve the JS-supplied deck list against the card database.
+            // We deliberately do NOT synthesize missing AI decks here: the
+            // engine has no view of which decks are format-legal for the
+            // host's catalog (that's `useAiDeckCatalog` on the frontend,
+            // which already filters by `selectedFormat`). If the caller
+            // passes fewer ai_decks than player_count expects, the
+            // `deck_pools.is_empty()`-style invariants below — and the
+            // per-player library check at game start — will surface it as
+            // a hard error instead of a silently-wrong-format game.
+            let payload = resolve_deck_list(db, &deck_list);
+
+            load_and_hydrate_decks(&mut state, &payload, Some(db));
+            state.all_card_names = db.card_names().into();
+            None
+        });
+
+        if let Some(reasons) = validation_error {
+            return to_js(&serde_json::json!({
+                "error": true,
+                "reasons": reasons,
+            }));
+        }
+
+        // Defense-in-depth: every seat must have at least one library card
+        // before start_game runs. CR 704.5b eliminates a player whose
+        // library is empty when they'd draw, so a seat that loads with zero
+        // cards is unconditionally a broken game. The most common cause is
+        // a JS caller supplying fewer `ai_decks` than the player_count
+        // implies (e.g., 3 players but only one AI deck for seat 2 — seat 2
+        // ends up with a deck while a missing seat would silently have an
+        // empty library). Surface it as a hard error instead of starting.
+        let empty_seats: Vec<u8> = state
+            .players
+            .iter()
+            .filter(|p| p.library.is_empty())
+            .map(|p| p.id.0)
+            .collect();
+        if !empty_seats.is_empty() {
+            return to_js(&serde_json::json!({
+                "error": true,
+                "reasons": [format!(
+                    "Empty library after deck load for seat(s): {empty_seats:?}. \
+                     The JS caller must supply main_deck entries for every seat \
+                     (player, opponent, and one ai_decks entry per additional seat).",
+                )],
+            }));
         }
     }
 
@@ -1271,24 +1322,21 @@ pub fn resolve_all(
 pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsValue, JsValue> {
     struct WasmDeckResolver;
     impl DeckResolver for WasmDeckResolver {
-        fn resolve(&self, choice: &DeckChoice) -> Result<PlayerDeckPayload, String> {
+        fn resolve(&self, choice: &DeckChoice) -> Result<PlayerDeckList, String> {
             let deck_data = match choice {
                 DeckChoice::Random => starter_decks::random_starter_deck(),
                 DeckChoice::Named(name) => starter_decks::find_starter_deck(name)
                     .ok_or_else(|| format!("Starter deck not found: {name}"))?,
                 DeckChoice::DeckList(deck) => deck.as_ref().clone(),
             };
-            CARD_DB.with(|cell| {
-                let db = cell.borrow();
-                let db = db.as_ref().ok_or("Card database not loaded")?;
-                Ok(resolve_player_deck_list(
-                    db,
-                    &PlayerDeckList {
-                        main_deck: deck_data.main_deck,
-                        sideboard: deck_data.sideboard,
-                        commander: deck_data.commander,
-                    },
-                ))
+            // Stay at the name-only layer — `wasm.initialize_game` re-resolves
+            // against `CARD_DB` when the game actually starts, so resolving
+            // here would be wasted work and would force a name-vs-resolved
+            // shape coercion at every JS boundary.
+            Ok(PlayerDeckList {
+                main_deck: deck_data.main_deck,
+                sideboard: deck_data.sideboard,
+                commander: deck_data.commander,
             })
         }
     }

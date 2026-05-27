@@ -272,6 +272,7 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "a deck can have",
     "nonland ",
     "noncreature ",
+    "each noncreature ",
     "nonbasic lands are ",
     "each land is a ",
     "all lands are ",
