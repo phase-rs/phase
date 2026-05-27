@@ -65,6 +65,9 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
+            // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
+            // Runtime enforcement is in casting.rs::is_blocked_by_cant_activate_during().
+            | StaticMode::CantActivateDuring { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
             | StaticMode::CantSearchLibrary { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
@@ -6376,6 +6379,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantCastDuring { .. } => {
                 effective_lower.contains("can't cast spells during")
                     || effective_lower.contains("can cast spells only during")
+            }
+            // CR 602.5 + CR 117.1b: City of Solitude class — "activate abilities
+            // only during" covers both bare and "and activate abilities" phrasings.
+            StaticMode::CantActivateDuring { .. } => {
+                effective_lower.contains("activate abilities only during")
             }
             StaticMode::PerTurnCastLimit { .. } => {
                 effective_lower.contains("can't cast more than")

@@ -217,6 +217,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't draw more than",
     "can't draw cards",
     "can cast spells only during",
+    // CR 602.5 + CR 117.1b: City of Solitude class — combined cast+activate
+    // prohibition. The conjunction "and activate abilities" is the
+    // discriminator; we route through the static parser so
+    // `parse_cast_and_activate_only_during` emits the paired statics.
+    "and activate abilities only during",
     "activated abilities can't be activated",
     "to cast spells or activate abilities",
     // CR 602.5 + CR 603.2a: Clarion/Karn-class global filter-scoped activation prohibition.
