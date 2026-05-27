@@ -726,6 +726,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    // CR 509.1b + CR 609.4 + CR 702.14c + CR 702.14d: "Creatures with <X>walk can
+    // be blocked as though they didn't have <X>walk." Global landwalk-restriction
+    // canceller (Ur-Drago class). Must run before the inverted "As long as" rewrite
+    // so the full literal sentence is detected before any structural rewriting.
+    if let Some(def) = try_parse_ignore_landwalk_for_blocking(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous
@@ -3979,6 +3987,43 @@ fn is_creature_you_control_filter(filter: &TargetFilter) -> bool {
         TargetFilter::Or { filters } => filters.iter().all(is_creature_you_control_filter),
         _ => false,
     }
+}
+
+/// CR 509.1b + CR 609.4 + CR 702.14c + CR 702.14d:
+/// "Creatures with <X>walk can be blocked as though they didn't have <X>walk."
+/// Both qualifier tokens MUST agree (printed cards always reference the same
+/// qualifier; cross-qualifier sentences are guarded out per CR 702.14d).
+///
+/// Class: the Portal/Legends "creatures with Xwalk can be blocked as though
+/// they didn't have Xwalk" cycle (Ur-Drago and four siblings — one per basic
+/// land subtype). Produces a `StaticMode::IgnoreLandwalkForBlocking` global
+/// rule-modification static.
+fn try_parse_ignore_landwalk_for_blocking(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let ((q1, q2), rest) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("creatures with ").parse(i)?;
+        let (i, q1) = parse_basic_landwalk_qualifier(i)?;
+        let (i, _) = tag(" can be blocked as though they didn't have ").parse(i)?;
+        let (i, q2) = parse_basic_landwalk_qualifier(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        Ok((i, (q1, q2)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    // CR 702.14d: qualifiers don't cancel cross-type. Printed cards always
+    // reference the same qualifier on both sides; guard against false matches.
+    if q1 != q2 {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::IgnoreLandwalkForBlocking {
+            qualifier: Some(q1.to_string()),
+        })
+        .description(text.to_string()),
+    )
 }
 
 fn parse_soulbond_paired_static(tp: &TextPair<'_>, description: &str) -> Option<StaticDefinition> {
@@ -9084,6 +9129,26 @@ fn parse_landwalk_keyword(text: &str) -> Option<Keyword> {
     }
 }
 
+/// CR 702.14a: Parse one of the five basic-land landwalk keyword tokens
+/// (`plainswalk`, `islandwalk`, `swampwalk`, `mountainwalk`, `forestwalk`)
+/// and return the canonical capitalized basic subtype string that
+/// `Keyword::Landwalk(String)` carries (e.g. `swampwalk` → `"Swamp"`).
+///
+/// This is a *qualifier extractor* used by static-line parsers that need
+/// to reference the land subtype directly. It does NOT replace
+/// `parse_landwalk_keyword` (which produces a `Keyword`), and the existing
+/// allow-list at `oracle_target.rs` for landwalk tokens is unaffected.
+pub(crate) fn parse_basic_landwalk_qualifier(input: &str) -> OracleResult<'_, &'static str> {
+    alt((
+        value("Plains", tag("plainswalk")),
+        value("Island", tag("islandwalk")),
+        value("Swamp", tag("swampwalk")),
+        value("Mountain", tag("mountainwalk")),
+        value("Forest", tag("forestwalk")),
+    ))
+    .parse(input)
+}
+
 /// Parse CDA power/toughness equality patterns like:
 /// - "~'s power and toughness are each equal to the number of creatures you control."
 /// - "~'s power is equal to the number of card types among cards in all graveyards
@@ -10990,6 +11055,56 @@ mod tests {
         assert!(def
             .modifications
             .contains(&ContinuousModification::AddPower { value: 1 }));
+    }
+
+    /// CR 509.1b + CR 609.4 + CR 702.14c: Ur-Drago's landwalk canceller produces
+    /// `StaticMode::IgnoreLandwalkForBlocking { qualifier: Some("Swamp") }`.
+    #[test]
+    fn ignore_landwalk_for_blocking_parses_ur_drago_swampwalk() {
+        let def = parse_static_line(
+            "Creatures with swampwalk can be blocked as though they didn't have swampwalk.",
+        )
+        .expect("ur-drago line must parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Swamp".to_string()),
+            }
+        );
+    }
+
+    /// CR 702.14a: All five basic-land qualifiers parse to the canonical
+    /// capitalized form (verified for islandwalk here).
+    #[test]
+    fn ignore_landwalk_for_blocking_parses_islandwalk() {
+        let def = parse_static_line(
+            "Creatures with islandwalk can be blocked as though they didn't have islandwalk.",
+        )
+        .expect("islandwalk line must parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Island".to_string()),
+            }
+        );
+    }
+
+    /// CR 702.14d: cross-qualifier sentences are not landwalk cancellations
+    /// (different landwalks don't cancel each other). The parser must reject.
+    #[test]
+    fn ignore_landwalk_for_blocking_rejects_cross_qualifier() {
+        let result = parse_static_line(
+            "Creatures with swampwalk can be blocked as though they didn't have islandwalk.",
+        );
+        // Must not produce IgnoreLandwalkForBlocking. Other parsers may produce
+        // something else, but the qualifier-mismatch path must not match.
+        if let Some(def) = result {
+            assert!(
+                !matches!(def.mode, StaticMode::IgnoreLandwalkForBlocking { .. }),
+                "cross-qualifier text must not produce IgnoreLandwalkForBlocking, got {:?}",
+                def.mode
+            );
+        }
     }
 
     #[test]
