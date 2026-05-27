@@ -979,7 +979,7 @@ pub(super) fn push_unique_string(values: &mut Vec<String>, value: impl Into<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::QuantityExpr;
+    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode};
 
     #[test]
     fn copy_tokens_of_exiled_cost_card_use_cost_paid_object_source() {
@@ -1042,6 +1042,53 @@ mod tests {
             panic!("expected CopyTokenOf, got {effect:?}");
         };
         assert_eq!(target, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn copy_token_half_pt_exception_emits_dynamic_modifications() {
+        let effect = try_parse_token(
+            "create two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. round up each time",
+            "Create two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. Round up each time",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            count,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::ParentTarget);
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+        assert!(matches!(
+            additional_modifications.as_slice(),
+            [
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                    },
+                },
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::DivideRounded {
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                        ..
+                    },
+                },
+            ] if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    }
+                }
+            )
+        ));
     }
 
     /// CR 109.4: `try_parse_token` emits the default `owner` of
