@@ -615,6 +615,111 @@ mod tests {
         assert_eq!(p1_own_ctx.trigger_events.len(), 1);
     }
 
+    /// CR 603.3b + CR 400.2: The singleton `pending_trigger` and its sidecar
+    /// `pending_trigger_event_batch` carry the same private payload shape as
+    /// the entries inside `pending_trigger_order`. Opponents must see only
+    /// the public spine; the controller still sees the full payload.
+    #[test]
+    fn pending_trigger_and_event_batch_redact_for_opponent() {
+        use engine::types::events::GameEvent;
+
+        let controller = PlayerId(0);
+        let source_id = ObjectId(303);
+        let ctx = make_pending_ctx_with_private_payload(
+            controller,
+            source_id,
+            "pending trigger private description",
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.pending_trigger = Some(ctx.pending.clone());
+        state.pending_trigger_event_batch = vec![GameEvent::GameStarted];
+
+        // Controller view: payload intact, batch intact.
+        let owner_view = filter_state_for_player(&state, controller);
+        let owner_pending = owner_view
+            .pending_trigger
+            .as_ref()
+            .expect("controller must still see pending_trigger");
+        assert_eq!(owner_pending.source_id, source_id);
+        assert!(owner_pending.trigger_event.is_some());
+        assert!(owner_pending.modal.is_some());
+        assert_eq!(
+            owner_pending.description.as_deref(),
+            Some("pending trigger private description")
+        );
+        assert_eq!(owner_pending.mode_abilities.len(), 1);
+        assert_eq!(owner_view.pending_trigger_event_batch.len(), 1);
+
+        // Opponent view: spine preserved, payload + sidecar cleared.
+        let opp_view = filter_state_for_player(&state, PlayerId(1));
+        let opp_pending = opp_view
+            .pending_trigger
+            .as_ref()
+            .expect("opponent must still see pending_trigger spine");
+        assert_eq!(opp_pending.source_id, source_id);
+        assert_eq!(opp_pending.controller, controller);
+        assert!(opp_pending.trigger_event.is_none());
+        assert!(opp_pending.modal.is_none());
+        assert!(opp_pending.distribute.is_none());
+        assert!(opp_pending.description.is_none());
+        assert!(opp_pending.mode_abilities.is_empty());
+        assert!(opp_view.pending_trigger_event_batch.is_empty());
+    }
+
+    /// CR 113.2c + CR 603.2 + CR 603.3b: `deferred_triggers` is a FIFO queue
+    /// of `PendingTriggerContext`s waiting on the active `pending_trigger` to
+    /// resolve. Redaction must be per-entry — a viewer who controls one entry
+    /// but not another sees only the controlled one's private payload.
+    #[test]
+    fn deferred_triggers_redact_per_entry_for_opponent() {
+        let ctx0 = make_pending_ctx_with_private_payload(
+            PlayerId(0),
+            ObjectId(401),
+            "p0 deferred description",
+        );
+        let ctx1 = make_pending_ctx_with_private_payload(
+            PlayerId(1),
+            ObjectId(402),
+            "p1 deferred description",
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.deferred_triggers = vec![ctx0, ctx1];
+
+        let p0_view = filter_state_for_player(&state, PlayerId(0));
+        assert_eq!(p0_view.deferred_triggers.len(), 2);
+        let p0_own = &p0_view.deferred_triggers[0];
+        assert!(p0_own.pending.trigger_event.is_some());
+        assert!(p0_own.pending.modal.is_some());
+        assert_eq!(
+            p0_own.pending.description.as_deref(),
+            Some("p0 deferred description")
+        );
+        let p0_opp = &p0_view.deferred_triggers[1];
+        assert_eq!(p0_opp.pending.source_id, ObjectId(402));
+        assert_eq!(p0_opp.pending.controller, PlayerId(1));
+        assert!(p0_opp.pending.trigger_event.is_none());
+        assert!(p0_opp.pending.modal.is_none());
+        assert!(p0_opp.pending.description.is_none());
+        assert!(p0_opp.pending.mode_abilities.is_empty());
+        assert!(p0_opp.trigger_events.is_empty());
+
+        let p1_view = filter_state_for_player(&state, PlayerId(1));
+        let p1_opp = &p1_view.deferred_triggers[0];
+        assert_eq!(p1_opp.pending.controller, PlayerId(0));
+        assert!(p1_opp.pending.trigger_event.is_none());
+        assert!(p1_opp.pending.modal.is_none());
+        assert!(p1_opp.pending.description.is_none());
+        let p1_own = &p1_view.deferred_triggers[1];
+        assert!(p1_own.pending.trigger_event.is_some());
+        assert!(p1_own.pending.modal.is_some());
+        assert_eq!(
+            p1_own.pending.description.as_deref(),
+            Some("p1 deferred description")
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig {
             cases: 16,

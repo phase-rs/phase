@@ -458,6 +458,27 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 603.3b + CR 400.2: Same redaction surface applies to the singleton
+    // `pending_trigger` (the currently-targeting trigger) and its sidecar
+    // `pending_trigger_event_batch` (full simultaneous-event set consumed when
+    // it reaches the stack). Gate on the pending trigger's own controller.
+    if let Some(pending) = filtered.pending_trigger.as_mut() {
+        if !can_view_private_for_player(pending.controller) {
+            redact_pending_trigger_for_observer(pending);
+            filtered.pending_trigger_event_batch.clear();
+        }
+    }
+
+    // CR 113.2c + CR 603.2 + CR 603.3b: `deferred_triggers` holds the FIFO
+    // queue of same-pass triggers waiting on the active `pending_trigger` to
+    // resolve. Each entry is a `PendingTriggerContext` with the same private
+    // payload shape — redact per controller.
+    for ctx in &mut filtered.deferred_triggers {
+        if !can_view_private_for_player(ctx.pending.controller) {
+            redact_pending_trigger_context_for_observer(ctx);
+        }
+    }
+
     filtered
 }
 
@@ -504,14 +525,22 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
 /// may_trigger_origin) needed for the engine to keep running on
 /// the wire and for the opponent's frontend to render an
 /// "opponent is ordering N triggers" indicator.
+fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::PendingTrigger) {
+    pending.trigger_event = None;
+    pending.modal = None;
+    pending.distribute = None;
+    pending.mode_abilities.clear();
+    pending.description = None;
+}
+
+/// CR 603.3b + CR 400.2: Wrapping-context variant of
+/// [`redact_pending_trigger_for_observer`] that also clears the
+/// `trigger_events` sidecar (the full simultaneous-event set for
+/// batched triggers, which can reference hidden-zone objects).
 fn redact_pending_trigger_context_for_observer(
     ctx: &mut crate::game::triggers::PendingTriggerContext,
 ) {
-    ctx.pending.trigger_event = None;
-    ctx.pending.modal = None;
-    ctx.pending.distribute = None;
-    ctx.pending.mode_abilities.clear();
-    ctx.pending.description = None;
+    redact_pending_trigger_for_observer(&mut ctx.pending);
     ctx.trigger_events.clear();
 }
 
