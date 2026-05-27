@@ -1408,9 +1408,10 @@ pub(crate) fn deterministic_choice(
         };
 
         let pay = match additional_cost {
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Mana { cost: extra_mana },
-            ) => affordable_mana_cost(extra_mana),
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Mana { cost: extra_mana },
+                ..
+            } => affordable_mana_cost(extra_mana),
             // CR 702.33c: a multikicker / kicker re-prompt presents exactly one
             // live cost. When that cost is pure mana, apply the same
             // affordability + over-commit guard as Optional(Mana).
@@ -1427,12 +1428,14 @@ pub(crate) fn deterministic_choice(
                 affordable_mana_cost(extra_mana)
             }
             // Non-mana optional costs: sacrifice → usually worth it for the upgrade
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Sacrifice { .. },
-            ) => false, // Conservative: don't sacrifice unless search says so
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::PayLife { amount },
-            ) => {
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Sacrifice { .. },
+                ..
+            } => false, // Conservative: don't sacrifice unless search says so
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::PayLife { amount },
+                ..
+            } => {
                 // CR 119.4 + CR 903.4: PayLife carries a QuantityExpr; resolve
                 // against the activator/source so dynamic costs (e.g. commander
                 // color identity) are costed correctly. Source = 0 falls back
@@ -1448,7 +1451,7 @@ pub(crate) fn deterministic_choice(
                 let life = state.players[player.0 as usize].life;
                 life > resolved * 3
             }
-            engine::types::ability::AdditionalCost::Optional(_) => true,
+            engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
             engine::types::ability::AdditionalCost::Choice(_, _) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,

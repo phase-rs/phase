@@ -3104,6 +3104,10 @@ pub enum QuantityRef {
     /// CR 702.33b + CR 702.33c: Number of kicker costs paid for the source
     /// spell. For multikicker, each repeated payment contributes one entry.
     KickerCount,
+    /// CR 601.2b/f/h + CR 702.157a: Number of non-kicker additional-cost
+    /// payments made for the source spell. Used by Squad so its payment count
+    /// remains distinct from Kicker's CR 702.33 payment model.
+    AdditionalCostPaymentCount,
     /// CR 702.51c: Number of creatures that convoked the source spell or the
     /// spell that became the source permanent. Reads `GameObject::convoked_creatures`;
     /// ETB replacement contexts resolve against the entering object.
@@ -4591,8 +4595,15 @@ impl AbilityCost {
 #[serde(tag = "type", content = "data")]
 pub enum AdditionalCost {
     /// "you may [cost]" — player decides whether to pay.
-    /// If paid, `SpellContext::additional_cost_paid` is set to true.
-    Optional(AbilityCost),
+    /// If paid, `SpellContext::additional_cost_paid` is set to true. When
+    /// `repeatable` is true, the same non-kicker additional cost may be paid
+    /// any number of times and each payment increments
+    /// `SpellContext::additional_cost_payment_count`.
+    Optional {
+        cost: AbilityCost,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        repeatable: bool,
+    },
     /// CR 702.33a-c + CR 601.2b/f: Kicker costs announced during spell
     /// casting. `costs.len() == 1` is ordinary kicker, `costs.len() == 2`
     /// represents "Kicker [cost 1] and/or [cost 2]" (CR 702.33b), and
@@ -4608,6 +4619,26 @@ pub enum AdditionalCost {
     Choice(AbilityCost, AbilityCost),
     /// Mandatory additional cost (e.g., "As an additional cost, waterbend {5}").
     Required(AbilityCost),
+}
+
+/// Which casting-time payment stream an `AdditionalCostPaid` condition reads.
+///
+/// `Any` preserves legacy optional-additional-cost behavior. `Kicker` reads
+/// only CR 702.33 kicker payments, while `NonKicker` reads only repeatable
+/// non-kicker additional-cost payments such as Squad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum AdditionalCostPaymentSource {
+    #[default]
+    Any,
+    Kicker,
+    NonKicker,
+}
+
+impl AdditionalCostPaymentSource {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(crate) fn is_any(value: &Self) -> bool {
+        matches!(value, AdditionalCostPaymentSource::Any)
+    }
 }
 
 /// Structured spell-casting options parsed from Oracle text.
@@ -8026,6 +8057,8 @@ pub enum ModalSelectionCondition {
     /// CR 601.2b + CR 702.33d/f: Additional-cost declaration made while casting
     /// the spell, before the modal cap is evaluated.
     AdditionalCostPaid {
+        #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
+        source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -8051,6 +8084,8 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
             },
             AdditionalCostPaid {
                 #[serde(default)]
+                source: AdditionalCostPaymentSource,
+                #[serde(default)]
                 variant: Option<KickerVariant>,
                 #[serde(default)]
                 kicker_cost: Option<ManaCost>,
@@ -8071,10 +8106,12 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
                 Ok(ModalSelectionCondition::Static { condition })
             }
             Repr::Tagged(Tagged::AdditionalCostPaid {
+                source,
                 variant,
                 kicker_cost,
                 min_count,
             }) => Ok(ModalSelectionCondition::AdditionalCostPaid {
+                source,
                 variant,
                 kicker_cost,
                 min_count,
@@ -8789,6 +8826,8 @@ pub enum AbilityCondition {
     ///     kicker" clauses. Database synthesis resolves this to `variant`
     ///     once the card's kicker declarations are visible.
     AdditionalCostPaid {
+        #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
+        source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9051,6 +9090,7 @@ impl AbilityCondition {
     /// `game/effects/change_zone.rs` (Collect Evidence).
     pub fn additional_cost_paid_any() -> Self {
         AbilityCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Any,
             variant: None,
             kicker_cost: None,
             min_count: 1,
@@ -9061,6 +9101,7 @@ impl AbilityCondition {
     /// specific kicker variant being paid.
     pub fn additional_cost_paid_kicker(variant: KickerVariant) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Kicker,
             variant: Some(variant),
             kicker_cost: None,
             min_count: 1,
@@ -9072,6 +9113,7 @@ impl AbilityCondition {
     /// `KickerVariant` using the card's `AdditionalCost::Kicker` declaration.
     pub fn additional_cost_paid_kicker_cost(cost: ManaCost) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Kicker,
             variant: None,
             kicker_cost: Some(cost),
             min_count: 1,
@@ -9082,6 +9124,7 @@ impl AbilityCondition {
     /// payment count meeting a minimum.
     pub fn additional_cost_paid_n_times(min_count: u32) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Kicker,
             variant: None,
             kicker_cost: None,
             min_count,
@@ -9115,6 +9158,11 @@ pub struct SpellContext {
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
+    /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
+    /// while casting this spell. Used by keyword abilities such as Squad
+    /// (CR 702.157a), whose repeatable payment count is not a kicker count.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub additional_cost_payment_count: u32,
     /// CR 702.33d + CR 702.33f: The list of kicker payments declared during
     /// casting, in payment order. For "Kicker {A} and/or {B}" cards (CR 702.33b),
     /// each chosen kicker pushes a corresponding `KickerVariant` entry. For
@@ -9161,6 +9209,7 @@ pub struct SpellContext {
 impl SpellContext {
     pub fn additional_cost_paid_matches(
         &self,
+        source: AdditionalCostPaymentSource,
         variant: Option<KickerVariant>,
         kicker_cost: Option<&ManaCost>,
         min_count: u32,
@@ -9171,12 +9220,42 @@ impl SpellContext {
 
         match variant {
             Some(kicker) => self.kickers_paid.contains(&kicker),
-            None => {
-                if min_count <= 1 {
-                    self.additional_cost_paid
-                } else {
-                    self.kickers_paid.len() >= min_count as usize
-                }
+            None => additional_cost_payment_count_matches(
+                source,
+                self.additional_cost_paid,
+                self.kickers_paid.len(),
+                self.additional_cost_payment_count,
+                min_count,
+            ),
+        }
+    }
+}
+
+pub(crate) fn additional_cost_payment_count_matches(
+    source: AdditionalCostPaymentSource,
+    additional_cost_paid: bool,
+    kicker_count: usize,
+    non_kicker_count: u32,
+    min_count: u32,
+) -> bool {
+    match source {
+        AdditionalCostPaymentSource::Any => {
+            if min_count == 0 || (min_count == 1 && additional_cost_paid) {
+                true
+            } else {
+                kicker_count >= min_count as usize || non_kicker_count >= min_count
+            }
+        }
+        AdditionalCostPaymentSource::Kicker => {
+            let min_count = min_count.max(1);
+            kicker_count >= min_count as usize
+        }
+        AdditionalCostPaymentSource::NonKicker => {
+            if min_count == 0 {
+                true
+            } else {
+                non_kicker_count >= min_count
+                    || (min_count == 1 && additional_cost_paid && kicker_count == 0)
             }
         }
     }
@@ -9246,6 +9325,8 @@ pub enum TriggerCondition {
     /// Evaluates the triggering zone-change object when present, otherwise the
     /// trigger source, using `GameObject::kickers_paid` recorded at cast time.
     AdditionalCostPaid {
+        #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
+        source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<KickerVariant>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

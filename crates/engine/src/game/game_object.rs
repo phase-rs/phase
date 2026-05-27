@@ -409,6 +409,12 @@ pub struct GameObject {
     /// spell has left the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+    /// CR 601.2b/f/h + CR 702.157a: Count of non-kicker repeatable
+    /// additional costs paid while casting the spell that produced this
+    /// permanent. Kept separate from `kickers_paid` so Squad does not inherit
+    /// Kicker semantics.
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
+    pub additional_cost_payment_count: u32,
     /// CR 702.51c: Creatures tapped to pay the convoke cost of the spell that
     /// produced this object. Stored as object ids so future convoke-reference
     /// classes can inspect identity; `QuantityRef::ConvokedCreatureCount`
@@ -799,6 +805,7 @@ impl GameObject {
             cast_timing_permission: None,
             cost_x_paid: None,
             kickers_paid: Vec::new(),
+            additional_cost_payment_count: 0,
             convoked_creatures: Vec::new(),
             bestow_form: None,
             unimplemented_mechanics: Vec::new(),
@@ -906,6 +913,7 @@ impl GameObject {
         // memory of prior kicker payments — clear before the cast resolution
         // path repopulates from the resolving spell's `SpellContext`.
         self.kickers_paid.clear();
+        self.additional_cost_payment_count = 0;
         // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
         // spell-resolution event that created this object. A re-entering
         // permanent has no memory of a prior convoke payment.

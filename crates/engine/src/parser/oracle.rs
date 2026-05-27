@@ -7097,6 +7097,7 @@ mod tests {
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -7125,6 +7126,7 @@ mod tests {
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Any,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -11691,9 +11693,10 @@ mod tests {
 
         assert_eq!(
             result.additional_cost,
-            Some(AdditionalCost::Optional(AbilityCost::CollectEvidence {
-                amount: 8,
-            }))
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::CollectEvidence { amount: 8 },
+                repeatable: false,
+            })
         );
         assert_eq!(result.abilities.len(), 1);
         let ability = &result.abilities[0];

@@ -53,6 +53,8 @@ pub fn resolve(
         copy_obj.controller = copy_controller;
         copy_obj.zone = Zone::Stack;
         copy_obj.is_token = true;
+        copy_obj.additional_cost_payment_count = 0;
+        copy_obj.kickers_paid.clear();
         state.objects.insert(copy_id, copy_obj);
     }
 
@@ -77,6 +79,7 @@ pub fn resolve(
         {
             set_resolved_source_recursive(a, copy_id);
             a.context.additional_cost_paid = false;
+            a.context.additional_cost_payment_count = 0;
             a.context.kickers_paid.clear();
         }
         set_copied_kind_controller(&mut kind, copy_controller);
@@ -483,6 +486,66 @@ mod tests {
             }
             _ => panic!("Expected both entries to be Spells with abilities"),
         }
+    }
+
+    #[test]
+    fn copy_spell_resets_additional_cost_payment_history() {
+        let mut state = GameState::new_two_player(42);
+
+        let mut original_ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::AdditionalCostPaymentCount,
+                },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        original_ability.context.additional_cost_paid = true;
+        original_ability.context.additional_cost_payment_count = 2;
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Endless Foot Assault",
+            original_ability,
+            CastingVariant::Normal,
+        );
+        {
+            let obj = state.objects.get_mut(&ObjectId(10)).unwrap();
+            obj.additional_cost_payment_count = 2;
+        }
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        assert_eq!(
+            state.objects[&copy_id].additional_cost_payment_count, 0,
+            "a spell copy was not cast, so it must not retain Squad payment history"
+        );
+        let copy_context = state.stack.back().and_then(StackEntry::ability).unwrap();
+        assert!(!copy_context.context.additional_cost_paid);
+        assert_eq!(copy_context.context.additional_cost_payment_count, 0);
     }
 
     #[test]
