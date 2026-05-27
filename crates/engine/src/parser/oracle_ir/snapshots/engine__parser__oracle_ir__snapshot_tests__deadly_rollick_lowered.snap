@@ -20,7 +20,6 @@ expression: "&lowered"
         },
         "owner_library": false,
         "enter_transformed": false,
-        "under_your_control": false,
         "enter_tapped": false,
         "enters_attacking": false
       },

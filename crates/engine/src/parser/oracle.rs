@@ -356,7 +356,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             origin: Some(Zone::Hand),
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
