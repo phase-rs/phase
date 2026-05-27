@@ -3643,6 +3643,38 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             owner_library,
         });
     }
+    // CR 701.24c + CR 400.3: "shuffle <descriptive target> into <possessive>
+    // library" — covers "shuffle enchanted creature into its owner's library"
+    // (Dramatic Accusation, Stay Hidden Stay Silent) and any future card that
+    // names a non-pronoun target phrase before "into ... library". The target
+    // is parsed by `parse_target` which handles "enchanted creature",
+    // "equipped creature", "target creature", etc.
+    // Placed after the pronoun path (which handles it/them/~/that card) so
+    // pronoun forms are not accidentally consumed by `parse_target`.
+    if let Some((_, after_shuffle)) =
+        nom_on_lower(text, lower, |input| value((), tag("shuffle ")).parse(input))
+    {
+        if nom_primitives::scan_contains(lower, "into")
+            && !nom_primitives::scan_contains(lower, "from")
+        {
+            let (target, _) = parse_target(after_shuffle);
+            if !matches!(target, TargetFilter::Any) {
+                let owner_library = nom_primitives::scan_at_word_boundaries(lower, |input| {
+                    alt((
+                        value((), tag::<_, _, OracleError<'_>>("its owner's library")),
+                        value((), tag("their owner's library")),
+                        value((), tag("their owners' libraries")),
+                    ))
+                    .parse(input)
+                })
+                .is_some();
+                return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                    target,
+                    owner_library,
+                });
+            }
+        }
+    }
     // CR 701.24c + CR 400.6: "shuffle the cards from {possessive} {zone} into
     // {possessive} library" and "shuffle {possessive} hand and graveyard into
     // {possessive} library" — whole-zone mass move(s) + implicit shuffle.
@@ -9440,6 +9472,40 @@ mod tests {
                 assert!(!owner_library);
             }
             other => panic!("Expected ChangeZoneToLibrary SelfRef+!owner_library, got {other:?}"),
+        }
+    }
+
+    /// CR 701.24c + CR 400.3: "shuffle enchanted creature into its owner's
+    /// library" — the descriptive-target path for Aura-based shuffle effects
+    /// (Dramatic Accusation, Stay Hidden Stay Silent). The target is parsed by
+    /// `parse_target` which resolves "enchanted creature" to a `Typed` filter
+    /// with `EnchantedBy` property. `owner_library` is `true` because the
+    /// possessive resolves to the card's owner.
+    #[test]
+    fn parse_shuffle_enchanted_creature_into_owners_library() {
+        use crate::types::ability::FilterProp;
+        let text = "shuffle enchanted creature into its owner's library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library,
+            }) => {
+                // "enchanted creature" → Typed filter with EnchantedBy property
+                match &target {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.properties.contains(&FilterProp::EnchantedBy),
+                            "expected EnchantedBy property, got {tf:?}"
+                        );
+                    }
+                    other => panic!("Expected Typed filter with EnchantedBy, got {other:?}"),
+                }
+                assert!(owner_library, "expected owner_library = true");
+            }
+            other => {
+                panic!("Expected ChangeZoneToLibrary with EnchantedBy target, got {other:?}")
+            }
         }
     }
 
