@@ -2546,8 +2546,8 @@ pub(super) fn pay_and_push_adventure(
         return enter_payment_step(state, player, convoke_mode, events);
     }
 
-    // CR 107.4f + CR 601.2f: Pause for interactive Phyrexian choice when the cost has
-    // at least one shard with both mana and 2-life viable. The resume handler calls
+    // CR 107.4f + CR 601.2f: Pause before any Phyrexian shard would deduct life,
+    // whether life is optional or the only legal route. The resume handler calls
     // `finalize_mana_payment_with_phyrexian_choices` which finishes the cast.
     if let Some(waiting) = maybe_pause_for_phyrexian_choice(
         state,
@@ -4342,8 +4342,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
 /// Auto-taps mana sources first (idempotent: already-tapped lands are skipped) so the
 /// shard-options computation reflects the pool the caster will actually spend from.
 /// Returns `Some(WaitingFor::PhyrexianPayment {...})` when at least one Phyrexian shard
-/// has `ShardOptions::ManaOrLife`; otherwise returns `None` so the caller proceeds with
-/// the existing auto-decision path.
+/// can deduct life; otherwise returns `None` so the caller proceeds with the existing
+/// auto-decision path.
 pub(super) fn maybe_pause_for_phyrexian_choice(
     state: &mut GameState,
     player: PlayerId,
