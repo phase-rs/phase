@@ -17,8 +17,15 @@ use nom::Parser;
 use super::error::OracleResult;
 use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter, TypedFilter};
 
-/// CR 702.5a: One enchantable core-type token. Driven by `value()` + `alt()`
-/// so additional types slot in as one-line extensions.
+/// CR 702.5a: One enchantable core-type or land-subtype token. Driven by
+/// `value()` + `alt()` so additional types slot in as one-line extensions.
+///
+/// Basic land subtypes (Forest, Plains, Island, Swamp, Mountain) are included
+/// per CR 205.3i — basic land types are the canonical Aura targets for
+/// "enchant Forest" / "enchant Plains" patterns used by Old-Growth Troll
+/// (KHM) and Harold and Bob, First Numens (FIN-precon). The longest-first
+/// ordering inside each cluster keeps "creature" from short-matching against
+/// future hypothetical subtype legs.
 pub(crate) fn parse_enchant_type_leg(input: &str) -> OracleResult<'_, TypeFilter> {
     alt((
         value(TypeFilter::Creature, tag("creature")),
@@ -31,6 +38,13 @@ pub(crate) fn parse_enchant_type_leg(input: &str) -> OracleResult<'_, TypeFilter
         // like Spellweaver Volute ("Enchant instant card in a graveyard").
         value(TypeFilter::Instant, tag("instant")),
         value(TypeFilter::Sorcery, tag("sorcery")),
+        // CR 205.3i + CR 702.5a: Basic land subtypes. Used by
+        // "enchant Forest you control" (Old-Growth Troll, Harold and Bob).
+        value(TypeFilter::Subtype("Forest".to_string()), tag("forest")),
+        value(TypeFilter::Subtype("Plains".to_string()), tag("plains")),
+        value(TypeFilter::Subtype("Island".to_string()), tag("island")),
+        value(TypeFilter::Subtype("Swamp".to_string()), tag("swamp")),
+        value(TypeFilter::Subtype("Mountain".to_string()), tag("mountain")),
     ))
     .parse(input)
 }
@@ -91,4 +105,30 @@ pub(crate) fn parse_enchant_player_base(input: &str) -> OracleResult<'_, TargetF
         ),
     ))
     .parse(input)
+}
+
+/// CR 702.5a + CR 109.4: Compose `parse_enchant_type_list` with the optional
+/// `parse_enchant_controller_suffix` to build a complete `TargetFilter` for an
+/// inline "enchant <X>" phrase such as the one inside a return-as-Aura
+/// sub-effect ("It's an Aura enchantment with enchant Forest you control").
+///
+/// Used by `oracle_nom::return_as_aura::try_parse` to extract the enchant
+/// filter from a chunked Oracle text body. The output filter is the SAME shape
+/// other Aura parsers produce so the resolver and layer system treat the
+/// runtime Aura identically regardless of whether it was cast normally or
+/// installed by a return-as-Aura effect.
+pub(crate) fn parse_enchant_target_full(input: &str) -> OracleResult<'_, TargetFilter> {
+    use nom::combinator::opt;
+
+    let (input, type_legs) = parse_enchant_type_list(input)?;
+    let (input, controller) = opt(parse_enchant_controller_suffix).parse(input)?;
+
+    let mut typed = TypedFilter {
+        type_filters: type_legs,
+        ..TypedFilter::default()
+    };
+    if let Some(c) = controller {
+        typed.controller = Some(c);
+    }
+    Ok((input, TargetFilter::Typed(typed)))
 }

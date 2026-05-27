@@ -369,6 +369,7 @@
     "chooseNewTargetForCopy": "Escolha um novo alvo para a cópia",
     "chooseTargetForCopy": "Escolha o alvo da cópia",
     "chooseCreatureToExplore": "Escolha qual criatura explora em seguida",
+    "chooseReturnAsAuraTarget": "Escolha um permanente para encantar",
     "tapUntappedCreatures_one": "Vire {{count}} criatura desvirada",
     "tapUntappedCreatures_other": "Vire {{count}} criaturas desviradas",
     "chooseTargetOf": "Escolha o alvo {{current}} de {{total}}",

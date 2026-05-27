@@ -712,6 +712,15 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
+        // CR 303.4 + CR 303.4g: Return-as-Aura attach pick — the engine only
+        // installs this state when `legal_targets` is non-empty, so picking
+        // the first candidate is always a legal fallback.
+        WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
+            legal_targets.first().map(|&id| GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(id)),
+            })
+        }
+
         // Phyrexian payment: pay mana for all shards (safe default).
         WaitingFor::PhyrexianPayment { shards, .. } => {
             let choices = shards

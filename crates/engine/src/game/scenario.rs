@@ -1222,6 +1222,7 @@ impl GameRunner {
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
+            WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",

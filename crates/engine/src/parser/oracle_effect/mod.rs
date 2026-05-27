@@ -11197,6 +11197,60 @@ pub(crate) fn parse_effect_chain_ir(
             }
         };
 
+        // CR 614.1 + CR 614.12 + CR 303.4 + CR 613.1d + CR 613.1f + CR 113.10 +
+        // CR 604.1: Return-as-Aura sub-effect (Old-Growth Troll [KHM],
+        // Bronzehide Lion [THB], Harold and Bob, First Numens [FIN-precon]).
+        // Detect the "It's an Aura enchantment with enchant <X> and \"<body>\""
+        // sentence as its own emitted `Effect::ReturnAsAura` clause. Slotted
+        // before the special-case riders because the prefix is highly
+        // distinctive ("it's an aura enchantment with enchant ") and the body
+        // contains nested apostrophe/quote sequences that could confuse later
+        // generic dispatch. The companion `try_fold_loses_other_sibling` pass
+        // (after the chunk loop) folds Bronzehide's pre-split
+        // `GenericEffect(RemoveAllAbilities)` sibling into this clause's grants.
+        {
+            let chunk_lower = normalized_text.to_ascii_lowercase();
+            if let Some((enchant_filter, mut grants, loses_other_in_chunk)) =
+                crate::parser::oracle_nom::return_as_aura::try_parse(normalized_text, &chunk_lower)
+            {
+                if loses_other_in_chunk {
+                    // CR 113.10 + CR 613.1f + CR 613.8: Layer-6
+                    // RemoveAllAbilities dependency-orders before grants
+                    // (CR 613.8a: a `Grant*` effect depends on the removal
+                    // because removal changes the existence of the grant).
+                    // Insert at index 0 so the resolver's grants Vec has
+                    // RemoveAllAbilities first.
+                    grants.insert(0, ContinuousModification::RemoveAllAbilities);
+                }
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::ReturnAsAura {
+                        enchant_filter,
+                        grants,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: starting_with.clone(),
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: None,
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                });
+                continue;
+            }
+        }
+
         // CR 118.9 + CR 119.4: Alternative-cost rider — "[If you cast a spell
         // this way,] pay <ability-cost> rather than paying its mana cost."
         // This is a *modifier* on the previous chain entry's `CastFromZone`
@@ -12881,12 +12935,90 @@ pub(crate) fn parse_effect_chain_ir(
     // Merge per-chunk diagnostics and any pre-loop diagnostics into the outer ctx.
     ctx.diagnostics.extend(chunk_diagnostics);
 
+    // CR 113.10 + chunk-splitter normalization: Bronzehide Lion's "and it loses
+    // all other abilities" was pre-split by
+    // `sequence.rs::starts_bare_and_clause` into a sibling `GenericEffect`
+    // clause. Fold it into the preceding `Effect::ReturnAsAura.grants` so the
+    // single resolver registers ONE `TransientContinuousEffect` under
+    // `Duration::UntilHostLeavesPlay` rather than a stray sibling that would
+    // default to `Duration::UntilEndOfTurn` (engine convention for
+    // `GenericEffect` whose duration field is `None`; the CR baseline per
+    // CR 611.2a is "until end of the game", which is not what we want either).
+    try_fold_loses_other_sibling(&mut clauses);
+
     EffectChainIr {
         clauses,
         kind,
         chain_rounding,
         actor: ctx.actor.clone(),
         repeat_until: pending_repeat_until,
+    }
+}
+
+/// CR 113.10 + CR 613.1f + CR 613.8: IR-layer fold helper.
+///
+/// Walks `clauses` and, for each `Effect::ReturnAsAura` whose IMMEDIATE
+/// following sibling is exactly the shape produced by the chunk-splitter for
+/// "and it loses all other abilities" — a `ClauseIr` with `Effect::GenericEffect`
+/// carrying a single `StaticDefinition { mode: Continuous, affected:
+/// Some(TargetFilter::SelfRef), modifications: [RemoveAllAbilities], condition:
+/// None }` and `duration: None`, `target: None` — prepends
+/// `ContinuousModification::RemoveAllAbilities` to the `ReturnAsAura`'s grants
+/// list and removes the sibling clause.
+///
+/// This consolidates Bronzehide Lion's pre-split decomposition into a single
+/// `TransientContinuousEffect` so the layer system runs `RemoveAllAbilities`
+/// (CR 613.1f, Layer 6) under the same `Duration::UntilHostLeavesPlay` as the
+/// rest of the Aura's continuous effect (CR 400.7 + CR 611.2a). Without the
+/// fold, the sibling `GenericEffect` resolver would default to
+/// `Duration::UntilEndOfTurn` (engine convention for `GenericEffect.duration ==
+/// None`; the CR baseline per CR 611.2a is "until end of the game", but the
+/// engine uses end-of-turn as a more conservative default for unannotated
+/// continuous effects). Either default is wrong for an Aura's installed
+/// effect, which is anchored to the host object's lifetime per CR 400.7.
+///
+/// Old-Growth Troll and Harold and Bob don't trigger the fold (Old-Growth has
+/// no loses-clause; Harold's loses-clause lives in the same chunk and is
+/// handled by `parse_loses_clause` in `oracle_nom::return_as_aura`).
+fn try_fold_loses_other_sibling(clauses: &mut Vec<ClauseIr>) {
+    let mut i = 0;
+    while i + 1 < clauses.len() {
+        let is_return_as_aura = matches!(&clauses[i].parsed.effect, Effect::ReturnAsAura { .. });
+        if !is_return_as_aura {
+            i += 1;
+            continue;
+        }
+        let sibling_is_loses_all = match &clauses[i + 1].parsed.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                duration.is_none() && target.is_none() && static_abilities.len() == 1 && {
+                    let s = &static_abilities[0];
+                    s.mode == StaticMode::Continuous
+                        && s.affected == Some(TargetFilter::SelfRef)
+                        && s.condition.is_none()
+                        && s.modifications.len() == 1
+                        && matches!(
+                            s.modifications[0],
+                            ContinuousModification::RemoveAllAbilities
+                        )
+                }
+            }
+            _ => false,
+        };
+        if !sibling_is_loses_all {
+            i += 1;
+            continue;
+        }
+        // Fold: prepend RemoveAllAbilities into the ReturnAsAura's grants,
+        // then drop the sibling clause.
+        if let Effect::ReturnAsAura { grants, .. } = &mut clauses[i].parsed.effect {
+            grants.insert(0, ContinuousModification::RemoveAllAbilities);
+        }
+        clauses.remove(i + 1);
+        i += 1;
     }
 }
 

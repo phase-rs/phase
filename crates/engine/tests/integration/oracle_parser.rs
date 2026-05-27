@@ -495,3 +495,53 @@ fn snapshot_force_of_despair() {
     );
     insta::assert_json_snapshot!(result);
 }
+
+// CR 614.1 + CR 614.12 + CR 303.4 + CR 613.1d + CR 613.1f + CR 113.10:
+// Return-as-Aura dies trigger. The dies-trigger sub-effect chain MUST emit
+// `Effect::ReturnAsAura` (not `Effect::Unimplemented { name: "it's" }`).
+// Snapshot tests lock in the parsed shape for the three known class members
+// so a future parser refactor cannot silently regress the outer effect.
+#[test]
+fn snapshot_old_growth_troll() {
+    let result = parse(
+        "Trample\nWhen Old-Growth Troll dies, if it was a creature, return it to the battlefield. It's an Aura enchantment with enchant Forest you control and \"Enchanted Forest has '{T}: Add {G}{G}' and '{1}, {T}, Sacrifice this land: Create a tapped 4/4 green Troll Warrior creature token with trample.'\"",
+        "Old-Growth Troll",
+        &[Keyword::Trample],
+        &["Creature"],
+        &["Troll"],
+    );
+    insta::assert_json_snapshot!(result);
+}
+
+#[test]
+fn snapshot_bronzehide_lion() {
+    // CR 614.1 + CR 113.10: Bronzehide's "and it loses all other abilities"
+    // is pre-split by the chunk-splitter into a sibling `GenericEffect`,
+    // which `try_fold_loses_other_sibling` folds back into the
+    // `Effect::ReturnAsAura.grants` list. The final IR must have
+    // `RemoveAllAbilities` at `grants[0]`.
+    let result = parse(
+        "{G}{W}: This creature gains indestructible until end of turn.\nWhen this creature dies, return it to the battlefield. It's an Aura enchantment with enchant creature you control and \"{G}{W}: Enchanted creature gains indestructible until end of turn,\" and it loses all other abilities.",
+        "Bronzehide Lion",
+        &[],
+        &["Creature"],
+        &["Cat"],
+    );
+    insta::assert_json_snapshot!(result);
+}
+
+#[test]
+fn snapshot_harold_and_bob_first_numens() {
+    // CR 614.1 + CR 113.10: Harold's "<card name> loses all other abilities"
+    // appears in the SAME chunk as the `It's an Aura ...` sentence (no
+    // intervening ` and ` connector). Detected in-combinator by
+    // `parse_loses_clause` and inserted at `grants[0]` directly.
+    let result = parse(
+        "Vigilance, reach\nWhen Harold and Bob dies, if it was a creature, return it to the battlefield. It's an Aura enchantment with enchant Forest you control and \"Enchanted Forest has '{T}: Add three mana of any one color. You get two rad counters.'\" Harold and Bob loses all other abilities.",
+        "Harold and Bob, First Numens",
+        &[Keyword::Vigilance, Keyword::Reach],
+        &["Legendary", "Creature"],
+        &["Troll", "Warrior"],
+    );
+    insta::assert_json_snapshot!(result);
+}
