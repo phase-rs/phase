@@ -794,6 +794,13 @@ export class P2PDraftHost {
     // already submitted this round and the engine would reject the duplicate
     // with `SeatAlreadyPickedThisRound`, swallowing the error and stranding
     // the timer at zero.
+    //
+    // Pass `resolveBots: false` to `handlePick` so the per-pick bot-pick
+    // resolution and view broadcast are suppressed during the sweep. Otherwise
+    // an N-seat sweep produces N redundant broadcasts (and N redundant bot
+    // resolution sweeps). After the loop we resolve bots once and broadcast
+    // once — except when the round naturally completed via `allPicksSubmitted`
+    // inside the last `handlePick`, which already broadcast.
     let anyPicked = false;
     for (let seat = 0; seat < this.activePodSize; seat++) {
       if (this.picksThisRound.has(seat)) continue;
@@ -802,18 +809,19 @@ export class P2PDraftHost {
         if (view.current_pack && view.current_pack.length > 0) {
           const randomIndex = Math.floor(Math.random() * view.current_pack.length);
           const card = view.current_pack[randomIndex];
-          await this.handlePick(seat, card.instance_id);
+          await this.handlePick(seat, card.instance_id, false);
           anyPicked = true;
         }
       } catch (err) {
         console.error(`[P2PDraftHost] auto-pick failed for seat ${seat}:`, err);
       }
     }
-    // If the round did not exhaust via handlePick's internal allPicksSubmitted
-    // check, broadcast the swept state so guests don't sit on a stale view
-    // (and so the timer-restart logic in handlePick doesn't strand the UI).
     if (anyPicked) {
-      await this.broadcastViews();
+      await this.resolveBotPicks({ emit: true, persist: true });
+      const allPicked = await this.adapter.allPicksSubmitted();
+      if (!allPicked) {
+        await this.broadcastViews();
+      }
     }
   }
 
