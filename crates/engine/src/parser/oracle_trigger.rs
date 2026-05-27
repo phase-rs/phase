@@ -5797,7 +5797,7 @@ fn parse_damage_amount_quantifier(input: &str) -> OracleResult<'_, (Comparator, 
 /// in trigger_matchers.rs validates the caster against `valid_target`, so:
 /// - "you cast or copy"       → `TargetFilter::Controller`
 /// - "an opponent casts or copies" → `TypedFilter` with `ControllerRef::Opponent`
-///   (CR 102.2: evaluates as `source_controller != player_id` at runtime)
+///   (evaluates as `source_controller != player_id` in the current engine model)
 /// - "a player casts or copies" → `TargetFilter::Player` (any player, CR 102.1)
 ///
 /// Covers Storm-Kiln Artist (you), Mage Hunter (opponent), and any future card
@@ -5823,7 +5823,7 @@ fn try_parse_casts_or_copies_trigger(lower: &str) -> Option<(TriggerMode, Trigge
             ),
             tag(" cast or copy "),
         ),
-        // CR 102.2: "an opponent" = any player other than the trigger controller.
+        // "An opponent" uses the engine's existing opponent controller filter.
         terminated(
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
