@@ -12416,10 +12416,15 @@ mod tests {
         match &def.valid_card {
             Some(TargetFilter::Typed(tf)) => {
                 assert_eq!(tf.controller, Some(ControllerRef::You));
+                // type_filters should contain the Merfolk subtype (no core type needed —
+                // "Merfolk" alone identifies the creature subtype per CR 205.3m).
                 assert!(
-                    tf.type_filters.is_empty() || tf.type_filters.contains(&TypeFilter::Creature)
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Merfolk".to_string())),
+                    "expected Subtype(Merfolk) in type_filters, got {:?}",
+                    tf.type_filters
                 );
-                // Should have NonToken property and Merfolk subtype
+                // Should have NonToken property
                 assert!(
                     tf.properties
                         .iter()
