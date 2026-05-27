@@ -876,6 +876,20 @@
       "subtitle_one": "Escolha {{count}} permanente para exilar",
       "subtitle_other": "Escolha {{count}} permanentes para exilar"
     },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
+    },
     "multiTarget": {
       "title": "Escolher Alvos",
       "subtitleExact_one": "Escolha {{count}} alvo",
