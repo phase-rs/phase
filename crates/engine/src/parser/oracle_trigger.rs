@@ -17241,7 +17241,7 @@ mod tests {
         match &*exec.effect {
             Effect::ChangeZone {
                 destination: Zone::Battlefield,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: true,
                 enters_attacking: true,
                 ..
@@ -21377,13 +21377,13 @@ mod snapshot_tests {
                 origin,
                 destination,
                 target,
-                under_your_control,
+                enters_under,
                 ..
             } => {
                 assert_eq!(*origin, Some(Zone::Graveyard));
                 assert_eq!(*destination, Zone::Battlefield);
                 assert!(matches!(target, TargetFilter::TriggeringSource));
-                assert!(*under_your_control);
+                assert_eq!(*enters_under, Some(ControllerRef::You));
             }
             other => panic!("expected ChangeZone, got {other:?}"),
         }

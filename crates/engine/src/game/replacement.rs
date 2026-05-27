@@ -3693,7 +3693,7 @@ fn effect_overrides_controller(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::ChangeZone {
-            under_your_control: true,
+            enters_under: Some(_),
             ..
         }
     )
@@ -4321,7 +4321,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -5390,7 +5390,7 @@ mod tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,

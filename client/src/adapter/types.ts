@@ -1099,7 +1099,10 @@ export type WaitingFor =
       destination?: Zone | null;
       enter_tapped?: boolean;
       enter_transformed?: boolean;
-      under_your_control?: boolean;
+      // CR 110.2a: pre-resolved controller override carried through the
+      // EffectZoneChoice round-trip. `null`/omitted = no override (object
+      // enters under its owner's control).
+      enters_under_player?: PlayerId | null;
       enters_attacking?: boolean;
       owner_library?: boolean;
       track_exiled_by_source?: boolean;
