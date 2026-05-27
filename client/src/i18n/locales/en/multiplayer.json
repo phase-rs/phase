@@ -185,6 +185,7 @@
     "setPassword": "Set password",
     "passwordPlaceholder": "Game password",
     "back": "Back",
+    "opening": "Opening…",
     "hostP2PGame": "Host P2P Game",
     "hostGame": "Host Game"
   },

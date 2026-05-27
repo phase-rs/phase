@@ -42,63 +42,65 @@ pub fn resolve(
     let controller = ability.controller;
 
     // Step 1: Draw `count` cards for the controller.
-    // Route through replacement pipeline (Dredge, Abundance, etc.).
-    let proposed = ProposedEvent::Draw {
-        player_id: controller,
+    // CR 614.1a + CR 614.6 + CR 704.3: Route through the single-authority
+    // helper so post-replacement continuations drain in the same step.
+    let result = super::draw::draw_through_replacement(
+        state,
+        controller,
         count,
-        applied: HashSet::new(),
-    };
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            if let ProposedEvent::Draw {
+        events,
+        |state, event, events| {
+            let ProposedEvent::Draw {
                 player_id,
                 count: draw_count,
                 ..
             } = event
-            {
-                let player = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player_id)
-                    .ok_or(EffectError::PlayerNotFound)?;
+            else {
+                return;
+            };
+            let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
+                return;
+            };
 
-                let cards_to_draw: Vec<_> = player
-                    .library
-                    .iter()
-                    .take(draw_count as usize)
-                    .copied()
-                    .collect();
+            let cards_to_draw: Vec<_> = player
+                .library
+                .iter()
+                .take(draw_count as usize)
+                .copied()
+                .collect();
 
-                if draw_count > 0 && cards_to_draw.len() < draw_count as usize {
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        p.drew_from_empty_library = true;
-                    }
-                }
-
-                for obj_id in cards_to_draw {
-                    zones::move_to_zone(state, obj_id, Zone::Hand, events);
-                    // CR 121.1 + CR 504.1: Increment counters first; embed the
-                    // resulting per-step ordinal into the event.
-                    let (nth_in_turn, nth_in_step) =
-                        if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                            p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
-                            p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
-                            (p.cards_drawn_this_turn, p.cards_drawn_this_step)
-                        } else {
-                            (1, 1)
-                        };
-                    events.push(GameEvent::CardDrawn {
-                        player_id,
-                        object_id: obj_id,
-                        nth_in_turn,
-                        nth_in_step,
-                    });
-                    super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
-                    // CR 702.94a: Connive draws count as draws for miracle tracking.
-                    super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
+            if draw_count > 0 && cards_to_draw.len() < draw_count as usize {
+                if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
+                    p.drew_from_empty_library = true;
                 }
             }
-        }
+
+            for obj_id in cards_to_draw {
+                zones::move_to_zone(state, obj_id, Zone::Hand, events);
+                // CR 121.1 + CR 504.1: Increment counters first; embed the
+                // resulting per-step ordinal into the event.
+                let (nth_in_turn, nth_in_step) =
+                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
+                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
+                        p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
+                        (p.cards_drawn_this_turn, p.cards_drawn_this_step)
+                    } else {
+                        (1, 1)
+                    };
+                events.push(GameEvent::CardDrawn {
+                    player_id,
+                    object_id: obj_id,
+                    nth_in_turn,
+                    nth_in_step,
+                });
+                super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
+                // CR 702.94a: Connive draws count as draws for miracle tracking.
+                super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
+            }
+        },
+    );
+    match result {
+        ReplacementResult::Execute(_) => {}
         ReplacementResult::Prevented => {
             // Draw was prevented — skip the discard step
             events.push(GameEvent::EffectResolved {
@@ -107,9 +109,7 @@ pub fn resolve(
             });
             return Ok(());
         }
-        ReplacementResult::NeedsChoice(player) => {
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
+        ReplacementResult::NeedsChoice(_) => {
             return Ok(());
         }
     }

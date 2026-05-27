@@ -31,7 +31,18 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
+
+/**
+ * Lowest server protocol version this client will accept in the handshake.
+ * Derived as `PROTOCOL_VERSION - 1` so bumping `PROTOCOL_VERSION` automatically
+ * rolls the floor forward — the same structural pattern as
+ * `MIN_SUPPORTED_PROTOCOL` in `crates/server-core/src/protocol.rs`. Allows a
+ * one-minor deprecation window so a freshly-built client can connect to a
+ * not-yet-redeployed lobby broker during rollout, instead of hard-failing
+ * with "Server protocol version N-1 does not match client N".
+ */
+export const MIN_SUPPORTED_SERVER_PROTOCOL = Math.max(0, PROTOCOL_VERSION - 1);
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-09T00:00:00Z",
+  "updated": "2026-06-10T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -813,15 +813,7 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
           "count": 1,
-          "name": "Den of the Bugbear"
-        },
-        {
-          "count": 4,
           "name": "Emberheart Challenger"
         },
         {
@@ -829,7 +821,7 @@
           "name": "Kumano Faces Kakkazan"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Robber of the Rich"
         },
         {
@@ -837,8 +829,32 @@
           "name": "Monastery Swiftspear"
         },
         {
+          "count": 3,
+          "name": "Sunspine Lynx"
+        },
+        {
+          "count": 3,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 1,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
           "count": 4,
           "name": "Monstrous Rage"
+        },
+        {
+          "count": 4,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 1,
+          "name": "Den of the Bugbear"
         },
         {
           "count": 1,
@@ -849,70 +865,54 @@
           "name": "Ramunap Ruins"
         },
         {
-          "count": 4,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 2,
-          "name": "Screaming Nemesis"
-        },
-        {
           "count": 1,
           "name": "Sokenzan, Crucible of Defiance"
         },
         {
           "count": 3,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 3,
-          "name": "Sunspine Lynx"
+          "name": "Emberheart Challenger"
         },
         {
           "count": 1,
           "name": "Mountain"
         },
         {
+          "count": 4,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Mountain"
+        },
+        {
           "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 9,
           "name": "Mountain"
         },
         {
           "count": 2,
-          "name": "Screaming Nemesis"
+          "name": "Mountain"
         },
         {
           "count": 4,
           "name": "Mutavault"
+        },
+        {
+          "count": 4,
+          "name": "Screaming Nemesis"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
+          "count": 3,
           "name": "Flowstone Infusion"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Scorching Shot"
         },
         {
-          "count": 3,
-          "name": "Pyroclasm"
-        },
-        {
           "count": 2,
-          "name": "Maelstrom Artisan"
-        },
-        {
-          "count": 4,
-          "name": "Magebane Lizard"
+          "name": "Ghost Vacuum"
         },
         {
           "count": 1,
@@ -921,6 +921,14 @@
         {
           "count": 1,
           "name": "Sunspine Lynx"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 4,
+          "name": "Magebane Lizard"
         }
       ]
     },
@@ -1391,10 +1399,10 @@
       ]
     },
     {
-      "name": "Selesnya Angels",
+      "name": "Jund Sacrifice",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
+        "B",
         "G"
       ],
       "tags": [
@@ -1402,98 +1410,118 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Bishop of Wings"
-        },
-        {
-          "count": 4,
-          "name": "Brushland"
-        },
-        {
-          "count": 4,
-          "name": "Collected Company"
-        },
-        {
           "count": 3,
-          "name": "Elvish Mystic"
+          "name": "Blazemire Verge"
         },
         {
           "count": 4,
-          "name": "Razorverge Thicket"
+          "name": "Blightstep Pathway"
         },
         {
           "count": 4,
-          "name": "Giada, Font of Hope"
+          "name": "Bloodtithe Harvester"
         },
         {
           "count": 4,
-          "name": "Hushwood Verge"
+          "name": "Cauldron Familiar"
+        },
+        {
+          "count": 4,
+          "name": "Deadly Dispute"
         },
         {
           "count": 1,
-          "name": "Inspiring Overseer"
+          "name": "Den of the Bugbear"
         },
         {
           "count": 4,
-          "name": "Kayla's Reconstruction"
+          "name": "Mayhem Devil"
         },
         {
           "count": 3,
-          "name": "Llanowar Elves"
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 4,
+          "name": "Scavenger's Talent"
         },
         {
           "count": 1,
-          "name": "Plains"
+          "name": "Sokenzan, Crucible of Defiance"
         },
         {
           "count": 4,
-          "name": "Resplendent Angel"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Righteous Valkyrie"
-        },
-        {
-          "count": 3,
-          "name": "Skyclave Apparition"
+          "name": "Witch's Oven"
         },
         {
           "count": 2,
-          "name": "Plains"
+          "name": "Swamp"
         },
         {
           "count": 4,
-          "name": "Plains"
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 4,
+          "name": "Moonshadow"
         },
         {
           "count": 3,
-          "name": "Enduring Innocence"
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 1,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 2,
+          "name": "Ygra, Eater of All"
+        },
+        {
+          "count": 1,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 2,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Fatal Push"
         }
       ],
       "sideboard": [
         {
-          "count": 3,
-          "name": "Archon of Emeria"
-        },
-        {
-          "count": 3,
-          "name": "High Noon"
+          "count": 2,
+          "name": "Kolaghan's Command"
         },
         {
           "count": 2,
-          "name": "Get Lost"
+          "name": "Leyline of the Void"
+        },
+        {
+          "count": 2,
+          "name": "Withering Curse"
         },
         {
           "count": 4,
-          "name": "Seam Rip"
+          "name": "Thoughtseize"
         },
         {
-          "count": 3,
-          "name": "Rest in Peace"
+          "count": 1,
+          "name": "Decorum Dissertation"
+        },
+        {
+          "count": 2,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 2,
+          "name": "Leyline of the Void"
         }
       ]
     }

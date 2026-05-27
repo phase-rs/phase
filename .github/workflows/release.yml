@@ -332,6 +332,11 @@ jobs:
           # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
           # deploy (deploy.yml) deliberately omits this so it never self-links.
           RELEASE_BUILD: "true"
+          # Cloud-sync config. The anon/publishable key is client-safe (RLS is the
+          # access control), so it's baked into the bundle. Empty (secret unset) →
+          # cloud sync stays disabled and the app falls back to file backup.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           cd client
           pnpm install --frozen-lockfile
@@ -538,18 +543,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Need the repo checked out so we can inject the Cloudflare-only
+      # _headers file alongside the prebuilt frontend artifact. The file
+      # is held outside client/public/ so the GitHub Pages preview deploy
+      # (deploy.yml) never serves it at /_headers.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download frontend artifact
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
           path: dist
 
+      - name: Inject Cloudflare Pages _headers
+        run: cp client/deploy/cloudflare-pages/_headers dist/_headers
+
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=phase-rs --commit-dirty=true
+          command: pages deploy dist --project-name=phase-rs --branch=main --commit-dirty=true
 
   deploy-lobby-worker:
     # Builds the Rust lobby-broker -> WASM and deploys the Cloudflare Worker +
@@ -893,6 +908,11 @@ jobs:
           # so this reaches vite.config.ts. Surfaces the preview-build CTA in the
           # desktop app too (it routes through openExternal → shell open).
           RELEASE_BUILD: "true"
+          # Cloud-sync config reaches vite.config.ts via the same beforeBuildCommand
+          # path; without these the desktop build ships with cloud sync disabled.
+          # Anon key is client-safe (RLS gates access).
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

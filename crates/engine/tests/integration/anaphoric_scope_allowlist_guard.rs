@@ -298,6 +298,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "pandemonium",
     "parallectric feedback",
     "passionate archaeologist",
+    "phthisis",
     "phyrexian delver",
     "planeswalker's fury",
     "planeswalker's mirth",
@@ -456,8 +457,8 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        262,
-        "Expected exactly 262 cards retaining ObjectScope::Anaphoric (the #495 \
+        263,
+        "Expected exactly 263 cards retaining ObjectScope::Anaphoric (the #495 \
          behavior-neutral floor of 156, minus four cards unlocked by #607's \
          target-subject DamageAll source wrapper, plus 88 cards from category 4, \
          plus the UUID-disambiguated Reanimate print key \
@@ -465,14 +466,15 @@ fn anaphoric_scope_set_is_frozen() {
          routed onto the Anaphoric arm by `classify_possessive_referent` \
          — plus 17 category-3 \"pump/tap target creature, then it deals damage \
          equal to its power\" fight spells newly parsed by the token-then-pump \
-         chain fix, anaphoric on the spell's chosen target creature); \
-         count moved to {}.",
+         chain fix, anaphoric on the spell's chosen target creature, plus \
+         Phthisis — destroy-target-creature + LoseLife-equal-to-its-P+T, \
+         category-3 target-spell anaphora); count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        262,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 262 cards."
+        263,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 263 cards."
     );
 }
 

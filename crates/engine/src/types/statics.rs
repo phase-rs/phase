@@ -793,6 +793,25 @@ pub enum StaticMode {
     /// CR 702.3b: Allows creatures with defender to attack despite having the keyword.
     /// "can attack as though it didn't have defender" overrides the defender restriction.
     CanAttackWithDefender,
+    /// CR 509.1b + CR 609.4 + CR 702.14c: Globally cancel the landwalk blocking
+    /// restriction for the named qualifier. The attacker still has the keyword
+    /// (CR 609.4: "as though" is scoped to the stated effect); only its
+    /// blocking-restriction consequence is suppressed. Per CR 702.14d, qualifiers
+    /// cancel independently: a swampwalk canceller leaves a co-present islandwalk
+    /// intact.
+    ///
+    /// INVARIANT: `qualifier` MUST match `Keyword::Landwalk`'s canonical capitalized
+    /// form (e.g. "Swamp", "Island", "Plains", "Mountain", "Forest"). `None` reserved
+    /// for a hypothetical "all landwalk" global canceller; no printed card currently
+    /// requires this, but the option preserves room for that class.
+    ///
+    /// Class: the Portal/Legends "creatures with Xwalk can be blocked as though
+    /// they didn't have Xwalk" cycle (Ur-Drago and four siblings — one per basic
+    /// land subtype). Global rule modification (`affected: None`); enforced inside
+    /// `is_landwalk_unblockable` rather than as a layer-6 ability removal.
+    IgnoreLandwalkForBlocking {
+        qualifier: Option<String>,
+    },
     /// CR 602.5a: Bypasses the summoning-sickness gate on a creature's `{T}`/`{Q}`
     /// activated abilities — "You may activate abilities of creatures you control as
     /// though those creatures had haste." This is NOT `AddKeyword(Haste)`: only the
@@ -856,6 +875,7 @@ impl Hash for StaticMode {
                 filter.hash(state);
                 action.hash(state);
             }
+            StaticMode::IgnoreLandwalkForBlocking { qualifier } => qualifier.hash(state),
             StaticMode::Other(s) => s.hash(state),
             StaticMode::GraveyardCastPermission {
                 frequency,
@@ -1075,6 +1095,12 @@ impl fmt::Display for StaticMode {
                 write!(f, "StepEndUnspentMana({filter:?},{action})")
             }
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
+            // CR 509.1b + CR 609.4 + CR 702.14c: Display follows the existing
+            // parenthesized-payload pattern. `None` = all-landwalk canceller.
+            StaticMode::IgnoreLandwalkForBlocking { qualifier } => match qualifier {
+                None => write!(f, "IgnoreLandwalkForBlocking"),
+                Some(q) => write!(f, "IgnoreLandwalkForBlocking({q})"),
+            },
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 write!(f, "CanActivateAbilitiesAsThoughHaste")
             }
@@ -1309,6 +1335,10 @@ impl FromStr for StaticMode {
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
+            // CR 509.1b + CR 609.4 + CR 702.14c: bare form = all-landwalk canceller.
+            "IgnoreLandwalkForBlocking" => {
+                StaticMode::IgnoreLandwalkForBlocking { qualifier: None }
+            }
             "CanActivateAbilitiesAsThoughHaste" => StaticMode::CanActivateAbilitiesAsThoughHaste,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UntapsDuringEachOtherPlayersUntapStep" => {
@@ -1436,6 +1466,15 @@ impl FromStr for StaticMode {
                 {
                     let keyword = Keyword::from_str(inner).unwrap();
                     StaticMode::CastWithKeyword { keyword }
+                } else if let Some(inner) = other
+                    .strip_prefix("IgnoreLandwalkForBlocking(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 509.1b + CR 609.4 + CR 702.14c: parameterized form carries
+                    // the canonical capitalized land subtype (e.g. "Swamp").
+                    StaticMode::IgnoreLandwalkForBlocking {
+                        qualifier: Some(inner.to_string()),
+                    }
                 } else if let Some(inner) = other
                     .strip_prefix("SkipStep(")
                     .and_then(|s| s.strip_suffix(')'))
@@ -1764,6 +1803,35 @@ mod tests {
                 exemption: ActivationExemption::None,
             }
         );
+    }
+
+    #[test]
+    fn ignore_landwalk_for_blocking_display_fromstr_roundtrip() {
+        // CR 509.1b + CR 609.4 + CR 702.14c: round-trip the `None` (all-landwalk)
+        // form and each of the five basic-land qualifier forms.
+        let cases = [
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: None },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Plains".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Island".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Swamp".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Mountain".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Forest".to_string()),
+            },
+        ];
+        for case in cases {
+            let s = case.to_string();
+            let parsed = StaticMode::from_str(&s).unwrap();
+            assert_eq!(parsed, case, "round-trip failed for {s}");
+        }
     }
 
     #[test]

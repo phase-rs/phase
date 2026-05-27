@@ -645,7 +645,11 @@ interface CreatedIssue {
 function createGithubIssue(item: TriageItem): CreatedIssue {
   const title = buildIssueTitle(item);
   const body = buildIssueBody(item);
-  const labels = ["source:discord", "status:needs-triage"];
+  // `classifier:pending` marks the issue as awaiting LLM analysis (AST-vs-Oracle
+  // faithfulness check per .claude/skills/bug-coverage-classifier). The classifier
+  // pass replaces `pending` with one of the four verdict labels and posts the
+  // reasoning comment. Greppable backlog: `gh issue list -l classifier:pending`.
+  const labels = ["source:discord", "status:needs-triage", "classifier:pending"];
 
   const result = Bun.spawnSync([
     "gh",

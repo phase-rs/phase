@@ -6477,6 +6477,17 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
+            // CR 509.1b + CR 609.4 + CR 702.14c: qualifier-aware coverage for
+            // Ur-Drago's "creatures with <X>walk can be blocked as though they
+            // didn't have <X>walk." Anchor on the per-qualifier keyword token
+            // so unrelated landwalk lines don't false-match.
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => {
+                let kw = format!("{}walk", q.to_ascii_lowercase());
+                effective_lower.contains(&format!("creatures with {kw}"))
+                    && effective_lower.contains("as though they didn't have")
+                    && effective_lower.contains(&kw)
+            }
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: None } => false,
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 effective_lower.contains("as though those creatures had haste")
                     || effective_lower.contains("as though that creature had haste")
@@ -6504,6 +6515,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     StaticMode::CanAttackWithDefender => {
                         effective_lower.contains("as though it didn't have defender")
                     }
+                    // CR 509.1b + CR 609.4 + CR 702.14c: mirror predicate for
+                    // statics nested under a GenericEffect.
+                    StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => {
+                        let kw = format!("{}walk", q.to_ascii_lowercase());
+                        effective_lower.contains(&format!("creatures with {kw}"))
+                            && effective_lower.contains("as though they didn't have")
+                            && effective_lower.contains(&kw)
+                    }
+                    StaticMode::IgnoreLandwalkForBlocking { qualifier: None } => false,
                     _ => false,
                 })
             } else {

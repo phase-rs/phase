@@ -5510,6 +5510,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::game::combat::AttackTarget;
     use crate::game::game_object::{BackFaceData, RoomDoor};
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
@@ -5524,7 +5525,7 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::TriggerMode;
 
     /// Create a simple test ability definition.
@@ -8672,6 +8673,301 @@ mod tests {
                 }
             )));
         }
+    }
+
+    // CR 120 (damage), CR 510.1 (combat damage step), CR 510.3a
+    // (combat-damage triggers go on the stack), CR 701.23a/b/d (search
+    // library / fail-to-find), CR 701.24 (shuffle), CR 100.2a /
+    // CR 903.5b (deck-construction overrides — verified silently consumed
+    // by Step 1's parser fix).
+    //
+    // Tempest Hawk's combat-damage trigger:
+    //   "Whenever this creature deals combat damage to a player, you may
+    //    search your library for a card named Tempest Hawk, reveal it,
+    //    put it into your hand, then shuffle."
+    //
+    // The AST shape: TriggerMode::DamageDone with damage_kind = CombatOnly,
+    // valid_target = Player, optional = true, execute chain =
+    // SearchLibrary → ChangeZone(Library→Hand) → Shuffle. The shape is
+    // identical to Squadron Hawk's ETB-triggered search, so we reuse the
+    // search-and-shuffle assertion structure; only the trigger source
+    // (combat damage vs ETB) differs.
+    const TEMPEST_HAWK_ORACLE: &str = "Flying\nWhenever this creature deals combat damage to a player, you may search your library for a card named Tempest Hawk, reveal it, put it into your hand, then shuffle.\nA deck can have any number of cards named Tempest Hawk.";
+
+    fn add_tempest_hawk_to_library(state: &mut GameState, card_id: u64) -> ObjectId {
+        let hawk = create_object(
+            state,
+            CardId(card_id),
+            PlayerId(0),
+            "Tempest Hawk".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&hawk).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        hawk
+    }
+
+    /// Set up a board where a Tempest Hawk on the battlefield is the sole
+    /// attacker against PlayerId(1), and advance combat through declare-
+    /// attackers / declare-blockers so the damage step is about to fire.
+    /// Returns (state, attacking hawk, hawks in library).
+    fn setup_tempest_hawk_attack(library_hawk_ids: &[u64]) -> (GameState, ObjectId, Vec<ObjectId>) {
+        let mut state = new_game(42);
+        state.turn_number = 5;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let attacker = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Tempest Hawk".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.color = vec![ManaColor::White];
+            obj.base_color = vec![ManaColor::White];
+            obj.entered_battlefield_turn = Some(4);
+        }
+        apply_oracle_to_object(&mut state, attacker, "Tempest Hawk", TEMPEST_HAWK_ORACLE);
+
+        let library_hawks: Vec<ObjectId> = library_hawk_ids
+            .iter()
+            .map(|id| add_tempest_hawk_to_library(&mut state, *id))
+            .collect();
+
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .unwrap();
+
+        (state, attacker, library_hawks)
+    }
+
+    /// Advance combat from DeclareAttackers (just submitted) through to the
+    /// point where Tempest Hawk's `you may` combat-damage trigger has been
+    /// pushed onto the stack and is being resolved (engine is at
+    /// `WaitingFor::OptionalEffectChoice`).
+    fn advance_to_tempest_hawk_optional_choice(state: &mut GameState) {
+        for _ in 0..16 {
+            if matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }) {
+                return;
+            }
+            apply_as_current(state, GameAction::PassPriority).unwrap();
+        }
+        panic!(
+            "expected WaitingFor::OptionalEffectChoice for Tempest Hawk's combat-damage trigger, \
+             got {:?} after exhausting priority passes",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn tempest_hawk_combat_damage_optional_accept_finds_named_card() {
+        // Accept path: Tempest Hawk deals combat damage to PlayerId(1),
+        // the optional `you may search` trigger is accepted, the
+        // SearchChoice exposes only Tempest Hawks from the library, and
+        // SelectCards moves the chosen hawk to hand with a Shuffle event.
+        let (mut state, _attacker, library_hawks) = setup_tempest_hawk_attack(&[701, 702, 703]);
+
+        // Sanity: also drop a non-Hawk into the library to confirm the
+        // SearchChoice filters by name.
+        let nonmatch = create_object(
+            &mut state,
+            CardId(799),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+
+        advance_to_tempest_hawk_optional_choice(&mut state);
+        assert_eq!(
+            state.players[1].life, 18,
+            "Tempest Hawk should have dealt 2 combat damage to PlayerId(1)"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice {
+                player,
+                cards,
+                count,
+                reveal,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 1);
+                assert!(*reveal);
+                for hawk in &library_hawks {
+                    assert!(
+                        cards.contains(hawk),
+                        "SearchChoice must offer library Tempest Hawk {hawk:?}, got {cards:?}"
+                    );
+                }
+                assert!(
+                    !cards.contains(&nonmatch),
+                    "SearchChoice must not offer non-Tempest-Hawk card {nonmatch:?}"
+                );
+            }
+            other => {
+                panic!("expected SearchChoice after accepting Tempest Hawk trigger, got {other:?}")
+            }
+        }
+
+        let chosen = library_hawks[0];
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![chosen],
+            },
+        )
+        .unwrap();
+
+        assert!(
+            state.stack.is_empty(),
+            "stack must be empty after resolving search"
+        );
+        assert_eq!(state.objects[&chosen].zone, Zone::Hand);
+        assert!(state.players[0].hand.contains(&chosen));
+        assert!(!state.players[0].library.contains(&chosen));
+        for other in &library_hawks[1..] {
+            assert_eq!(state.objects[other].zone, Zone::Library);
+        }
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "library must be shuffled at end of the trigger chain (CR 701.24)"
+        );
+    }
+
+    #[test]
+    fn tempest_hawk_combat_damage_optional_decline_leaves_library_untouched() {
+        // Decline path: declining the `you may` trigger must leave the
+        // library and hand untouched and clear the stack — no search,
+        // no shuffle.
+        let (mut state, _attacker, library_hawks) = setup_tempest_hawk_attack(&[711, 712]);
+
+        advance_to_tempest_hawk_optional_choice(&mut state);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        assert!(state.stack.is_empty());
+        for hawk in &library_hawks {
+            assert_eq!(state.objects[hawk].zone, Zone::Library);
+            assert!(state.players[0].library.contains(hawk));
+            assert!(!state.players[0].hand.contains(hawk));
+        }
+        assert!(
+            !result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::SearchedLibrary,
+                    ..
+                } | GameEvent::CardsRevealed { .. }
+                    | GameEvent::EffectResolved {
+                        kind: EffectKind::Shuffle,
+                        ..
+                    }
+            )),
+            "declining the trigger must produce no search/reveal/shuffle events"
+        );
+    }
+
+    #[test]
+    fn tempest_hawk_combat_damage_accept_with_empty_library_resolves_cleanly() {
+        // Fail-to-find path: accepting the search with zero Tempest Hawks
+        // in the library must resolve cleanly per CR 701.23b (player may
+        // search and find nothing; library still shuffles per CR 701.23d).
+        let (mut state, _attacker, _) = setup_tempest_hawk_attack(&[]);
+        // Non-matching filler so the library is not literally empty —
+        // this isolates "no card matching the filter" from "library empty".
+        let filler = create_object(
+            &mut state,
+            CardId(720),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+
+        advance_to_tempest_hawk_optional_choice(&mut state);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        let mut events = result.events;
+
+        // Engine may either (a) skip straight past SearchChoice because no
+        // cards match, in which case the shuffle event is emitted by the
+        // DecideOptionalEffect call above, or (b) expose an empty/zero
+        // SearchChoice that resolves to SelectCards { cards: vec![] }, in
+        // which case the shuffle event is emitted by SelectCards. Combine
+        // events from both possible paths so the shuffle assertion holds
+        // regardless of which branch the engine takes (CR 701.24 still
+        // applies — the library shuffles even on fail-to-find).
+        if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
+            let select_result =
+                apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
+            events.extend(select_result.events);
+        }
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "library must shuffle even when the search finds nothing (CR 701.24)"
+        );
+
+        assert!(
+            state.stack.is_empty(),
+            "stack must drain even on fail-to-find"
+        );
+        assert_eq!(state.objects[&filler].zone, Zone::Library);
+        assert!(state.players[0].hand.is_empty());
     }
 
     #[test]

@@ -146,10 +146,30 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     state.outside_game_cards_brought_in.clear();
     state.sideboard_submitted.clear();
 
+    // CR 903.5e: Commander-style formats (Commander, Brawl, etc.) do not start
+    // the game with a sideboard. Phase's deck builder reuses the sideboard
+    // slot as a builder-only "Maybeboard" staging area, so the submitted list
+    // may carry extra entries for these formats — drop them here so wish /
+    // search-outside-the-game effects (Karn the Great Creator, etc.) correctly
+    // see an empty sideboard pool per CR 903.5e. The validator (see
+    // `deck_validation.rs`) accepts the entries; this is the rule-enforcement
+    // boundary.
+    let drop_sideboard = matches!(
+        state.format_config.format.sideboard_policy(),
+        crate::types::format::SideboardPolicy::Forbidden
+    );
+    let sideboard_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
+        if drop_sideboard {
+            Vec::new()
+        } else {
+            submitted.to_vec()
+        }
+    };
+
     // Build each Arc<Vec<_>> once and share between registered_X and current_X —
     // they start identical and diverge via Arc::make_mut on first mutation.
     let p0_main = std::sync::Arc::new(payload.player.main_deck.clone());
-    let p0_side = std::sync::Arc::new(payload.player.sideboard.clone());
+    let p0_side = std::sync::Arc::new(sideboard_for(&payload.player.sideboard));
     let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
     state
         .deck_pools
@@ -163,7 +183,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_commander: p0_cmdr,
         });
     let p1_main = std::sync::Arc::new(payload.opponent.main_deck.clone());
-    let p1_side = std::sync::Arc::new(payload.opponent.sideboard.clone());
+    let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
     let p1_cmdr = std::sync::Arc::new(payload.opponent.commander.clone());
     state
         .deck_pools
@@ -179,7 +199,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
         let main = std::sync::Arc::new(ai_deck.main_deck.clone());
-        let side = std::sync::Arc::new(ai_deck.sideboard.clone());
+        let side = std::sync::Arc::new(sideboard_for(&ai_deck.sideboard));
         let cmdr = std::sync::Arc::new(ai_deck.commander.clone());
         state
             .deck_pools
@@ -529,6 +549,49 @@ mod tests {
         assert_eq!(state.players[0].library.len(), 6); // 4 + 2
         assert_eq!(state.players[1].library.len(), 3);
         assert_eq!(state.objects.len(), 9); // 6 + 3
+    }
+
+    #[test]
+    fn load_deck_drops_sideboard_for_commander_format() {
+        // CR 903.5e: a Commander player does not start the game with a
+        // sideboard. The deck-builder's Maybeboard reuses the sideboard slot,
+        // so any submitted entries must be dropped here — Karn the Great
+        // Creator and similar effects depend on `current_sideboard` being
+        // empty in Commander.
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::commander();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                sideboard: vec![DeckEntry {
+                    card: make_instant_face(),
+                    count: 3,
+                }],
+                commander: vec![],
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                sideboard: vec![DeckEntry {
+                    card: make_instant_face(),
+                    count: 2,
+                }],
+                commander: vec![],
+            },
+            ai_decks: vec![],
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert!(state.deck_pools[0].current_sideboard.is_empty());
+        assert!(state.deck_pools[0].registered_sideboard.is_empty());
+        assert!(state.deck_pools[1].current_sideboard.is_empty());
+        assert!(state.deck_pools[1].registered_sideboard.is_empty());
     }
 
     #[test]

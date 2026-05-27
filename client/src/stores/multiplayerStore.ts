@@ -120,6 +120,7 @@ export interface AiSeatConfig {
   seatIndex: number;
   difficulty: string;
   deckName: string | null;
+  deck?: DeckChoice;
 }
 
 export interface HostingDeck {
@@ -800,22 +801,47 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       startP2PHostingSession: async (settings, deck, opts) => {
-        const [{ hostRoom }, { P2PHostAdapter }] = await Promise.all([
-          import("../network/connection"),
-          import("../adapter/p2p-adapter"),
-        ]);
+        const resetFailedHosting = () => {
+          set({
+            hostIsPublic: false,
+            hostingStatus: "idle",
+            hostGameCode: null,
+            hostSession: null,
+            playerSlots: [],
+          });
+        };
 
-        if (activeP2PHostAdapter) {
-          activeP2PHostAdapter.dispose();
-          activeP2PHostAdapter = null;
-          activeP2PHostGameId = null;
-        }
+        set({
+          hostIsPublic: opts.useBroker,
+          hostingStatus: "connecting",
+          hostGameCode: null,
+          hostSession: {
+            formatConfig: settings.formatConfig,
+            timerSeconds: settings.timerSeconds,
+            matchType: settings.matchType,
+          },
+          pendingGameRoute: null,
+        });
 
         let broker: BrokerClient | null = null;
         let brokerGameCode: string | null = null;
-        const host = await hostRoom(undefined, {});
-        if (opts.useBroker) {
-          try {
+        let destroyHostedRoom: (() => void) | null = null;
+
+        try {
+          const [{ hostRoom }, { P2PHostAdapter }] = await Promise.all([
+            import("../network/connection"),
+            import("../adapter/p2p-adapter"),
+          ]);
+
+          if (activeP2PHostAdapter) {
+            activeP2PHostAdapter.dispose();
+            activeP2PHostAdapter = null;
+            activeP2PHostGameId = null;
+          }
+
+          const host = await hostRoom(undefined, {});
+          destroyHostedRoom = () => host.destroy();
+          if (opts.useBroker) {
             broker = await openBrokerClient(get().serverAddress);
             const registered = await broker.registerHost({
               hostPeerId: host.peer.id,
@@ -835,86 +861,110 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             brokerGameCode = registered.gameCode;
             activeBroker = broker;
             activeBrokerGameCode = registered.gameCode;
-          } catch (err) {
-            host.destroy();
-            console.error("[startP2PHostingSession] broker registration failed:", err);
-            return false;
           }
-        }
 
-        const gameId = crypto.randomUUID();
-        const adapter = new P2PHostAdapter(
-          {
-            player: asDeckPayload(deck),
-            opponent: { main_deck: [], sideboard: [], commander: [] },
-            ai_decks: [],
-          },
-          host.peer,
-          host.onGuestConnected,
-          settings.formatConfig.max_players,
-          settings.formatConfig,
-          { match_type: settings.matchType },
-          undefined,
-          broker ?? undefined,
-          false,
-          brokerGameCode ?? undefined,
-          {
-            gameId,
-            roomCode: host.roomCode,
-            hostDisplayName: get().displayName || undefined,
-          },
-        );
+          const gameId = crypto.randomUUID();
+          const adapter = new P2PHostAdapter(
+            {
+              player: asDeckPayload(deck),
+              opponent: { main_deck: [], sideboard: [], commander: [] },
+              ai_decks: [],
+            },
+            host.peer,
+            host.onGuestConnected,
+            settings.formatConfig.max_players,
+            settings.formatConfig,
+            { match_type: settings.matchType },
+            undefined,
+            broker ?? undefined,
+            false,
+            brokerGameCode ?? undefined,
+            {
+              gameId,
+              roomCode: host.roomCode,
+              hostDisplayName: get().displayName || undefined,
+            },
+          );
 
-        adapter.onEvent((event) => {
-          if (event.type === "playerSlotsUpdated" || event.type === "lobbyProgress") {
-            set({ playerSlots: adapter.getPlayerSlots() });
-          } else if (event.type === "roomFull") {
-            if (settings.startWhenFull) {
-              void startActiveP2PHostGame(set).catch((err) => {
-                get().showToast(err instanceof Error ? err.message : String(err));
-              });
-            } else {
-              get().showToast("Room full — ready to start!");
+          adapter.onEvent((event) => {
+            if (event.type === "playerSlotsUpdated" || event.type === "lobbyProgress") {
+              set({ playerSlots: adapter.getPlayerSlots() });
+            } else if (event.type === "playerIdentity") {
+              const names = new Map<number, string>();
+              for (const [playerId, name] of Object.entries(event.playerNames ?? {})) {
+                names.set(Number(playerId), name);
+              }
+              set({ playerNames: names });
+            } else if (event.type === "roomFull") {
+              if (settings.startWhenFull) {
+                void startActiveP2PHostGame(set).catch((err) => {
+                  get().showToast(err instanceof Error ? err.message : String(err));
+                });
+              } else {
+                get().showToast("Room full — ready to start!");
+              }
+            } else if (event.type === "error") {
+              get().showToast(event.message);
             }
-          } else if (event.type === "error") {
-            get().showToast(event.message);
-          }
-        });
+          });
 
-        activeP2PHostAdapter = adapter;
-        activeP2PHostGameId = gameId;
+          activeP2PHostAdapter = adapter;
+          activeP2PHostGameId = gameId;
 
-        await adapter.initialize();
+          await adapter.initialize();
+          destroyHostedRoom = null;
 
-        set({
-          hostIsPublic: opts.useBroker,
-          hostingStatus: "waiting",
-          hostGameCode: host.roomCode,
-          hostSession: {
-            formatConfig: settings.formatConfig,
-            timerSeconds: settings.timerSeconds,
-            matchType: settings.matchType,
-          },
-          playerSlots: adapter.getPlayerSlots(),
-        });
+          set({
+            hostIsPublic: opts.useBroker,
+            hostingStatus: "waiting",
+            hostGameCode: host.roomCode,
+            hostSession: {
+              formatConfig: settings.formatConfig,
+              timerSeconds: settings.timerSeconds,
+              matchType: settings.matchType,
+            },
+            playerSlots: adapter.getPlayerSlots(),
+          });
 
-        for (const seat of settings.aiSeats) {
-          await adapter.applySeatMutation({
-            type: "SetKind",
-            data: {
-              seatIndex: seat.seatIndex,
-              kind: {
-                type: "Ai",
-                data: {
-                  difficulty: seat.difficulty,
-                  deck: aiSeatDeckChoice(seat.deckName),
+          for (const seat of settings.aiSeats) {
+            await adapter.applySeatMutation({
+              type: "SetKind",
+              data: {
+                seatIndex: seat.seatIndex,
+                kind: {
+                  type: "Ai",
+                  data: {
+                    difficulty: seat.difficulty,
+                  deck: seat.deck ?? aiSeatDeckChoice(seat.deckName),
+                  },
                 },
               },
-            },
-          });
-        }
+            });
+          }
 
-        return true;
+          return true;
+        } catch (err) {
+          if (activeP2PHostAdapter) {
+            activeP2PHostAdapter.dispose();
+            activeP2PHostAdapter = null;
+            activeP2PHostGameId = null;
+          } else {
+            destroyHostedRoom?.();
+          }
+          if (broker) {
+            if (brokerGameCode) {
+              await broker.unregister(brokerGameCode).catch(() => {});
+            }
+            broker.close();
+            if (activeBroker === broker) {
+              activeBroker = null;
+              activeBrokerGameCode = null;
+            }
+          }
+          console.error("[startP2PHostingSession] failed:", err);
+          resetFailedHosting();
+          return false;
+        }
       },
 
       getActiveP2PHost: () => {
@@ -934,6 +984,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               set({ playerSlots: activeP2PHostAdapter.getPlayerSlots() });
             }
           })().catch((err) => {
+            // Surface the failure to BOTH the dev console and the in-app
+            // toaster. The toaster can be off-screen or hidden behind the
+            // lobby modal; without the console.error a silent rejection in
+            // startPregameGame / applySeatMutation looks like the button
+            // did nothing at all.
+            console.error("[seatMutate]", mutation.type, err);
             get().showToast(err instanceof Error ? err.message : String(err));
           });
           return;

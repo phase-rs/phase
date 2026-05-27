@@ -315,6 +315,11 @@ jobs:
           DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging"
           CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/${{ needs.card-data.outputs.card_data_filename }}"
           AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
+          # Cloud-sync config. The anon/publishable key is client-safe (RLS is the
+          # access control), so it's baked into the bundle. Empty (secret unset) →
+          # cloud sync stays disabled and the app falls back to file backup.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           cd client
           pnpm install --frozen-lockfile

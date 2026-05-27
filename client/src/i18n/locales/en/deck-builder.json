@@ -59,6 +59,7 @@
   "card": {
     "moveToSideboard": "Move one {{name}} to sideboard",
     "moveToMain": "Move one {{name}} to main deck",
+    "moveToTarget": "Move one {{name}} to {{target}}",
     "removeOne": "Remove one {{name}}",
     "makeCommander": "Make {{name}} the commander",
     "makeCommanderTitle": "Make this my commander",
@@ -84,12 +85,18 @@
     "exportTitle": "Export deck",
     "mainTab": "Main ({{count}})",
     "sideboardTab": "Sideboard ({{count}})",
+    "maybeboardTab": "Maybeboard ({{count}})",
+    "mainName": "Main",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
     "mainDeckHeading_one": "Main Deck ({{count}} card)",
     "mainDeckHeading_other": "Main Deck ({{count}} cards)",
     "sideboardUnlimited": "Sideboard ({{count}})",
     "sideboardLimited": "Sideboard ({{count}}/{{max}})",
+    "maybeboard": "Maybeboard ({{count}})",
     "sideboardExceeds": "Sideboard exceeds {{max}}-card limit",
-    "sideboardEmptyHint": "Hover a main-deck card and click → to move it here.",
+    "sideboardEmptyHint": "Tap → Sideboard on a deck card to move it here.",
+    "maybeboardEmptyHint": "Cards you're considering. Tap → Maybeboard on a deck card to park one here.",
     "group": {
       "Creatures": "Creatures",
       "Spells": "Spells",
@@ -102,7 +109,9 @@
     "exportModalTitle": "Export Deck",
     "saveToFile": "Save to File",
     "copied": "Copied!",
-    "copy": "Copy"
+    "copy": "Copy",
+    "commanderHeading": "Commander",
+    "removeCommander": "Remove {{name}} as commander"
   },
   "moveList": {
     "empty": "Empty"
@@ -112,6 +121,10 @@
     "visualDeckStack": "Visual Deck Stack",
     "mainBadge": "Main {{count}}",
     "sideboardBadge": "Sideboard {{count}}",
+    "maybeboardBadge": "Maybeboard {{count}}",
+    "mainName": "Main",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
     "emptyHint": "Added cards will appear here as a staggered stack.",
     "commanderBadge": "Commander",
     "commanderLane": "Commander",
@@ -121,6 +134,7 @@
     "cardCount_one": "{{count}} card",
     "cardCount_other": "{{count}} cards",
     "mainSideBadge": "{{main}} main + {{side}} side",
+    "mainMaybeBadge": "{{main}} main + {{side}} maybe",
     "groupCards_one": "{{count}} card",
     "groupCards_other": "{{count}} cards",
     "group": {
@@ -129,6 +143,7 @@
       "Lands": "Lands"
     },
     "sideboardGroup": "Sideboard",
+    "maybeboardGroup": "Maybeboard",
     "addOne": "Add one {{name}}",
     "copyLimit": "{{name}} is at the copy limit",
     "removeOne": "Remove one {{name}}",
