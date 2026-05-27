@@ -5432,8 +5432,9 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
         })
 }
 
-/// CR 702.51a / 702.126a: Tap-payment keywords function on the spell being cast,
-/// so resolve the active mode once from the spell's effective keyword set.
+/// CR 702.51a: Convoke functions on the spell being cast.
+/// CR 702.126a: Improvise functions on the spell being cast.
+/// Resolve the active tap-payment mode once from the spell's effective keyword set.
 pub(super) fn spell_tap_payment_mode(
     state: &GameState,
     player: PlayerId,
@@ -5482,6 +5483,7 @@ fn can_pay_with_spell_tap_payments(
     // flows through ManaPayment and the shared mana-payment algorithm.
     match mode {
         ConvokeMode::Improvise => {
+            // CR 702.126a: Improvise lets players tap untapped artifacts to pay generic mana.
             let mut pool = player_data.mana_pool.clone();
             for (&object_id, obj) in &state.objects {
                 if obj.is_improvise_eligible(player) {
@@ -5508,6 +5510,7 @@ fn can_pay_with_spell_tap_payments(
             mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
         }
         ConvokeMode::Convoke => {
+            // CR 702.51a: Convoke lets players tap untapped creatures to pay colored or generic mana.
             let options = state
                 .objects
                 .iter()
@@ -5530,6 +5533,7 @@ fn can_pay_with_spell_tap_payments(
     }
 }
 
+// CR 702.51a: Evaluate valid creature-tap choices that can satisfy a convoke cost.
 fn can_pay_with_convoke_options(
     base_pool: &crate::types::mana::ManaPool,
     cost: &crate::types::mana::ManaCost,
