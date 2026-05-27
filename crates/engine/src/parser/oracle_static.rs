@@ -6424,16 +6424,12 @@ fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         let (cause, predicate) = strip_controller_possessive_scope(rest_tp.original)?;
         let predicate_lower = predicate.to_lowercase();
         // Compose as modal + causal clause + search target; avoid verbatim phrase matching.
-        if nom_on_lower(predicate, &predicate_lower, |i| {
+        nom_on_lower(predicate, &predicate_lower, |i| {
             let (i, _) = parse_cause_controller_search_their_library(i)?;
             let (i, _) = opt(tag(".")).parse(i)?;
             let (i, _) = eof(i)?;
             Ok((i, ()))
-        })
-        .is_none()
-        {
-            return None;
-        }
+        })?;
         return Some(
             StaticDefinition::new(StaticMode::CantSearchLibrary { cause })
                 .description(text.to_string()),
@@ -6448,16 +6444,12 @@ fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
     }
     let predicate_lower = predicate.to_lowercase();
     // Compose as modal + "search" + object noun, not a single full-string tag.
-    if nom_on_lower(predicate, &predicate_lower, |i| {
+    nom_on_lower(predicate, &predicate_lower, |i| {
         let (i, _) = parse_search_libraries(i)?;
         let (i, _) = opt(tag(".")).parse(i)?;
         let (i, _) = eof(i)?;
         Ok((i, ()))
-    })
-    .is_none()
-    {
-        return None;
-    }
+    })?;
 
     Some(
         StaticDefinition::new(StaticMode::CantSearchLibrary { cause })
