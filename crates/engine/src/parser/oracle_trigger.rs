@@ -11153,6 +11153,146 @@ mod tests {
         }
     }
 
+    /// CR 603.4 + CR 608.2c + CR 119.3 + CR 107.1a: Cecil, Dark Knight —
+    /// damage-done trigger with a "Then if your life total is less than or
+    /// equal to half your starting life total, untap ~ and transform it"
+    /// sub-ability gate. The "Then if" gate must NOT be hoisted as a
+    /// trigger-level intervening-if; it scopes to the per-clause Untap
+    /// sub_ability (with Transform chained sequentially). The condition is a
+    /// `QuantityCheck` comparing `LifeTotal{Controller}` to
+    /// `DivideRounded(StartingLifeTotal, 2, Down)` — fractional rounding
+    /// follows the engine convention when Oracle text does not specify
+    /// direction (CR 107.1a). The Untap and Transform clauses chain as
+    /// `SequentialSibling` so the Untap's condition does not gate the
+    /// Transform; both share the same per-clause check by virtue of the
+    /// gate sitting on the first sub_ability.
+    #[test]
+    fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
+        use crate::types::ability::{AbilityCondition, Effect, RoundingMode, SubAbilityLink};
+
+        let def = parse_trigger_line(
+            "Whenever ~ deals damage, you lose that much life. Then if your life total is less than or equal to half your starting life total, untap ~ and transform it.",
+            "Cecil, Dark Knight",
+        );
+
+        // CR 603.4 — "Then if" attaches as per-clause QuantityCheck, NOT
+        // trigger-level intervening-if. The gate scopes only to the
+        // sub_ability chain.
+        assert_eq!(
+            def.condition, None,
+            "trigger.condition must be None (the 'Then if' gate scopes to sub_ability, not the trigger as a whole)",
+        );
+
+        let execute = def.execute.as_ref().expect("execute must be Some");
+
+        // Outer effect: LoseLife { amount: Ref(EventContextAmount), target: Controller }.
+        // CR 119.3 — life-loss adjusts the player's life total.
+        match &*execute.effect {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    "LoseLife.amount must be Ref(EventContextAmount) — 'you lose that much life' tracks the damage amount",
+                );
+                assert_eq!(
+                    *target,
+                    Some(TargetFilter::Controller),
+                    "LoseLife.target must be Controller — 'you' is the trigger source's controller",
+                );
+            }
+            other => panic!("outer execute effect must be LoseLife, got {other:?}"),
+        }
+
+        // First sub_ability: Untap { target: SelfRef } with QuantityCheck.
+        // CR 608.2c — per-clause QuantityCheck condition.
+        // CR 119.3 + CR 107.1a — LifeTotal{Controller} compared to half StartingLifeTotal rounded Down.
+        let untap_sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("first sub_ability (Untap) must be Some");
+        match &untap_sub.condition {
+            Some(AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
+                    },
+                comparator: Comparator::LE,
+                rhs:
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                    },
+            }) => {
+                assert_eq!(
+                    **inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal,
+                    },
+                    "DivideRounded.inner must be Ref(StartingLifeTotal), got {inner:?}",
+                );
+            }
+            other => panic!(
+                "Untap sub_ability.condition must be QuantityCheck LifeTotal{{Controller}} LE DivideRounded(StartingLifeTotal, 2, Down), got {other:?}",
+            ),
+        }
+        match &*untap_sub.effect {
+            Effect::Untap { target } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "Untap.target must be SelfRef — 'untap ~' refers to the trigger source",
+                );
+            }
+            other => panic!("first sub_ability effect must be Untap, got {other:?}"),
+        }
+        assert_eq!(
+            untap_sub.sub_link,
+            SubAbilityLink::SequentialSibling,
+            "Untap sub_link must be SequentialSibling (independent following instruction after LoseLife)",
+        );
+
+        // Nested sub_ability: Transform { target: ParentTarget } with no
+        // condition (the QuantityCheck sits on the Untap sub_ability above;
+        // both clauses share the gate by SequentialSibling chaining).
+        let transform_sub = untap_sub
+            .sub_ability
+            .as_deref()
+            .expect("nested sub_ability (Transform) must be Some");
+        assert!(
+            transform_sub.condition.is_none(),
+            "Transform sub_ability.condition must be None (the 'Then if' gate sits on the Untap sub_ability), got {:?}",
+            transform_sub.condition,
+        );
+        match &*transform_sub.effect {
+            Effect::Transform { target } => {
+                // The parser today emits `ParentTarget` here — "transform it"
+                // refers back to the Untap target (the trigger source).
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTarget,
+                    "Transform.target must be ParentTarget — 'transform it' inherits the Untap target",
+                );
+            }
+            other => panic!("nested sub_ability effect must be Transform, got {other:?}"),
+        }
+        // The Transform clause is the inner-most sub_ability and inherits the
+        // default `ContinuationStep` link — the chain shape is
+        // LoseLife (outer) → Untap (SequentialSibling under the gate)
+        // → Transform (ContinuationStep extension of the Untap clause). The
+        // QuantityCheck on Untap still gates Transform via chain dependency.
+        assert_eq!(
+            transform_sub.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "Transform sub_link must be ContinuationStep (chain extension of the Untap clause)",
+        );
+    }
+
     /// CR 208.1 + CR 603.4: Cloud, Ex-SOLDIER — attack trigger with a "Then if
     /// ~ has power 7 or greater, …" sub-ability gate. Before the `~ has power N`
     /// grammar branch was added to `parse_source_power_toughness_condition`,
