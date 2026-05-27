@@ -92,6 +92,15 @@ interface DeckListPayload {
   ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
 }
 
+function isDeckListPlayerShape(x: unknown): x is DeckListPayload["player"] {
+  return (
+    x !== null &&
+    typeof x === "object" &&
+    "main_deck" in x &&
+    Array.isArray((x as { main_deck: unknown }).main_deck)
+  );
+}
+
 /**
  * Game-run state. Typed enum (per CLAUDE.md §4: no raw bool flags).
  * - `running`     — normal play, `submitAction` accepted.
@@ -367,10 +376,14 @@ export class P2PHostAdapter implements EngineAdapter {
       this.playerTokens.set(Number(pidStr), token);
     }
     for (const [pidStr, deck] of Object.entries(session.guestDecks)) {
-      this.guestDecks.set(Number(pidStr), deck as DeckListPayload["player"]);
+      if (isDeckListPlayerShape(deck)) {
+        this.guestDecks.set(Number(pidStr), deck);
+      }
     }
     for (const [pidStr, deck] of Object.entries(session.aiDecks ?? {})) {
-      this.aiDecks.set(Number(pidStr), deck as DeckListPayload["player"]);
+      if (isDeckListPlayerShape(deck)) {
+        this.aiDecks.set(Number(pidStr), deck);
+      }
     }
     for (const token of session.kickedTokens) this.kickedTokens.add(token);
     for (const pid of session.eliminatedSeats) {
@@ -470,9 +483,31 @@ export class P2PHostAdapter implements EngineAdapter {
       return this.hostDisplayName ?? "Host";
     }
     if (kind.type === "Ai") {
+      // Use the AI's commander as their persona — matches the feel of offline
+      // play where opponents are recognizable rather than anonymous "AI"
+      // labels. Strip everything after the first comma so
+      // "Otrimi, the Ever-Playful" → "Otrimi". Falls back to the difficulty
+      // label if the seat has no resolved commander yet (transient pregame
+      // state before `applySeatMutation` lands the deck).
+      const deck = this.aiDecks.get(playerId);
+      const commander = deck?.commander?.[0];
+      if (commander) {
+        const shortName = commander.split(",")[0].trim();
+        return `${shortName} (AI · ${kind.data.difficulty})`;
+      }
       return `AI (${kind.data.difficulty})`;
     }
-    return this.guestNames.get(playerId) ?? "";
+    // Human guest. Prefer the displayName the guest sent over the wire; fall
+    // back to their commander short name (mirroring the AI seat). The guest's
+    // displayName is optional and absent for users who never set one in the
+    // multiplayer store — without this fallback, the host's UI labels the
+    // seat "Opp N" while every other client (which receives the same name
+    // map) sees nothing missing for their own perspective.
+    const stored = this.guestNames.get(playerId);
+    if (stored) return stored;
+    const guestCommander = this.guestDecks.get(playerId)?.commander?.[0];
+    if (guestCommander) return guestCommander.split(",")[0].trim();
+    return "";
   }
 
   /**
@@ -606,7 +641,11 @@ export class P2PHostAdapter implements EngineAdapter {
         this.aiDecks.delete(seatIndex);
       }
       for (const [seatIndex, _difficulty, deck] of result.delta.newAi) {
-        this.aiDecks.set(seatIndex, deck as DeckListPayload["player"]);
+        // Rust SeatDelta now carries name-only PlayerDeckList — match the
+        // shape with a type guard, no cast.
+        if (isDeckListPlayerShape(deck)) {
+          this.aiDecks.set(seatIndex, deck);
+        }
       }
 
       if (result.delta.renumbering) {
@@ -783,7 +822,20 @@ export class P2PHostAdapter implements EngineAdapter {
       return;
     }
 
-    const guestDeck = (deckData as DeckListPayload).player;
+    // `deckData` is typed `unknown` at the wire boundary (see
+    // network/protocol.ts). The guest sends a `DeckListPayload`-shaped object
+    // and we only need its `.player` slot here. If a malformed wire payload
+    // arrives, fall through to an empty deck — the engine's
+    // `deck_pools.is_empty()` invariant will reject it loudly at game start.
+    const guestDeckRaw =
+      deckData !== null && typeof deckData === "object" && "player" in deckData
+        ? (deckData as { player: unknown }).player
+        : undefined;
+    const guestDeck: DeckListPayload["player"] = isDeckListPlayerShape(
+      guestDeckRaw,
+    )
+      ? guestDeckRaw
+      : { main_deck: [], sideboard: [], commander: [] };
 
     const token = crypto.randomUUID();
     this.playerTokens.set(pid, token);
@@ -1139,6 +1191,10 @@ export class P2PHostAdapter implements EngineAdapter {
           // guard meaningful for P2P.
           const result = await this.wasm.submitAction(msg.action, pid);
           await this.broadcastStateUpdate(result.events);
+          // Wake the AI loop. After a guest's action lands, priority may have
+          // shifted to an AI seat — without this, the AI never gets a turn
+          // and the game stalls (same pattern as concedePlayer/host submit).
+          await this.runAiLoop();
           // Emit local stateChanged so host UI updates for opponent actions.
           const state = await this.wasm.getState();
           const legalResult = await this.wasm.getLegalActions();

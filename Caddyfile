@@ -1,0 +1,48 @@
+# phase.rs — local HTTPS reverse proxy
+#
+# Fronts the Vite dev server (pnpm dev → :5173) on :443 with a stable
+# hostname and a locally-trusted cert (see scripts/setup-ssl.sh), so
+# WebRTC DTLS (PeerJS P2P hosting) and crypto.randomUUID work for LAN
+# guest devices. Both refuse to operate on insecure origins other than
+# localhost, which is why a bare http://192.168.x.y:5173 cannot host a
+# P2P game.
+#
+# Launch via Tilt's `caddy` resource — see Tiltfile + scripts/run-caddy.sh.
+# :443 binding works without sudo because run-caddy.sh sets the bind
+# address to 0.0.0.0 (macOS quirk; non-root binding to privileged ports
+# is allowed when listening on all interfaces).
+#
+# One-time setup:
+#   ./scripts/setup-ssl.sh                  # generate certs + trust root CA
+#   # then add the /etc/hosts entry the script prints.
+{
+	admin off
+	http_port 8080
+	https_port 443
+	# We don't want Caddy attempting to auto-issue real ACME certs for
+	# *.local.phase-rs.dev; we provide our own from scripts/setup-ssl.sh.
+	auto_https disable_certs
+}
+
+# Wildcard match covers any future split (app + ws + server subdomains)
+# without touching the cert. Apex `local.phase-rs.dev` is covered by an
+# additional explicit block below since Caddy wildcard matchers don't
+# match the apex on their own.
+*.local.phase-rs.dev, local.phase-rs.dev {
+	tls certs/local.phase-rs.dev/server.crt certs/local.phase-rs.dev/server.key
+	bind {$CADDY_BIND_ADDRESS:0.0.0.0}
+
+	# Vite dev server (pnpm dev). Caddy handles WebSocket upgrade
+	# automatically, so HMR over wss://local.phase-rs.dev/ works through
+	# the proxy with no extra plumbing.
+	@app host local.phase-rs.dev app.local.phase-rs.dev
+	handle @app {
+		reverse_proxy localhost:5173
+	}
+
+	# Default — anything not matched above falls through to the dev server
+	# so a typo in the subdomain still lands on something useful.
+	handle {
+		reverse_proxy localhost:5173
+	}
+}

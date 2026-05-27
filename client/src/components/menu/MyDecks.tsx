@@ -888,7 +888,13 @@ export function MyDecks({
         syntheticResults[name] = {
           standard: { compatible: candidate.knownFormat === "Standard", reasons: [] },
           commander: { compatible: candidate.knownFormat === "Commander", reasons: [] },
-          bo3_ready: candidate.deck.sideboard.length > 0,
+          // Mirror engine deck_validation: a deck that declares a commander is
+          // never BO3-ready — its sideboard slot is the builder's Maybeboard
+          // (CR 903.5e), dropped at game load. Keep this in sync with
+          // `evaluate_deck_compatibility` in deck_validation.rs.
+          bo3_ready:
+            candidate.deck.sideboard.length > 0 &&
+            (candidate.deck.commander?.length ?? 0) === 0,
           unknown_cards: [],
           selected_format_compatible: selectedFormatForCompatibility
             ? candidate.knownFormat === selectedFormatForCompatibility

@@ -1143,7 +1143,14 @@ pub(super) fn push_activated_ability_to_stack(
             resolved,
             crate::types::mana::ManaCost::NoCost,
         );
-        pending_act.activation_cost = remaining_cost.cloned();
+        // CR 602.2b: The remainder of the process for activating an ability is
+        // identical to the process for casting a spell listed in rules 601.2b–i.
+        // Note: The engine currently pays non-mana costs (Tap, Sacrifice, etc.)
+        // before target selection, which is a shortcut that deviates from the
+        // strict CR 601.2 order (targets at 601.2c, costs at 601.2h). To prevent
+        // double-payment when target selection resumes, we clear the activation
+        // cost here — it was already consumed above (issue #897 class).
+        pending_act.activation_cost = None;
         pending_act.activation_ability_index = Some(ability_index);
         return Ok(WaitingFor::TargetSelection {
             player,
