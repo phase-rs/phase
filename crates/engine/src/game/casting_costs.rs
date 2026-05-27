@@ -3975,15 +3975,21 @@ pub(super) fn max_x_value_excluding(
     // that is both a mana source and tap-keyword-eligible can serve only ONE
     // channel, not both. Partition per object: each contributes
     // max(mana yield, tap-keyword yield), never the sum, or the X cap inflates
-    // above what the caster can actually pay. CR 107.1b: `max_mana_yield`
-    // reports a producer's full output (Sol Ring, bounce lands) so multi-mana
-    // sources are not understated.
+    // above what the caster can actually pay.
+    //
+    // CR 117.1d + CR 601.2g: Use `feasible_mana_capacity` (not the auto-tap-
+    // only `max_mana_yield`) so sacrifice-/discard-/life-cost mana abilities
+    // the controller could activate manually are counted. Without this, KCI
+    // (and similar non-tap mana sources) understate the X cap for X-spells
+    // — see #562. The per-permanent sum can over-count chain-sacrifice
+    // configurations (tracked in #1235); colored-shard non-tap feasibility
+    // is deferred separately (tracked in #1234).
     let capacity: u32 = state
         .battlefield
         .iter()
         .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
-            let mana = mana_sources::max_mana_yield(state, id, player);
+            let mana = mana_sources::feasible_mana_capacity(state, id, player);
             let tap = pred
                 .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
                 .map_or(0, |_| 1);
@@ -7978,6 +7984,132 @@ mod tests {
         // 3 lands + 2 Treasures = 5 sources, minus 1 for the {R} = max X of 4.
         let max = max_x_value(&state, player, &cost, None);
         assert_eq!(max, 4, "max X should count Treasure tokens as mana sources");
+    }
+
+    /// Issue #562: Krark-Clan Ironworks (`Sacrifice an artifact: Add {C}{C}`)
+    /// is a non-tap mana ability — the cost is bare `Sacrifice`, not the
+    /// `Composite { Tap, Sacrifice }` shape Treasure tokens use. Before this
+    /// fix, `max_x_value` called `max_mana_yield`, which gates on
+    /// `has_tap_component` and therefore reported 0 for KCI. The X chooser
+    /// understated affordable X for X-spells that KCI could manually fund.
+    ///
+    /// With the routing change to `feasible_mana_capacity`, KCI's 2-mana yield
+    /// per activation is counted up to the sacrifice supply.
+    ///
+    // CR 107.1b + CR 117.1d + CR 605.3a: Mana abilities (including non-tap-
+    // cost ones) may be activated during cost payment, so the affordable X
+    // cap must include their feasible yield.
+    #[test]
+    fn max_x_value_counts_kci_non_tap_sacrifice_mana_ability() {
+        use crate::types::ability::{ManaProduction, TargetFilter, TypeFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        // 1 Mountain — the only `{T}`-cost producer, supplies the fixed {R}.
+        let mountain = create_object(
+            &mut state,
+            CardId(900),
+            player,
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mountain).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Mountain".to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Red],
+                            contribution: crate::types::ability::ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // KCI — non-tap, bare `Sacrifice an artifact: Add {C}{C}`.
+        let kci = create_object(
+            &mut state,
+            CardId(901),
+            player,
+            "Krark-Clan Ironworks".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kci).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    count: 1,
+                }),
+            );
+        }
+
+        // Three sacrificable artifact creatures so KCI's sacrifice supply
+        // is non-empty.
+        for i in 0..3 {
+            let sac = create_object(
+                &mut state,
+                CardId(902 + i),
+                player,
+                format!("Sacrificial Artifact {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&sac).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 0,
+        };
+
+        // Without the fix, `max_mana_yield` would return 0 for KCI (no `{T}`
+        // cost component) and the cap would be 0 (1 Mountain − 1 fixed {R}
+        // shard). With the fix, KCI's `feasible_mana_capacity` returns 2.
+        //
+        // Arithmetic (deterministic):
+        //   - Mountain: feasible_mana_capacity = 1 ({R} via `{T}`)
+        //   - KCI:      feasible_mana_capacity = 2 ({C}{C} via one Sacrifice)
+        //   - 3 fodder: feasible_mana_capacity = 0 each (no mana abilities)
+        //   - pool = 0, fixed_portion = 1 (the {R})
+        //   - capacity = 1 + 2 = 3, remaining = 3 − 1 = 2
+        //   - x_count = 1, so max X = 2 / 1 = 2.
+        //
+        // The tight `assert_eq!(max, 2)` is a falsifiable expectation in
+        // both directions: an *under-count* regression (the original #562
+        // bug) would report max == 0, and an *over-count* regression
+        // (e.g. counting fodder or chain-sacrificing the same mana source
+        // twice) would report max >= 3.
+        let max = max_x_value(&state, player, &cost, None);
+        assert_eq!(
+            max, 2,
+            "Issue #562: KCI's non-tap mana ability must be counted by max_x_value. \
+             Expected exactly 2 (1 Mountain + 2 KCI − 1 fixed {{R}}), got {max}",
+        );
     }
 
     /// CR 702.51a + CR 601.2b: `max_x_value` must count Convoke-eligible
