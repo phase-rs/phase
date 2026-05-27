@@ -10,12 +10,74 @@ If you are the LLM executing this: read top to bottom and follow every step. Do 
 
 ## 0. Quality Floor — self-confirm before touching code
 
-Before Step 1, confirm the following. **Model** and **Thinking level** are advisory — proceed even if your runtime is below them, but report your actual configuration accurately so the maintainer's automation can triage the resulting PR. **Tool support** and **Autonomy** are hard requirements: without them, abort.
+Before Step 1, confirm the following. **Tool support** and **Autonomy** are hard requirements: without them, abort. **Model** is load-bearing — see §0.1 for tier routing; report your actual model accurately on a `Model:` line in the PR body. **Thinking level** is advisory.
 
-- **Model (advisory):** Best results come from Claude Opus 4.7+ or Codex 5.4+. Weaker models produce less idiomatic code and may silently skip verification steps; the maintainer prefers a flagged PR from a weaker model to no PR at all. Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-7`, `Model: claude-sonnet-4-6`, `Model: codex-5.4`). Do not editorialize this line — upstream automation parses it.
+- **Model (load-bearing):** §0.1 routes you to either the full pipeline (Frontier tier) or the same pipeline with mandatory pre-PR gates (Standard tier). Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-7`, `Model: claude-sonnet-4-6`, `Model: codex-5.4`). Do not editorialize this line — `/pr-contribution-handler` parses it (and the matching `Tier:` line in §0.1.4) to prioritize PRs. Claiming Frontier when you are Standard wastes maintainer time on a PR that will fail the §0.1.2 gates anyway.
 - **Thinking (advisory):** Medium or higher. On Claude Code this is the default for Opus; on Codex CLI pass `--reasoning medium` or higher. Report on a `Thinking:` line in the PR body.
 - **Tool support (required):** You can invoke skills, use `WebFetch`, run shell commands, and use an independent reviewer or fresh context when requested. Without these, you cannot run `$engine-implementer` and must abort.
 - **Autonomy (required):** You will not pause for human input during the run. Every decision fork defaults to the architecturally idiomatic path as defined by `CLAUDE.md`, `AGENTS.md`, and the skills under `.claude/skills/`.
+
+---
+
+## 0.1. Capability tier and Standard-tier gates
+
+Skill references in this section use the `$skill` / `/skill` convention defined in §0.25 — the forward reference is intentional so tier routing precedes notation.
+
+### 0.1.1. Tier table
+
+| Tier     | Models | Procedure |
+|----------|--------|-----------|
+| Frontier | `claude-opus-4-7`+, `gpt-5-5`+, `codex-5-5`+ | Full pipeline per §4 onward. Trusted to self-comply with `CLAUDE.md`. |
+| Standard | `claude-sonnet-4-6`, `claude-haiku-4-5`, `gpt-5-3` through `gpt-5-4`, `codex-5-3` through `codex-5-4` | Full pipeline allowed, but both gates in §0.1.2 must pass before opening the PR. |
+
+If you cannot determine your model, assume Standard. Below Standard (no tools, no autonomy), abort per §0.
+
+### 0.1.2. Standard-tier pre-PR gates
+
+Both gates run on your diff before you push and open a PR. Failure on either → stop, do not open the PR, trigger §0.1.3 honesty clause.
+
+**Gate A — Combinator-purity script.** Run from the repo root:
+
+```bash
+./scripts/check-parser-combinators.sh
+```
+
+Paste the full output (including the success line or the violation list) into the PR body under a `## Gate A` heading. Non-zero exit = stop. The script catches the patterns Standard-tier models most frequently violate despite the `CLAUDE.md` nom mandate: `.contains("…")`, `.split_once`, `.starts_with("…")`, match-arm string literals, and chained `if let Ok = tag(...)` blocks. Do not skip this step. Do not edit the pasted output.
+
+**Gate B — Pattern anchoring.** Before writing your change, identify ≥2 existing analogous implementations in the same module(s) you are about to edit. Cite them in the PR body under `## Anchored on` with `file:line` references and a one-line description of what pattern you are following:
+
+```
+## Anchored on
+- crates/engine/src/parser/oracle_static.rs:412 — existing `alt()` extension for keyword granting
+- crates/engine/src/parser/oracle_static.rs:687 — existing continuous-modification wiring
+```
+
+Your new code must visibly mirror these analogs — same combinator family, same naming convention, same module placement. `/pr-contribution-handler` audits these citations (paths must exist, cited code must use the same combinator family as the new code, cited module class must match the modified module class). Fabricated, broken, or unrelated citations are a hard-reject signal — the maintainer will close the PR without further review.
+
+### 0.1.3. Honesty clause
+
+When a gate fails or you cannot find compliant analogs to anchor on, do NOT open a partial/WIP PR and do NOT edit Gate A output to mask violations. Stop and report to the user with:
+
+- The gate that failed and its raw output.
+- The missing primitive or pattern (e.g. "no existing parser arm in `oracle_trigger.rs` handles this triggering-condition shape").
+- File paths inspected + relevant CR section.
+- Recommendation to re-run the task on a Frontier-tier model.
+
+### 0.1.4. PR-body tier declaration
+
+Every PR body must include a single canonical line on its own line:
+
+```
+Tier: Frontier
+```
+
+or
+
+```
+Tier: Standard
+```
+
+`/pr-contribution-handler` parses this to sort processing order (Frontier PRs first — higher base quality, faster to merge). Missing or malformed → treated as Standard. Do not editorialize.
 
 ---
 
@@ -94,6 +156,8 @@ Then invoke the `$engine-implementer` skill with this prompt, substituting `<NAM
 > Implement full engine support for the card "<NAME>". Follow `CLAUDE.md` and `AGENTS.md` design principles without exception: build for the class not the card, nom combinators on first pass, CR annotations verified against `docs/MagicCompRules.txt` (and for each cited rule, also read its adjacent rules in the same section — cite the *authorizing* rule for the effect, not just the *layering* rule), idiomatic Rust, engine owns all logic, frontend is display-only. Reuse existing building blocks before writing new ones. Do not ask for clarification — on any ambiguity, take the architecturally idiomatic path. If scope expands beyond a single effect (e.g. the card requires new infrastructure, a new keyword, a new replacement pipeline), proceed anyway and explicitly note the scope expansion in your final report under a heading "Scope Expansion".
 
 `$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → verify → review the implementation with `$review-impl` until clean → commit. Validate that next.
+
+**Standard tier:** the §0.1.2 gates apply to whatever diff `$engine-implementer` produces. Run both Gate A and Gate B before §5; if either fails, do NOT continue to §7 — return to fix the violations, or stop per §0.1.3 if they cannot be fixed without exceeding tier.
 
 ---
 
@@ -232,7 +296,8 @@ Paste one of these into your LLM. That is the entire interaction.
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow the Developer track end-to-end to implement the card {CARD_NAME, or
 say "pick one" and let the LLM choose}. Use medium thinking. Do not stop for
-my input. Open a PR when done.
+my input. Apply the §0.1 tier routing — if you are Standard tier, BOTH §0.1.2
+gates must pass before opening the PR. Open a PR when done.
 ```
 
 ### B.2 — Non-developer track, URL-only
@@ -241,7 +306,9 @@ my input. Open a PR when done.
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow the Non-developer track end-to-end to implement the card {CARD_NAME,
 or say "pick one"}. Skip local verification — GitHub Actions will run CI on the
-PR. Use medium thinking. Do not stop for my input. Open a PR when done.
+PR. Use medium thinking. Do not stop for my input. Apply the §0.1 tier routing
+— if you are Standard tier, BOTH §0.1.2 gates must pass before opening the PR.
+Open a PR when done.
 ```
 
 ### B.3 — Non-developer track, fully self-contained (for UIs without web fetch)
@@ -281,6 +348,17 @@ Steps:
    --label flags — the upstream auto-labeler applies ai-contribution and
    needs-maintainer automatically based on the branch name and body content.
 8. Print the PR URL and exit.
+
+Tier gates: identify your model. If you are Standard tier (claude-sonnet-4-6,
+claude-haiku-4-5, gpt-5-3 through gpt-5-4, codex-5-3 through codex-5-4), BEFORE
+pushing the PR you MUST: (a) run ./scripts/check-parser-combinators.sh and
+paste the full output under a `## Gate A` heading in the PR body, (b) include
+a `## Anchored on` section with at least 2 file:line citations to existing
+analogous implementations in the same module(s) you edited, (c) include a
+`Tier: Standard` line. If either gate fails, do NOT open the PR — stop and
+report the failed gate output to the user with a recommendation to re-run on
+a Frontier-tier model. Frontier tier (claude-opus-4-7+, gpt-5-5+, codex-5-5+)
+includes a `Tier: Frontier` line and the same `## Anchored on` section.
 
 Card: {CARD_NAME or "pick one"}
 ```
