@@ -4133,20 +4133,46 @@ fn try_parse_put_on_top_or_bottom(
 ) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
-    // Must contain the signature suffix
-    if !scan_contains_phrase(tp.lower, "on the top or bottom of their library")
-        && !scan_contains_phrase(
-            tp.lower,
-            "on their choice of the top or bottom of their library",
-        )
+    // Pattern 0: "its owner puts it ..." (anaphoric continuation from prior target clause).
+    if super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("its owner puts it on ").parse(i)?;
+        let (i, _) = alt((
+            tag("the top or bottom of their library"),
+            tag("their choice of the top or bottom of their library"),
+        ))
+        .parse(i)?;
+        value((), eof).parse(i)
+    })
+    .is_some()
     {
-        return None;
+        return Some(parsed_clause(Effect::PutOnTopOrBottom {
+            target: TargetFilter::ParentTarget,
+        }));
     }
 
-    // Pattern 1: "target creature's owner puts it ..."
-    // Strip "'s owner puts it on ..." suffix, parse the target prefix.
-    if let Some(idx) = tp.find("'s owner puts it") {
-        let target_text = &tp.original[..idx];
+    // Pattern 1: "target [filter]'s owner puts it ..."
+    if super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = take_until("'s owner puts it on ").parse(i)?;
+        let (i, _) = tag("'s owner puts it on ").parse(i)?;
+        let (i, _) = alt((
+            tag("the top or bottom of their library"),
+            tag("their choice of the top or bottom of their library"),
+        ))
+        .parse(i)?;
+        value((), eof).parse(i)
+    })
+    .is_some()
+    {
+        let target_text = tp
+            // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+            .strip_suffix("'s owner puts it on the top or bottom of their library")
+            .or_else(|| {
+                // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+                tp.strip_suffix(
+                    "'s owner puts it on their choice of the top or bottom of their library",
+                )
+            })
+            .map(|pair| pair.original)?;
         let (filter, remainder) = parse_target(target_text);
         if !remainder.trim().is_empty() {
             ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
@@ -4158,26 +4184,43 @@ fn try_parse_put_on_top_or_bottom(
         return Some(parsed_clause(Effect::PutOnTopOrBottom { target: filter }));
     }
 
-    // Pattern 2: "the owner of target nonland permanent puts it ..."
-    if let Some((_, rest_orig)) =
-        super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
-            value((), tag("the owner of ")).parse(i)
-        })
+    // Pattern 2: "the owner of target [filter] puts it ..."
+    if super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("the owner of ").parse(i)?;
+        let (i, _) = take_until(" puts it on ").parse(i)?;
+        let (i, _) = tag(" puts it on ").parse(i)?;
+        let (i, _) = alt((
+            tag("the top or bottom of their library"),
+            tag("their choice of the top or bottom of their library"),
+        ))
+        .parse(i)?;
+        value((), eof).parse(i)
+    })
+    .is_some()
     {
-        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-        let rest = TextPair::new(rest_orig, rest_lower);
-        if let Some(idx) = rest.find(" puts it") {
-            let target_text = &rest.original[..idx];
-            let (filter, remainder) = parse_target(target_text);
-            if !remainder.trim().is_empty() {
-                ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
-                    text: remainder.trim().into(),
-                    parser: "owner-puts-it".into(),
-                    line_index: 0,
-                });
-            }
-            return Some(parsed_clause(Effect::PutOnTopOrBottom { target: filter }));
+        let target_text = tp
+            // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+            .strip_prefix("the owner of ")
+            .and_then(|pair| {
+                // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+                pair.strip_suffix(" puts it on the top or bottom of their library")
+                    .or_else(|| {
+                        // allow-noncombinator: TextPair structural extraction after nom-dispatch confirmation.
+                        pair.strip_suffix(
+                            " puts it on their choice of the top or bottom of their library",
+                        )
+                    })
+            })
+            .map(|pair| pair.original)?;
+        let (filter, remainder) = parse_target(target_text);
+        if !remainder.trim().is_empty() {
+            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                text: remainder.trim().into(),
+                parser: "owner-puts-it".into(),
+                line_index: 0,
+            });
         }
+        return Some(parsed_clause(Effect::PutOnTopOrBottom { target: filter }));
     }
 
     None
@@ -6664,10 +6707,16 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     let mut sub_clause = parse_imperative_effect(sub_text, &mut continuation_ctx);
 
     // CR 608.2c: Verb carry-forward for bare "target X" clauses in compound actions.
-    // When the sub-text starts with "target" and parsed as Unimplemented, prepend
-    // the verb from the primary effect and re-parse. Handles "exile target creature
-    // and target artifact" where "target artifact" lacks a verb.
-    if matches!(sub_clause.effect, Effect::Unimplemented { .. })
+    // When the sub-text starts with "target" and parsed as Unimplemented or
+    // the structural TargetOnly wrapper, prepend the verb from the primary
+    // effect and re-parse. Handles "exile target creature and target artifact"
+    // where "target artifact" lacks a verb.
+    // Only this branch accepts TargetOnly: bare "target ..." is the only
+    // verbless head that lowers structurally to TargetOnly; the other
+    // carry-forward prefixes below ("up to", "all/each", "~", possessives)
+    // fall back as Unimplemented when the verb is omitted.
+    if (matches!(sub_clause.effect, Effect::Unimplemented { .. })
+        || matches!(sub_clause.effect, Effect::TargetOnly { .. }))
         && tag::<_, _, OracleError<'_>>("target ")
             .parse(sub_lower.as_str())
             .is_ok()
@@ -17596,6 +17645,7 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
             origin: Some(Zone::Battlefield),
             ..
         } => Some("return"),
+        Effect::Bounce { .. } | Effect::BounceAll { .. } => Some("return"),
         Effect::Sacrifice { .. } => Some("sacrifice"),
         Effect::Tap { .. } | Effect::TapAll { .. } => Some("tap"),
         Effect::Untap { .. } | Effect::UntapAll { .. } => Some("untap"),
@@ -18004,6 +18054,41 @@ mod tests {
                 );
             }
             other => panic!("expected Destroy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_verb_carry_forward_return_target_only_tail_aether_tradewinds() {
+        let clause = parse_effect_clause(
+            "Return target permanent you control and target permanent you don't control to their owners' hands.",
+            &mut ParseContext::default(),
+        );
+
+        match &clause.effect {
+            Effect::Bounce { target, .. } => {
+                let tf = typed_leg(target).expect("primary return target should be typed");
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "primary return target should remain 'you control'",
+                );
+            }
+            other => panic!("primary clause must be Bounce, got {:?}", other),
+        }
+
+        let sub = clause
+            .sub_ability
+            .expect("must have sub_ability for compound return");
+        match sub.effect.as_ref() {
+            Effect::Bounce { target, .. } => {
+                let tf = typed_leg(target).expect("sub return target should be typed");
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::Opponent),
+                    "sub return target should resolve to 'you don't control'",
+                );
+            }
+            other => panic!("sub-clause must be Bounce, got {:?}", other),
         }
     }
 
@@ -27246,6 +27331,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_aether_gust_effect_chain() {
+        let def = parse_effect_chain(
+            "Choose target spell or permanent that's red or green. Its owner puts it on their choice of the top or bottom of their library.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::TargetOnly { .. }),
+            "Expected TargetOnly first clause, got {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Expected PutOnTopOrBottom continuation");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::PutOnTopOrBottom {
+                    target: TargetFilter::ParentTarget,
+                }
+            ),
+            "Expected ParentTarget PutOnTopOrBottom continuation, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
     fn parse_gift_was_promised_condition() {
         // "If the gift was promised, Blooming Blast also deals 3 damage to that creature's controller."
         let def = parse_effect_chain(
@@ -29429,6 +29541,38 @@ mod tests {
             }
             _ => panic!("expected GenericEffect"),
         }
+    }
+
+    #[test]
+    fn effect_your_opponents_cant_gain_life() {
+        let def = parse_effect_chain(
+            "Your opponents can't gain life this turn",
+            AbilityKind::Activated,
+        );
+        match *def.effect {
+            Effect::GenericEffect {
+                ref static_abilities,
+                ..
+            } => {
+                assert!(
+                    static_abilities
+                        .iter()
+                        .any(|s| s.mode == StaticMode::CantGainLife),
+                    "should contain CantGainLife mode"
+                );
+                assert!(static_abilities.iter().any(|s| {
+                    matches!(
+                        s.affected,
+                        Some(TargetFilter::Typed(TypedFilter {
+                            controller: Some(ControllerRef::Opponent),
+                            ..
+                        }))
+                    )
+                }));
+            }
+            _ => panic!("expected GenericEffect"),
+        }
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
     }
 
     /// End-to-end parser integration test for Teferi's Protection.

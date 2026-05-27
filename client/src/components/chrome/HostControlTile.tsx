@@ -59,15 +59,15 @@ function SeatRow({
   seatCount,
   canEdit,
   deckChoices,
-  defaultAiDeck,
+  pickRandomAiDeck,
   mutate,
 }: {
   slot: PlayerSlot;
   minPlayers: number;
   seatCount: number;
   canEdit: boolean;
-  deckChoices: Array<{ label: string; choice: DeckChoice }>;
-  defaultAiDeck: DeckChoice | null;
+  deckChoices: Array<{ id: string; label: string; choice: DeckChoice }>;
+  pickRandomAiDeck: () => DeckChoice | null;
   mutate: (mutation: SeatMutation) => void;
 }) {
   const { t } = useTranslation();
@@ -91,19 +91,21 @@ function SeatRow({
             <>
               <button
                 type="button"
-                disabled={!defaultAiDeck}
-                onClick={() =>
-                  defaultAiDeck && mutate({
+                disabled={deckChoices.length === 0}
+                onClick={() => {
+                  const deck = pickRandomAiDeck();
+                  if (!deck) return;
+                  mutate({
                     type: "SetKind",
                     data: {
                       seatIndex: slot.playerId,
                       kind: {
                         type: "Ai",
-                        data: { difficulty: "Medium", deck: defaultAiDeck },
+                        data: { difficulty: "Medium", deck },
                       },
                     },
-                  })
-                }
+                  });
+                }}
                 className="rounded border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {t("hostControl.addAi")}
@@ -166,9 +168,9 @@ function SeatRow({
                 }
                 className="rounded border border-white/10 bg-slate-950 px-1 py-0.5 text-xs text-slate-200"
               >
-                {deckChoices.map(({ label, choice }) => (
+                {deckChoices.map(({ id, label, choice }) => (
                   <option
-                    key={deckChoiceKey(choice)}
+                    key={id}
                     value={deckChoiceKey(choice)}
                   >
                     {label}
@@ -215,19 +217,20 @@ function SeatRow({
               </button>
               <button
                 type="button"
-                disabled={!defaultAiDeck}
+                disabled={deckChoices.length === 0}
                 onClick={() => {
                   if (!window.confirm(t("hostControl.replaceConfirm", { name: kickLabel }))) {
                     return;
                   }
-                  if (!defaultAiDeck) return;
+                  const deck = pickRandomAiDeck();
+                  if (!deck) return;
                   mutate({
                     type: "SetKind",
                     data: {
                       seatIndex: slot.playerId,
                       kind: {
                         type: "Ai",
-                        data: { difficulty: "Medium", deck: defaultAiDeck },
+                        data: { difficulty: "Medium", deck },
                       },
                     },
                   });
@@ -262,18 +265,38 @@ export function HostControlTile() {
   const isConnecting = hostingStatus === "connecting";
   const minPlayers = hostSession?.formatConfig.min_players ?? 2;
   const deckChoices = aiDeckCatalog.candidates.map((candidate) => ({
+    id: candidate.id,
     label: candidate.name,
     choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
   }));
-  const defaultAiDeck = deckChoices[0]?.choice ?? null;
+  // Pick a random format-legal deck for each fresh AI-seat assignment.
+  // Previously this defaulted to `deckChoices[0]`, which meant every AI seat
+  // got the same deck — uninteresting and exposed catalog ordering. The
+  // engine's `DeckChoice::Random` can't be used here because it pulls from
+  // `STARTER_DECKS` (Standard-format hardcoded list) and would produce an
+  // illegal deck for any non-Standard format. `aiDeckCatalog.candidates` is
+  // already filtered by `selectedFormat`, so picking from it gives a random
+  // format-legal deck.
+  const pickRandomAiDeck = (): DeckChoice | null => {
+    if (deckChoices.length === 0) return null;
+    const idx = Math.floor(Math.random() * deckChoices.length);
+    return deckChoices[idx].choice;
+  };
+  // Used only for the dropdown's fallback/disabled state — buttons that
+  // assign a deck call `pickRandomAiDeck()` per-seat instead.
+  const haveAnyDeck = deckChoices.length > 0;
   const waitingSeats = playerSlots.filter((slot) => slot.kind.type === "WaitingHuman");
   const occupiedSeats = playerSlots.length - waitingSeats.length;
   const canEditSeats = hostingStatus === "waiting";
 
   useEffect(() => {
-    if (!canEditSeats || !defaultAiDeck) return;
+    if (!canEditSeats || !haveAnyDeck) return;
     for (const slot of playerSlots) {
       if (slot.kind.type !== "Ai" || slot.kind.data.deck.type === "DeckList") continue;
+      // Each "promote non-DeckList AI seat to a real deck" decision gets a
+      // fresh random pick from the format-legal catalog.
+      const deck = pickRandomAiDeck();
+      if (!deck) continue;
       seatMutate({
         type: "SetKind",
         data: {
@@ -282,13 +305,17 @@ export function HostControlTile() {
             type: "Ai",
             data: {
               difficulty: slot.kind.data.difficulty,
-              deck: defaultAiDeck,
+              deck,
             },
           },
         },
       });
     }
-  }, [canEditSeats, defaultAiDeck, playerSlots, seatMutate]);
+    // `pickRandomAiDeck` is intentionally omitted from deps — it closes over
+    // `deckChoices` which is already a dep (via `haveAnyDeck`), and including
+    // the function would cause an effect storm on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canEditSeats, haveAnyDeck, playerSlots, seatMutate]);
 
   if (hostingStatus === "idle") {
     return null;
@@ -302,13 +329,15 @@ export function HostControlTile() {
   };
 
   const fillWithAiAndStart = () => {
-    if (!defaultAiDeck) return;
+    if (!haveAnyDeck) return;
     for (const slot of waitingSeats) {
+      const deck = pickRandomAiDeck();
+      if (!deck) return;
       seatMutate({
         type: "SetKind",
         data: {
           seatIndex: slot.playerId,
-          kind: { type: "Ai", data: { difficulty: "Medium", deck: defaultAiDeck } },
+          kind: { type: "Ai", data: { difficulty: "Medium", deck } },
         },
       });
     }
@@ -379,7 +408,7 @@ export function HostControlTile() {
                 seatCount={playerSlots.length}
                 canEdit={canEditSeats}
                 deckChoices={deckChoices}
-                defaultAiDeck={defaultAiDeck}
+                pickRandomAiDeck={pickRandomAiDeck}
                 mutate={seatMutate}
               />
             ))}
@@ -413,7 +442,7 @@ export function HostControlTile() {
                   <button
                     type="button"
                     onClick={fillWithAiAndStart}
-                    disabled={!defaultAiDeck}
+                    disabled={!haveAnyDeck}
                     className="rounded border border-cyan-500/20 px-2 py-1 text-xs font-medium text-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {t("hostControl.fillWithAi")}

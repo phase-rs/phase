@@ -201,6 +201,18 @@ export default defineConfig(({ mode }) => ({
   worker: {
     plugins: () => [wasmEnvShim()],
   },
+  // Vite's host-check rejects requests with a Host header outside its
+  // known list — required to allow the Caddy proxy at local.phase-rs.dev
+  // (see Caddyfile). HMR's injected websocket client connects back to the
+  // page origin, so it needs `clientPort: 443` and `protocol: wss` to
+  // hit Caddy rather than the bare :5173 dev server. Both are gated on a
+  // hostname presence check so plain `pnpm dev` on localhost still works.
+  server: {
+    allowedHosts: ["local.phase-rs.dev", ".local.phase-rs.dev"],
+    hmr: process.env.CADDY_PROXY === "1"
+      ? { protocol: "wss", host: "local.phase-rs.dev", clientPort: 443 }
+      : undefined,
+  },
   build: {
     target: "esnext",
   },
