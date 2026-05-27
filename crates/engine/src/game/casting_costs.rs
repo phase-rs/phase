@@ -2546,8 +2546,8 @@ pub(super) fn pay_and_push_adventure(
         return enter_payment_step(state, player, convoke_mode, events);
     }
 
-    // CR 107.4f + CR 601.2f: Pause for interactive Phyrexian choice when the cost has
-    // at least one shard with both mana and 2-life viable. The resume handler calls
+    // CR 107.4f + CR 601.2f: Pause before any Phyrexian shard would deduct life,
+    // whether life is optional or the only legal route. The resume handler calls
     // `finalize_mana_payment_with_phyrexian_choices` which finishes the cast.
     if let Some(waiting) = maybe_pause_for_phyrexian_choice(
         state,
@@ -4348,8 +4348,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
 /// Auto-taps mana sources first (idempotent: already-tapped lands are skipped) so the
 /// shard-options computation reflects the pool the caster will actually spend from.
 /// Returns `Some(WaitingFor::PhyrexianPayment {...})` when at least one Phyrexian shard
-/// has `ShardOptions::ManaOrLife`; otherwise returns `None` so the caller proceeds with
-/// the existing auto-decision path.
+/// can deduct life; otherwise returns `None` so the caller proceeds with the existing
+/// auto-decision path.
 pub(super) fn maybe_pause_for_phyrexian_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -4435,25 +4435,45 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     let permissions =
         super::static_abilities::build_cost_permission_context(state, player, any_color);
 
-    let shards = {
+    let (shards, payable) = {
         let player_data = state.players.iter().find(|p| p.id == player)?;
-        mana_payment::compute_phyrexian_shards(
+        let shards = mana_payment::compute_phyrexian_shards(
             &player_data.mana_pool,
             cost,
             effective_payment_context,
             permissions,
-        )
+        );
+        // CR 601.2h: Only pause when the cost is actually payable in aggregate.
+        // Phyrexian shards may surface as `LifeOnly` even when the non-Phyrexian
+        // portion (e.g., a {1} generic shard) is unpayable; in that case the
+        // downstream finalizer must reject with "Cannot pay mana cost" rather
+        // than pausing on an unpayable cast.
+        let payable = mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            effective_payment_context,
+            permissions,
+        );
+        (shards, payable)
     };
+    if !payable {
+        return None;
+    }
 
-    // CR 107.4f + CR 601.2f: Pause iff the choice is meaningful — at least one shard
-    // has both options viable. Trivial-choice shards auto-resolve without pausing.
-    let has_meaningful_choice = shards.iter().any(|s| {
+    // CR 107.4f + CR 601.2h: Pause whenever any shard would deduct life — either
+    // because the player explicitly chooses (`ManaOrLife`) or because life is the
+    // only remaining payment route (`LifeOnly`). The player retains the CR 601.2h
+    // option to refuse the cast via `CancelCast` rather than have life silently
+    // deducted (issue #704). `ManaOnly` shards have no life consequence and
+    // continue to auto-resolve.
+    let has_life_consequence = shards.iter().any(|s| {
         matches!(
             s.options,
             crate::types::game_state::ShardOptions::ManaOrLife
+                | crate::types::game_state::ShardOptions::LifeOnly,
         )
     });
-    if !has_meaningful_choice {
+    if !has_life_consequence {
         return None;
     }
 

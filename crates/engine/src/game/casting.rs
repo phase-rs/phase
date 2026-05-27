@@ -9849,6 +9849,7 @@ mod tests {
     fn x_phyrexian_composite_mana_tap_activation_excludes_source_during_phyrexian_prepass() {
         use super::super::engine::apply_as_current;
         use crate::types::ability::QuantityRef;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
 
         let mut state = setup_game_at_main_phase();
         let source = create_object(
@@ -9908,13 +9909,29 @@ mod tests {
 
         apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
 
-        assert!(
-            !matches!(state.waiting_for, WaitingFor::PhyrexianPayment { .. }),
-            "source-only Phyrexian activation has no mana/life choice once the source is excluded"
-        );
-        if matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
-            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        // CR 601.2f: After X is chosen, the activation enters ManaPayment to give the
+        // player priority over mana abilities. `PassPriority` then triggers the
+        // Phyrexian pause pre-pass.
+        assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        // CR 107.4f + CR 601.2h: With the source excluded and no other blue mana, the
+        // remaining {U/P} shard surfaces as `LifeOnly`. The engine now pauses to let
+        // the caster confirm or cancel rather than silently deducting life (issue #704).
+        match state.waiting_for.clone() {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(matches!(shards[0].options, ShardOptions::LifeOnly));
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
         }
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            },
+        )
+        .unwrap();
 
         assert!(state.objects[&source].tapped);
         assert_eq!(state.players[0].life, life_before - 2);
@@ -19962,7 +19979,7 @@ mod tests {
         };
 
         let chosen: Vec<ObjectId> = exile_cards.iter().copied().take(3).collect();
-        let _waiting2 = super::casting_costs::handle_exile_for_cost(
+        let waiting2 = super::casting_costs::handle_exile_for_cost(
             &mut state,
             PlayerId(0),
             crate::types::zones::ExileCostSourceZone::Graveyard,
@@ -19974,8 +19991,34 @@ mod tests {
         )
         .expect("exile cost payment should succeed");
 
-        // After exile cost, the flow should auto-resolve the Phyrexian mana
-        // cost ({U/P}) by paying 2 life (no mana available).
+        // CR 107.4f + CR 601.2h: After the exile portion is paid, the Phyrexian
+        // {U/P} shard is `LifeOnly` (empty pool, 20 life), so the engine pauses to
+        // let the caster confirm or cancel rather than silently deducting life
+        // (issue #704). Submitting `PayLife` finalizes the cast and deducts 2 life.
+        match waiting2 {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(matches!(
+                    shards[0].options,
+                    crate::types::game_state::ShardOptions::LifeOnly
+                ));
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: life must not be deducted before the caster confirms"
+        );
+
+        let choices = vec![crate::types::game_state::ShardChoice::PayLife];
+        super::casting_costs::finalize_mana_payment_with_phyrexian_choices(
+            &mut state,
+            PlayerId(0),
+            &choices,
+            &mut events,
+        )
+        .expect("resume with PayLife must succeed");
+
         assert_eq!(
             state.players[0].life,
             life_before - 2,
@@ -21077,10 +21120,15 @@ mod tests {
         obj_id
     }
 
-    /// CR 107.4f + CR 118.3b + CR 119.4: Paying a Phyrexian shard with life
-    /// actually deducts 2 life from the caster.
+    /// CR 107.4f + CR 118.3b + CR 119.4 + CR 601.2h: Paying a Phyrexian shard with life
+    /// actually deducts 2 life from the caster. With no mana of the color, the engine
+    /// pauses at `PhyrexianPayment` with `LifeOnly` so the caster can confirm or cancel
+    /// (issue #704); submitting `PayLife` finalizes the cast and deducts 2 life.
     #[test]
     fn phyrexian_cast_with_life_deducts_life() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
         let mut state = setup_game_at_main_phase();
         let spell = create_phyrexian_instant_in_hand(
             &mut state,
@@ -21088,23 +21136,39 @@ mod tests {
             vec![ManaCostShard::PhyrexianBlue],
             0,
         );
-        // Empty mana pool → the {U/P} must auto-resolve to the 2-life fallback.
+        // Empty mana pool → the {U/P} must surface a `LifeOnly` confirm-or-cancel pause.
         let life_before = state.players[0].life;
 
-        let mut events = Vec::new();
-        let result = handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9117), &mut events);
-
-        assert!(
-            result.is_ok(),
-            "cast must succeed paying 2 life for {{U/P}}"
+        let cast = GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(0x9117),
+            targets: Vec::new(),
+        };
+        let result = apply_as_current(&mut state, cast).expect("announce cast");
+        match &result.waiting_for {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(matches!(shards[0].options, ShardOptions::LifeOnly));
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: life must not be deducted until the caster confirms"
         );
+
+        let submit = GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        };
+        let result = apply_as_current(&mut state, submit).expect("submit PayLife");
         assert_eq!(
             state.players[0].life,
             life_before - 2,
             "CR 118.3b: paying 2 life must reduce the life total by 2"
         );
         assert!(
-            events
+            result
+                .events
                 .iter()
                 .any(|e| matches!(e, GameEvent::LifeChanged { player_id, amount: -2 } if *player_id == PlayerId(0))),
             "CR 119.4: pay-life must emit a LifeChanged event with amount -2"
@@ -21213,6 +21277,9 @@ mod tests {
 
     #[test]
     fn phyrexian_spell_prepass_honors_spell_mana_restrictions() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
         let mut state = setup_game_at_main_phase();
         let spell = create_phyrexian_instant_in_hand(
             &mut state,
@@ -21228,19 +21295,37 @@ mod tests {
         );
         let life_before = state.players[0].life;
 
-        let waiting = handle_cast_spell(
-            &mut state,
-            PlayerId(0),
-            spell,
-            CardId(0x9117),
-            &mut Vec::new(),
-        )
-        .expect("restricted mana cannot pay this instant, but life can");
-
-        assert!(
-            !matches!(waiting, WaitingFor::PhyrexianPayment { .. }),
-            "spell-restricted mana must not create a false mana/life choice for an ineligible spell"
+        // CR 107.4f + CR 601.2h: The restricted blue mana cannot pay this instant, so
+        // the {U/P} shard surfaces as `LifeOnly`. The original spell-restriction intent
+        // is verified by the absence of a `ManaOrLife` choice; the engine still pauses
+        // so the caster can confirm or cancel the life-only payment (issue #704).
+        let cast = GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(0x9117),
+            targets: Vec::new(),
+        };
+        let result = apply_as_current(&mut state, cast).expect("announce cast");
+        match &result.waiting_for {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(
+                    matches!(shards[0].options, ShardOptions::LifeOnly),
+                    "spell-restricted mana must not create a false mana/life choice for an ineligible spell"
+                );
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "life unchanged at pause"
         );
+
+        // CR 107.4f: caster accepts the life-only payment.
+        let submit = GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        };
+        apply_as_current(&mut state, submit).expect("submit PayLife");
+
         assert_eq!(state.players[0].life, life_before - 2);
         assert_eq!(
             state.players[0].mana_pool.total(),
@@ -21249,10 +21334,15 @@ mod tests {
         );
     }
 
-    /// CR 107.4f + CR 118.3b: Multi-Phyrexian cost paid entirely with life —
-    /// each shard deducts 2, total life loss = 2 × shard_count.
+    /// CR 107.4f + CR 118.3b + CR 601.2h: Multi-Phyrexian cost paid entirely with life —
+    /// each shard deducts 2, total life loss = 2 × shard_count. With no mana, every
+    /// shard surfaces as `LifeOnly` and the engine pauses for the caster to confirm or
+    /// cancel before any life is deducted (issue #704).
     #[test]
     fn phyrexian_multi_shard_all_life_deducts_per_shard() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
         let mut state = setup_game_at_main_phase();
         let spell = create_phyrexian_instant_in_hand(
             &mut state,
@@ -21262,13 +21352,31 @@ mod tests {
         );
         let life_before = state.players[0].life;
 
-        let mut events = Vec::new();
-        let result = handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9117), &mut events);
-
-        assert!(
-            result.is_ok(),
-            "cast must succeed paying 4 life for {{W/P}}{{U/P}}"
+        let cast = GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(0x9117),
+            targets: Vec::new(),
+        };
+        let result = apply_as_current(&mut state, cast).expect("announce cast");
+        match &result.waiting_for {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 2);
+                assert!(shards
+                    .iter()
+                    .all(|s| matches!(s.options, ShardOptions::LifeOnly)));
+            }
+            other => panic!("expected PhyrexianPayment (two LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: life must not be deducted before the caster confirms"
         );
+
+        let submit = GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife, ShardChoice::PayLife],
+        };
+        apply_as_current(&mut state, submit).expect("submit two PayLife choices");
+
         assert_eq!(
             state.players[0].life,
             life_before - 4,
@@ -22032,8 +22140,15 @@ mod tests {
         /// Reverted-fix discriminator: without the parser/promotion plumbing,
         /// `can_cast_object_now` rejects this cast and `handle_cast_spell`
         /// errors with `ActionNotAllowed("Cannot pay mana cost")`.
+        /// CR 107.4f + CR 601.2h: K'rrik enables {{B}} life-payment with 0 black mana.
+        /// The shard surfaces as `LifeOnly` so the caster confirms or cancels before
+        /// any life is deducted (issue #704); submitting `PayLife` finalizes the cast
+        /// and deducts 2 life.
         #[test]
         fn krrik_offers_life_payment_for_black_shard() {
+            use crate::game::engine::apply_as_current;
+            use crate::types::game_state::{ShardChoice, ShardOptions};
+
             let mut state = setup_game_at_main_phase();
             add_krrik_static(&mut state, PlayerId(0));
             state.players[0].life = 20;
@@ -22044,16 +22159,38 @@ mod tests {
                 "CR 107.4f: K'rrik must enable {{B}} cast with 0 black mana + 20 life"
             );
 
-            let mut events = Vec::new();
             let life_before = state.players[0].life;
-            let _waiting =
-                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
-                    .expect("CR 107.4f: K'rrik {B} cast must succeed via auto life payment");
+            let cast = GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(0x9595),
+                targets: Vec::new(),
+            };
+            let result = apply_as_current(&mut state, cast)
+                .expect("CR 107.4f: K'rrik {B} cast announcement must succeed");
+            match &result.waiting_for {
+                WaitingFor::PhyrexianPayment { shards, .. } => {
+                    assert_eq!(shards.len(), 1);
+                    assert!(
+                        matches!(shards[0].options, ShardOptions::LifeOnly),
+                        "CR 107.4f: with no black mana, the K'rrik-promoted shard is LifeOnly"
+                    );
+                }
+                other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+            }
+            assert_eq!(
+                state.players[0].life, life_before,
+                "CR 601.2h: life must not be deducted before the caster confirms"
+            );
+
+            let submit = GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            };
+            apply_as_current(&mut state, submit).expect("CR 107.4f: PayLife submit");
 
             assert_eq!(
                 state.players[0].life,
                 life_before - 2,
-                "CR 118.3b: auto-decided K'rrik life payment must deduct exactly 2 life"
+                "CR 118.3b: K'rrik life payment must deduct exactly 2 life"
             );
             assert!(
                 state.stack.iter().any(|s| s.source_id == spell),
@@ -22209,11 +22346,12 @@ mod tests {
             }
         }
 
-        /// CR 107.4f + CR 107.4e: K'rrik promotes `{2/B}` to
+        /// CR 107.4f + CR 107.4e + CR 601.2h: K'rrik promotes `{2/B}` to
         /// `TwoGenericHybridPhyrexian(Black)` — the synthetic fusion arm.
         /// With 0 mana and ample life, only the 2-life route is viable so the
-        /// engine auto-decides: cast succeeds, life drops 2, spell on stack.
-        /// (No pause — single option, no `ManaOrLife` choice.)
+        /// shard surfaces as `LifeOnly`. The engine pauses for the caster to
+        /// confirm or cancel rather than silently deducting life (issue #704);
+        /// submitting `PayLife` finalizes the cast.
         ///
         /// Reverted-fix discriminator: without the new
         /// `TwoGenericHybridPhyrexian` variant + promotion table, the {2/B}
@@ -22221,6 +22359,9 @@ mod tests {
         /// (no black mana, no generic mana).
         #[test]
         fn krrik_promotes_two_generic_hybrid_black_shard() {
+            use crate::game::engine::apply_as_current;
+            use crate::types::game_state::{ShardChoice, ShardOptions};
+
             let mut state = setup_game_at_main_phase();
             add_krrik_static(&mut state, PlayerId(0));
             state.players[0].life = 20;
@@ -22231,15 +22372,35 @@ mod tests {
                 "CR 107.4f: TwoGenericHybridPhyrexian promotion must enable cast"
             );
 
-            let mut events = Vec::new();
             let life_before = state.players[0].life;
-            let _waiting =
-                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
-                    .expect("CR 107.4f: {2/B} promoted under K'rrik must cast via life");
+            let cast = GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(0x9595),
+                targets: Vec::new(),
+            };
+            let result = apply_as_current(&mut state, cast)
+                .expect("CR 107.4f: {2/B} promoted under K'rrik must announce");
+            match &result.waiting_for {
+                WaitingFor::PhyrexianPayment { shards, .. } => {
+                    assert_eq!(shards.len(), 1);
+                    assert!(matches!(shards[0].options, ShardOptions::LifeOnly));
+                }
+                other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+            }
+            assert_eq!(
+                state.players[0].life, life_before,
+                "CR 601.2h: life must not be deducted before the caster confirms"
+            );
+
+            let submit = GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            };
+            apply_as_current(&mut state, submit).expect("CR 107.4f: PayLife submit");
+
             assert_eq!(
                 state.players[0].life,
                 life_before - 2,
-                "CR 118.3b: auto-paid life for {{2/B/P}} shard must deduct 2 life"
+                "CR 118.3b: paid life for {{2/B/P}} shard must deduct 2 life"
             );
             assert!(
                 state.stack.iter().any(|s| s.source_id == spell),
