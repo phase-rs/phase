@@ -4487,17 +4487,36 @@ fn with_triggering_player_controller(filter: TargetFilter) -> TargetFilter {
 // ---------------------------------------------------------------------------
 
 /// Parse the "to <target>" qualifier that follows a damage verb.
-/// Returns a `TargetFilter` for the three common cases:
-/// - "to a player"         → `Player`
-/// - "to an opponent"      → opponent-controlled TypedFilter
-/// - "to you"              → `Controller`
 ///
+/// Returns a `TargetFilter` for the recognized recipient phrases:
+/// - "to a player"                  → `Player`
+/// - "to an opponent"               → opponent-controlled TypedFilter
+/// - "to another player"            → opponent-controlled TypedFilter
+/// - "to one of your opponents"     → opponent-controlled TypedFilter
+/// - "to you"                       → `Controller`
+/// - "to a player or planeswalker"  → `Or { Player, Planeswalker }`
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
     let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("to "))
         .parse(after_verb.trim_start())
         .ok()?;
     // Use nom alt() to match damage target qualifiers (input already lowercase)
     fn parse_damage_target(input: &str) -> OracleResult<'_, TargetFilter> {
+        fn opponent_player_filter() -> TargetFilter {
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        }
+
+        fn parse_opponent_player_recipient(input: &str) -> OracleResult<'_, TargetFilter> {
+            value(
+                opponent_player_filter(),
+                alt((
+                    preceded(tag("an "), tag("opponent")),
+                    preceded(tag("one of your "), tag("opponents")),
+                    preceded(tag("another "), tag("player")),
+                )),
+            )
+            .parse(input)
+        }
+
         alt((
             value(
                 TargetFilter::Or {
@@ -4512,14 +4531,7 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
                 )),
             ),
             value(TargetFilter::Player, tag("a player")),
-            value(
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag("an opponent"),
-            ),
-            value(
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag("one of your opponents"),
-            ),
+            parse_opponent_player_recipient,
             value(TargetFilter::Controller, tag("you")),
         ))
         .parse(input)
@@ -5134,6 +5146,9 @@ fn try_parse_event(
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
             value(SimpleEvent::BecomesBlocked, tag("becomes blocked")),
+            // CR 509.1h: Plural form for batched "one or more creatures … become
+            // blocked" triggers (Hezrou, etc.).
+            value(SimpleEvent::BecomesBlocked, tag("become blocked")),
             // CR 702.171b: Mount becomes saddled (saddled designation acquired).
             value(SimpleEvent::BecomesSaddled, tag("becomes saddled")),
             // CR 702.122d: "Whenever [this Vehicle] becomes crewed" — trigger fires
@@ -12310,6 +12325,45 @@ mod tests {
     }
 
     #[test]
+    fn trigger_one_or_more_creatures_become_blocked() {
+        // Hezrou (CLB): "Whenever one or more creatures you control become blocked,
+        // each blocking creature gets -1/-1 until end of turn."
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control become blocked, each blocking creature gets -1/-1 until end of turn.",
+            "Hezrou",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+        assert!(def.batched, "one or more triggers must be batched");
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed creature filter with controller You, got {other:?}"),
+        }
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+        match execute.effect.as_ref() {
+            Effect::PumpAll {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(*power, PtValue::Fixed(-1));
+                assert_eq!(*toughness, PtValue::Fixed(-1));
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                        assert!(tf.properties.contains(&FilterProp::Blocking));
+                    }
+                    other => panic!("expected Typed blocking creature filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected PumpAll, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn trigger_is_dealt_damage() {
         let def = parse_trigger_line(
             "Whenever Spitemare is dealt damage, it deals that much damage to any target.",
@@ -16213,6 +16267,30 @@ mod tests {
         ));
         // No amount threshold on Virtue of Courage's trigger.
         assert_eq!(def.damage_amount, None);
+    }
+
+    #[test]
+    fn trigger_source_you_control_deals_damage_to_another_player() {
+        let def = parse_trigger_line(
+            "Whenever a source you control deals damage to another player, put that many theft counters on ~.",
+            "Night Dealings",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.damage_amount, None);
+        assert!(matches!(
+            def.valid_source,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            }))
+        ));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
     }
 
     // CR 603.2 + CR 120.1: "Whenever a source you control deals N or more

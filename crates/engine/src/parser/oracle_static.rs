@@ -8422,8 +8422,23 @@ fn parse_dynamic_pt_in_text(
     // die roll's result. `parse_cda_quantity` has no "the result" arm; fall
     // through to `parse_event_context_quantity`, which maps it to
     // `EventContextAmount` (the same channel "that much"/"the result" use).
-    let wx = where_x_expression?;
-    let quantity = parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx))?;
+    //
+    // CR 107.3a + CR 107.3i: When no "where X is …" clause is present and the
+    // containing activated ability has an {X} (or X) in its cost, X in the
+    // effect refers to the value chosen as the ability was activated
+    // (CR 107.3a) and every instance of X on the object shares that value
+    // (CR 107.3i). The engine models this as `QuantityRef::CostXPaid`,
+    // mirroring `parse_cost_x_become_pt_prefix` in
+    // `oracle_effect/animation.rs` for the "becomes an X/X creature" animation
+    // case. This unblocks +X/+0 and +X/+X pump activations like Kessig Wolf
+    // Run whose effect text has no binding clause — the X is bound to the
+    // cost, not to a derived quantity.
+    let quantity = match where_x_expression {
+        Some(wx) => parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx))?,
+        None => QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        },
+    };
 
     let mut mods = Vec::new();
     if p_is_x {
@@ -15645,6 +15660,265 @@ mod tests {
                 .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
             "expected AddDynamicToughness, got {:?}",
             def.modifications
+        );
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_x_over_0_without_where_clause_defaults_to_cost_x_paid() {
+        // CR 107.3i: Kessig Wolf Run's activated ability text "Target creature
+        // gets +X/+0 and gains trample until end of turn." has no "where X is …"
+        // binding clause, so X in the effect refers to the value chosen for
+        // the ability's cost. `parse_dynamic_pt_in_text` previously gated the
+        // entire dynamic-PT path on a required `where_x_expression`, silently
+        // dropping the +X/+0 modification. The fix defaults the X-bound
+        // quantity to `QuantityRef::CostXPaid` when no clause is present.
+        let mods = parse_dynamic_pt_in_text(
+            "target creature gets +x/+0 and gains trample until end of turn.",
+            None,
+        )
+        .expect("dynamic-PT helper must emit modifications without a where-X clause");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected AddDynamicPower; got mods: {mods:?}"));
+        assert!(
+            matches!(
+                dyn_pow,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            ),
+            "expected QuantityExpr::Ref(CostXPaid), got {dyn_pow:?}"
+        );
+
+        // No AddDynamicToughness — the +0 leg must not emit a modification.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+            "must not emit AddDynamicToughness for the +0 leg, got {mods:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_x_over_x_without_where_clause_defaults_both_to_cost_x_paid() {
+        // CR 107.3i: When neither leg has a "where X is …" binding, both
+        // AddDynamicPower and AddDynamicToughness must default to
+        // `QuantityRef::CostXPaid`. Covers the symmetric +X/+X pump variant.
+        let mods = parse_dynamic_pt_in_text("target creature gets +x/+x until end of turn.", None)
+            .expect("symmetric +X/+X must emit modifications without a where-X clause");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        assert!(
+            matches!(
+                dyn_pow,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            ),
+            "power must be Ref(CostXPaid), got {dyn_pow:?}"
+        );
+
+        let dyn_tou = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicToughness { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicToughness");
+        assert!(
+            matches!(
+                dyn_tou,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            ),
+            "toughness must be Ref(CostXPaid), got {dyn_tou:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_x_over_0_with_where_clause_still_uses_where_clause() {
+        // CR 107.3i regression guard: when an explicit "where X is …" clause
+        // is present, the dynamic-PT branch must still resolve X via that
+        // clause (here, an ObjectCount) and NOT fall back to CostXPaid. This
+        // protects every existing dynamic-PT card (Craterhoof Behemoth-style)
+        // from being silently rewritten to read the cost-X channel.
+        let mods = parse_dynamic_pt_in_text(
+            "target creature gets +x/+0 until end of turn",
+            Some("the number of creatures you control"),
+        )
+        .expect("where-X branch must still emit modifications");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        match dyn_pow {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    ..
+                }) => {
+                    assert_eq!(type_filters, &vec![TypeFilter::Creature]);
+                    assert_eq!(controller.as_ref(), Some(&ControllerRef::You));
+                }
+                other => panic!("expected Typed(Creature, You) filter, got {other:?}"),
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            } => panic!(
+                "where-X clause must take precedence over CostXPaid default; \
+                 parser regressed to CostXPaid"
+            ),
+            other => panic!("expected Ref(ObjectCount), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_minus_x_over_0_without_where_clause_defaults_to_cost_x_paid() {
+        // CR 107.3i: Negated +X/+0 mirrors the positive variant — when no
+        // "where X is …" clause is present, X binds to the activated ability's
+        // cost-X (`QuantityRef::CostXPaid`). The `-X` leg wraps that ref in
+        // `QuantityExpr::Multiply { factor: -1, .. }` per the sign-handling
+        // block in `parse_dynamic_pt_in_text`. The `-0` leg must NOT emit an
+        // `AddDynamicToughness` modification.
+        let mods = parse_dynamic_pt_in_text("target creature gets -x/-0 until end of turn.", None)
+            .expect("dynamic-PT helper must emit modifications for -X/-0 without a where-X clause");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected AddDynamicPower; got mods: {mods:?}"));
+        match dyn_pow {
+            QuantityExpr::Multiply { factor: -1, inner } => assert!(
+                matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                ),
+                "expected Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got inner={inner:?}"
+            ),
+            other => {
+                panic!("expected Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got {other:?}")
+            }
+        }
+
+        // No AddDynamicToughness — the -0 leg must not emit a modification.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+            "must not emit AddDynamicToughness for the -0 leg, got {mods:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_minus_x_over_minus_x_without_where_clause_defaults_both_to_cost_x_paid() {
+        // CR 107.3i: Symmetric -X/-X with no binding clause must default both
+        // legs to `QuantityRef::CostXPaid` wrapped in
+        // `QuantityExpr::Multiply { factor: -1, .. }` per the sign-handling
+        // block in `parse_dynamic_pt_in_text`.
+        let mods = parse_dynamic_pt_in_text("target creature gets -x/-x until end of turn.", None)
+            .expect("symmetric -X/-X must emit modifications without a where-X clause");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        match dyn_pow {
+            QuantityExpr::Multiply { factor: -1, inner } => assert!(
+                matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                ),
+                "power must be Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got inner={inner:?}"
+            ),
+            other => panic!(
+                "power must be Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got {other:?}"
+            ),
+        }
+
+        let dyn_tou = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicToughness { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicToughness");
+        match dyn_tou {
+            QuantityExpr::Multiply { factor: -1, inner } => assert!(
+                matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                ),
+                "toughness must be Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got inner={inner:?}"
+            ),
+            other => panic!(
+                "toughness must be Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_plus_0_over_plus_x_without_where_clause_defaults_to_cost_x_paid() {
+        // CR 107.3i: Toughness-only asymmetric +0/+X must emit a single
+        // `AddDynamicToughness` carrying `Ref(CostXPaid)` and NOT emit
+        // `AddDynamicPower` — the +0 power leg must drop out per the
+        // `if p_is_x` guard in `parse_dynamic_pt_in_text`.
+        let mods = parse_dynamic_pt_in_text("target creature gets +0/+x until end of turn.", None)
+            .expect("dynamic-PT helper must emit modifications for +0/+X without a where-X clause");
+
+        let dyn_tou = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicToughness { value } => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected AddDynamicToughness; got mods: {mods:?}"));
+        assert!(
+            matches!(
+                dyn_tou,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            ),
+            "expected QuantityExpr::Ref(CostXPaid), got {dyn_tou:?}"
+        );
+
+        // No AddDynamicPower — the +0 leg must not emit a modification.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })),
+            "must not emit AddDynamicPower for the +0 leg, got {mods:?}"
         );
     }
 

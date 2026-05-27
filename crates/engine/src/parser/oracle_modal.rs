@@ -6,9 +6,9 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, Effect, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, PlayerFilter, ReplacementDefinition, StaticCondition, TargetFilter,
-    TriggerCondition,
+    AbilityDefinition, AbilityKind, AdditionalCostPaymentSource, ChoiceType, Effect, ModalChoice,
+    ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, ReplacementDefinition,
+    StaticCondition, TargetFilter, TriggerCondition,
 };
 use crate::types::replacements::ReplacementEvent;
 
@@ -483,6 +483,7 @@ fn parse_modal_additional_cost_condition(
         return Ok((
             rest,
             ModalSelectionCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::Any,
                 variant: None,
                 kicker_cost: None,
                 min_count: 1,
@@ -501,6 +502,7 @@ fn parse_modal_additional_cost_condition(
         parse_modal_specific_kicker_cost_condition,
         value(
             ModalSelectionCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::Kicker,
                 variant: None,
                 kicker_cost: None,
                 min_count: 2,
@@ -513,12 +515,14 @@ fn parse_modal_additional_cost_condition(
                 terminated(nom_primitives::parse_number, tag(" times")),
             ),
             |min_count| ModalSelectionCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::Kicker,
                 variant: None,
                 kicker_cost: None,
                 min_count,
             },
         ),
         success(ModalSelectionCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Kicker,
             variant: None,
             kicker_cost: None,
             min_count: 1,
@@ -539,6 +543,7 @@ fn parse_modal_specific_kicker_cost_condition(
     Ok((
         rest,
         ModalSelectionCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Kicker,
             variant: None,
             kicker_cost: Some(kicker_cost),
             min_count: 1,

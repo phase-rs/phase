@@ -71,6 +71,7 @@ mod ripples_of_undeath_regression;
 mod rite_of_consumption_damage;
 mod roots_of_wisdom_if_you_cant_draw;
 mod rules;
+mod seasoned_dungeoneer_initiative_room_trigger;
 mod serras_emissary_chosen_card_type_protection;
 mod skullwinder_chosen_opponent;
 mod spellstutter_sprite_counter_with_x;

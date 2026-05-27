@@ -733,6 +733,7 @@ fn apply_pending_spell_resolution(
             obj.cast_timing_permission = Some((permission, state.turn_number));
         }
         obj.kickers_paid.clone_from(&ctx.kickers_paid);
+        obj.additional_cost_payment_count = ctx.additional_cost_payment_count;
         obj.convoked_creatures.clone_from(&ctx.convoked_creatures);
     }
 
