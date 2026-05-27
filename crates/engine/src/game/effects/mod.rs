@@ -106,6 +106,7 @@ pub mod rad_counters;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remove_from_combat;
+pub mod return_as_aura;
 pub mod reveal;
 pub mod reveal_from_hand;
 pub mod reveal_hand;
@@ -772,6 +773,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
+            | WaitingFor::ReturnAsAuraTarget { .. }
             | WaitingFor::ChooseManaColor { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -1358,6 +1360,7 @@ pub fn resolve_effect(
         Effect::DoublePTAll { .. } => pump::resolve_double_pt_all(state, ability, events),
         Effect::MoveCounters { .. } => counters::resolve_move(state, ability, events),
         Effect::Animate { .. } => animate::resolve(state, ability, events),
+        Effect::ReturnAsAura { .. } => return_as_aura::resolve(state, ability, events),
         Effect::RegisterBending { .. } => register_bending::resolve(state, ability, events),
         Effect::GenericEffect { .. } => effect::resolve(state, ability, events),
         Effect::Cleanup { .. } => cleanup::resolve(state, ability, events),

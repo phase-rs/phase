@@ -8886,39 +8886,7 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
         if ch == '"' {
             if let Some(open) = start.take() {
                 let ability_text = text[open + 1..idx].trim();
-                if !ability_text.is_empty() {
-                    let lower = ability_text.to_lowercase();
-                    // CR 603.1: Detect trigger prefixes to route to GrantTrigger.
-                    if nom_tag_lower(&lower, &lower, "when ").is_some()
-                        || nom_tag_lower(&lower, &lower, "whenever ").is_some()
-                        || nom_tag_lower(&lower, &lower, "at the beginning of ").is_some()
-                        || nom_tag_lower(&lower, &lower, "at the end of ").is_some()
-                    {
-                        let triggers =
-                            super::oracle_trigger::parse_trigger_lines(ability_text, "~");
-                        for trigger in triggers {
-                            modifications.push(ContinuousModification::GrantTrigger {
-                                trigger: Box::new(trigger),
-                            });
-                        }
-                    } else {
-                        // CR 702: Quoted text that is a keyword (e.g. "Ward—Pay 2 life") should be
-                        // granted as AddKeyword, not wrapped in an AbilityDefinition.
-                        if let Some(keyword) =
-                            super::oracle_keyword::parse_keyword_from_oracle(&lower)
-                        {
-                            modifications.push(ContinuousModification::AddKeyword { keyword });
-                        } else if let Some(static_modifications) =
-                            parse_quoted_rule_static_modifications(ability_text)
-                        {
-                            modifications.extend(static_modifications);
-                        } else {
-                            modifications.push(ContinuousModification::GrantAbility {
-                                definition: Box::new(parse_quoted_ability(ability_text)),
-                            });
-                        }
-                    }
-                }
+                modifications.extend(classify_quoted_inner(ability_text));
             } else {
                 start = Some(idx);
             }
@@ -8926,6 +8894,64 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
     }
 
     modifications
+}
+
+/// CR 604.1: Classify already-stripped inner-quote text into the appropriate
+/// `ContinuousModification` variant. Extracted from
+/// `parse_quoted_ability_modifications` so callers that already have the
+/// inner-quote slice (e.g., `parser::oracle_nom::return_as_aura::try_parse`)
+/// can dispatch directly without re-walking for `"..."` pairs.
+///
+/// Dispatch ladder (single authority — DO NOT duplicate elsewhere):
+///   1. CR 603.1: trigger prefix ("when "/"whenever "/"at the beginning of "/
+///      "at the end of ") → `ContinuousModification::GrantTrigger`.
+///   2. CR 702: keyword text ("flying", "ward—pay 2 life", etc.) →
+///      `ContinuousModification::AddKeyword`.
+///   3. CR 113.3d + CR 604.1: static-line text ("enchanted creature gets +N/+M",
+///      "creatures you control have ...") → one or more
+///      `ContinuousModification::GrantStaticAbility` / `AddStaticMode`.
+///   4. CR 113 / CR 117 (fallback): spell/activated text → `GrantAbility`
+///      wrapping the parsed `AbilityDefinition`.
+///
+/// Visibility: `pub(crate)` so external crate-local callers can reuse the
+/// canonical inner classifier without exposing the private
+/// `parse_quoted_ability` / `parse_quoted_rule_static_modifications` helpers.
+pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModification> {
+    let ability_text = ability_text.trim();
+    if ability_text.is_empty() {
+        return Vec::new();
+    }
+    let lower = ability_text.to_lowercase();
+
+    // CR 603.1: Detect trigger prefixes to route to GrantTrigger.
+    if nom_tag_lower(&lower, &lower, "when ").is_some()
+        || nom_tag_lower(&lower, &lower, "whenever ").is_some()
+        || nom_tag_lower(&lower, &lower, "at the beginning of ").is_some()
+        || nom_tag_lower(&lower, &lower, "at the end of ").is_some()
+    {
+        return super::oracle_trigger::parse_trigger_lines(ability_text, "~")
+            .into_iter()
+            .map(|trigger| ContinuousModification::GrantTrigger {
+                trigger: Box::new(trigger),
+            })
+            .collect();
+    }
+
+    // CR 702: Quoted text that is a keyword (e.g. "Ward—Pay 2 life") should be
+    // granted as AddKeyword, not wrapped in an AbilityDefinition.
+    if let Some(keyword) = super::oracle_keyword::parse_keyword_from_oracle(&lower) {
+        return vec![ContinuousModification::AddKeyword { keyword }];
+    }
+
+    // CR 113.3d + CR 604.1: Static-line text → GrantStaticAbility / AddStaticMode.
+    if let Some(static_modifications) = parse_quoted_rule_static_modifications(ability_text) {
+        return static_modifications;
+    }
+
+    // CR 113 / CR 117 fallback: spell/activated text → GrantAbility.
+    vec![ContinuousModification::GrantAbility {
+        definition: Box::new(parse_quoted_ability(ability_text)),
+    }]
 }
 
 fn parse_quoted_rule_static_modifications(text: &str) -> Option<Vec<ContinuousModification>> {

@@ -2922,6 +2922,66 @@ fn apply_action(
                 &mut events,
             )?
         }
+        // CR 303.4 + CR 303.4g + CR 115.1: Player picked the permanent to
+        // enchant for a `Effect::ReturnAsAura` sub-effect. The picker is a
+        // CHOICE (not a target), so the action shape mirrors
+        // `WaitingFor::ExploreChoice` — `GameAction::ChooseTarget { target:
+        // Some(Object(id)) }` with `id` drawn from `legal_targets`.
+        (
+            WaitingFor::ReturnAsAuraTarget {
+                player,
+                source_id: _,
+                returned_id,
+                legal_targets,
+                pending_effect,
+            },
+            GameAction::ChooseTarget { target },
+        ) => {
+            if turn_control::authorized_submitter(state) != Some(*player) {
+                return Err(EngineError::WrongPlayer);
+            }
+            let chosen = match target {
+                Some(TargetRef::Object(id)) if legal_targets.contains(&id) => id,
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "ReturnAsAuraTarget: invalid or missing legal Object target".to_string(),
+                    ));
+                }
+            };
+            let pending = pending_effect.clone();
+            let returned = *returned_id;
+            let active_player = *player;
+            let (filter, grants) = match &pending.effect {
+                crate::types::ability::Effect::ReturnAsAura {
+                    enchant_filter,
+                    grants,
+                } => (enchant_filter.clone(), grants.clone()),
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "ReturnAsAuraTarget: pending_effect is not ReturnAsAura".to_string(),
+                    ));
+                }
+            };
+            super::effects::return_as_aura::finalize_attach(
+                state,
+                pending.as_ref(),
+                returned,
+                chosen,
+                &filter,
+                grants,
+                &mut events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // After resolving the attach, return control to standard priority
+            // flow under the picker's controller, then resume any chain that was
+            // paused behind the picker.
+            state.waiting_for = WaitingFor::Priority {
+                player: active_player,
+            };
+            state.priority_player = active_player;
+            effects::drain_pending_continuation(state, &mut events);
+            state.waiting_for.clone()
+        }
         (
             WaitingFor::EquipTarget {
                 player,

@@ -135,6 +135,12 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::ExploreChoice { choosable, .. }, GameAction::ChooseTarget { target }) => {
             !matches_target_choice(target, choosable)
         }
+        // CR 303.4 + CR 303.4g + CR 115.1: Validate the chosen attach target
+        // for a return-as-Aura pick against the engine-computed legal list.
+        (
+            WaitingFor::ReturnAsAuraTarget { legal_targets, .. },
+            GameAction::ChooseTarget { target },
+        ) => !matches_target_choice(target, legal_targets),
         (WaitingFor::TargetSelection { selection, .. }, GameAction::ChooseTarget { target })
         | (
             WaitingFor::TriggerTargetSelection { selection, .. },

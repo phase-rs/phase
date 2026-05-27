@@ -1516,6 +1516,38 @@ pub enum WaitingFor {
         remaining: Vec<ObjectId>,
         pending_effect: Box<ResolvedAbility>,
     },
+    /// CR 303.4 + CR 303.4a + CR 303.4g + CR 614.12 + CR 115.1b: After a
+    /// return-as-Aura sub-effect resolves and finds 2+ legal objects matching
+    /// the parsed enchant filter, the controller picks which permanent the
+    /// returned object attaches to. This is a CHOICE (CR 303.4f / 303.4g), not
+    /// a target (CR 115.1b applies to Aura spells being cast — return-as-Aura
+    /// is a sub-effect of a different ability), so hexproof / shroud /
+    /// protection do NOT filter `legal_targets`.
+    ///
+    /// **Forward-looking note (per add-engine-variant gate):** if a fourth
+    /// resolution-time-pick `WaitingFor` variant is added (e.g., a future
+    /// CR 706 emerge replacement, CR 305 land-attach pick), refactor this
+    /// sibling cluster (ExploreChoice / CopyTargetChoice / EquipTarget /
+    /// ReturnAsAuraTarget) into a unified
+    /// `WaitingFor::ObjectPick { kind: ObjectPickKind, ... }` BEFORE adding
+    /// the fourth.
+    ReturnAsAuraTarget {
+        player: PlayerId,
+        source_id: ObjectId,
+        /// The host object that was just returned to the battlefield by the
+        /// preceding `Effect::ChangeZone` and that this `Effect::ReturnAsAura`
+        /// is converting into an Aura.
+        returned_id: ObjectId,
+        /// Battlefield objects (excluding `returned_id`) that satisfy the
+        /// parsed `enchant_filter`. Built via `filter::matches_target_filter`
+        /// — hexproof / shroud / protection are intentionally NOT applied
+        /// here (CR 303.4 / CR 115.1b distinction).
+        legal_targets: Vec<ObjectId>,
+        /// The `ResolvedAbility` that emitted this picker; cloned so
+        /// `finalize_attach` can re-read `effect.enchant_filter` and
+        /// `effect.grants` after the pick lands.
+        pending_effect: Box<ResolvedAbility>,
+    },
     EquipTarget {
         player: PlayerId,
         equipment_id: ObjectId,
@@ -2819,6 +2851,7 @@ impl WaitingFor {
             | WaitingFor::OrderTriggers { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
             | WaitingFor::ExploreChoice { player, .. }
+            | WaitingFor::ReturnAsAuraTarget { player, .. }
             | WaitingFor::EquipTarget { player, .. }
             | WaitingFor::CrewVehicle { player, .. }
             | WaitingFor::StationTarget { player, .. }
