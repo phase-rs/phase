@@ -1976,6 +1976,10 @@ fn is_myriad_attack_trigger(t: &TriggerDefinition) -> bool {
 fn is_dethrone_attack_trigger(t: &TriggerDefinition) -> bool {
     if !matches!(t.mode, TriggerMode::Attacks)
         || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        || !matches!(
+            t.attack_target_filter,
+            Some(crate::types::triggers::AttackTargetFilter::Player)
+        )
     {
         return false;
     }
@@ -2242,14 +2246,18 @@ fn build_dethrone_trigger() -> TriggerDefinition {
         },
     };
 
-    TriggerDefinition::new(TriggerMode::Attacks)
+    let mut trigger = TriggerDefinition::new(TriggerMode::Attacks)
         .valid_card(TargetFilter::SelfRef)
         .condition(condition)
         .execute(put_counter)
         .description(
             "CR 702.105a: Dethrone — whenever ~ attacks the player with the most life or tied for most life, put a +1/+1 counter on ~."
                 .to_string(),
-        )
+        );
+    // CR 702.105a: Dethrone only triggers when attacking a player, not a
+    // planeswalker or battle.
+    trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
+    trigger
 }
 
 /// CR 702.100a: Evolve — "Whenever a creature you control enters, if that
@@ -5598,6 +5606,14 @@ mod dethrone_tests {
             matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
             "valid_card must be SelfRef so the trigger fires only when this \
              creature attacks"
+        );
+
+        // CR 702.105a: Dethrone only triggers when attacking a player.
+        assert_eq!(
+            trigger.attack_target_filter,
+            Some(crate::types::triggers::AttackTargetFilter::Player),
+            "attack_target_filter must be Player so the trigger fires only \
+             when attacking a player, not a planeswalker or battle"
         );
 
         let Some(execute) = trigger.execute.as_deref() else {
