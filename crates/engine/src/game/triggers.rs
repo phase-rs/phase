@@ -2916,6 +2916,7 @@ pub(crate) fn check_trigger_condition(
         // ETB/LTB trigger conditions refer to the triggering zone-change
         // object; self-referential triggers fall back to the trigger source.
         TriggerCondition::AdditionalCostPaid {
+            source,
             variant,
             kicker_cost,
             min_count,
@@ -2933,13 +2934,13 @@ pub(crate) fn check_trigger_condition(
                     .and_then(|id| state.objects.get(&id))
                     .is_some_and(|obj| match variant {
                         Some(kicker) => obj.kickers_paid.contains(kicker),
-                        None => {
-                            let min_count = (*min_count).max(1);
-                            obj.kickers_paid
-                                .len()
-                                .max(obj.additional_cost_payment_count as usize)
-                                >= min_count as usize
-                        }
+                        None => crate::types::ability::additional_cost_payment_count_matches(
+                            *source,
+                            obj.additional_cost_payment_count > 0 || !obj.kickers_paid.is_empty(),
+                            obj.kickers_paid.len(),
+                            obj.additional_cost_payment_count,
+                            *min_count,
+                        ),
                     })
             }
         }
@@ -10734,10 +10735,13 @@ pub mod tests {
             let obj = state.objects.get_mut(&spell).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.cast_from_zone = Some(Zone::Hand);
-            obj.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::creature()),
-                count: 1,
-            }));
+            obj.additional_cost = Some(AdditionalCost::Optional {
+                cost: AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    count: 1,
+                },
+                repeatable: false,
+            });
             obj.keywords.push(Keyword::Casualty(2));
         }
         let ability = ResolvedAbility::new(
@@ -10912,6 +10916,7 @@ pub mod tests {
         assert!(check_trigger_condition(
             &state,
             &TriggerCondition::AdditionalCostPaid {
+                source: crate::types::ability::AdditionalCostPaymentSource::Any,
                 variant: None,
                 kicker_cost: None,
                 min_count: 1,
@@ -10942,6 +10947,7 @@ pub mod tests {
         assert!(check_trigger_condition(
             &state,
             &TriggerCondition::AdditionalCostPaid {
+                source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
                 variant: None,
                 kicker_cost: None,
                 min_count: 2,

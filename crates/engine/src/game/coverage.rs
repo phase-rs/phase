@@ -2829,9 +2829,7 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
 fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec<ParsedItem>) {
     if additional_cost_has_unimplemented(additional_cost) {
         match additional_cost {
-            AdditionalCost::Optional(cost)
-            | AdditionalCost::Repeatable(cost)
-            | AdditionalCost::Required(cost) => {
+            AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
                 build_cost_item(cost, items);
             }
             AdditionalCost::Kicker { costs, .. } => {
@@ -2848,8 +2846,12 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
     }
 
     let label = match additional_cost {
-        AdditionalCost::Optional(_) => "AdditionalCost:Optional",
-        AdditionalCost::Repeatable(_) => "AdditionalCost:Repeatable",
+        AdditionalCost::Optional {
+            repeatable: true, ..
+        } => "AdditionalCost:Repeatable",
+        AdditionalCost::Optional {
+            repeatable: false, ..
+        } => "AdditionalCost:Optional",
         AdditionalCost::Kicker { repeatable, .. } => {
             if *repeatable {
                 "AdditionalCost:Multikicker"
@@ -2873,9 +2875,9 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 /// Returns true if any leaf `AbilityCost` in the tree is `Unimplemented`.
 fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
-        AdditionalCost::Optional(cost)
-        | AdditionalCost::Repeatable(cost)
-        | AdditionalCost::Required(cost) => ability_cost_has_unimplemented(cost),
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
+            ability_cost_has_unimplemented(cost)
+        }
         AdditionalCost::Kicker { costs, .. } => costs.iter().any(ability_cost_has_unimplemented),
         AdditionalCost::Choice(first, second) => {
             ability_cost_has_unimplemented(first) || ability_cost_has_unimplemented(second)
@@ -4076,9 +4078,9 @@ fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
 
 fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
-        AdditionalCost::Optional(cost)
-        | AdditionalCost::Repeatable(cost)
-        | AdditionalCost::Required(cost) => ability_cost_has_unimplemented_parts(cost),
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
+            ability_cost_has_unimplemented_parts(cost)
+        }
         AdditionalCost::Kicker { costs, .. } => {
             costs.iter().any(ability_cost_has_unimplemented_parts)
         }
@@ -4127,9 +4129,7 @@ fn collect_additional_cost_missing_parts(
     missing: &mut Vec<String>,
 ) {
     match additional_cost {
-        AdditionalCost::Optional(cost)
-        | AdditionalCost::Repeatable(cost)
-        | AdditionalCost::Required(cost) => {
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
             collect_ability_cost_missing_parts(cost, missing);
         }
         AdditionalCost::Kicker { costs, .. } => {
@@ -8292,9 +8292,12 @@ mod tests {
     #[test]
     fn card_face_with_unimplemented_additional_cost_is_detected() {
         let mut face = make_face();
-        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Unimplemented {
-            description: "mystery cost".to_string(),
-        }));
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::Unimplemented {
+                description: "mystery cost".to_string(),
+            },
+            repeatable: false,
+        });
 
         assert!(card_face_has_unimplemented_parts(&face));
     }

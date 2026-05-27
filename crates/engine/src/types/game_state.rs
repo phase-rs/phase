@@ -5280,7 +5280,10 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::OptionalCostChoice {
             player: PlayerId(0),
-            cost: AdditionalCost::Optional(crate::types::ability::AbilityCost::Blight { count: 1 }),
+            cost: AdditionalCost::Optional {
+                cost: crate::types::ability::AbilityCost::Blight { count: 1 },
+                repeatable: false,
+            },
             times_kicked: 0,
             pending_cast: dummy_pending(),
         }));

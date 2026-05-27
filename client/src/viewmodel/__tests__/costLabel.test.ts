@@ -247,8 +247,11 @@ describe("additionalCostChoices — multikicker (issue #454)", () => {
 
 describe("additionalCostChoices — repeatable additional cost", () => {
   const repeatableCost: AdditionalCost = {
-    type: "Repeatable",
-    data: { type: "Mana", cost: { type: "Cost", shards: [], generic: 1 } },
+    type: "Optional",
+    data: {
+      cost: { type: "Mana", cost: { type: "Cost", shards: [], generic: 1 } },
+      repeatable: true,
+    },
   };
 
   it("first prompt offers a non-cancel decline", () => {

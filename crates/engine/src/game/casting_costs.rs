@@ -111,27 +111,34 @@ pub(crate) fn handle_decide_additional_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if matches!(
-        pending.additional_cost_flow,
-        Some(AdditionalCost::Kicker { .. })
-    ) {
-        return handle_decide_kicker_cost(state, player, pending, pay, events);
-    }
-    if matches!(
-        pending.additional_cost_flow,
-        Some(AdditionalCost::Repeatable(_))
-    ) {
-        return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
-    }
-    if matches!(additional_cost, AdditionalCost::Kicker { .. }) {
-        let mut pending = pending;
-        pending.additional_cost_flow = Some(additional_cost.clone());
-        return handle_decide_kicker_cost(state, player, pending, pay, events);
-    }
-    if matches!(additional_cost, AdditionalCost::Repeatable(_)) {
-        let mut pending = pending;
-        pending.additional_cost_flow = Some(additional_cost.clone());
-        return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+    match (pending.additional_cost_flow.as_ref(), additional_cost) {
+        (Some(AdditionalCost::Kicker { .. }), _) => {
+            return handle_decide_kicker_cost(state, player, pending, pay, events);
+        }
+        (
+            Some(AdditionalCost::Optional {
+                repeatable: true, ..
+            }),
+            _,
+        ) => {
+            return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+        }
+        (None, AdditionalCost::Kicker { .. }) => {
+            let mut pending = pending;
+            pending.additional_cost_flow = Some(additional_cost.clone());
+            return handle_decide_kicker_cost(state, player, pending, pay, events);
+        }
+        (
+            None,
+            AdditionalCost::Optional {
+                repeatable: true, ..
+            },
+        ) => {
+            let mut pending = pending;
+            pending.additional_cost_flow = Some(additional_cost.clone());
+            return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+        }
+        _ => {}
     }
 
     let mut ability = pending.ability;
@@ -144,7 +151,10 @@ pub(crate) fn handle_decide_additional_cost(
 
     let cost_to_pay = match additional_cost {
         // CR 702.33a: Kicker is an optional additional cost.
-        AdditionalCost::Optional(cost) => {
+        AdditionalCost::Optional {
+            cost,
+            repeatable: false,
+        } => {
             if pay {
                 ability.context.additional_cost_paid = true;
                 ability.context.additional_cost_payment_count = 1;
@@ -154,8 +164,10 @@ pub(crate) fn handle_decide_additional_cost(
                 None
             }
         }
-        AdditionalCost::Repeatable(_) => {
-            unreachable!("repeatable costs are handled before generic optional costs")
+        AdditionalCost::Optional {
+            repeatable: true, ..
+        } => {
+            unreachable!("repeatable optional costs are handled before generic optional costs")
         }
         AdditionalCost::Kicker { .. } => {
             unreachable!("kicker costs are handled before generic optional costs")
@@ -196,7 +208,10 @@ pub(crate) fn handle_decide_additional_cost(
     if updated_pending.deferred_target_selection
         && matches!(
             updated_pending.additional_cost_flow,
-            Some(AdditionalCost::Optional(_))
+            Some(AdditionalCost::Optional {
+                repeatable: false,
+                ..
+            })
         )
     {
         updated_pending.additional_cost_flow = None;
@@ -401,7 +416,11 @@ fn next_repeatable_additional_cost(
     player: PlayerId,
     pending: &PendingCast,
 ) -> Option<AbilityCost> {
-    let Some(AdditionalCost::Repeatable(cost)) = &pending.additional_cost_flow else {
+    let Some(AdditionalCost::Optional {
+        cost,
+        repeatable: true,
+    }) = &pending.additional_cost_flow
+    else {
         return None;
     };
 
@@ -438,13 +457,19 @@ fn finish_pending_cost_or_cast(
 
     if matches!(
         pending.additional_cost_flow,
-        Some(AdditionalCost::Repeatable(_))
+        Some(AdditionalCost::Optional {
+            repeatable: true,
+            ..
+        })
     ) {
         if let Some(current_cost) = next_repeatable_additional_cost(state, player, &pending) {
             let times_kicked = pending.ability.context.additional_cost_payment_count;
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
-                cost: AdditionalCost::Repeatable(current_cost),
+                cost: AdditionalCost::Optional {
+                    cost: current_cost,
+                    repeatable: true,
+                },
                 times_kicked,
                 pending_cast: Box::new(pending),
             });
@@ -503,9 +528,16 @@ fn finish_pending_cost_or_cast(
     // targets. When deferred_target_selection is true, present the choice first.
     // After the choice resolves, additional_cost_flow is cleared by
     // handle_decide_additional_cost so the general deferred path below fires.
-    if let Some(AdditionalCost::Optional(ref cost)) = pending.additional_cost_flow {
+    if let Some(AdditionalCost::Optional {
+        cost: ref optional_cost,
+        repeatable: false,
+    }) = pending.additional_cost_flow
+    {
         if pending.deferred_target_selection {
-            let optional_cost = AdditionalCost::Optional(cost.clone());
+            let optional_cost = AdditionalCost::Optional {
+                cost: optional_cost.clone(),
+                repeatable: false,
+            };
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
                 cost: optional_cost,
@@ -521,7 +553,13 @@ fn finish_pending_cost_or_cast(
     if pending.deferred_target_selection
         && !matches!(
             pending.additional_cost_flow,
-            Some(AdditionalCost::Kicker { .. } | AdditionalCost::Repeatable(_))
+            Some(
+                AdditionalCost::Kicker { .. }
+                    | AdditionalCost::Optional {
+                        repeatable: true,
+                        ..
+                    }
+            )
         )
     {
         return begin_deferred_target_selection(state, player, pending, events);
@@ -1673,18 +1711,26 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 }
                 return finish_pending_cost_or_cast(state, player, pending, events);
             }
-            AdditionalCost::Repeatable(repeatable_cost) => {
+            AdditionalCost::Optional {
+                cost: repeatable_cost,
+                repeatable: true,
+            } => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
                 pending.cast_timing_permission = cast_timing_permission;
                 pending.distribute = distribute.clone();
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
-                pending.additional_cost_flow =
-                    Some(AdditionalCost::Repeatable(repeatable_cost.clone()));
+                pending.additional_cost_flow = Some(AdditionalCost::Optional {
+                    cost: repeatable_cost.clone(),
+                    repeatable: true,
+                });
                 return finish_pending_cost_or_cast(state, player, pending, events);
             }
-            AdditionalCost::Optional(opt_cost) => {
+            AdditionalCost::Optional {
+                cost: opt_cost,
+                repeatable: false,
+            } => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
                 pending.cast_timing_permission = cast_timing_permission;
@@ -2454,19 +2500,22 @@ pub(super) fn effective_casualty_additional_cost(
             Keyword::Casualty(n) => Some(n),
             _ => None,
         })?;
-    Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
-        target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
-            crate::types::ability::FilterProp::PtComparison {
-                stat: crate::types::ability::PtStat::Power,
-                scope: crate::types::ability::PtValueScope::Current,
-                comparator: crate::types::ability::Comparator::GE,
-                value: QuantityExpr::Fixed {
-                    value: threshold as i32,
+    Some(AdditionalCost::Optional {
+        cost: AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                crate::types::ability::FilterProp::PtComparison {
+                    stat: crate::types::ability::PtStat::Power,
+                    scope: crate::types::ability::PtValueScope::Current,
+                    comparator: crate::types::ability::Comparator::GE,
+                    value: QuantityExpr::Fixed {
+                        value: threshold as i32,
+                    },
                 },
-            },
-        ])),
-        count: 1,
-    }))
+            ])),
+            count: 1,
+        },
+        repeatable: false,
+    })
 }
 
 pub(super) fn retrace_discard_land_cost() -> AbilityCost {
@@ -4985,7 +5034,10 @@ mod tests {
 
         match waiting {
             WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-                AdditionalCost::Optional(AbilityCost::Sacrifice { target, count }) => {
+                AdditionalCost::Optional {
+                    cost: AbilityCost::Sacrifice { target, count },
+                    repeatable: false,
+                } => {
                     assert_eq!(count, 1);
                     match target {
                         TargetFilter::Typed(tf) => {
@@ -8602,7 +8654,10 @@ many tokens that are copies of it.)";
             } => {
                 assert!(matches!(
                     cost,
-                    AdditionalCost::Repeatable(AbilityCost::Mana { .. })
+                    AdditionalCost::Optional {
+                        cost: AbilityCost::Mana { .. },
+                        repeatable: true,
+                    }
                 ));
                 assert_eq!(times_kicked, 0);
             }
