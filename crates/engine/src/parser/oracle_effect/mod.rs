@@ -6664,10 +6664,16 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     let mut sub_clause = parse_imperative_effect(sub_text, &mut continuation_ctx);
 
     // CR 608.2c: Verb carry-forward for bare "target X" clauses in compound actions.
-    // When the sub-text starts with "target" and parsed as Unimplemented, prepend
-    // the verb from the primary effect and re-parse. Handles "exile target creature
-    // and target artifact" where "target artifact" lacks a verb.
-    if matches!(sub_clause.effect, Effect::Unimplemented { .. })
+    // When the sub-text starts with "target" and parsed as Unimplemented or
+    // the structural TargetOnly wrapper, prepend the verb from the primary
+    // effect and re-parse. Handles "exile target creature and target artifact"
+    // where "target artifact" lacks a verb.
+    // Only this branch accepts TargetOnly: bare "target ..." is the only
+    // verbless head that lowers structurally to TargetOnly; the other
+    // carry-forward prefixes below ("up to", "all/each", "~", possessives)
+    // fall back as Unimplemented when the verb is omitted.
+    if (matches!(sub_clause.effect, Effect::Unimplemented { .. })
+        || matches!(sub_clause.effect, Effect::TargetOnly { .. }))
         && tag::<_, _, OracleError<'_>>("target ")
             .parse(sub_lower.as_str())
             .is_ok()
@@ -17596,6 +17602,7 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
             origin: Some(Zone::Battlefield),
             ..
         } => Some("return"),
+        Effect::Bounce { .. } | Effect::BounceAll { .. } => Some("return"),
         Effect::Sacrifice { .. } => Some("sacrifice"),
         Effect::Tap { .. } | Effect::TapAll { .. } => Some("tap"),
         Effect::Untap { .. } | Effect::UntapAll { .. } => Some("untap"),
@@ -18004,6 +18011,41 @@ mod tests {
                 );
             }
             other => panic!("expected Destroy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_verb_carry_forward_return_target_only_tail_aether_tradewinds() {
+        let clause = parse_effect_clause(
+            "Return target permanent you control and target permanent you don't control to their owners' hands.",
+            &mut ParseContext::default(),
+        );
+
+        match &clause.effect {
+            Effect::Bounce { target, .. } => {
+                let tf = typed_leg(target).expect("primary return target should be typed");
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "primary return target should remain 'you control'",
+                );
+            }
+            other => panic!("primary clause must be Bounce, got {:?}", other),
+        }
+
+        let sub = clause
+            .sub_ability
+            .expect("must have sub_ability for compound return");
+        match sub.effect.as_ref() {
+            Effect::Bounce { target, .. } => {
+                let tf = typed_leg(target).expect("sub return target should be typed");
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::Opponent),
+                    "sub return target should resolve to 'you don't control'",
+                );
+            }
+            other => panic!("sub-clause must be Bounce, got {:?}", other),
         }
     }
 
