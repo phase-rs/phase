@@ -10852,6 +10852,33 @@ pub enum KeywordAction {
 // Resolved ability -- simplified, zero HashMap
 // ---------------------------------------------------------------------------
 
+/// CR 707.10 + CR 614.1a: Whether copy-count replacement effects (Twinning
+/// Staff's "copy an additional time") have already been folded into a
+/// `CopySpell` resolution's iteration count.
+///
+/// A `CopySpell` of a targeted spell pauses on `CopyRetarget` per copy; the
+/// drain driver then resumes the next iteration with a single-iteration ability.
+/// The bonus must apply to the copy *event* once (CR 614.5 — a replacement
+/// effect doesn't invoke itself repeatedly; it gets only one opportunity to
+/// affect an event), not per copy, so a resumed iteration is marked `Finalized`
+/// and the count hook skips it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CopyCountStatus {
+    /// Initial resolution — copy-count replacements not yet applied.
+    #[default]
+    Pending,
+    /// Resumed iteration — the bonus is already folded into the iteration count.
+    Finalized,
+}
+
+impl CopyCountStatus {
+    /// True for the initial resolution (the only state in which copy-count
+    /// replacements should be applied).
+    pub fn is_pending(&self) -> bool {
+        matches!(self, CopyCountStatus::Pending)
+    }
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAbility {
@@ -10917,6 +10944,16 @@ pub struct ResolvedAbility {
     /// Stack-copy restriction from "This ability can't be copied."
     #[serde(default, skip_serializing_if = "is_false")]
     pub cant_be_copied: bool,
+    /// CR 707.10 + CR 614.1a + CR 614.5: `Finalized` on a `repeat_for` iteration
+    /// that the drain driver resumes after a per-copy pause, so the "copy an
+    /// additional time" replacement bonus (Twinning Staff) is folded into the
+    /// iteration count exactly once — at the initial resolution — and never
+    /// re-applied on each resumed iteration (CR 614.5: a replacement effect gets
+    /// only one opportunity to affect an event; re-applying would explode into
+    /// runaway copies). Only read by the `CopySpell` count hook in
+    /// `effects::resolve_effect`.
+    #[serde(default, skip_serializing_if = "CopyCountStatus::is_pending")]
+    pub copy_count_status: CopyCountStatus,
     /// When true, moved/created objects from this effect are forwarded to the sub_ability.
     #[serde(default)]
     pub forward_result: bool,
@@ -11025,6 +11062,7 @@ impl ResolvedAbility {
             repeat_for: None,
             min_x_value: 0,
             cant_be_copied: false,
+            copy_count_status: CopyCountStatus::Pending,
             forward_result: false,
             unless_pay: None,
             distribution: None,

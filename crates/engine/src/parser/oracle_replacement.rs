@@ -426,6 +426,17 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         }
     }
 
+    // --- Copy-count replacement: "If you would copy a spell one or more times,
+    //     instead copy it that many times plus an additional time." (Twinning
+    //     Staff) ---
+    // CR 707.10 + CR 614.1a: A replacement effect that increases the number of
+    // copies a copy-a-spell effect produces, modeled as a `CopySpell`
+    // replacement carrying a `QuantityModification` — the same shape as the
+    // token / counter doubling family above.
+    if let Some(def) = parse_copy_count_replacement(&lower, &text) {
+        return Some(def);
+    }
+
     // --- Counter addition replacement: "if one or more ... counters would be put on..." ---
     if nom_primitives::scan_contains(&lower, "counters would be put on")
         || nom_primitives::scan_contains(&lower, "counter would be put on")
@@ -3736,6 +3747,47 @@ pub(super) fn has_except_first_draw_in_draw_step_clause(lower: &str) -> bool {
             .map_or("", |i| remaining[i + 1..].trim_start());
     }
     false
+}
+
+/// CR 707.10 + CR 614.1a: Parse a "copy an additional time" replacement —
+/// "If you would copy a spell one or more times, instead copy it that many
+/// times plus an additional time. You may choose new targets for the additional
+/// copy." (Twinning Staff).
+///
+/// Modeled as a `CopySpell` replacement carrying a `QuantityModification`,
+/// mirroring the token/counter doubling family (Doubling Season, Hardened
+/// Scales). Generalizes to "plus N additional times" via `parse_number`. The
+/// count change is consumed by `copy_spell::copy_count_with_replacements` at the
+/// copy-count site — copies are produced by the `repeat_for` loop, not the
+/// `ProposedEvent` pipeline, so this replacement is queried directly rather than
+/// proposed. The additional copies always permit new targets (standard wording
+/// for this class), satisfied by each copy's existing retarget step.
+fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    use crate::types::ability::QuantityModification;
+
+    // Require the "plus [N] additional time(s)" tail so this only matches the
+    // count-increasing class, not an unrelated one-shot "copy a spell" effect.
+    // Composed from modular combinators along three independent axes — count
+    // (`an` => 1, else a number), the fixed `additional` token, and the
+    // singular/plural `time(s)` noun — rather than enumerating full-phrase tags,
+    // so "plus an additional time" and "plus N additional times" both parse.
+    let additional = nom_on_lower(lower, lower, |i| {
+        let (i, _) = tag(
+            "if you would copy a spell one or more times, instead copy it that many times plus ",
+        )
+        .parse(i)?;
+        let (i, n) = alt((value(1u32, tag("an")), nom_primitives::parse_number)).parse(i)?;
+        let (i, _) = tag(" additional ").parse(i)?;
+        let (i, _) = alt((tag("times"), tag("time"))).parse(i)?;
+        Ok((i, n))
+    })
+    .map(|(n, _)| n)?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::CopySpell)
+            .quantity_modification(QuantityModification::Plus { value: additional })
+            .description(original_text.to_string()),
+    )
 }
 
 /// CR 614.1a: Parse token creation replacement effects.
@@ -9843,5 +9895,61 @@ mod snapshot_tests {
         let (no_modal, unchanged) = super::strip_optional_instead_lead_in("draw two cards");
         assert!(!no_modal, "mandatory effect text must not be misclassified");
         assert_eq!(unchanged, "draw two cards");
+    }
+
+    /// CR 707.10 + CR 614.1a: Twinning Staff's "If you would copy a spell one or
+    /// more times, instead copy it that many times plus an additional time"
+    /// parses to a `CopySpell` replacement carrying `Plus { value: 1 }`.
+    #[test]
+    fn copy_count_replacement_parses_twinning_staff() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::replacements::ReplacementEvent;
+
+        let def = super::parse_replacement_line(
+            "If you would copy a spell one or more times, instead copy it that many times \
+             plus an additional time. You may choose new targets for the additional copy.",
+            "Twinning Staff",
+        )
+        .expect("Twinning Staff replacement must parse");
+
+        assert_eq!(def.event, ReplacementEvent::CopySpell);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+    }
+
+    /// The "additional time(s)" tail is composed from modular combinators, so a
+    /// numbered, pluralized variant ("plus 2 additional times") parses to the
+    /// corresponding `Plus { value }` — sibling coverage beyond the single
+    /// Twinning Staff wording.
+    #[test]
+    fn copy_count_replacement_parses_plural_numbered_variant() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::replacements::ReplacementEvent;
+
+        let def = super::parse_replacement_line(
+            "If you would copy a spell one or more times, instead copy it that many times \
+             plus 2 additional times.",
+            "Hypothetical Double Staff",
+        )
+        .expect("plural numbered copy-count replacement must parse");
+
+        assert_eq!(def.event, ReplacementEvent::CopySpell);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 2 })
+        );
+    }
+
+    #[test]
+    fn copy_count_replacement_requires_full_copy_count_shape() {
+        let text = "If you would copy a spell, instead copy target spell plus an additional time.";
+        let lower = text.to_lowercase();
+
+        assert!(
+            super::parse_copy_count_replacement(&lower, text).is_none(),
+            "copy-count replacement must not be gated by loose substring matching"
+        );
     }
 }
