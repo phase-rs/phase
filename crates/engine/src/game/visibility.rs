@@ -444,6 +444,20 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 603.3b + CR 400.2: Per-controller ordering pass — keep the
+    // placement spine visible to everyone (groups, group sizes,
+    // controllers, ordered flags) but strip each group's private
+    // payload from viewers who are not that group's controller.
+    if let Some(order) = filtered.pending_trigger_order.as_mut() {
+        for group in &mut order.groups {
+            if !can_view_private_for_player(group.controller) {
+                for ctx in &mut group.triggers {
+                    redact_pending_trigger_context_for_observer(ctx);
+                }
+            }
+        }
+    }
+
     filtered
 }
 
@@ -476,6 +490,29 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.source_related_token_ids.clear();
         obj.foretold = false;
     }
+}
+
+/// CR 603.3b + CR 400.2: A pending trigger awaiting its
+/// controller's ordering choice may carry private data —
+/// the firing `GameEvent` can reference hidden-zone objects
+/// (library look/scry/surveil/mill triggers), and the
+/// modal/distribute/mode_abilities/description fields describe
+/// the controller's not-yet-public choices. Strip every payload
+/// an opponent has no rules-permission to see, leaving only
+/// the public spine (source_id, controller, timestamp, ability,
+/// condition, target_constraints, subject_match_count,
+/// may_trigger_origin) needed for the engine to keep running on
+/// the wire and for the opponent's frontend to render an
+/// "opponent is ordering N triggers" indicator.
+fn redact_pending_trigger_context_for_observer(
+    ctx: &mut crate::game::triggers::PendingTriggerContext,
+) {
+    ctx.pending.trigger_event = None;
+    ctx.pending.modal = None;
+    ctx.pending.distribute = None;
+    ctx.pending.mode_abilities.clear();
+    ctx.pending.description = None;
+    ctx.trigger_events.clear();
 }
 
 #[cfg(test)]
