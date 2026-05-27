@@ -54,6 +54,7 @@ mod integration_landfall;
 mod jace_wielder_empty_library_win;
 mod json_smoke_test;
 mod kaito_integration;
+mod krark_clan_ironworks_castability;
 mod leyline_taps_for_mana_repro;
 mod louisoix_sacrifice_counter;
 mod madame_null_integration;

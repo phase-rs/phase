@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -6,6 +6,7 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { useDraftStore } from "../../stores/draftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import { CardPreview, type CardHoverInfo } from "../card/CardPreview";
 import { ManaCurve } from "./ManaCurve";
 
 // Shared enter/exit for cards moving between the pool and the deck.
@@ -43,9 +44,10 @@ interface CardTileProps {
   count?: number;
   dimmed?: boolean;
   onClick: () => void;
+  onHover: (info: CardHoverInfo | null) => void;
 }
 
-function CardTile({ card, count, dimmed, onClick }: CardTileProps) {
+function CardTile({ card, count, dimmed, onClick, onHover }: CardTileProps) {
   const { src, isLoading } = useCardImage(card.name, {
     size: "normal",
     sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
@@ -54,6 +56,13 @@ function CardTile({ card, count, dimmed, onClick }: CardTileProps) {
   return (
     <button
       onClick={onClick}
+      onMouseEnter={() =>
+        onHover({
+          name: card.name,
+          sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
+        })
+      }
+      onMouseLeave={() => onHover(null)}
       className={`relative cursor-pointer overflow-hidden rounded-[14px] ring-1 ring-white/10 transition-all duration-150 hover:scale-[1.02] hover:ring-white/20
         ${dimmed ? "opacity-70 hover:opacity-90" : ""}`}
     >
@@ -209,6 +218,8 @@ export function LimitedDeckBuilder({
   const setLandCount = onSetLandCount ?? quickSetLandCount;
   const submitDeck = onSubmitDeck ?? quickSubmitDeck;
 
+  const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
+
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
 
   const remainingPool = useMemo(
@@ -237,6 +248,12 @@ export function LimitedDeckBuilder({
 
   return (
     <div className="flex h-full flex-col gap-4">
+      <CardPreview
+        cardName={hoveredCard?.name ?? null}
+        sourcePrinting={hoveredCard?.sourcePrinting}
+        mobileLayout="compact"
+        onDismiss={() => setHoveredCard(null)}
+      />
       <DeckStatus spells={mainDeck.length} lands={totalLands} min={minDeckSize} />
 
       <div className="flex min-h-0 flex-1 gap-6">
@@ -251,7 +268,12 @@ export function LimitedDeckBuilder({
               <AnimatePresence mode="popLayout" initial={false}>
                 {remainingPool.map((card) => (
                   <motion.div key={card.instance_id} {...CARD_MOTION}>
-                    <CardTile card={card} dimmed onClick={() => addToDeck(card.name)} />
+                    <CardTile
+                      card={card}
+                      dimmed
+                      onClick={() => addToDeck(card.name)}
+                      onHover={setHoveredCard}
+                    />
                   </motion.div>
                 ))}
               </AnimatePresence>
@@ -270,7 +292,12 @@ export function LimitedDeckBuilder({
               <AnimatePresence mode="popLayout" initial={false}>
                 {deckGroups.map(({ card, count }) => (
                   <motion.div key={card.instance_id} {...CARD_MOTION}>
-                    <CardTile card={card} count={count} onClick={() => removeFromDeck(card.name)} />
+                    <CardTile
+                      card={card}
+                      count={count}
+                      onClick={() => removeFromDeck(card.name)}
+                      onHover={setHoveredCard}
+                    />
                   </motion.div>
                 ))}
               </AnimatePresence>

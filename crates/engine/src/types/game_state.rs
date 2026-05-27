@@ -1099,12 +1099,16 @@ pub enum CombatTaxPending {
     },
 }
 
-/// CR 107.4f + CR 601.2f: Which legal payments a single Phyrexian shard offers to the
+/// CR 107.4f + CR 601.2h: Which legal payments a single Phyrexian shard offers to the
 /// caster. Computed from the mana pool state (Phyrexian color availability) combined with
 /// the caster's life total and CantLoseLife status (CR 118.3 + CR 119.8).
 ///
-/// The engine only pauses for a `WaitingFor::PhyrexianPayment` when at least one shard
-/// carries `ManaOrLife` — otherwise the choice is trivial and auto-resolves.
+/// The engine pauses at `WaitingFor::PhyrexianPayment` whenever any shard would deduct
+/// life — both `ManaOrLife` (player explicitly picks mana vs life) and `LifeOnly` (life
+/// is the only remaining payment route; player confirms or cancels via `CancelCast`).
+/// Only `ManaOnly` shards auto-resolve without surfacing the prompt, since they have no
+/// life consequence (issue #704: silent life deduction violated CR 601.2h's right to
+/// refuse the cast).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ShardOptions {
@@ -2725,10 +2729,13 @@ pub enum WaitingFor {
         per_creature: Vec<(ObjectId, crate::types::mana::ManaCost)>,
         pending: CombatTaxPending,
     },
-    /// CR 107.4f + CR 601.2f + CR 601.2h: Caster must choose mana-or-2-life for each
-    /// Phyrexian shard that has both options viable. Only pauses when the choice is
-    /// meaningful — if every shard resolves to `ShardOptions::ManaOnly` or
-    /// `ShardOptions::LifeOnly`, the engine auto-decides and skips this state.
+    /// CR 107.4f + CR 601.2f + CR 601.2h: Caster must approve every Phyrexian shard
+    /// that would deduct life — either by choosing between mana and 2 life
+    /// (`ShardOptions::ManaOrLife`) or by confirming the life-only payment
+    /// (`ShardOptions::LifeOnly`). Only `ShardOptions::ManaOnly` shards auto-resolve
+    /// and skip this state, since they carry no life consequence. The player may
+    /// always submit `CancelCast` here to abandon the cast rather than pay life
+    /// (issue #704).
     ///
     /// The `PendingCast` still lives in `GameState::pending_cast` (same ManaPayment
     /// convention), so multiplayer visibility filtering continues to clear inner detail

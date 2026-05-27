@@ -2175,6 +2175,29 @@ fn pay_additional_cost(
     pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if pending.ability.chosen_x.is_none() {
+        if let Some(max) = additional_cost_x_max(state, player, &cost) {
+            let min = pending.ability.min_x_value;
+            if min > max {
+                super::casting::handle_cancel_cast(state, &pending, events);
+                return Err(EngineError::ActionNotAllowed(format!(
+                    "Minimum legal X value {min} exceeds maximum payable X value {max}"
+                )));
+            }
+            let mut pending = pending;
+            let cost = prepend_deferred_required_cost(cost, &mut pending);
+            pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
+            state.pending_cast = Some(Box::new(pending.clone()));
+            return Ok(WaitingFor::ChooseXValue {
+                player,
+                min,
+                max,
+                pending_cast: Box::new(pending),
+                convoke_mode: None,
+            });
+        }
+    }
+
     match cost {
         AbilityCost::PayLife { amount } => {
             // CR 118.3 + CR 119.4 + CR 119.8: Pay life as an additional cost via
@@ -2182,8 +2205,8 @@ fn pay_additional_cost(
             // CR 119.4 + CR 903.4: `amount` is a QuantityExpr so dynamic refs
             // (e.g. commander color identity count) resolve at cast time.
             let resolved =
-                super::quantity::resolve_quantity(state, &amount, player, pending.object_id).max(0)
-                    as u32;
+                super::quantity::resolve_quantity_with_targets(state, &amount, &pending.ability)
+                    .max(0) as u32;
             match super::life_costs::pay_life_as_cast_or_activation_cost(
                 state, player, resolved, events,
             ) {
@@ -2494,6 +2517,71 @@ fn pay_additional_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+fn prepend_deferred_required_cost(cost: AbilityCost, pending: &mut PendingCast) -> AbilityCost {
+    match pending.additional_cost_flow.take() {
+        Some(AdditionalCost::Required(AbilityCost::Composite { costs })) => {
+            let mut combined = Vec::with_capacity(costs.len() + 1);
+            combined.push(cost);
+            combined.extend(costs);
+            AbilityCost::Composite { costs: combined }
+        }
+        Some(AdditionalCost::Required(next)) => AbilityCost::Composite {
+            costs: vec![cost, next],
+        },
+        Some(other) => {
+            pending.additional_cost_flow = Some(other);
+            cost
+        }
+        None => cost,
+    }
+}
+
+fn additional_cost_x_max(state: &GameState, player: PlayerId, cost: &AbilityCost) -> Option<u32> {
+    match cost {
+        AbilityCost::PayLife { amount } if quantity_expr_contains_x(amount) => {
+            Some(max_pay_life_x(state, player))
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .filter_map(|cost| additional_cost_x_max(state, player, cost))
+            .min(),
+        AbilityCost::PerCounter { base, .. } => additional_cost_x_max(state, player, base),
+        _ => None,
+    }
+}
+
+fn max_pay_life_x(state: &GameState, player: PlayerId) -> u32 {
+    if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, 1) {
+        return 0;
+    }
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| u32::try_from(p.life.max(0)).unwrap_or(0))
+        .unwrap_or(0)
+}
+
+fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } => name == "X",
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_contains_x(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_contains_x),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_contains_x(left) || quantity_expr_contains_x(right)
+        }
+        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
+    }
+}
+
 pub(super) fn effective_casualty_additional_cost(
     state: &GameState,
     player: PlayerId,
@@ -2673,8 +2761,8 @@ pub(super) fn pay_and_push_adventure(
         return enter_payment_step(state, player, convoke_mode, events);
     }
 
-    // CR 107.4f + CR 601.2f: Pause for interactive Phyrexian choice when the cost has
-    // at least one shard with both mana and 2-life viable. The resume handler calls
+    // CR 107.4f + CR 601.2f: Pause before any Phyrexian shard would deduct life,
+    // whether life is optional or the only legal route. The resume handler calls
     // `finalize_mana_payment_with_phyrexian_choices` which finishes the cast.
     if let Some(waiting) = maybe_pause_for_phyrexian_choice(
         state,
@@ -4021,15 +4109,21 @@ pub(super) fn max_x_value_excluding(
     // that is both a mana source and tap-keyword-eligible can serve only ONE
     // channel, not both. Partition per object: each contributes
     // max(mana yield, tap-keyword yield), never the sum, or the X cap inflates
-    // above what the caster can actually pay. CR 107.1b: `max_mana_yield`
-    // reports a producer's full output (Sol Ring, bounce lands) so multi-mana
-    // sources are not understated.
+    // above what the caster can actually pay.
+    //
+    // CR 117.1d + CR 601.2g: Use `feasible_mana_capacity` (not the auto-tap-
+    // only `max_mana_yield`) so sacrifice-/discard-/life-cost mana abilities
+    // the controller could activate manually are counted. Without this, KCI
+    // (and similar non-tap mana sources) understate the X cap for X-spells
+    // — see #562. The per-permanent sum can over-count chain-sacrifice
+    // configurations (tracked in #1235); colored-shard non-tap feasibility
+    // is deferred separately (tracked in #1234).
     let capacity: u32 = state
         .battlefield
         .iter()
         .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
-            let mana = mana_sources::max_mana_yield(state, id, player);
+            let mana = mana_sources::feasible_mana_capacity(state, id, player);
             let tap = pred
                 .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
                 .map_or(0, |_| 1);
@@ -4097,6 +4191,19 @@ pub fn enter_payment_step(
                 convoke_mode,
             });
         }
+    }
+
+    if state.pending_cast.as_ref().is_some_and(|pending| {
+        matches!(
+            pending.additional_cost_flow,
+            Some(AdditionalCost::Required(_))
+        )
+    }) {
+        let pending = *state
+            .pending_cast
+            .take()
+            .expect("checked pending cast presence");
+        return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
     if state
@@ -4476,8 +4583,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
 /// Auto-taps mana sources first (idempotent: already-tapped lands are skipped) so the
 /// shard-options computation reflects the pool the caster will actually spend from.
 /// Returns `Some(WaitingFor::PhyrexianPayment {...})` when at least one Phyrexian shard
-/// has `ShardOptions::ManaOrLife`; otherwise returns `None` so the caller proceeds with
-/// the existing auto-decision path.
+/// can deduct life; otherwise returns `None` so the caller proceeds with the existing
+/// auto-decision path.
 pub(super) fn maybe_pause_for_phyrexian_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -4563,25 +4670,45 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     let permissions =
         super::static_abilities::build_cost_permission_context(state, player, any_color);
 
-    let shards = {
+    let (shards, payable) = {
         let player_data = state.players.iter().find(|p| p.id == player)?;
-        mana_payment::compute_phyrexian_shards(
+        let shards = mana_payment::compute_phyrexian_shards(
             &player_data.mana_pool,
             cost,
             effective_payment_context,
             permissions,
-        )
+        );
+        // CR 601.2h: Only pause when the cost is actually payable in aggregate.
+        // Phyrexian shards may surface as `LifeOnly` even when the non-Phyrexian
+        // portion (e.g., a {1} generic shard) is unpayable; in that case the
+        // downstream finalizer must reject with "Cannot pay mana cost" rather
+        // than pausing on an unpayable cast.
+        let payable = mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            effective_payment_context,
+            permissions,
+        );
+        (shards, payable)
     };
+    if !payable {
+        return None;
+    }
 
-    // CR 107.4f + CR 601.2f: Pause iff the choice is meaningful — at least one shard
-    // has both options viable. Trivial-choice shards auto-resolve without pausing.
-    let has_meaningful_choice = shards.iter().any(|s| {
+    // CR 107.4f + CR 601.2h: Pause whenever any shard would deduct life — either
+    // because the player explicitly chooses (`ManaOrLife`) or because life is the
+    // only remaining payment route (`LifeOnly`). The player retains the CR 601.2h
+    // option to refuse the cast via `CancelCast` rather than have life silently
+    // deducted (issue #704). `ManaOnly` shards have no life consequence and
+    // continue to auto-resolve.
+    let has_life_consequence = shards.iter().any(|s| {
         matches!(
             s.options,
             crate::types::game_state::ShardOptions::ManaOrLife
+                | crate::types::game_state::ShardOptions::LifeOnly,
         )
     });
-    if !has_meaningful_choice {
+    if !has_life_consequence {
         return None;
     }
 
@@ -7994,6 +8121,132 @@ mod tests {
         // 3 lands + 2 Treasures = 5 sources, minus 1 for the {R} = max X of 4.
         let max = max_x_value(&state, player, &cost, None);
         assert_eq!(max, 4, "max X should count Treasure tokens as mana sources");
+    }
+
+    /// Issue #562: Krark-Clan Ironworks (`Sacrifice an artifact: Add {C}{C}`)
+    /// is a non-tap mana ability — the cost is bare `Sacrifice`, not the
+    /// `Composite { Tap, Sacrifice }` shape Treasure tokens use. Before this
+    /// fix, `max_x_value` called `max_mana_yield`, which gates on
+    /// `has_tap_component` and therefore reported 0 for KCI. The X chooser
+    /// understated affordable X for X-spells that KCI could manually fund.
+    ///
+    /// With the routing change to `feasible_mana_capacity`, KCI's 2-mana yield
+    /// per activation is counted up to the sacrifice supply.
+    ///
+    // CR 107.1b + CR 117.1d + CR 605.3a: Mana abilities (including non-tap-
+    // cost ones) may be activated during cost payment, so the affordable X
+    // cap must include their feasible yield.
+    #[test]
+    fn max_x_value_counts_kci_non_tap_sacrifice_mana_ability() {
+        use crate::types::ability::{ManaProduction, TargetFilter, TypeFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        // 1 Mountain — the only `{T}`-cost producer, supplies the fixed {R}.
+        let mountain = create_object(
+            &mut state,
+            CardId(900),
+            player,
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mountain).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Mountain".to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Red],
+                            contribution: crate::types::ability::ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // KCI — non-tap, bare `Sacrifice an artifact: Add {C}{C}`.
+        let kci = create_object(
+            &mut state,
+            CardId(901),
+            player,
+            "Krark-Clan Ironworks".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kci).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    count: 1,
+                }),
+            );
+        }
+
+        // Three sacrificable artifact creatures so KCI's sacrifice supply
+        // is non-empty.
+        for i in 0..3 {
+            let sac = create_object(
+                &mut state,
+                CardId(902 + i),
+                player,
+                format!("Sacrificial Artifact {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&sac).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 0,
+        };
+
+        // Without the fix, `max_mana_yield` would return 0 for KCI (no `{T}`
+        // cost component) and the cap would be 0 (1 Mountain − 1 fixed {R}
+        // shard). With the fix, KCI's `feasible_mana_capacity` returns 2.
+        //
+        // Arithmetic (deterministic):
+        //   - Mountain: feasible_mana_capacity = 1 ({R} via `{T}`)
+        //   - KCI:      feasible_mana_capacity = 2 ({C}{C} via one Sacrifice)
+        //   - 3 fodder: feasible_mana_capacity = 0 each (no mana abilities)
+        //   - pool = 0, fixed_portion = 1 (the {R})
+        //   - capacity = 1 + 2 = 3, remaining = 3 − 1 = 2
+        //   - x_count = 1, so max X = 2 / 1 = 2.
+        //
+        // The tight `assert_eq!(max, 2)` is a falsifiable expectation in
+        // both directions: an *under-count* regression (the original #562
+        // bug) would report max == 0, and an *over-count* regression
+        // (e.g. counting fodder or chain-sacrificing the same mana source
+        // twice) would report max >= 3.
+        let max = max_x_value(&state, player, &cost, None);
+        assert_eq!(
+            max, 2,
+            "Issue #562: KCI's non-tap mana ability must be counted by max_x_value. \
+             Expected exactly 2 (1 Mountain + 2 KCI − 1 fixed {{R}}), got {max}",
+        );
     }
 
     /// CR 702.51a + CR 601.2b: `max_x_value` must count Convoke-eligible
