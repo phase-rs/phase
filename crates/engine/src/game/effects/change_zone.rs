@@ -3,8 +3,8 @@ use rand::Rng;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Duration, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter,
-    TargetSelectionMode, TypedFilter,
+    Duration, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -53,6 +53,32 @@ fn tracked_set_member_zone(state: &GameState, filter: &TargetFilter) -> Option<Z
         .get(&id)?
         .iter()
         .find_map(|obj_id| state.objects.get(obj_id).map(|obj| obj.zone))
+}
+
+fn resolution_choice_cardinality(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    eligible_count: usize,
+    up_to: bool,
+) -> (usize, usize, bool) {
+    let Some(spec) = ability
+        .multi_target
+        .as_ref()
+        .filter(|_| matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution))
+    else {
+        return (1, 0, up_to);
+    };
+
+    let max = spec
+        .max
+        .as_ref()
+        .map(|expr| crate::game::quantity::resolve_quantity_with_targets(state, expr, ability))
+        .map(|value| value.max(0) as usize)
+        .unwrap_or(eligible_count)
+        .max(spec.min)
+        .min(eligible_count);
+    let min = spec.min.min(max);
+    (max, min, min != max)
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.
@@ -495,7 +521,13 @@ pub fn resolve(
             return Ok(());
         }
 
-        if matches!(ability.target_selection_mode, TargetSelectionMode::Random) && !up_to {
+        let (choice_count, min_count, choice_up_to) =
+            resolution_choice_cardinality(state, ability, eligible.len(), up_to);
+
+        if matches!(ability.target_selection_mode, TargetSelectionMode::Random)
+            && !choice_up_to
+            && choice_count == 1
+        {
             let index = state.rng.random_range(0..eligible.len());
             let chosen = eligible[index];
             let ctrl_override = if under_your_control {
@@ -547,7 +579,7 @@ pub fn resolve(
             return Ok(());
         }
 
-        if eligible.len() == 1 && !up_to {
+        if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let ctrl_override = if under_your_control {
                 Some(ability.controller)
             } else {
@@ -600,9 +632,9 @@ pub fn resolve(
         state.waiting_for = WaitingFor::EffectZoneChoice {
             player: filter_controller,
             cards: eligible,
-            count: 1,
-            min_count: 0,
-            up_to,
+            count: choice_count,
+            min_count,
+            up_to: choice_up_to,
             source_id: ability.source_id,
             effect_kind: EffectKind::ChangeZone,
             zone: scan_zone,
@@ -1077,6 +1109,88 @@ mod tests {
 
         assert!(state.battlefield.contains(&obj_id));
         assert!(!state.players[0].hand.contains(&obj_id));
+    }
+
+    #[test]
+    fn change_zone_any_number_from_hand_prompts_for_all_eligible_cards() {
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Hand,
+        );
+        let wolf = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Wolf".to_string(),
+            Zone::Hand,
+        );
+        let island = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        for id in [bear, wolf] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::InZone { zone: Zone::Hand }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
+        ability.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 2);
+                assert_eq!(*min_count, 0);
+                assert!(*up_to);
+                assert!(cards.contains(&bear));
+                assert!(cards.contains(&wolf));
+                assert!(!cards.contains(&island));
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
     }
 
     #[test]

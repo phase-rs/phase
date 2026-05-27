@@ -149,7 +149,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MadnessCastOffer { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
+        | WaitingFor::ExileForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. }
         | WaitingFor::PayManaAbilityMana { .. }
         | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,

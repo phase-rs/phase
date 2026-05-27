@@ -9,8 +9,8 @@ expression: "&ir"
         "kind": "Spell",
         "effect": {
           "type": "Unimplemented",
-          "name": "unknown",
-          "description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
+          "name": "static_structure",
+          "description": "Static pattern matched but line failed static parser: Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
         },
         "cost": null,
         "sub_ability": null,

@@ -16,6 +16,7 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::cost_payability::{eligible_exile_cost_objects, exile_cost_effective_zone};
 use super::effects::mana::resolve_restrictions;
 use super::engine::EngineError;
 use super::filter::{matches_target_filter, FilterContext};
@@ -439,7 +440,7 @@ pub fn activate_mana_ability(
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
@@ -764,35 +765,39 @@ pub fn handle_tap_creatures_for_mana_ability(
     advance_mana_ability_activation(state, updated, events)
 }
 
-/// CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Complete the
-/// exile-from-battlefield mana-ability cost selection (Food Chain class).
-/// Captures the cost-paid object's mana value snapshot from the live
-/// battlefield before the cost is paid, then resumes the activation flow.
-pub fn handle_exile_from_battlefield_for_mana_ability(
+/// CR 117.1 + CR 118.3 + CR 605.3b + CR 400.7j: Complete a non-self exile
+/// mana-ability cost selection. Captures the cost-paid object's public
+/// characteristics before the cost is paid, then resumes the activation flow.
+pub fn handle_exile_for_mana_ability(
     state: &mut GameState,
     count: usize,
-    legal_permanents: &[ObjectId],
+    legal_cards: &[ObjectId],
     pending: &PendingManaAbility,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if chosen.len() != count {
         return Err(EngineError::InvalidAction(format!(
-            "Must exile exactly {} permanent(s), got {}",
+            "Must exile exactly {} card(s), got {}",
             count,
             chosen.len()
         )));
     }
+    if contains_duplicate_object_id(chosen) {
+        return Err(EngineError::InvalidAction(
+            "Cannot exile the same card more than once for a mana ability cost".to_string(),
+        ));
+    }
     for id in chosen {
-        if !legal_permanents.contains(id) {
+        if !legal_cards.contains(id) {
             return Err(EngineError::InvalidAction(
-                "Selected permanent not eligible for mana ability exile cost".to_string(),
+                "Selected card not eligible for mana ability exile cost".to_string(),
             ));
         }
     }
 
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the cost-paid object's public
-    // characteristics before it leaves the battlefield.
+    // characteristics before it leaves its zone.
     let captured = chosen.first().and_then(|id| {
         state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
             object_id: *id,
@@ -801,7 +806,7 @@ pub fn handle_exile_from_battlefield_for_mana_ability(
     });
 
     let mut updated = pending.clone();
-    updated.chosen_exiled_battlefield = chosen.to_vec();
+    updated.chosen_exiled = chosen.to_vec();
     updated.cost_paid_object = captured;
     advance_mana_ability_activation(state, updated, events)
 }
@@ -962,26 +967,34 @@ fn advance_mana_ability_activation(
         }
     }
 
-    // CR 117.1 + CR 118.3: Non-self exile-from-battlefield as a mana ability cost
-    // (Food Chain class). Surface the player choice before producing mana so the
-    // cost-paid object's mana value can be captured at cost-payment time
-    // (CR 202.3).
-    if pending.chosen_exiled_battlefield.is_empty() {
-        if let Some((count, permanents)) = exile_from_battlefield_cost_choice(
-            state,
-            pending.player,
-            pending.source_id,
-            &ability_def.cost,
-        ) {
-            if permanents.len() < count {
+    // CR 117.1 + CR 118.3 + CR 400.7j: Non-self exile as a mana ability cost.
+    // Library costs are deterministic top-card payment, so prepare their
+    // selected objects and cost-paid snapshot before any mana output prompt.
+    if pending.chosen_exiled.is_empty() {
+        if let Some(updated) =
+            prepare_deterministic_exile_cost_selection(state, &pending, &ability_def.cost)?
+        {
+            return advance_mana_ability_activation(state, updated, events);
+        }
+    }
+
+    // CR 117.1 + CR 118.3: Interactive non-self exile costs (Food Chain,
+    // Titans' Nest) choose objects before producing mana so the cost-paid
+    // object's public characteristics can be captured at payment time.
+    if pending.chosen_exiled.is_empty() {
+        if let Some((count, zone, cards)) =
+            exile_cost_choice(state, pending.player, pending.source_id, &ability_def.cost)
+        {
+            if cards.len() < count {
                 return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible permanents to exile for mana ability cost".to_string(),
+                    "Not enough eligible cards to exile for mana ability cost".to_string(),
                 ));
             }
-            return Ok(WaitingFor::ExileFromBattlefieldForManaAbility {
+            return Ok(WaitingFor::ExileForManaAbility {
                 player: pending.player,
                 count,
-                permanents,
+                zone,
+                cards,
                 pending_mana_ability: Box::new(pending),
             });
         }
@@ -1075,7 +1088,7 @@ fn advance_mana_ability_activation(
                 events,
                 &mut pending.chosen_tappers.iter().copied(),
                 &mut pending.chosen_discards.iter().copied(),
-                &mut pending.chosen_exiled_battlefield.iter().copied(),
+                &mut pending.chosen_exiled.iter().copied(),
                 &mut pending.chosen_sacrificed_battlefield.iter().copied(),
                 pending.chosen_mana_payment.as_deref(),
             )?;
@@ -1125,7 +1138,7 @@ fn advance_mana_ability_activation(
         pending.color_override.clone(),
         &pending.chosen_tappers,
         &pending.chosen_discards,
-        &pending.chosen_exiled_battlefield,
+        &pending.chosen_exiled,
         &pending.chosen_sacrificed_battlefield,
         pending.chosen_mana_payment.as_deref(),
         pending.cost_paid_object,
@@ -1202,7 +1215,7 @@ fn resolve_mana_ability_with_selected_choices(
     }
     if exiled.next().is_some() {
         return Err(EngineError::InvalidAction(
-            "Too many permanents selected for mana ability exile cost".to_string(),
+            "Too many cards selected for mana ability exile cost".to_string(),
         ));
     }
     if discarded.next().is_some() {
@@ -1311,6 +1324,86 @@ fn resolve_mana_ability_sub_chain(
     let _ = super::effects::resolve_ability_chain(state, sub, events, 0);
 }
 
+struct ExileCostPayment<'a, I>
+where
+    I: Iterator<Item = ObjectId>,
+{
+    source_id: ObjectId,
+    player: PlayerId,
+    count: u32,
+    zone: Option<Zone>,
+    filter: Option<&'a TargetFilter>,
+    events: &'a mut Vec<GameEvent>,
+    chosen_exiled: &'a mut I,
+}
+
+fn pay_selected_exile_cost_for_mana_ability<I>(
+    state: &mut GameState,
+    payment: ExileCostPayment<'_, I>,
+) -> Result<(), EngineError>
+where
+    I: Iterator<Item = ObjectId>,
+{
+    let effective_zone = exile_cost_effective_zone(payment.zone, payment.filter);
+    if effective_zone == Zone::Library && payment.filter.is_some() {
+        return Err(EngineError::InvalidAction(
+            "Unsupported filtered library exile cost for mana ability".to_string(),
+        ));
+    }
+    let chosen: Vec<_> = (0..payment.count)
+        .map(|_| {
+            payment.chosen_exiled.next().ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Missing exiled card selection for mana ability".to_string(),
+                )
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    if contains_duplicate_object_id(&chosen) {
+        return Err(EngineError::InvalidAction(
+            "Cannot exile the same card more than once for a mana ability cost".to_string(),
+        ));
+    }
+    let legal = eligible_exile_cost_objects(
+        state,
+        payment.player,
+        payment.source_id,
+        effective_zone,
+        payment.filter,
+        payment.count,
+    );
+    if effective_zone == Zone::Library {
+        if chosen != legal {
+            return Err(EngineError::ActionNotAllowed(
+                "Selected cards are no longer on top of your library".to_string(),
+            ));
+        }
+    } else {
+        for chosen_id in &chosen {
+            if !legal.contains(chosen_id) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Selected card does not match the exile cost".to_string(),
+                ));
+            }
+        }
+    }
+    for chosen_id in chosen {
+        if chosen_id == payment.source_id {
+            return Err(EngineError::ActionNotAllowed(
+                "Source cannot satisfy its own exile cost".to_string(),
+            ));
+        }
+        super::zones::move_to_zone(state, chosen_id, Zone::Exile, payment.events);
+    }
+    Ok(())
+}
+
+fn contains_duplicate_object_id(ids: &[ObjectId]) -> bool {
+    ids.iter()
+        .enumerate()
+        .any(|(index, id)| ids[index + 1..].contains(id))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pay_mana_ability_cost_with_choices<I, J, K, L>(
     state: &mut GameState,
@@ -1320,7 +1413,7 @@ fn pay_mana_ability_cost_with_choices<I, J, K, L>(
     events: &mut Vec<GameEvent>,
     chosen_tappers: &mut I,
     chosen_discards: &mut J,
-    chosen_exiled_battlefield: &mut K,
+    chosen_exiled: &mut K,
     chosen_sacrificed_battlefield: &mut L,
     chosen_hybrid_payment: Option<&[ManaType]>,
 ) -> Result<(), EngineError>
@@ -1448,48 +1541,27 @@ where
             zone,
             count: 1,
         }) => exile_self_for_mana_cost(state, source_id, *zone, events)?,
-        // CR 117.1 + CR 118.3 + CR 605.3b: Non-self exile-from-battlefield as a
-        // mana ability cost (Food Chain class). The interactive flow has already
-        // captured the chosen permanents in `chosen_exiled_battlefield`; here we
-        // verify each is still legal and move it to exile. The cost-paid object's
-        // mana value is captured by the resume handler before this fn runs.
+        // CR 117.1 + CR 118.3 + CR 605.3b: Non-self exile as a mana ability
+        // cost. The activation flow has already captured the selected objects
+        // and the cost-paid snapshot; here we verify they are still legal and
+        // move them to exile.
         Some(AbilityCost::Exile {
             count,
             zone,
-            filter: Some(filter),
-        }) if matches!(zone, None | Some(Zone::Battlefield))
-            && !matches!(filter, TargetFilter::SelfRef) =>
-        {
-            let ctx = FilterContext::from_source(state, source_id);
-            for _ in 0..*count {
-                let chosen_id = chosen_exiled_battlefield.next().ok_or_else(|| {
-                    EngineError::InvalidAction(
-                        "Missing exiled permanent selection for mana ability".to_string(),
-                    )
-                })?;
-                if chosen_id == source_id {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Source cannot satisfy its own exile cost".to_string(),
-                    ));
-                }
-                let obj = state.objects.get(&chosen_id).ok_or_else(|| {
-                    EngineError::InvalidAction(
-                        "Selected permanent for exile cost not found".to_string(),
-                    )
-                })?;
-                if obj.zone != Zone::Battlefield || obj.controller != player {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Selected permanent is not on the battlefield under your control"
-                            .to_string(),
-                    ));
-                }
-                if !matches_target_filter(state, chosen_id, filter, &ctx) {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Selected permanent does not match the exile cost filter".to_string(),
-                    ));
-                }
-                super::zones::move_to_zone(state, chosen_id, Zone::Exile, events);
-            }
+            filter,
+        }) if !matches!(filter, Some(TargetFilter::SelfRef)) => {
+            pay_selected_exile_cost_for_mana_ability(
+                state,
+                ExileCostPayment {
+                    source_id,
+                    player,
+                    count: *count,
+                    zone: *zone,
+                    filter: filter.as_ref(),
+                    events,
+                    chosen_exiled,
+                },
+            )?;
         }
         Some(AbilityCost::Composite { costs }) => {
             let exclude_source = costs
@@ -1596,6 +1668,24 @@ where
                         zone,
                         count: 1,
                     } => exile_self_for_mana_cost(state, source_id, *zone, events)?,
+                    AbilityCost::Exile {
+                        count,
+                        zone,
+                        filter,
+                    } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
+                        pay_selected_exile_cost_for_mana_ability(
+                            state,
+                            ExileCostPayment {
+                                source_id,
+                                player,
+                                count: *count,
+                                zone: *zone,
+                                filter: filter.as_ref(),
+                                events,
+                                chosen_exiled,
+                            },
+                        )?;
+                    }
                     // CR 122.1 + CR 601.2b: RemoveCounter-on-self as part of a
                     // composite mana-ability cost (e.g. Gemstone Mine: `{T}, Remove
                     // a mining counter from this land: Add one mana of any color`).
@@ -2069,56 +2159,83 @@ fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     }
 }
 
-/// CR 117.1 + CR 118.3: Match `AbilityCost::Exile` shapes that target a
-/// non-self battlefield permanent. Returns `(count, filter)` if found, else
-/// `None`. Both `zone: None` (parser convention when the filter implies
-/// battlefield) and `zone: Some(Battlefield)` are accepted.
-fn find_exile_from_battlefield_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+/// CR 117.1 + CR 118.3: Match non-self `AbilityCost::Exile` shapes. Returns
+/// `(count, effective_zone, filter)` if found, else `None`.
+fn find_exile_cost(cost: &AbilityCost) -> Option<(u32, Zone, Option<&TargetFilter>)> {
     match cost {
         AbilityCost::Exile {
             count,
             zone,
-            filter: Some(filter),
-        } if matches!(zone, None | Some(Zone::Battlefield))
-            && !matches!(filter, TargetFilter::SelfRef) =>
-        {
-            Some((*count, filter))
-        }
-        AbilityCost::Composite { costs } => costs.iter().find_map(find_exile_from_battlefield_cost),
+            filter,
+        } if !matches!(filter, Some(TargetFilter::SelfRef)) => Some((
+            *count,
+            exile_cost_effective_zone(*zone, filter.as_ref()),
+            filter.as_ref(),
+        )),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_exile_cost),
         _ => None,
     }
 }
 
-/// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible battlefield permanents
-/// for an `AbilityCost::Exile { zone: None|Battlefield, filter: !SelfRef }`
-/// mana ability cost (Food Chain class). Excludes the source object so
-/// abilities cannot exile themselves to satisfy their own cost.
-fn exile_from_battlefield_cost_choice(
+/// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible objects for a non-self
+/// exile mana ability cost. Library costs are deterministic top-card payment,
+/// not a player choice, so they are prepared separately.
+fn exile_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &Option<AbilityCost>,
-) -> Option<(usize, Vec<ObjectId>)> {
-    let (count, filter) = find_exile_from_battlefield_cost(cost.as_ref()?)?;
-    let ctx = FilterContext::from_source(state, source_id);
-    let permanents = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|&id| {
-            if id == source_id {
-                return false;
-            }
-            let Some(obj) = state.objects.get(&id) else {
-                return false;
-            };
-            if obj.zone != Zone::Battlefield || obj.controller != player {
-                return false;
-            }
-            matches_target_filter(state, id, filter, &ctx)
+) -> Option<(usize, Zone, Vec<ObjectId>)> {
+    let (count, zone, filter) = find_exile_cost(cost.as_ref()?)?;
+    if zone == Zone::Library {
+        return None;
+    }
+    Some((
+        count as usize,
+        zone,
+        eligible_exile_cost_objects(state, player, source_id, zone, filter, count),
+    ))
+}
+
+fn prepare_deterministic_exile_cost_selection(
+    state: &GameState,
+    pending: &PendingManaAbility,
+    cost: &Option<AbilityCost>,
+) -> Result<Option<PendingManaAbility>, EngineError> {
+    let Some((count, Zone::Library, filter)) = cost.as_ref().and_then(find_exile_cost) else {
+        return Ok(None);
+    };
+    if count == 0 {
+        return Ok(None);
+    }
+    if filter.is_some() {
+        return Err(EngineError::InvalidAction(
+            "Unsupported filtered library exile cost for mana ability".to_string(),
+        ));
+    }
+    let chosen = eligible_exile_cost_objects(
+        state,
+        pending.player,
+        pending.source_id,
+        Zone::Library,
+        None,
+        count,
+    );
+    if chosen.len() < count as usize {
+        return Err(EngineError::ActionNotAllowed(
+            "Not enough cards in library to exile for mana ability cost".to_string(),
+        ));
+    }
+    let captured = chosen.first().and_then(|id| {
+        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
+            object_id: *id,
+            lki: obj.snapshot_for_mana_spent(),
         })
-        .collect();
-    Some((count as usize, permanents))
+    });
+    let mut updated = pending.clone();
+    updated.chosen_exiled = chosen;
+    updated.cost_paid_object = captured;
+    Ok(Some(updated))
 }
 
 /// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible battlefield permanents
@@ -2309,9 +2426,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
-        ContinuousModification, ControllerRef, DevotionColors, Duration, Effect, LinkedExileScope,
-        ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope, PlayerScope, QuantityExpr,
-        QuantityRef, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ContinuousModification, ControllerRef, DevotionColors, Duration, Effect, FilterProp,
+        LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope,
+        PlayerScope, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -4473,7 +4591,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
@@ -4534,7 +4652,7 @@ mod tests {
                 chosen_tappers: Vec::new(),
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
-                chosen_exiled_battlefield: Vec::new(),
+                chosen_exiled: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
                 batch_siblings: Vec::new(),
@@ -4761,7 +4879,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
@@ -4861,7 +4979,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
@@ -5759,7 +5877,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
@@ -6042,7 +6160,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
@@ -6330,6 +6448,32 @@ mod tests {
         })
     }
 
+    fn make_titans_nest_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }]),
+            )),
+        })
+    }
+
     /// Helper: spawn `name` on the battlefield with a printed mana cost
     /// and the Creature core type.
     fn spawn_creature_with_cost(
@@ -6432,6 +6576,159 @@ mod tests {
     }
 
     #[test]
+    fn titans_nest_exiles_own_graveyard_card_for_colorless_mana() {
+        let mut state = GameState::new_two_player(42);
+        let nest = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Titans' Nest".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_titans_nest_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&nest).unwrap().abilities).push(ability.clone());
+
+        let own_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let own_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let own_stolen = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Stolen graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&own_stolen).unwrap().controller = PlayerId(1);
+        let opponent_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            nest,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .expect("Titans' Nest should ask which graveyard card pays the cost");
+
+        let pending = match waiting {
+            WaitingFor::ExileForManaAbility {
+                player,
+                count,
+                zone,
+                cards,
+                pending_mana_ability,
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 1);
+                assert_eq!(zone, Zone::Graveyard);
+                assert!(cards.contains(&own_a));
+                assert!(cards.contains(&own_b));
+                assert!(cards.contains(&own_stolen));
+                assert!(!cards.contains(&opponent_card));
+                pending_mana_ability
+            }
+            other => panic!("expected ExileForManaAbility, got {other:?}"),
+        };
+
+        let result = handle_exile_for_mana_ability(
+            &mut state,
+            1,
+            &[own_a, own_b],
+            &pending,
+            &[own_a],
+            &mut events,
+        )
+        .expect("exile choice should resolve the mana ability");
+
+        assert!(matches!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.objects.get(&own_a).unwrap().zone, Zone::Exile);
+        assert_eq!(state.objects.get(&own_b).unwrap().zone, Zone::Graveyard);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1
+        );
+    }
+
+    #[test]
+    fn exile_for_mana_ability_rejects_duplicate_selected_cards() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Two-card Exile Source".to_string(),
+            Zone::Battlefield,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: source,
+            ability_index: 0,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            batch_siblings: Vec::new(),
+        };
+
+        let result = handle_exile_for_mana_ability(
+            &mut state,
+            2,
+            &[first, second],
+            &pending,
+            &[first, first],
+            &mut Vec::new(),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(state.objects.get(&first).unwrap().zone, Zone::Graveyard);
+        assert_eq!(state.objects.get(&second).unwrap().zone, Zone::Graveyard);
+    }
+
+    #[test]
     fn sacrifice_mana_cost_rejects_prohibited_selected_permanent() {
         let mut state = GameState::new_two_player(42);
         let altar = create_object(
@@ -6478,7 +6775,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
@@ -6596,13 +6893,13 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
-        let _ = handle_exile_from_battlefield_for_mana_ability(
+        let _ = handle_exile_for_mana_ability(
             &mut state,
             1,
             &[creature],
@@ -6656,13 +6953,13 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
-        let _ = handle_exile_from_battlefield_for_mana_ability(
+        let _ = handle_exile_for_mana_ability(
             &mut state,
             1,
             &[creature],
@@ -6807,13 +7104,13 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_exiled_battlefield: Vec::new(),
+            chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
             batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
-        let _ = handle_exile_from_battlefield_for_mana_ability(
+        let _ = handle_exile_for_mana_ability(
             &mut state,
             1,
             &[creature],

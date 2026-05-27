@@ -1697,6 +1697,13 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
+        Effect::Sacrifice { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
         Effect::AddCounter { .. }
         | Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
@@ -5492,6 +5499,38 @@ mod tests {
     }
 
     #[test]
+    fn damage_chain_controller_rider_ignores_parent_targets() {
+        let mut state = GameState::new_two_player(42);
+        let rider = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(rider);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].life, 18);
+        assert_eq!(state.players[1].life, 16);
+    }
+
+    #[test]
     fn counter_spell_damage_rider_hits_countered_spell_controller() {
         let mut state = GameState::new_two_player(42);
         let spell = create_object(
@@ -8167,6 +8206,178 @@ mod tests {
         assert!(
             state.pending_repeat_iteration.is_none(),
             "loop must clear pending_repeat_iteration after final iteration completes"
+        );
+    }
+
+    /// CR 608.2c + CR 109.5 + CR 701.23a: Ghost Quarter shape — after a land
+    /// is destroyed, "its controller may search their library..." binds the
+    /// search and the Library -> Battlefield continuation to the destroyed
+    /// land's controller, not the ability controller. `ChangeZone { target:
+    /// Any }` is the continuation sentinel for the card selected by
+    /// SearchLibrary, so the selected object target must flow through the
+    /// pending continuation instead of scanning any player's library.
+    #[test]
+    fn parent_target_controller_search_puts_chosen_card_onto_that_players_battlefield() {
+        use crate::game::engine::apply;
+        use crate::types::ability::{EffectKind, SearchSelectionConstraint};
+
+        let mut state = GameState::new_two_player(42);
+
+        let destroyed_land = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Destroyed Land".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&destroyed_land).unwrap().controller = PlayerId(1);
+
+        let p0_basic = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(0),
+            "Caster Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&p0_basic)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+        state
+            .objects
+            .get_mut(&p0_basic)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(crate::types::card_type::Supertype::Basic);
+
+        let p1_basic = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(1),
+            "Opponent Plains".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&p1_basic)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+        state
+            .objects
+            .get_mut(&p1_basic)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(crate::types::card_type::Supertype::Basic);
+
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetController,
+            },
+            vec![],
+            ObjectId(9000),
+            PlayerId(0),
+        );
+        let put = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(9000),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle);
+        let search = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic,
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ParentTargetController),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+            },
+            vec![TargetRef::Object(destroyed_land)],
+            ObjectId(9000),
+            PlayerId(0),
+        )
+        .sub_ability(put);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &search, &mut events, 0).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, cards, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "destroyed land's controller must receive the search prompt"
+                );
+                assert_eq!(
+                    cards,
+                    &vec![p1_basic],
+                    "search must inspect the destroyed land controller's library, not the caster's"
+                );
+            }
+            other => panic!("expected SearchChoice for destroyed land controller, got {other:?}"),
+        }
+
+        let result = apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::SelectCards {
+                cards: vec![p1_basic],
+            },
+        )
+        .unwrap();
+        events.extend(result.events);
+
+        assert_eq!(
+            state.objects.get(&p1_basic).unwrap().zone,
+            Zone::Battlefield,
+            "chosen basic land must enter the battlefield"
+        );
+        assert_eq!(
+            state.objects.get(&p1_basic).unwrap().controller,
+            PlayerId(1),
+            "chosen basic land must remain under its owner's control"
+        );
+        assert_eq!(
+            state.objects.get(&p0_basic).unwrap().zone,
+            Zone::Library,
+            "caster's library must not be searched by the ParentTargetController continuation"
+        );
+        assert!(state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(1)));
+        assert!(!state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(0)));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "shuffle continuation must resolve for the searching player"
         );
     }
 
@@ -11239,6 +11450,89 @@ mod tests {
         assert_eq!(state.players[0].life, 19);
         assert_eq!(state.players[0].hand.len(), 1);
         assert_eq!(state.players[0].library.len(), 0);
+    }
+
+    #[test]
+    fn optional_resolution_pay_mana_if_you_do_creates_token() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Myrsmith".to_string(),
+            Zone::Battlefield,
+        );
+        state.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(200),
+                false,
+                Vec::new(),
+            ));
+
+        let token = ResolvedAbility::new(
+            Effect::Token {
+                name: "Myr".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec![
+                    "Artifact".to_string(),
+                    "Creature".to_string(),
+                    "Myr".to_string(),
+                ],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::effect_performed());
+        let mut ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: crate::types::ability::PaymentCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+        .sub_ability(token);
+        ability.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+        assert!(
+            events.iter().any(
+                |event| matches!(event, GameEvent::TokenCreated { name, .. } if name == "Myr")
+            ),
+            "accepted optional mana payment must create the reflexive Myr token"
+        );
     }
 
     /// Abandon Attachments #81: stale cost_payment_failed_flag from a previous resolution
