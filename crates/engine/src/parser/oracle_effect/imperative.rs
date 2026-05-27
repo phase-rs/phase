@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -3651,28 +3651,25 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     // "equipped creature", "target creature", etc.
     // Placed after the pronoun path (which handles it/them/~/that card) so
     // pronoun forms are not accidentally consumed by `parse_target`.
-    if let Some((_, after_shuffle)) =
-        nom_on_lower(text, lower, |input| value((), tag("shuffle ")).parse(input))
-    {
-        if nom_primitives::scan_contains(lower, "into")
-            && !nom_primitives::scan_contains(lower, "from")
-        {
-            let (target, _) = parse_target(after_shuffle);
-            if !matches!(target, TargetFilter::Any) {
-                let owner_library = nom_primitives::scan_at_word_boundaries(lower, |input| {
-                    alt((
-                        value((), tag::<_, _, OracleError<'_>>("its owner's library")),
-                        value((), tag("their owner's library")),
-                        value((), tag("their owners' libraries")),
-                    ))
-                    .parse(input)
-                })
-                .is_some();
-                return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
-                    target,
-                    owner_library,
-                });
-            }
+    if let Some(((target_phrase, owner_library), _)) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(input)?;
+        let (input, target_phrase) = take_until(" into ").parse(input)?;
+        not(take_until::<_, _, OracleError<'_>>(" from ")).parse(target_phrase)?;
+        let (input, _) = tag(" into ").parse(input)?;
+        let (input, owner_library) = alt((
+            value(true, tag("its owner's library")),
+            value(true, tag("their owner's library")),
+            value(true, tag("their owners' libraries")),
+        ))
+        .parse(input)?;
+        Ok((input, (target_phrase.to_string(), owner_library)))
+    }) {
+        let (target, _) = parse_target(&target_phrase);
+        if !matches!(target, TargetFilter::Any) {
+            return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library,
+            });
         }
     }
     // CR 701.24c + CR 400.6: "shuffle the cards from {possessive} {zone} into
