@@ -159,6 +159,23 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 702.3b: CanAttackWithDefender — allows creatures with defender to attack.
     // Runtime enforcement is in combat.rs::validate_attack().
     registry.insert(StaticMode::CanAttackWithDefender, handle_rule_mod);
+    // CR 509.1b + CR 609.4 + CR 702.14c: IgnoreLandwalkForBlocking — global
+    // rule-modification static observed inside is_landwalk_unblockable.
+    // Registered per discriminant shape (the `None` instance plus the five
+    // basic-subtype instances) to mirror the data-carrying static precedent
+    // (e.g., ExtraBlockers { count: None } row).
+    registry.insert(
+        StaticMode::IgnoreLandwalkForBlocking { qualifier: None },
+        handle_rule_mod,
+    );
+    for q in ["Plains", "Island", "Swamp", "Mountain", "Forest"] {
+        registry.insert(
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some(q.to_string()),
+            },
+            handle_rule_mod,
+        );
+    }
     // CR 602.5a: CanActivateAbilitiesAsThoughHaste — bypasses the summoning-sickness
     // gate on a creature's {T}/{Q} activated abilities (Tyvar, Jubilant Brawler).
     // Runtime enforcement is in restrictions.rs::summoning_sick_for_tap_ability().

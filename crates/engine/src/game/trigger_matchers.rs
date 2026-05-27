@@ -5,7 +5,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
-use crate::types::game_state::{GameState, StackEntryKind};
+use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
@@ -1647,13 +1647,28 @@ pub(super) fn match_becomes_target(
         return false;
     };
 
-    // CR 115.1a: Check source filter — "of a spell" restricts to StackEntryKind::Spell
-    if let Some(TargetFilter::StackSpell) = &trigger.valid_source {
-        let is_spell = state
+    // CR 115.1a + CR 115.1b: Trigger text like "of a spell" and "of an Aura spell"
+    // constrains the targeting source to matching stack spell characteristics.
+    if let Some(source_filter) = &trigger.valid_source {
+        let Some(targeting_entry) = state
             .stack
             .iter()
-            .any(|e| e.id == *targeting_spell_id && matches!(e.kind, StackEntryKind::Spell { .. }));
-        if !is_spell {
+            .find(|entry| entry.id == *targeting_spell_id)
+        else {
+            return false;
+        };
+        let trigger_controller = state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(state.active_player);
+        if !super::targeting::stack_entry_matches_filter(
+            state,
+            targeting_entry,
+            source_filter,
+            trigger_controller,
+            source_id,
+        ) {
             return false;
         }
     }
@@ -6321,9 +6336,25 @@ mod tests {
     // BecomesTarget + valid_source (spell-only filtering)
     // -----------------------------------------------------------------------
 
-    fn setup_with_spell_on_stack() -> (GameState, ObjectId) {
+    fn setup_with_spell_on_stack(is_aura_spell: bool) -> (GameState, ObjectId) {
         let mut state = setup();
-        let spell_id = ObjectId(50);
+        let spell_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            if is_aura_spell {
+                "Pacifism".to_string()
+            } else {
+                "Lightning Bolt".to_string()
+            },
+            Zone::Stack,
+        );
+        if is_aura_spell {
+            if let Some(spell_obj) = state.objects.get_mut(&spell_id) {
+                spell_obj.card_types.core_types.push(CoreType::Enchantment);
+                spell_obj.card_types.subtypes.push("Aura".to_string());
+            }
+        }
         state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,
@@ -6344,6 +6375,15 @@ mod tests {
             },
         });
         (state, spell_id)
+    }
+
+    fn aura_stack_spell_filter() -> TargetFilter {
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string())),
+            ],
+        }
     }
 
     fn setup_with_ability_on_stack() -> (GameState, ObjectId) {
@@ -6371,7 +6411,7 @@ mod tests {
 
     #[test]
     fn becomes_target_spell_only_matches_spell() {
-        let (state, spell_id) = setup_with_spell_on_stack();
+        let (state, spell_id) = setup_with_spell_on_stack(false);
         // trigger_owner is the permanent with the trigger (e.g. Bonecrusher Giant)
         let trigger_owner = ObjectId(5);
         let mut trigger = make_trigger(TriggerMode::BecomesTarget);
@@ -6424,6 +6464,63 @@ mod tests {
             source_id: ability_id,
         };
         assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_aura_spell_filter_matches_aura_spell() {
+        let (state, spell_id) = setup_with_spell_on_stack(true);
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(aura_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            object_id: trigger_owner,
+            source_id: spell_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_aura_spell_filter_rejects_non_aura_spell() {
+        let (state, spell_id) = setup_with_spell_on_stack(false);
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(aura_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            object_id: trigger_owner,
+            source_id: spell_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_aura_spell_filter_rejects_ability_source() {
+        let (state, ability_id) = setup_with_ability_on_stack();
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(aura_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            object_id: trigger_owner,
+            source_id: ability_id,
+        };
+        assert!(!match_becomes_target(
             &event,
             &trigger,
             trigger_owner,

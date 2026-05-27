@@ -1770,6 +1770,36 @@ pub fn is_landwalk_unblockable(
         return false;
     }
 
+    // CR 509.1b + CR 609.4 + CR 702.14c + CR 702.14d: Global
+    // IgnoreLandwalkForBlocking statics cancel the landwalk *restriction* for
+    // the named qualifier. The keyword itself remains on the attacker
+    // (CR 609.4 — "as though" is scoped to this effect). `game_active_statics`
+    // (battlefield + command zone) iterates both controllers' statics; the
+    // static is global (`affected = None`), so a canceller under either
+    // player's control suppresses the qualifier symmetrically.
+    let cancelled: HashSet<&str> = super::functioning_abilities::game_active_statics(state)
+        .filter_map(|(_src, sd)| match &sd.mode {
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => Some(q.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    #[cfg(debug_assertions)]
+    for q in &cancelled {
+        debug_assert!(
+            !q.is_empty(),
+            "IgnoreLandwalkForBlocking qualifier must match Keyword::Landwalk canonical form"
+        );
+    }
+
+    let qualifiers: Vec<&str> = qualifiers
+        .into_iter()
+        .filter(|q| !cancelled.contains(q))
+        .collect();
+    if qualifiers.is_empty() {
+        return false;
+    }
+
     // CR 702.14c: Check every land the defending player controls on the battlefield.
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
@@ -2784,6 +2814,125 @@ mod tests {
         let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
 
         assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b + CR 609.4 + CR 702.14c: Ur-Drago's static cancels the swampwalk
+    /// blocking restriction. Attacker with swampwalk + defender controls a Swamp +
+    /// a permanent emitting `IgnoreLandwalkForBlocking(Swamp)` => blockable.
+    #[test]
+    fn swampwalk_cancelled_by_ur_drago_static() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Swampwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Swamp".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _swamp = create_land(&mut state, PlayerId(1), "Swamp", &["Swamp"], &[]);
+        // Place an Ur-Drago-like permanent on the defender's side emitting the static.
+        let ur_drago = create_creature(&mut state, PlayerId(1), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&ur_drago)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        assert!(can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14d: A swampwalk canceller leaves an unrelated islandwalk intact.
+    #[test]
+    fn islandwalk_unaffected_by_swamp_canceller() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Islandwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Island".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
+        let canceller = create_creature(&mut state, PlayerId(1), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&canceller)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14d: Qualifiers cancel independently — an attacker with both
+    /// swampwalk and islandwalk only loses the cancelled qualifier; the other
+    /// landwalk path remains active.
+    #[test]
+    fn multi_qualifier_attacker_preserves_other_landwalks() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Dual Walker", 2, 2);
+        let kws = &mut state.objects.get_mut(&attacker).unwrap().keywords;
+        kws.push(Keyword::Landwalk("Swamp".to_string()));
+        kws.push(Keyword::Landwalk("Island".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _swamp = create_land(&mut state, PlayerId(1), "Swamp", &["Swamp"], &[]);
+        let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
+        let canceller = create_creature(&mut state, PlayerId(1), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&canceller)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        // Islandwalk path still active => attacker is unblockable.
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b + CR 609.4: The static is global (`affected = None`); a canceller
+    /// on the ATTACKING player's side still suppresses the restriction.
+    #[test]
+    fn ur_drago_canceller_controller_independence() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Swampwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Swamp".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _swamp = create_land(&mut state, PlayerId(1), "Swamp", &["Swamp"], &[]);
+        // Canceller is on the ATTACKING side, not defender.
+        let canceller = create_creature(&mut state, PlayerId(0), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&canceller)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        // Cancellation still applies regardless of controller.
+        assert!(can_block_pair(&state, blocker, attacker));
     }
 
     /// CR 702.14a: Legendary landwalk — defender controlling a legendary land makes
