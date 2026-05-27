@@ -3331,7 +3331,7 @@ async fn handle_client_message(
                                     Some(format!("Cannot start cEDH game: {bracket_err}"));
                                 // Evaluate to Err so the outer match join_outcome sends an Error
                                 // message to the client via the existing Err(e) arm.
-                                Err(bracket_err.to_string())
+                                Err(format!("Cannot start cEDH game: {bracket_err}"))
                             } else {
                                 // Persist updated session (now has the new player and is started)
                                 persist_session_async(game_db, &game_code, session);
