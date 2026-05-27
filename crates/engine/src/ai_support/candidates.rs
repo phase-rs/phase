@@ -609,14 +609,14 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             creatures,
             ..
         } => select_cards_variants(*player, creatures, Some(*count)),
-        // CR 117.1 + CR 118.3 + CR 605.3b: Food Chain class — pick which
-        // permanent(s) to exile to pay the mana ability cost.
-        WaitingFor::ExileFromBattlefieldForManaAbility {
+        // CR 117.1 + CR 118.3 + CR 605.3b: Pick which object(s) to exile to
+        // pay the mana ability cost.
+        WaitingFor::ExileForManaAbility {
             player,
             count,
-            permanents,
+            cards,
             ..
-        } => select_cards_variants(*player, permanents, Some(*count)),
+        } => select_cards_variants(*player, cards, Some(*count)),
         // CR 117.1 + CR 118.3 + CR 605.3b: Phyrexian Altar class — pick which
         // permanent(s) to sacrifice to pay the mana ability cost.
         WaitingFor::SacrificeForManaAbility {
