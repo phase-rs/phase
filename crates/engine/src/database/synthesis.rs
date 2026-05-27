@@ -2260,7 +2260,9 @@ fn build_extort_trigger() -> TriggerDefinition {
     let gain_life = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::GainLife {
-            amount: QuantityExpr::Fixed { value: 1 },
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount,
+            },
             player: GainLifePlayer::Controller,
         },
     );
@@ -5696,8 +5698,16 @@ mod extort_synthesis_tests {
     //! CR 702.101a + CR 702.101b shape tests: the synthesized Extort trigger
     //! is a `SpellCast` trigger with `valid_target = Controller` whose execute
     //! body is optional with a mana cost and a `LoseLife` effect scoped to
+    //! opponents. The chained `GainLife` uses `PreviousEffectAmount` because
+    //! CR 702.101a's "that much life" is the total life actually lost by all
     //! opponents.
     use super::*;
+    use crate::game::effects::resolve_ability_chain;
+    use crate::types::ability::ResolvedAbility;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
 
     fn extort_face() -> CardFace {
         let mut face = CardFace::default();
@@ -5735,6 +5745,20 @@ mod extort_synthesis_tests {
             matches!(&*execute.effect, Effect::LoseLife { .. }),
             "primary effect must be LoseLife"
         );
+
+        let Some(gain) = execute.sub_ability.as_deref() else {
+            panic!("extort must chain a gain-life rider");
+        };
+        let Effect::GainLife { amount, player } = &*gain.effect else {
+            panic!("extort rider must be GainLife");
+        };
+        assert!(matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount
+            }
+        ));
+        assert!(matches!(player, GainLifePlayer::Controller));
     }
 
     #[test]
@@ -5771,6 +5795,43 @@ mod extort_synthesis_tests {
             .filter(|t| is_extort_trigger(t))
             .count();
         assert_eq!(count, 2);
+    }
+
+    /// CR 702.101a: "you gain that much life" means the total life actually
+    /// lost by all opponents, not a fixed 1. In a three-player game one Extort
+    /// trigger drains two opponents for 1 each, so the controller gains 2.
+    #[test]
+    fn extort_gain_tracks_total_life_lost_across_opponents() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source_id = ObjectId(100);
+        let mut drain = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        drain.player_scope = Some(PlayerFilter::Opponent);
+        drain.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &drain, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].life, 22);
+        assert_eq!(state.players[1].life, 19);
+        assert_eq!(state.players[2].life, 19);
     }
 }
 
