@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-06-10T00:00:00Z",
+  "updated": "2026-06-11T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -274,12 +274,12 @@
       ],
       "main": [
         {
-          "count": 7,
-          "name": "Island"
+          "count": 4,
+          "name": "Sunderflock"
         },
         {
-          "count": 3,
-          "name": "Sunderflock"
+          "count": 6,
+          "name": "Island"
         },
         {
           "count": 4,
@@ -290,39 +290,31 @@
           "name": "Opt"
         },
         {
-          "count": 1,
-          "name": "Three Steps Ahead"
-        },
-        {
-          "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 2,
-          "name": "Stormcarved Coast"
+          "count": 3,
+          "name": "Get Out"
         },
         {
           "count": 4,
           "name": "Traumatic Critique"
         },
         {
-          "count": 2,
-          "name": "Colorstorm Stallion"
+          "count": 3,
+          "name": "Burst Lightning"
         },
         {
           "count": 2,
-          "name": "Winternight Stories"
-        },
-        {
-          "count": 2,
-          "name": "Flow State"
+          "name": "Impractical Joke"
         },
         {
           "count": 2,
           "name": "Spell Snare"
         },
         {
-          "count": 1,
+          "count": 2,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 2,
           "name": "Spell Pierce"
         },
         {
@@ -330,12 +322,12 @@
           "name": "Hearth Elemental"
         },
         {
-          "count": 2,
-          "name": "Prismari Charm"
+          "count": 4,
+          "name": "Riverpyre Verge"
         },
         {
           "count": 4,
-          "name": "Riverpyre Verge"
+          "name": "Prismari Charm"
         },
         {
           "count": 4,
@@ -352,16 +344,12 @@
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 2,
+          "count": 4,
           "name": "Colorstorm Stallion"
         },
         {
           "count": 1,
-          "name": "Hydro-Man, Fluid Felon"
+          "name": "Sear"
         },
         {
           "count": 1,
@@ -372,28 +360,20 @@
           "name": "Annul"
         },
         {
-          "count": 1,
-          "name": "The Legend of Kuruk"
-        },
-        {
-          "count": 1,
+          "count": 2,
           "name": "Ral, Crackling Wit"
         },
         {
           "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Fire Magic"
+          "name": "The Legend of Kuruk"
         },
         {
           "count": 2,
-          "name": "Broadside Barrage"
+          "name": "Flashfreeze"
         },
         {
           "count": 1,
-          "name": "Sunderflock"
+          "name": "Broadside Barrage"
         }
       ]
     },
@@ -857,112 +837,6 @@
       ]
     },
     {
-      "name": "Mono-Green Landfall",
-      "author": "MTGGoldfish",
-      "colors": [
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Promising Vein"
-        },
-        {
-          "count": 4,
-          "name": "Earthbender Ascension"
-        },
-        {
-          "count": 4,
-          "name": "Mightform Harmonizer"
-        },
-        {
-          "count": 4,
-          "name": "Esper Origins"
-        },
-        {
-          "count": 1,
-          "name": "Archdruid's Charm"
-        },
-        {
-          "count": 2,
-          "name": "Meltstrider's Resolve"
-        },
-        {
-          "count": 3,
-          "name": "Escape Tunnel"
-        },
-        {
-          "count": 1,
-          "name": "Royal Treatment"
-        },
-        {
-          "count": 4,
-          "name": "Ba Sing Se"
-        },
-        {
-          "count": 4,
-          "name": "Sazh's Chocobo"
-        },
-        {
-          "count": 2,
-          "name": "Mossborn Hydra"
-        },
-        {
-          "count": 4,
-          "name": "Icetill Explorer"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
-          "name": "Badgermole Cub"
-        },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
-        },
-        {
-          "count": 13,
-          "name": "Forest"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 2,
-          "name": "Meltstrider's Resolve"
-        },
-        {
-          "count": 2,
-          "name": "Pawpatch Formation"
-        },
-        {
-          "count": 1,
-          "name": "Royal Treatment"
-        },
-        {
-          "count": 4,
-          "name": "Sapling Nursery"
-        },
-        {
-          "count": 2,
-          "name": "Mossborn Hydra"
-        },
-        {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
-        }
-      ]
-    },
-    {
       "name": "Izzet Lessons",
       "author": "MTGGoldfish",
       "colors": [
@@ -1086,6 +960,120 @@
         {
           "count": 1,
           "name": "Broadside Barrage"
+        }
+      ]
+    },
+    {
+      "name": "Mono-Green Landfall",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 1,
+          "name": "Promising Vein"
+        },
+        {
+          "count": 4,
+          "name": "Earthbender Ascension"
+        },
+        {
+          "count": 2,
+          "name": "Keen-Eyed Curator"
+        },
+        {
+          "count": 2,
+          "name": "Sapling Nursery"
+        },
+        {
+          "count": 2,
+          "name": "Demolition Field"
+        },
+        {
+          "count": 4,
+          "name": "Sazh's Chocobo"
+        },
+        {
+          "count": 4,
+          "name": "Icetill Explorer"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 4,
+          "name": "Fabled Passage"
+        },
+        {
+          "count": 13,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Mightform Harmonizer"
+        },
+        {
+          "count": 3,
+          "name": "Escape Tunnel"
+        },
+        {
+          "count": 3,
+          "name": "Meltstrider's Resolve"
+        },
+        {
+          "count": 1,
+          "name": "Royal Treatment"
+        },
+        {
+          "count": 3,
+          "name": "Ba Sing Se"
+        },
+        {
+          "count": 1,
+          "name": "Snakeskin Veil"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Origin of Metalbending"
+        },
+        {
+          "count": 3,
+          "name": "Torpor Orb"
+        },
+        {
+          "count": 2,
+          "name": "Sapling Nursery"
+        },
+        {
+          "count": 1,
+          "name": "Meltstrider's Resolve"
+        },
+        {
+          "count": 2,
+          "name": "Leatherhead, Swamp Stalker"
+        },
+        {
+          "count": 4,
+          "name": "Mossborn Hydra"
+        },
+        {
+          "count": 1,
+          "name": "Eumidian Terrabotanist"
         }
       ]
     },
