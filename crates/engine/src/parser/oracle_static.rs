@@ -5752,6 +5752,7 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
         prefix.trim()
     } else if !descriptor_text.contains(' ') && descriptor_text.to_lowercase().ends_with('s') {
         if descriptor_text.eq_ignore_ascii_case("creatures") {
+            // CR 205.2a: "creatures" names the creature card type, not a creature subtype.
             let mut typed = TypedFilter::creature();
             if let Some(controller) = controller {
                 typed = typed.controller(controller);
@@ -5778,6 +5779,7 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     };
 
     if descriptor.eq_ignore_ascii_case("creature") {
+        // CR 205.2a: "creature" names the creature card type, not a creature subtype.
         let mut typed = TypedFilter::creature();
         if let Some(controller) = controller {
             typed = typed.controller(controller);
