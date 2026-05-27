@@ -5315,19 +5315,25 @@ fn can_cast_prepared_now(
         }
     }
 
-    // CR 702.172: Spree spells must afford at least one mode to be castable
+    // CR 702.172: Spree spells must afford at least one mode to be castable.
+    // CR 117.1d + CR 601.2g: Use the feasibility predicate so non-tap mana
+    // abilities (Sacrifice / Discard / PayLife) the controller could activate
+    // manually during cost payment are counted as castable mana sources.
     if let Some(ref modal) = prepared.modal {
         if !modal.mode_costs.is_empty() {
             return modal.mode_costs.iter().any(|mode_cost| {
                 let total = restrictions::add_mana_cost(&prepared.mana_cost, mode_cost);
-                can_pay_cost_after_auto_tap(state, player, prepared.object_id, &total)
+                can_feasibly_pay_mana_cost(state, player, Some(prepared.object_id), &total)
             });
         }
     }
 
+    // CR 117.1d + CR 601.2g: Feasibility, not just auto-tap, gates castability —
+    // a player may activate sacrifice-/discard-/life-cost mana abilities during
+    // payment (issue #562: KCI must expose Ichor Wellspring as castable).
     let creature_face_ok = (prepared.modal.is_some()
         || spell_has_legal_targets(state, obj, player))
-        && can_pay_cost_after_auto_tap(state, player, prepared.object_id, &prepared.mana_cost);
+        && can_feasibly_pay_mana_cost(state, player, Some(prepared.object_id), &prepared.mana_cost);
 
     if creature_face_ok {
         return true;
@@ -5442,6 +5448,114 @@ pub fn can_pay_cost_after_auto_tap(
         spell_ctx.as_ref(),
         &HashSet::new(),
     )
+}
+
+/// Castability-gate feasibility predicate. Returns true if `player` could pay
+/// `cost` for casting `source_id` by **any** combination of auto-taps PLUS
+/// manual activation of non-tap mana abilities (Sacrifice — KCI, Phyrexian
+/// Altar, Ashnod's Altar; Discard — Lion's Eye Diamond; Pay Life; etc.) during
+/// the cost-payment step.
+///
+/// This is at least as permissive as [`can_pay_cost_after_auto_tap`]: it short-
+/// circuits to that path first and only attempts the manual extension when the
+/// auto-tap simulator alone cannot cover the cost. Callers that must require
+/// pure auto-payability (`pay_mana_cost`, the `Auto`-mode auto-finalize check
+/// in `casting_costs::enter_payment_step`) must continue to call the auto-tap
+/// predicate directly — only the castability/legal-actions surface widens to
+/// "manual is reachable."
+///
+/// Colored-shard feasibility under non-tap sources is conservatively rejected:
+/// if any colored shard remains after the existing pool is subtracted, this
+/// predicate returns `false`. Pure-generic feasibility is sufficient for the
+/// principal repro (Krark-Clan Ironworks producing `{C}{C}` — issue #562).
+/// Colored-shard widening — covering Phyrexian Altar, Lion's Eye Diamond, and
+/// other any-color non-tap mana abilities — is tracked in issue #1234.
+//
+// CR 117.1d + CR 601.2g: Mana abilities (including sacrifice-cost,
+// discard-cost, and pay-life mana abilities) may be activated during cost
+// payment. Castability must account for them, or spells with feasibly payable
+// costs are never offered (the original #562 bug).
+pub(super) fn can_feasibly_pay_mana_cost(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    // CR 117.1d: Auto-tap path remains the fast path. Anything that can be
+    // paid with only `{T}` activations was castable before this predicate
+    // existed and must continue to be castable now.
+    if let Some(sid) = source_id {
+        if can_pay_cost_after_auto_tap(state, player, sid, cost) {
+            return true;
+        }
+    }
+
+    let crate::types::mana::ManaCost::Cost { .. } = cost else {
+        // NoCost / SelfManaCost are unconditionally payable (they have no
+        // mana shards to cover); the auto-tap path already returned true above
+        // when `source_id` was `Some`, so this only fires for the rare
+        // `source_id == None` callers.
+        return true;
+    };
+
+    // Reduce the cost by the current floating mana pool. `reduce_cost_by_pool`
+    // is the dry-run twin of the real payment path — it respects spell
+    // restrictions and any-color permissions exactly as the real pay does.
+    let Some(player_data) = state.players.iter().find(|p| p.id == player) else {
+        return false;
+    };
+
+    let spell_meta = source_id.and_then(|sid| build_spell_meta(state, player, sid));
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    let any_color = source_id.is_some_and(|sid| {
+        player_can_spend_as_any_color_for_payment(state, player, sid, spell_ctx.as_ref())
+    });
+    let residual = mana_payment::reduce_cost_by_pool(
+        &player_data.mana_pool,
+        cost,
+        spell_ctx.as_ref(),
+        any_color,
+    );
+
+    let (residual_shards, residual_generic) = match &residual {
+        crate::types::mana::ManaCost::NoCost | crate::types::mana::ManaCost::SelfManaCost => {
+            return true
+        }
+        crate::types::mana::ManaCost::Cost { shards, generic } => (shards, *generic),
+    };
+
+    // CR 117.1: Colored-shard feasibility under non-tap mana sources is
+    // deferred (see issue #1234 — Phyrexian Altar, Lion's Eye Diamond, etc.).
+    // Pure-generic residual is sufficient for the principal repro (KCI
+    // sacrificing artifacts for `{C}{C}`).
+    if !residual_shards.is_empty() {
+        return false;
+    }
+    if residual_generic == 0 {
+        return true;
+    }
+
+    // CR 117.1d + CR 605.3a: Sum the per-permanent feasible mana capacity
+    // across the controller's untapped non-excluded battlefield permanents.
+    // Each contribution is the largest single mana-ability output the
+    // controller could currently activate (covering Sacrifice / Discard /
+    // PayLife costs that auto-tap cannot simulate).
+    //
+    // The per-permanent sum over-counts in chain-sacrifice configurations
+    // (e.g. 2× KCI + 1 fodder reports cap=4 when the actual reachable yield
+    // is 2). The trade-off — over-count rather than under-count, since
+    // under-count was the original #562 bug — is intentional. A bounded-
+    // flow model that respects sacrifice/discard/life supply is tracked in
+    // issue #1235.
+    let excluded = source_id;
+    let capacity: u32 = state
+        .battlefield
+        .iter()
+        .filter(|id| Some(**id) != excluded)
+        .map(|&id| super::mana_sources::feasible_mana_capacity(state, id, player))
+        .sum();
+
+    capacity >= residual_generic
 }
 
 /// Returns true if the player can pay this activated-ability mana cost after
