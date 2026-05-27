@@ -65,6 +65,9 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
+            // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
+            // Runtime enforcement is in casting.rs::is_blocked_by_cant_activate_during().
+            | StaticMode::CantActivateDuring { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
             | StaticMode::CantSearchLibrary { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
@@ -387,6 +390,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttackingController => parts.push("attacking you".into()),
             FilterProp::Blocking => parts.push("blocking".into()),
             FilterProp::BlockingSource => parts.push("blocking source".into()),
+            FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
             FilterProp::Unblocked => parts.push("unblocked".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
@@ -2305,7 +2309,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Conjure { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::ChooseOneOf { .. } => {}
+        | Effect::ChooseOneOf { .. }
+        | Effect::ReturnAsAura { .. } => {}
     }
     d
 }
@@ -6377,6 +6382,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't cast spells during")
                     || effective_lower.contains("can cast spells only during")
             }
+            // CR 602.5 + CR 117.1b: City of Solitude class — "activate abilities
+            // only during" covers both bare and "and activate abilities" phrasings.
+            StaticMode::CantActivateDuring { .. } => {
+                effective_lower.contains("activate abilities only during")
+            }
             StaticMode::PerTurnCastLimit { .. } => {
                 effective_lower.contains("can't cast more than")
                     || effective_lower.contains("cast no more than")
@@ -6477,6 +6487,17 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
+            // CR 509.1b + CR 609.4 + CR 702.14c: qualifier-aware coverage for
+            // Ur-Drago's "creatures with <X>walk can be blocked as though they
+            // didn't have <X>walk." Anchor on the per-qualifier keyword token
+            // so unrelated landwalk lines don't false-match.
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => {
+                let kw = format!("{}walk", q.to_ascii_lowercase());
+                effective_lower.contains(&format!("creatures with {kw}"))
+                    && effective_lower.contains("as though they didn't have")
+                    && effective_lower.contains(&kw)
+            }
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: None } => false,
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 effective_lower.contains("as though those creatures had haste")
                     || effective_lower.contains("as though that creature had haste")
@@ -6504,6 +6525,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     StaticMode::CanAttackWithDefender => {
                         effective_lower.contains("as though it didn't have defender")
                     }
+                    // CR 509.1b + CR 609.4 + CR 702.14c: mirror predicate for
+                    // statics nested under a GenericEffect.
+                    StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => {
+                        let kw = format!("{}walk", q.to_ascii_lowercase());
+                        effective_lower.contains(&format!("creatures with {kw}"))
+                            && effective_lower.contains("as though they didn't have")
+                            && effective_lower.contains(&kw)
+                    }
+                    StaticMode::IgnoreLandwalkForBlocking { qualifier: None } => false,
                     _ => false,
                 })
             } else {

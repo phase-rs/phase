@@ -2339,6 +2339,7 @@ fn evaluate_replacement_condition(
                 crate::game::quantity::resolve_quantity(state, rhs, controller, source_id);
             comparator.evaluate(lhs_val, rhs_val)
         }
+        ReplacementCondition::HasMaxSpeed => super::speed::has_max_speed(state, controller),
         // CR 702.138c: "escapes with" — applies only when the source was cast via escape.
         // Check cast_from_zone on the entering permanent as a proxy for escape.
         ReplacementCondition::CastViaEscape => state
@@ -3056,10 +3057,18 @@ impl EventModifiers {
     /// An ability that is *purely* a Tap SelfRef / PutCounter-SelfRef / ChangeZone has no
     /// remaining work after its modifiers are applied to the event.
     fn has_only_event_modifier(ability: Option<&AbilityDefinition>) -> bool {
-        let Some(def) = ability else {
+        let Some(mut current) = ability else {
             return false;
         };
-        Self::is_event_modifier_effect(&def.effect) && def.sub_ability.is_none()
+        loop {
+            if !Self::is_event_modifier_effect(&current.effect) {
+                return false;
+            }
+            let Some(next) = current.sub_ability.as_deref() else {
+                return true;
+            };
+            current = next;
+        }
     }
 
     /// CR 614.1c: Walk the ability's sub_ability chain and find the first effect
@@ -4061,6 +4070,48 @@ mod tests {
                 (CounterType::Plus1Plus1, 1),
                 (CounterType::Generic("shield".to_string()), 1)
             ]
+        );
+    }
+
+    #[test]
+    fn chained_etb_modifiers_do_not_stash_post_replacement_continuation() {
+        let mut enter_tapped = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+        );
+        enter_tapped.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Stun,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )));
+        let repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(enter_tapped)
+            .valid_card(TargetFilter::SelfRef);
+        let mut state = test_state_with_object(ObjectId(10), Zone::Hand, vec![repl]);
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+            enter_tapped,
+            enter_with_counters,
+            ..
+        }) = result
+        else {
+            panic!("expected Execute with ZoneChange, got {result:?}");
+        };
+
+        assert!(enter_tapped.resolve(false));
+        assert_eq!(enter_with_counters, vec![(CounterType::Stun, 1)]);
+        assert!(
+            state.post_replacement_continuation.is_none(),
+            "pure ETB modifier chains must not be replayed after the event"
         );
     }
 
@@ -6996,6 +7047,32 @@ mod tests {
     }
 
     #[test]
+    fn has_max_speed_condition_tracks_controller_speed() {
+        let mut state = GameState::new_two_player(42);
+        let condition = ReplacementCondition::HasMaxSpeed;
+
+        assert!(!evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(1),
+            &state,
+            None,
+            &dummy_begin_turn_event()
+        ));
+
+        state.players[0].speed = Some(4);
+
+        assert!(evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(1),
+            &state,
+            None,
+            &dummy_begin_turn_event()
+        ));
+    }
+
+    #[test]
     fn only_if_quantity_is_filtered_for_opponent_draws() {
         let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
             .condition(ReplacementCondition::OnlyIfQuantity {
@@ -7138,6 +7215,41 @@ mod tests {
         assert!(
             find_applicable_replacements(&state2, &proposed_creature, &registry).is_empty(),
             "opponent player filter should not match damage to creatures"
+        );
+    }
+
+    #[test]
+    fn damage_target_filter_controller_only() {
+        let repl = damage_repl(DamageModification::Plus { value: 1 }).damage_target_filter(
+            DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Controller,
+            },
+        );
+        let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        let registry = build_replacement_registry();
+
+        let proposed_self = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &proposed_self, &registry).is_empty(),
+            "controller player filter should match damage to the replacement source controller"
+        );
+
+        let proposed_opponent = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &proposed_opponent, &registry).is_empty(),
+            "controller player filter should not match damage to opponents"
         );
     }
 

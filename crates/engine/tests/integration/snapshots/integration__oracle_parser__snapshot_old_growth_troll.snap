@@ -1,0 +1,154 @@
+---
+source: crates/engine/tests/integration/oracle_parser.rs
+expression: result
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZone",
+          "origin": null,
+          "destination": "Battlefield",
+          "target": {
+            "type": "TriggeringSource"
+          },
+          "owner_library": false,
+          "enter_transformed": false,
+          "under_your_control": false,
+          "enter_tapped": false,
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "ReturnAsAura",
+            "enchant_filter": {
+              "type": "Typed",
+              "type_filters": [
+                {
+                  "Subtype": "Forest"
+                }
+              ],
+              "controller": "You",
+              "properties": []
+            },
+            "grants": [
+              {
+                "type": "GrantAbility",
+                "definition": {
+                  "kind": "Activated",
+                  "effect": {
+                    "type": "Unimplemented",
+                    "name": "add",
+                    "description": "Add {G}{G}' and '{1}, {T}"
+                  },
+                  "cost": {
+                    "type": "Unimplemented",
+                    "description": "Enchanted Forest has '{T}"
+                  },
+                  "sub_ability": {
+                    "kind": "Spell",
+                    "effect": {
+                      "type": "Sacrifice",
+                      "target": {
+                        "type": "SelfRef"
+                      },
+                      "count": {
+                        "type": "Fixed",
+                        "value": 1
+                      }
+                    },
+                    "cost": null,
+                    "sub_ability": {
+                      "kind": "Spell",
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "'",
+                        "description": "'"
+                      },
+                      "cost": null,
+                      "sub_ability": null,
+                      "duration": null,
+                      "description": null,
+                      "target_prompt": null,
+                      "sorcery_speed": false,
+                      "condition": null,
+                      "optional_targeting": false,
+                      "optional": false,
+                      "forward_result": false,
+                      "sub_link": "SequentialSibling"
+                    },
+                    "duration": null,
+                    "description": null,
+                    "target_prompt": null,
+                    "sorcery_speed": false,
+                    "condition": null,
+                    "optional_targeting": false,
+                    "optional": false,
+                    "forward_result": false
+                  },
+                  "duration": null,
+                  "description": "Enchanted Forest has '{T}: Add {G}{G}' and '{1}, {T}, Sacrifice ~: Create a tapped 4/4 green Troll Warrior creature token with trample.'",
+                  "target_prompt": null,
+                  "sorcery_speed": false,
+                  "condition": null,
+                  "optional_targeting": false,
+                  "optional": false,
+                  "forward_result": false
+                }
+              }
+            ]
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "sorcery_speed": false,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false,
+          "sub_link": "SequentialSibling"
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": "Battlefield",
+      "destination": "Graveyard",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When ~ dies, if it was a creature, return it to the battlefield. It's an Aura enchantment with enchant Forest you control and \"Enchanted Forest has '{T}: Add {G}{G}' and '{1}, {T}, Sacrifice ~: Create a tapped 4/4 green Troll Warrior creature token with trample.'\"",
+      "constraint": null,
+      "condition": {
+        "type": "WasType",
+        "card_type": "Creature"
+      },
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

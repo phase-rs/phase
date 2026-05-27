@@ -14,7 +14,7 @@ expression: def
   "damage_target_filter": {
     "Player": {
       "player": {
-        "type": "Any"
+        "type": "Controller"
       }
     }
   },

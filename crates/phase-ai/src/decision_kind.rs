@@ -60,6 +60,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
+        | WaitingFor::ReturnAsAuraTarget { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::CrewVehicle { .. }
         | WaitingFor::StationTarget { .. }
@@ -148,7 +149,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MadnessCastOffer { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
+        | WaitingFor::ExileForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. }
         | WaitingFor::PayManaAbilityMana { .. }
         | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,
