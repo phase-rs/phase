@@ -5715,6 +5715,14 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     ))
     .parse(rest)?;
 
+    // CR 702.112b: "renowned creature you control deals..." uses the renowned
+    // designation as an adjective on the damage source.
+    let (rest, renowned) = opt(value(
+        FilterProp::Renowned,
+        tag::<_, _, OracleError<'_>>("renowned "),
+    ))
+    .parse(rest)?;
+
     // Optional color qualifier ("red source you control"). `parse_color` is the
     // shared color-word combinator and has no internal word boundary; the
     // mandatory `tag(" ")` after it is structural — without it `parse_color`
@@ -5771,6 +5779,9 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     }
     let mut props = Vec::new();
     if let Some(p) = another {
+        props.push(p);
+    }
+    if let Some(p) = renowned {
         props.push(p);
     }
     if let Some(col) = color {
@@ -10047,6 +10058,33 @@ mod tests {
             def.valid_source,
             Some(TargetFilter::Typed(TypedFilter::creature()))
         );
+    }
+
+    #[test]
+    fn renowned_creature_damage_subject_keeps_designation_filter() {
+        let def = parse_trigger_line(
+            "Whenever a renowned creature you control deals combat damage to a player, double the number of +1/+1 counters on it.",
+            "Aragorn, Hornburg Hero",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Renowned])
+            ))
+        );
+        let exec = def.execute.as_deref().expect("execute should be set");
+        assert!(matches!(
+            exec.effect.as_ref(),
+            Effect::MultiplyCounter {
+                target: TargetFilter::TriggeringSource,
+                ..
+            }
+        ));
     }
 
     #[test]

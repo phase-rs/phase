@@ -550,6 +550,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("non-{}", format!("{value}").to_lowercase()));
             }
             FilterProp::Suspected => parts.push("suspected".into()),
+            FilterProp::Renowned => parts.push("renowned".into()),
             // CR 700.9
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
@@ -2133,6 +2134,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::Monstrosity { count } => {
+            d.push(("counters".into(), fmt_quantity(count)));
+        }
+        Effect::Renown { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
         }
         Effect::Adapt { count } => {

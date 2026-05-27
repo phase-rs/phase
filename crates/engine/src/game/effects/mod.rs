@@ -106,6 +106,7 @@ pub mod rad_counters;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remove_from_combat;
+pub mod renown;
 pub mod return_as_aura;
 pub mod reveal;
 pub mod reveal_from_hand;
@@ -1202,6 +1203,7 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::Incubate { count: amount, .. }
         | Effect::Amass { count: amount, .. }
         | Effect::Monstrosity { count: amount, .. }
+        | Effect::Renown { count: amount, .. }
         | Effect::Bolster { count: amount, .. }
         | Effect::Adapt { count: amount, .. } => out.push(amount),
         Effect::Token {
@@ -1467,6 +1469,7 @@ pub fn resolve_effect(
         Effect::Incubate { .. } => incubate::resolve(state, ability, events),
         Effect::Amass { .. } => amass::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
+        Effect::Renown { .. } => renown::resolve(state, ability, events),
         Effect::Adapt { .. } => adapt::resolve(state, ability, events),
         Effect::Bolster { .. } => bolster::resolve(state, ability, events),
         Effect::Manifest { .. } => manifest::resolve(state, ability, events),

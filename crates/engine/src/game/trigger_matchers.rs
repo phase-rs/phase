@@ -104,6 +104,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::FullyUnlock => match_fully_unlock,
         TriggerMode::TakesInitiative => match_takes_initiative,
         TriggerMode::Exploited => match_exploited,
+        TriggerMode::BecomeRenowned => match_become_renowned,
         TriggerMode::BecomeMonstrous => match_become_monstrous,
         TriggerMode::ManaExpend => match_mana_expend,
         TriggerMode::EntersOrAttacks => match_enters_or_attacks,
@@ -151,7 +152,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Copied
         | TriggerMode::ConjureAll
         | TriggerMode::Vote
-        | TriggerMode::BecomeRenowned
         | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
@@ -338,6 +338,8 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // CR 701.37b: "When ~ becomes monstrous" — self-trigger on Monstrosity resolution.
     r.insert(TriggerMode::BecomeMonstrous, match_become_monstrous);
+    // CR 702.112b: "When ~ becomes renowned" — self-trigger on Renown resolution.
+    r.insert(TriggerMode::BecomeRenowned, match_become_renowned);
 
     // CR 700.14: Expend trigger — cumulative mana spent on spells
     r.insert(TriggerMode::ManaExpend, match_mana_expend);
@@ -384,7 +386,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
         TriggerMode::Vote,
-        TriggerMode::BecomeRenowned,
         TriggerMode::Abandoned,
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
@@ -2206,6 +2207,23 @@ pub(super) fn match_exploited(
     matches!(
         event,
         GameEvent::CreatureExploited { exploiter, .. } if *exploiter == source_id
+    )
+}
+
+/// CR 702.112b: "When ~ becomes renowned" — self-trigger only.
+/// Fires when EffectResolved::Renown is emitted for this source.
+pub(super) fn match_become_renowned(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(
+        event,
+        GameEvent::EffectResolved {
+            kind: EffectKind::Renown,
+            source_id: sid,
+        } if *sid == source_id
     )
 }
 
