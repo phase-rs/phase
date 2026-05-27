@@ -230,6 +230,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "activated abilities of ",
     // CR 701.23 + CR 609.3: Ashiok-class search prohibition.
     "can't cause their controller to search their library",
+    // CR 701.23 + CR 609.3: Mindlock Orb-class search prohibition.
+    "can't search libraries",
+    "cannot search libraries",
+    "may not search libraries",
     // CR 603.2g + CR 603.6a + CR 700.4: Torpor Orb / Hushbringer trigger suppression.
     "don't cause abilities to trigger",
     "skip your ",
