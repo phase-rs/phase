@@ -4350,6 +4350,110 @@ mod tests {
         }));
     }
 
+    // Issue #562: During WaitingFor::ManaPayment, the filtered legal-actions
+    // surface (legal_actions / legal_actions_full) must expose sacrifice-cost
+    // mana ability activations — not just `candidate_actions`. The
+    // pre-existing test above (`mana_payment_actions_include_no_tap_sacrifice_mana_abilities`)
+    // proves the candidate enumerator emits the action; this test proves the
+    // SimulationFilter clone-through path keeps it in the public surface.
+    //
+    // CR 117.1d + CR 605.3a: A player may activate a mana ability during cost
+    // payment. KCI / Phyrexian Altar / Ashnod's Altar must remain activatable
+    // while the engine is in ManaPayment.
+    #[test]
+    fn legal_actions_include_sacrifice_mana_activation_during_mana_payment() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        // KCI-shape: bare `Sacrifice { target: Typed(Artifact) }` cost, no Tap.
+        let kci = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Krark-Clan Ironworks".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kci).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    count: 1,
+                }),
+            );
+        }
+
+        // Two sacrificable artifacts on the battlefield.
+        for (cid, name) in [
+            (CardId(702), "Myr Retriever"),
+            (CardId(703), "Scrap Trawler"),
+        ] {
+            let sac_target = create_object(
+                &mut state,
+                cid,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&sac_target).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        // candidate_actions must include the activation (already covered by
+        // the sibling test, but assert here so the regression scope is clear).
+        let candidates = candidate_actions(&state);
+        assert!(
+            candidates.iter().any(|c| matches!(
+                c.action,
+                GameAction::ActivateAbility { source_id, ability_index: 0 } if source_id == kci
+            )),
+            "candidate_actions must include KCI activation during ManaPayment",
+        );
+
+        // legal_actions (the filtered surface the frontend dispatches against)
+        // must also include the activation.
+        let actions = crate::ai_support::legal_actions(&state);
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateAbility { source_id, ability_index: 0 } if *source_id == kci
+            )),
+            "legal_actions must expose KCI activation during ManaPayment (#562)",
+        );
+
+        // legal_actions_full's grouped map must place the activation under KCI.
+        let (_, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        let kci_actions = grouped
+            .get(&kci)
+            .expect("KCI must appear in grouped legal_actions_full");
+        assert!(
+            kci_actions.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateAbility { source_id, ability_index: 0 } if *source_id == kci
+            )),
+            "grouped legal_actions_full[KCI] must include the KCI activation (#562)",
+        );
+    }
+
     #[test]
     fn priority_actions_do_not_offer_lands_as_cast_spells() {
         let mut state = GameState::new_two_player(42);
