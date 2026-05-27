@@ -6796,6 +6796,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn damage_received_object_target_rejects_damage_to_other_objects() {
+        let mut state = setup();
+        let obliterator = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Phyrexian Obliterator".to_string(),
+            Zone::Battlefield,
+        );
+        let other_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Damage Source".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::DamageReceived);
+
+        let unrelated_damage = GameEvent::DamageDealt {
+            source_id: damage_source,
+            target: TargetRef::Object(other_creature),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_received(&unrelated_damage, &trigger, obliterator, &state),
+            "Obliterator-style DamageReceived triggers must ignore damage to other objects"
+        );
+
+        let self_damage = GameEvent::DamageDealt {
+            source_id: damage_source,
+            target: TargetRef::Object(obliterator),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(match_damage_received(
+            &self_damage,
+            &trigger,
+            obliterator,
+            &state
+        ));
+    }
+
     /// CR 120.1: match_damage_received fires for player targets when valid_target=Controller
     /// and the opponent's source matches valid_source.
     #[test]

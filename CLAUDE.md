@@ -176,7 +176,7 @@ If the answer to any of these is wrong, **stop and refactor before moving on.** 
 
 ## Build & Development Commands
 
-Run `./scripts/setup.sh` for full onboarding (gen card data → build WASM → pnpm install).
+Run `./scripts/setup.sh` for full onboarding (Scryfall sidecars → card data → WASM → pnpm install). Auto-detects Tilt and defers WASM + card-data to `tilt up` when present. Flags: `--agent` skips Scryfall art for LLM contributors (see `docs/AI-CONTRIBUTOR.md`); `--no-tilt` forces the inline build path.
 
 ### Rust Engine
 ```bash
