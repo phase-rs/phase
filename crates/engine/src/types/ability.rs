@@ -11500,6 +11500,56 @@ where
     }
 }
 
+/// Compat shim for the pre-2026-Q2 `under_your_control: bool` field on the
+/// resolved-once runtime carriers (`PendingChangeZoneIteration` and
+/// `WaitingFor::EffectZoneChoice`). Modern shape is `Option<PlayerId>` —
+/// the bool was resolved to a concrete `PlayerId` at the ChangeZone resolver
+/// entry per CR 110.2a so the carrier no longer re-evaluates a `ControllerRef`
+/// across an interactive pause.
+///
+/// Reached only through `serde_json::from_str` resume paths: IndexedDB resume
+/// (`client/src/services/gamePersistence.ts`), phase-server SQLite restore,
+/// and P2P resume. The `serde_wasm_bindgen` action-dispatch path never carries
+/// these carriers across the boundary.
+///
+/// **Mapping:** legacy `true` → `None` with `tracing::warn!`. The bool's
+/// original semantics ("under ability controller") cannot be reconstructed
+/// at deserialization time without the originating `AbilityDefinition`. Falling
+/// back to `None` matches what the unshimmed code would have produced anyway
+/// (object enters under its owner's control) — we accept that worst case and
+/// emit a warn so a paused mid-prompt resume that hits the wrong routing has
+/// an audit trail. Legacy `false` → `None` silently; modern shape roundtrips
+/// through `serde_json::from_value::<Option<PlayerId>>`.
+///
+/// Removal is gated by `_LEGACY_DESER_ETB_CONTROLLER_2026Q2` alongside
+/// `deserialize_enters_under_compat`.
+pub fn deserialize_enters_under_player_compat<'de, D>(
+    deserializer: D,
+) -> Result<Option<PlayerId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Bool(true) => {
+            tracing::warn!(
+                target: "engine::compat",
+                "LEGACY_DESER_ETB_CONTROLLER_2026Q2: legacy `under_your_control=true` \
+                 on resumed runtime carrier (PendingChangeZoneIteration or \
+                 EffectZoneChoice); cannot reconstruct PlayerId without ability \
+                 context. Defaulting to None (owner control). If the controller \
+                 assignment is load-bearing for this resume, the player should \
+                 restart the prompt."
+            );
+            Ok(None)
+        }
+        serde_json::Value::Bool(false) => Ok(None),
+        serde_json::Value::Null => Ok(None),
+        other => serde_json::from_value::<Option<PlayerId>>(other).map_err(D::Error::custom),
+    }
+}
+
 /// const fn version-component parser for `_LEGACY_DESER_ETB_CONTROLLER_2026Q2`.
 /// `env!` produces a `&'static str` at compile time; this consumes ASCII digits.
 const fn parse_version_component(s: &str) -> u32 {
@@ -11534,8 +11584,12 @@ const _LEGACY_DESER_ETB_CONTROLLER_2026Q2: () = {
     assert!(
         !(MAJOR > 0 || MINOR > 1 || (MINOR == 1 && PATCH > 53)),
         "LEGACY_DESER_ETB_CONTROLLER_2026Q2: remove the under_your_control bool \
-         compat path in deserialize_enters_under_compat (and this tripwire) \
-         once we ship past 0.1.53. See docs/LEGACY-COMPAT.md."
+         compat paths in deserialize_enters_under_compat (AST field) AND \
+         deserialize_enters_under_player_compat (PendingChangeZoneIteration + \
+         WaitingFor::EffectZoneChoice runtime carriers), the corresponding \
+         `#[serde(alias = ..., deserialize_with = ...)]` attributes on all \
+         three fields, and this tripwire once we ship past 0.1.53. See \
+         docs/LEGACY-COMPAT.md."
     );
 };
 
