@@ -1582,6 +1582,16 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    // CR 205.2 + CR 613.1d + CR 613.4b: class-wide animation static for
+    // "Each noncreature <T> ..." subjects (March of the Machines, Karn).
+    // Opalescence ("Each other non-Aura enchantment ...") starts with
+    // "Each other" and is handled by a different arm. The affirmative-type
+    // token is artifact or enchantment; the dynamic-P/T tail is delegated
+    // to the existing helper.
+    if let Some(def) = parse_each_noncreature_subject_is_creature_with_pt_mv(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "~ can't be blocked [by filter] [as long as condition]" ---
     // CR 509.1b: Handles unconditional, conditional, and filter-based "can't be blocked".
     // "except by" patterns are handled separately by CantBeBlockedExceptBy.
@@ -8429,6 +8439,109 @@ fn parse_pronoun_becomes_type_static(tp: &TextPair<'_>, text: &str) -> Option<St
         .affected(TargetFilter::SelfRef)
         .modifications(modifications)
         .description(text.to_string());
+    if let Some(cond_tp) = condition_tp {
+        let cond_text = cond_tp.original.trim().trim_end_matches('.');
+        let condition =
+            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
+                text: cond_text.to_string(),
+            });
+        def = def.condition(condition);
+    }
+    Some(def)
+}
+
+/// CR 205.2 + CR 613.1d + CR 613.4b + CR 611.3a: "Each noncreature <T> [you control]
+/// is a[n] [<T>] creature with power and toughness each equal to its mana value
+/// [as long as <condition>]." — March of the Machines class. The affirmative type
+/// `<T>` must be artifact or enchantment. The second type token (if present) must
+/// agree with `<T>`. Corpus members: March of the Machines, Karn, Silver Golem.
+///
+/// This is the noncreature-subject sibling of `parse_pronoun_becomes_type_static`
+/// (which handles self-referential `it's a/an <types>` animations). Opalescence
+/// (`"Each other non-Aura enchantment ..."`) starts with `"Each other"` and is
+/// handled by a different parser arm — it is NOT in this class.
+///
+/// Composition: `nom_tag_tp` peels the subject prefix; `nom_target::parse_type_filter_word`
+/// recognizes the affirmative type; `nom_tag_lower` (leading-space-anchored) peels
+/// the optional controller clause and the copula; the dynamic-P/T-by-mana-value
+/// tail is delegated to `push_base_pt_mana_value_dynamic_modifications`.
+fn parse_each_noncreature_subject_is_creature_with_pt_mv(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    // STEP A — CR 611.3a: peel a trailing " as long as <condition>" FIRST.
+    // The condition must come off before the effect is parsed, or it leaks into
+    // the dynamic-P/T tail and never becomes a StaticCondition. Mirrors STEP A
+    // of `parse_pronoun_becomes_type_static`.
+    let (effect_tp, condition_tp) = match tp.split_around(" as long as ") {
+        Some((before, after)) => (before, Some(after)),
+        None => (*tp, None),
+    };
+
+    // STEP C.1 — strip "each noncreature " subject prefix.
+    let rest_tp = nom_tag_tp(&effect_tp, "each noncreature ")?;
+
+    // STEP C.2 — affirmative type word. Direct nom call: (remainder, value) ordering.
+    let (after_subject_lower, affirmative_type) =
+        nom_target::parse_type_filter_word(rest_tp.lower).ok()?;
+    if !matches!(
+        affirmative_type,
+        TypeFilter::Artifact | TypeFilter::Enchantment
+    ) {
+        return None;
+    }
+
+    // STEP C.3 — optional " you control" (leading-space-anchored).
+    // CR 109.5: "you/your" rebinding.
+    let (rest_after_controller, controller): (&str, Option<ControllerRef>) =
+        match nom_tag_lower(after_subject_lower, after_subject_lower, " you control") {
+            Some(rest) => (rest, Some(ControllerRef::You)),
+            None => (after_subject_lower, None),
+        };
+
+    // STEP C.4 — copula (leading-space-anchored). Try " is an " first (longer match).
+    let after_copula = nom_tag_lower(rest_after_controller, rest_after_controller, " is an ")
+        .or_else(|| nom_tag_lower(rest_after_controller, rest_after_controller, " is a "))?;
+
+    // STEP D — optional adjective matching affirmative_type, then required "creature".
+    // March of the Machines: "is an artifact creature ..." — adjective present.
+    // Hypothetical sibling "is a creature ...": adjective absent (fall through).
+    let after_adjective = match nom_target::parse_type_filter_word(after_copula) {
+        Ok((rest, adj)) if adj == affirmative_type => rest,
+        _ => after_copula,
+    };
+    // When STEP D consumed an adjective, `after_adjective` begins with " creature"
+    // (the space between adjective and noun is still pending). When STEP D fell
+    // through, `after_adjective == after_copula` already had its leading space
+    // consumed by the " is a "/" is an " copula and now begins with "creature"
+    // directly (no leading space). Both branches must succeed for the union.
+    let after_creature = nom_tag_lower(after_adjective, after_adjective, " creature")
+        .or_else(|| nom_tag_lower(after_adjective, after_adjective, "creature"))?;
+
+    // STEP E — emit modifications.
+    // CR 205.2 + CR 613.1d: Layer 4 add of the Creature core type.
+    // CR 613.4b: Layer 7b set of base power/toughness (delegated).
+    let mut modifications = vec![ContinuousModification::AddType {
+        core_type: CoreType::Creature,
+    }];
+    if !push_base_pt_mana_value_dynamic_modifications(&mut modifications, after_creature) {
+        return None;
+    }
+
+    // STEP F — build the affected-object selector: [<T>, Non(Creature)] + optional controller.
+    let mut typed = TypedFilter::new(affirmative_type)
+        .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)));
+    if let Some(ctrl) = controller {
+        typed = typed.controller(ctrl);
+    }
+    let affected = TargetFilter::Typed(typed);
+
+    // STEP G — build the continuous static and re-attach the condition peeled
+    // in STEP A. S8: description is the ORIGINAL line, not any peeled remainder.
+    let mut def = StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(modifications)
+        .description(description.to_string());
     if let Some(cond_tp) = condition_tp {
         let cond_text = cond_tp.original.trim().trim_end_matches('.');
         let condition =
@@ -21435,6 +21548,255 @@ mod snapshot_tests {
             "expected SetToughnessDynamic(ObjectManaValue Recipient) in {mods:?}"
         );
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    }
+
+    /// CR 205.2 + CR 613.1d + CR 613.4b: March of the Machines (global,
+    /// no controller scope) — every noncreature artifact becomes an
+    /// artifact creature with dynamic mana-value P/T.
+    #[test]
+    fn parses_march_of_the_machines_static() {
+        let text = "Each noncreature artifact is an artifact creature with power and \
+                    toughness each equal to its mana value.";
+        let def = parse_static_line(text).expect("March of the Machines must parse");
+
+        // Membership-style assertions throughout (S3) to hedge against TypedFilter normalization.
+        let TargetFilter::Typed(ref tf) = def.affected.as_ref().expect("affected must be set")
+        else {
+            panic!("expected TargetFilter::Typed, got {:?}", def.affected);
+        };
+
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Artifact)),
+            "expected Artifact in type_filters; got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.type_filters.iter().any(|f| matches!(
+                f,
+                TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Creature)
+            )),
+            "expected Non(Creature) in type_filters; got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.controller.is_none(),
+            "global — no controller scope expected for March"
+        );
+
+        let mods = &def.modifications;
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )),
+            "expected AddType(Creature); got {:?}",
+            mods
+        );
+        let expected_mv = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetPowerDynamic { value } if value == &expected_mv
+            )),
+            "expected SetPowerDynamic with ObjectManaValue(Recipient); got {:?}",
+            mods
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetToughnessDynamic { value } if value == &expected_mv
+            )),
+            "expected SetToughnessDynamic with ObjectManaValue(Recipient); got {:?}",
+            mods
+        );
+    }
+
+    /// CR 205.2 + CR 613.1d + CR 613.4b + CR 109.5: Karn-shape, controller-scoped
+    /// (`you control`). The `controller` field on the typed filter must be set.
+    #[test]
+    fn parses_karn_each_noncreature_artifact_you_control_static() {
+        let text = "Each noncreature artifact you control is an artifact creature with \
+                    power and toughness each equal to its mana value.";
+        let def = parse_static_line(text).expect("Karn-shape must parse");
+
+        let TargetFilter::Typed(ref tf) = def.affected.as_ref().expect("affected must be set")
+        else {
+            panic!("expected TargetFilter::Typed, got {:?}", def.affected);
+        };
+
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Artifact)),
+            "expected Artifact; got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.type_filters.iter().any(|f| matches!(
+                f,
+                TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Creature)
+            )),
+            "expected Non(Creature); got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "Karn restricts to You-controlled"
+        );
+    }
+
+    /// Sibling subject "each artifact" (no "noncreature ") is out of scope for
+    /// this arm — the parser must NOT capture it.
+    #[test]
+    fn rejects_each_artifact_without_noncreature_prefix() {
+        let text = "Each artifact you control is a creature with power and toughness each \
+                    equal to its mana value.";
+        let lower = text.to_ascii_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert!(
+            parse_each_noncreature_subject_is_creature_with_pt_mv(&tp, text).is_none(),
+            "the each-noncreature arm must not capture 'each artifact' subjects"
+        );
+    }
+
+    /// Bludgeon Brawl shape: the comma after "noncreature" defeats the
+    /// "each noncreature " prefix strip — the subject is "noncreature, non-Equipment
+    /// artifact", not "noncreature artifact". This arm must NOT capture it.
+    #[test]
+    fn rejects_bludgeon_brawl_shape() {
+        let text = "Each noncreature, non-Equipment artifact is an Equipment with equip {X} \
+                    and \"Equipped creature gets +X/+0,\" where X is that artifact's mana value.";
+        let lower = text.to_ascii_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert!(
+            parse_each_noncreature_subject_is_creature_with_pt_mv(&tp, text).is_none(),
+            "the each-noncreature arm must not capture the Bludgeon Brawl shape \
+             (comma after 'noncreature')"
+        );
+    }
+
+    /// "Each noncreature land" — `Land` is not in the `Artifact | Enchantment`
+    /// whitelist at STEP C.2; this arm must NOT capture it.
+    #[test]
+    fn rejects_each_noncreature_land() {
+        let text =
+            "Each noncreature land is a creature with power and toughness each equal to its \
+             mana value.";
+        let lower = text.to_ascii_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert!(
+            parse_each_noncreature_subject_is_creature_with_pt_mv(&tp, text).is_none(),
+            "the each-noncreature arm must reject 'land' as affirmative type"
+        );
+    }
+
+    /// "Each noncreature spell" — `parse_type_filter_word` maps "spell" to
+    /// `TypeFilter::Card` (CR 112.1), which is not in the `Artifact | Enchantment`
+    /// whitelist; this arm must NOT capture it.
+    #[test]
+    fn rejects_each_noncreature_spell() {
+        let text = "Each noncreature spell costs {2} more to cast.";
+        let lower = text.to_ascii_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert!(
+            parse_each_noncreature_subject_is_creature_with_pt_mv(&tp, text).is_none(),
+            "the each-noncreature arm must reject 'spell' as affirmative type"
+        );
+    }
+
+    /// Synthetic Enchantment-class sibling of March of the Machines (no real
+    /// printed card uses this exact shape, but the parser must compose for it
+    /// because Enchantment is in the C.2 whitelist alongside Artifact). Asserts
+    /// affirmative type, Non(Creature), You-controller, and the dynamic-P/T mods.
+    #[test]
+    fn accepts_each_noncreature_enchantment_synthetic() {
+        let text = "Each noncreature enchantment you control is an enchantment creature with \
+                    power and toughness each equal to its mana value.";
+        let def = parse_static_line(text).expect("synthetic enchantment shape must parse");
+
+        let TargetFilter::Typed(ref tf) = def.affected.as_ref().expect("affected must be set")
+        else {
+            panic!("expected TargetFilter::Typed, got {:?}", def.affected);
+        };
+
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Enchantment)),
+            "expected Enchantment in type_filters; got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.type_filters.iter().any(|f| matches!(
+                f,
+                TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Creature)
+            )),
+            "expected Non(Creature) in type_filters; got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "synthetic Enchantment shape uses 'you control'"
+        );
+
+        let mods = &def.modifications;
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )),
+            "expected AddType(Creature); got {:?}",
+            mods
+        );
+        let expected_mv = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetPowerDynamic { value } if value == &expected_mv
+            )),
+            "expected SetPowerDynamic(ObjectManaValue Recipient); got {:?}",
+            mods
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetToughnessDynamic { value } if value == &expected_mv
+            )),
+            "expected SetToughnessDynamic(ObjectManaValue Recipient); got {:?}",
+            mods
+        );
+    }
+
+    /// S1 regression: CR 611.3a — a trailing " as long as <condition>" clause
+    /// must be peeled before the subject/effect parse and re-attached to the
+    /// resulting `StaticDefinition`. Without STEP A, the condition would leak
+    /// into the dynamic-P/T tail and `def.condition` would be `None`.
+    #[test]
+    fn condition_clause_preserved_in_each_noncreature_static() {
+        let text = "Each noncreature artifact is an artifact creature with power and \
+                    toughness each equal to its mana value as long as you control a creature.";
+        let def = parse_static_line(text).expect("conditional March-shape must parse");
+        assert!(
+            def.condition.is_some(),
+            "expected condition to be attached; got None on def {:?}",
+            def
+        );
     }
 
     /// Animate Artifact: the full inverted-form line must parse to a single

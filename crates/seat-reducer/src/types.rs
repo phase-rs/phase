@@ -91,12 +91,9 @@ pub struct SeatDelta {
     pub invalidated_tokens: Vec<String>,
     /// Seat indices of removed AI seats.
     pub removed_ai: Vec<u8>,
-    /// (seat_index, difficulty, resolved_deck) for newly added AI seats.
-    pub new_ai: Vec<(
-        u8,
-        AiDifficulty,
-        engine::game::deck_loading::PlayerDeckPayload,
-    )>,
+    /// (seat_index, difficulty, deck) for newly added AI seats. The deck is
+    /// the name-only `PlayerDeckList` form — see `DeckResolver` for why.
+    pub new_ai: Vec<(u8, AiDifficulty, engine::game::deck_loading::PlayerDeckList)>,
     pub renumbering: Option<Renumbering>,
     /// True only for Start mutations — signals the caller to begin the game.
     pub now_started: bool,
@@ -139,11 +136,22 @@ pub enum SeatError {
     DeckResolutionFailed(String),
 }
 
-use engine::game::deck_loading::PlayerDeckPayload;
+use engine::game::deck_loading::PlayerDeckList;
 use phase_ai::config::Platform;
 
+/// Resolves a `DeckChoice` (Random / Named / DeckList) into the name-only
+/// `PlayerDeckList` shape every downstream consumer can use uniformly.
+///
+/// The reducer deliberately stays at the name-only layer: the WASM host path
+/// calls `wasm.initialize_game(...)` which re-resolves names against its own
+/// `CARD_DB`, and the server-core path resolves at `start_game` time when
+/// the server-side `CardDatabase` is already in scope. Returning a
+/// fully-resolved `PlayerDeckPayload` here forced both consumers to coerce
+/// shapes at every boundary, hid the name-vs-resolved confusion behind
+/// TypeScript `as` casts, and produced the silent empty-libraries bug at
+/// `wasm.initialize_game` deserialization.
 pub trait DeckResolver {
-    fn resolve(&self, choice: &DeckChoice) -> Result<PlayerDeckPayload, String>;
+    fn resolve(&self, choice: &DeckChoice) -> Result<PlayerDeckList, String>;
 }
 
 pub struct ReducerCtx<'a> {

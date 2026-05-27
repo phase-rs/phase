@@ -52,7 +52,7 @@ Paste the full output (including the success line or the violation list) into th
 - crates/engine/src/parser/oracle_static.rs:687 — existing continuous-modification wiring
 ```
 
-Your new code must visibly mirror these analogs — same combinator family, same naming convention, same module placement. `/pr-contribution-handler` audits these citations (paths must exist, cited code must use the same combinator family as the new code, cited module class must match the modified module class). Fabricated, broken, or unrelated citations are a hard-reject signal — the maintainer will close the PR without further review.
+Your new code must visibly mirror these analogs — same combinator family, same naming convention, same module placement. `/pr-contribution-handler` audits these citations (paths must exist, cited code must use the same combinator family as the new code, cited module class must match the modified module class). Fabricated, broken, or unrelated citations signal the maintainer to apply elevated scrutiny and increase the inline cleanup cost — they slow your PR down rather than helping it across the finish line.
 
 ### 0.1.3. Honesty clause
 
