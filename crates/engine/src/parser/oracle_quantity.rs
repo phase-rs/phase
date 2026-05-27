@@ -68,6 +68,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
+    if let Some(qty) = parse_milled_this_way_count(trimmed) {
+        return Some(qty);
+    }
+
     if all_consuming(pair(
         tag::<_, _, OracleError<'_>>("the number of"),
         alt((tag(" counters on ~"), tag(" counters on it"))),
@@ -210,8 +214,11 @@ pub(crate) fn parse_quantity_ref_with_context(
     ))
     .parse(trimmed)
     {
-        let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
-        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
+        let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
+        if remainder.trim().is_empty()
+            && !matches!(filter, TargetFilter::Any)
+            && !is_empty_typed_filter(&filter)
+        {
             return Some(QuantityRef::Aggregate {
                 function: func,
                 property: prop,
@@ -238,7 +245,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::OpponentDealtCombatDamage,
             });
         }
-        let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
+        let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
         // including the empty-shaped form (no `type_filters`, no `controller`, no
         // `properties`) when the input has no recognized type word (e.g.
@@ -247,7 +254,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         // it would silently drain every permanent. Treat the empty shape as
         // "no type-phrase match" and fall through to the next pattern (or
         // surface `Unimplemented`) instead.
-        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
+        if remainder.trim().is_empty()
+            && !matches!(filter, TargetFilter::Any)
+            && !is_empty_typed_filter(&filter)
+        {
             return Some(QuantityRef::ObjectCount { filter });
         }
     }
@@ -270,6 +280,18 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
     None
+}
+
+fn parse_milled_this_way_count(text: &str) -> Option<QuantityRef> {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("the number of "),
+        opt(tag("nonland ")),
+        alt((tag("cards"), tag("card"))),
+        tag(" milled this way"),
+    ))
+    .parse(text)
+    .is_ok()
+    .then_some(QuantityRef::EventContextAmount)
 }
 
 /// CR 109.1: `parse_type_phrase` always returns `TargetFilter::Typed`, even
@@ -456,6 +478,10 @@ pub(crate) fn parse_cda_quantity_with_context(
                 qty: canonicalize_quantity_ref(qty),
             });
         }
+    }
+
+    if let Some(qty) = parse_milled_this_way_count(text) {
+        return Some(QuantityExpr::Ref { qty });
     }
 
     if let Ok((rest, expr)) = parse_owned_cards_in_zones_quantity(text) {
@@ -1706,7 +1732,8 @@ fn with_target_player_controller(filter: TargetFilter) -> Option<TargetFilter> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, ControllerRef, FilterProp, TypeFilter, TypedFilter,
+        CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, TypeFilter,
+        TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -3001,6 +3028,40 @@ mod tests {
         assert!(
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
+        );
+    }
+
+    #[test]
+    fn for_each_other_creature_you_control_with_exact_base_power() {
+        let qty = parse_for_each_clause("other creature you control with base power 1").unwrap();
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::Another));
+        assert!(typed.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 1 },
+        }));
+    }
+
+    #[test]
+    fn quantity_number_of_nonland_cards_milled_this_way_uses_event_count() {
+        assert_eq!(
+            parse_quantity_ref("the number of nonland cards milled this way"),
+            Some(QuantityRef::EventContextAmount)
+        );
+        assert_eq!(
+            parse_cda_quantity("the number of nonland cards milled this way"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            })
         );
     }
 

@@ -19,7 +19,7 @@ import {
   createDraftPeerSession,
   type DraftPeerSession,
 } from "../network/draftPeerSession";
-import { DRAFT_PROTOCOL_VERSION } from "../network/draftProtocol";
+import { DRAFT_PROTOCOL_VERSION, DraftPauseReason } from "../network/draftProtocol";
 import type { DraftDeckPayload, DraftMatchDeckPayload, DraftMatchLaunch, DraftP2PMessage } from "../network/draftProtocol";
 import type { MatchConfig, MatchScore } from "./types";
 import {
@@ -46,7 +46,7 @@ export type DraftHostEvent =
   | { type: "seatJoined"; seatIndex: number; displayName: string }
   | { type: "seatReconnected"; seatIndex: number }
   | { type: "seatDisconnected"; seatIndex: number }
-  | { type: "seatKicked"; seatIndex: number; reason: string }
+  | { type: "seatKicked"; seatIndex: number; reason: DraftPauseReason | string }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "lobbyFull" }
   | { type: "draftStarted"; view: DraftPlayerView }
@@ -55,7 +55,7 @@ export type DraftHostEvent =
   | { type: "draftComplete" }
   | { type: "deckSubmitted"; seatIndex: number }
   | { type: "allDecksSubmitted" }
-  | { type: "draftPaused"; reason: string }
+  | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
   | { type: "error"; message: string }
   | { type: "viewUpdated"; view: DraftPlayerView }
@@ -338,9 +338,14 @@ export class P2PDraftHost {
 
     session.onMessage((msg) => this.handleGuestMessage(seat!, msg));
 
-    // Send current view
+    // Send current view. Order matters: sync the engine connection bitmap
+    // BEFORE fetching the view so the reconnect_ack carries the up-to-date
+    // `seats[*].connected` snapshot. Then broadcast to siblings.
     void (async () => {
       try {
+        if (this.draftStarted) {
+          await this.adapter.setSeatConnected(seat!, true);
+        }
         const view = this.draftStarted
           ? await this.adapter.getViewForSeat(seat!)
           : this.buildLobbyView();
@@ -352,6 +357,9 @@ export class P2PDraftHost {
           view,
           draftCode: this.draftCode,
         });
+        if (this.draftStarted) {
+          await this.broadcastViews();
+        }
         if (view.status === "MatchInProgress") {
           await this.dispatchMatchLaunchesForSeat(view, seat!);
         }
@@ -670,20 +678,46 @@ export class P2PDraftHost {
       return;
     }
 
+    // Mid-draft disconnect: sync the engine connection bitmap first so
+    // `DraftPlayerView.seats[*].connected` reflects the new state, then
+    // broadcast to all guests. Wrapped in a void-IIFE because this method
+    // is sync `: void`; matching the existing convention on lines 342 / 1267.
+    void (async () => {
+      try {
+        await this.adapter.setSeatConnected(seat, false);
+        await this.broadcastViews();
+      } catch (err) {
+        console.error(
+          `[P2PDraftHost] setSeatConnected(false) failed for seat ${seat}:`,
+          err,
+        );
+      }
+    })();
+
     // Mid-draft disconnect: grace window
     const timer = setTimeout(() => {
       // Grace expired — mark seat as abandoned but don't remove from draft
       // (other players' packs may depend on this seat's position)
       this.disconnectedSeats.delete(seat);
-      this.emit({ type: "seatKicked", seatIndex: seat, reason: "Disconnect grace expired" });
+      this.emit({
+        type: "seatKicked",
+        seatIndex: seat,
+        reason: DraftPauseReason.DisconnectGraceExpired,
+      });
     }, this.gracePeriodMs);
 
     this.disconnectedSeats.set(seat, { disconnectedAt: Date.now(), timer });
 
     if (!this.paused) {
       this.paused = true;
-      this.broadcastToGuests({ type: "draft_paused", reason: "Player disconnected" });
-      this.emit({ type: "draftPaused", reason: "Player disconnected" });
+      this.broadcastToGuests({
+        type: "draft_paused",
+        reason: DraftPauseReason.PlayerDisconnected,
+      });
+      this.emit({
+        type: "draftPaused",
+        reason: DraftPauseReason.PlayerDisconnected,
+      });
     }
 
     this.emit({ type: "seatDisconnected", seatIndex: seat });
@@ -755,18 +789,31 @@ export class P2PDraftHost {
   }
 
   private async autoPickAllPending(): Promise<void> {
-    // For each seat that still has a current_pack (hasn't picked), auto-pick a random card (D-02)
+    // For each seat that still has a current_pack (hasn't picked), auto-pick
+    // a random card (D-02). Skip seats already in `picksThisRound` — they've
+    // already submitted this round and the engine would reject the duplicate
+    // with `SeatAlreadyPickedThisRound`, swallowing the error and stranding
+    // the timer at zero.
+    let anyPicked = false;
     for (let seat = 0; seat < this.activePodSize; seat++) {
+      if (this.picksThisRound.has(seat)) continue;
       try {
         const view = await this.adapter.getViewForSeat(seat);
         if (view.current_pack && view.current_pack.length > 0) {
           const randomIndex = Math.floor(Math.random() * view.current_pack.length);
           const card = view.current_pack[randomIndex];
           await this.handlePick(seat, card.instance_id);
+          anyPicked = true;
         }
       } catch (err) {
         console.error(`[P2PDraftHost] auto-pick failed for seat ${seat}:`, err);
       }
+    }
+    // If the round did not exhaust via handlePick's internal allPicksSubmitted
+    // check, broadcast the swept state so guests don't sit on a stale view
+    // (and so the timer-restart logic in handlePick doesn't strand the UI).
+    if (anyPicked) {
+      await this.broadcastViews();
     }
   }
 
@@ -1252,8 +1299,11 @@ export class P2PDraftHost {
     if (!this.paused) {
       this.clearActiveTimer();
       this.paused = true;
-      this.broadcastToGuests({ type: "draft_paused", reason: "Paused by host" });
-      this.emit({ type: "draftPaused", reason: "Paused by host" });
+      this.broadcastToGuests({
+        type: "draft_paused",
+        reason: DraftPauseReason.PausedByHost,
+      });
+      this.emit({ type: "draftPaused", reason: DraftPauseReason.PausedByHost });
     }
   }
 
@@ -1388,7 +1438,10 @@ export class P2PDraftHost {
 
       if (this.disconnectedSeats.size > 0) {
         this.paused = true;
-        this.emit({ type: "draftPaused", reason: "Waiting for players to reconnect" });
+        this.emit({
+          type: "draftPaused",
+          reason: DraftPauseReason.PlayerDisconnected,
+        });
       }
 
       if (view.status === "MatchInProgress") {

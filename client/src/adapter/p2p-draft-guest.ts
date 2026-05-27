@@ -18,7 +18,11 @@ import {
   type DraftPeerSession,
 } from "../network/draftPeerSession";
 import { DRAFT_PROTOCOL_VERSION } from "../network/draftProtocol";
-import type { DraftMatchLaunch, DraftP2PMessage } from "../network/draftProtocol";
+import type {
+  DraftMatchLaunch,
+  DraftP2PMessage,
+  DraftPauseReason,
+} from "../network/draftProtocol";
 import {
   saveDraftGuestSession,
   clearDraftGuestSession,
@@ -32,7 +36,7 @@ export type DraftGuestEvent =
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
-  | { type: "draftPaused"; reason: string }
+  | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
   | { type: "pairing"; round: number; table: number; opponentName: string; matchHostPeerId: string; matchId: string }
   | { type: "matchResult"; matchId: string; winnerSeat: number | null }
