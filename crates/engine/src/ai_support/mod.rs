@@ -408,9 +408,9 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             GameAction::SelectCards { cards: chosen },
         )
         | (
-            WaitingFor::ExileFromBattlefieldForManaAbility {
+            WaitingFor::ExileForManaAbility {
                 player: _,
-                permanents: cards,
+                cards,
                 count,
                 ..
             },

@@ -45,6 +45,7 @@ import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
+import { RichLabel } from "../components/mana/RichLabel.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
@@ -1346,7 +1347,7 @@ function GamePageContent({
         {/* Unless payment choice ("Counter unless you pay {X}") */}
         {waitingFor?.type === "UnlessPayment" &&
           canActForWaitingState && (
-            <UnlessPaymentModal />
+            <UnlessPaymentPanel />
           )}
 
         {/* CR 118.12a: Disjunctive unless-cost choice (Tergrid's Lantern). */}
@@ -2472,7 +2473,7 @@ function formatUnlessCost(
   }
 }
 
-function UnlessPaymentModal() {
+function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
@@ -2484,16 +2485,45 @@ function UnlessPaymentModal() {
   const effect = description.charAt(0).toUpperCase() + description.slice(1);
 
   return (
-    <ChoiceModal
-      title={t("gamePage.unlessPayment.title", { effect })}
-      options={[
-        { id: "pay", label: t("gamePage.cost.pay", { cost: costDisplay }) },
-        { id: "decline", label: t("gamePage.unlessPayment.dontPay") },
-      ]}
-      onChoose={(id) =>
-        dispatch({ type: "PayUnlessCost", data: { pay: id === "pay" } })
-      }
-    />
+    <AnimatePresence>
+      <motion.div
+        className="fixed inset-x-0 bottom-0 z-40 flex justify-center px-2 pb-4"
+        initial={{ y: 80, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        exit={{ y: 80, opacity: 0 }}
+        transition={{ duration: 0.25 }}
+      >
+        <div className="w-full max-w-md rounded-xl border border-white/10 bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
+          <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
+            <RichLabel
+              text={t("gamePage.unlessPayment.title", { effect })}
+              size="sm"
+            />
+          </h3>
+          <div className="flex justify-center gap-3">
+            <button
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: true } })
+              }
+              className={gameButtonClass({ tone: "emerald", size: "md" })}
+            >
+              <RichLabel
+                text={t("gamePage.cost.pay", { cost: costDisplay })}
+                size="sm"
+              />
+            </button>
+            <button
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: false } })
+              }
+              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+            >
+              {t("gamePage.unlessPayment.dontPay")}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </AnimatePresence>
   );
 }
 
