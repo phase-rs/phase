@@ -3315,19 +3315,27 @@ async fn handle_client_message(
                         let public_before =
                             session.lobby_meta.as_ref().is_some_and(|meta| meta.public);
                         if should_start {
-                            session.start_game(db.as_ref());
-                        }
-
-                        // Persist updated session (now has the new player)
-                        persist_session_async(game_db, &game_code, session);
-
-                        if should_start {
-                            Ok(JoinOutcome::Started {
-                                player_token,
-                                joiner,
-                                public_before,
-                            })
+                            if let Err(bracket_err) = session.start_game(db.as_ref()) {
+                                // start_game guarantees no mutation on Err, so the session still
+                                // holds the joining player. We keep them seated — rolling back
+                                // would require deleting their deck/token which is more invasive.
+                                // The host can correct the deck(s) and trigger a new start.
+                                persist_session_async(game_db, &game_code, session);
+                                // Evaluate to Err so the outer match join_outcome sends an Error
+                                // message to the client via the existing Err(e) arm.
+                                Err(bracket_err.to_string())
+                            } else {
+                                // Persist updated session (now has the new player and is started)
+                                persist_session_async(game_db, &game_code, session);
+                                Ok(JoinOutcome::Started {
+                                    player_token,
+                                    joiner,
+                                    public_before,
+                                })
+                            }
                         } else {
+                            // Persist updated session (now has the new player, not yet started)
+                            persist_session_async(game_db, &game_code, session);
                             Ok(JoinOutcome::Waiting {
                                 player_token,
                                 joiner,
@@ -3577,7 +3585,15 @@ async fn handle_client_message(
                 return;
             };
 
-            let (slot_info, kicked_players, started, current_players, max_players, public_before) = {
+            let (
+                slot_info,
+                kicked_players,
+                started,
+                current_players,
+                max_players,
+                public_before,
+                bracket_error,
+            ) = {
                 let mut mgr = state.lock().await;
                 let Some(session) = mgr.sessions.get_mut(&game_code) else {
                     let msg = ServerMessage::Error {
@@ -3623,11 +3639,21 @@ async fn handle_client_message(
                     .collect::<Vec<_>>();
 
                 session.apply_seat_delta(seat_state, &delta);
-                let started = delta.now_started
+                let mut started = delta.now_started
                     || (session.is_full() && session.start_when_full && session.is_pregame());
-                if started {
-                    session.start_game(db.as_ref());
-                }
+                // Collect a bracket-violation message to broadcast after releasing the state lock.
+                // start_game guarantees no mutation on Err, so session state is untouched.
+                let bracket_error: Option<String> = if started {
+                    match session.start_game(db.as_ref()) {
+                        Ok(()) => None,
+                        Err(bracket_err) => {
+                            started = false;
+                            Some(format!("Cannot start cEDH game: {bracket_err}"))
+                        }
+                    }
+                } else {
+                    None
+                };
                 let slot_info = session.player_slot_info();
                 let current_players = session.current_player_count();
                 let max_players = session.player_count;
@@ -3639,6 +3665,7 @@ async fn handle_client_message(
                     current_players,
                     max_players,
                     public_before,
+                    bracket_error,
                 )
             };
 
@@ -3650,6 +3677,16 @@ async fn handle_client_message(
                             let _ = sender.send(ServerMessage::Error {
                                 message: "You were removed from the room by the host.".to_string(),
                             });
+                        }
+                    }
+
+                    // If the start was blocked by a bracket violation, notify all players.
+                    if let Some(ref err_msg) = bracket_error {
+                        let msg = ServerMessage::Error {
+                            message: err_msg.clone(),
+                        };
+                        for sender in players.values() {
+                            let _ = sender.send(msg.clone());
                         }
                     }
 
