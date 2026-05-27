@@ -196,6 +196,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "domri's ambush",
     "doomgape",
     "durkwood tracker",
+    "duskmantle seer",
     "efteekay, flame of the kav",
     "electrosiphon",
     "electryte",
@@ -457,10 +458,10 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        263,
-        "Expected exactly 263 cards retaining ObjectScope::Anaphoric (the #495 \
+        264,
+        "Expected exactly 264 cards retaining ObjectScope::Anaphoric (the #495 \
          behavior-neutral floor of 156, minus four cards unlocked by #607's \
-         target-subject DamageAll source wrapper, plus 88 cards from category 4, \
+         target-subject DamageAll source wrapper, plus 89 cards from category 4, \
          plus the UUID-disambiguated Reanimate print key \
          — the Yuriko/Dark Confidant bare-anaphoric-possessive class \
          routed onto the Anaphoric arm by `classify_possessive_referent` \
@@ -473,8 +474,8 @@ fn anaphoric_scope_set_is_frozen() {
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        263,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 263 cards."
+        264,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 264 cards."
     );
 }
 

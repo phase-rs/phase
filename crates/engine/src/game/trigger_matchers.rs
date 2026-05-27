@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, EffectKind, OriginConstraint,
-    TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DestinationConstraint, EffectKind,
+    OriginConstraint, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -746,6 +746,15 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint) -> bool {
+    match constraint {
+        DestinationConstraint::Any => true,
+        DestinationConstraint::Equals(expected) => zone == *expected,
+        DestinationConstraint::NotEquals(excluded) => zone != *excluded,
+        DestinationConstraint::OneOf(zones) => zones.contains(&zone),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core Trigger Matchers (~20 with real logic)
 // ---------------------------------------------------------------------------
@@ -757,6 +766,7 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
 fn zone_change_clause_matches(
     origin: &OriginConstraint,
     destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
     valid_card: Option<&TargetFilter>,
     from: &Option<Zone>,
     to: &Zone,
@@ -781,6 +791,9 @@ fn zone_change_clause_matches(
         if dest != to {
             return false;
         }
+    }
+    if !destination_matches_constraint(*to, destination_constraint) {
+        return false;
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_source(state, source_id);
@@ -820,6 +833,7 @@ pub(super) fn match_changes_zone(
                 zone_change_clause_matches(
                     &clause.origin,
                     clause.destination.as_ref(),
+                    &clause.destination_constraint,
                     clause.valid_card.as_ref(),
                     from,
                     to,
@@ -843,6 +857,7 @@ pub(super) fn match_changes_zone(
         zone_change_clause_matches(
             &origin,
             trigger.destination.as_ref(),
+            &trigger.destination_constraint,
             trigger.valid_card.as_ref(),
             from,
             to,
@@ -2297,10 +2312,21 @@ pub(super) fn match_leaves_battlefield(
     state: &GameState,
 ) -> bool {
     if let GameEvent::ZoneChanged {
-        object_id, from, ..
+        object_id,
+        from,
+        to,
+        ..
     } = event
     {
         if *from != Some(Zone::Battlefield) {
+            return false;
+        }
+        if let Some(destination) = trigger.destination {
+            if destination != *to {
+                return false;
+            }
+        }
+        if !destination_matches_constraint(*to, &trigger.destination_constraint) {
             return false;
         }
         valid_card_matches(trigger, state, *object_id, source_id)
@@ -4307,6 +4333,7 @@ mod tests {
             ZoneChangeClause {
                 origin: OriginConstraint::Equals(Zone::Battlefield),
                 destination: Some(Zone::Graveyard),
+                destination_constraint: DestinationConstraint::Any,
                 valid_card: None,
             },
             // Clause 2: a creature card put into a graveyard from anywhere
@@ -4314,12 +4341,14 @@ mod tests {
             ZoneChangeClause {
                 origin: OriginConstraint::NotEquals(Zone::Battlefield),
                 destination: Some(Zone::Graveyard),
+                destination_constraint: DestinationConstraint::Any,
                 valid_card: None,
             },
             // Clause 3: a creature card leaves the graveyard (any destination).
             ZoneChangeClause {
                 origin: OriginConstraint::Equals(Zone::Graveyard),
                 destination: None,
+                destination_constraint: DestinationConstraint::Any,
                 valid_card: None,
             },
         ];
@@ -4407,6 +4436,7 @@ mod tests {
                 Zone::Command,
             ]),
             destination: Some(Zone::Battlefield),
+            destination_constraint: DestinationConstraint::Any,
             valid_card: None,
         }];
 
@@ -4700,6 +4730,41 @@ mod tests {
             Vec::new(),
         );
         assert!(match_changes_zone(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn leaves_battlefield_without_dying_rejects_graveyard_destination() {
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::LeavesBattlefield);
+        trigger.destination_constraint = DestinationConstraint::NotEquals(Zone::Graveyard);
+
+        let to_exile = zone_changed_event(
+            ObjectId(5),
+            Zone::Battlefield,
+            Zone::Exile,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(match_leaves_battlefield(
+            &to_exile,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        let to_graveyard = zone_changed_event(
+            ObjectId(5),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!match_leaves_battlefield(
+            &to_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
     }
 
     #[test]

@@ -24,7 +24,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::GameState;
 
-use super::filter::{matches_target_filter, FilterContext};
+use super::filter::{matches_target_filter, matches_target_filter_in_owner_zone, FilterContext};
 
 impl AbilityCost {
     /// CR 605.3a + CR 602.2b + CR 601.2g-h: Payability gate for ACTIVATED
@@ -159,17 +159,9 @@ impl AbilityCost {
                     let zone = zone.unwrap_or(Zone::Hand);
                     return state.objects.get(&source).is_some_and(|o| o.zone == zone);
                 }
-                let zone = zone.unwrap_or_else(|| {
-                    if filter
-                        .as_ref()
-                        .is_some_and(filter_implies_battlefield_permanent)
-                    {
-                        Zone::Battlefield
-                    } else {
-                        Zone::Hand
-                    }
-                });
-                eligible_in_zone_count(state, player, source, zone, filter.as_ref())
+                let zone = exile_cost_effective_zone(*zone, filter.as_ref());
+                eligible_exile_cost_objects(state, player, source, zone, filter.as_ref(), *count)
+                    .len()
                     >= *count as usize
             }
             // CR 701.59b: Can't collect evidence if graveyard total mana value
@@ -352,22 +344,52 @@ impl AbilityCost {
     }
 }
 
-/// Count objects in `zone` controlled by `player` that match `filter`
-/// (if provided), excluding `source`.
-fn eligible_in_zone_count(
+/// CR 117.1 + CR 118.3: Infer the source zone for a non-self
+/// `AbilityCost::Exile`. Explicit zones are authoritative. A missing zone
+/// keeps the existing parser convention: permanent-implying filters mean
+/// battlefield, otherwise hand.
+pub(super) fn exile_cost_effective_zone(zone: Option<Zone>, filter: Option<&TargetFilter>) -> Zone {
+    zone.unwrap_or_else(|| {
+        if filter.is_some_and(filter_implies_battlefield_permanent) {
+            Zone::Battlefield
+        } else {
+            Zone::Hand
+        }
+    })
+}
+
+/// CR 117.1 + CR 118.3: Objects in `zone` controlled/owned by `player` that
+/// can be exiled to pay a non-self `AbilityCost::Exile`, excluding `source`.
+///
+/// `Zone::Library` is deterministic top-of-library payment, not a choice. Only
+/// the top `count` cards are eligible, and filtered library exile costs are not
+/// surfaced because the existing AST shape represents "exile the top N cards".
+pub(super) fn eligible_exile_cost_objects(
     state: &GameState,
     player: PlayerId,
     source: ObjectId,
     zone: Zone,
     filter: Option<&TargetFilter>,
-) -> usize {
+    count: u32,
+) -> Vec<ObjectId> {
     let Some(p) = state.players.get(player.0 as usize) else {
-        return 0;
+        return Vec::new();
     };
     let ids: Box<dyn Iterator<Item = ObjectId> + '_> = match zone {
         Zone::Hand => Box::new(p.hand.iter().copied()),
         Zone::Graveyard => Box::new(p.graveyard.iter().copied()),
-        Zone::Library => Box::new(p.library.iter().copied()),
+        Zone::Library => {
+            if filter.is_some() {
+                return Vec::new();
+            }
+            return p
+                .library
+                .iter()
+                .copied()
+                .filter(|id| *id != source)
+                .take(count as usize)
+                .collect();
+        }
         // Battlefield exile/etc. — fall back to iterating the object set by zone.
         _ => {
             let ctx = FilterContext::from_source(state, source);
@@ -380,14 +402,16 @@ fn eligible_in_zone_count(
                         && o.id != source
                         && filter.is_none_or(|f| matches_target_filter(state, o.id, f, &ctx))
                 })
-                .count();
+                .map(|o| o.id)
+                .collect();
         }
     };
     let ctx = FilterContext::from_source(state, source);
     ids.filter(|&id| {
-        id != source && filter.is_none_or(|f| matches_target_filter(state, id, f, &ctx))
+        id != source
+            && filter.is_none_or(|f| matches_target_filter_in_owner_zone(state, id, f, &ctx))
     })
-    .count()
+    .collect()
 }
 
 /// Count counters of the given kind on an object.
