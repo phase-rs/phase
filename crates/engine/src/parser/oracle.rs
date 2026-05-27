@@ -4050,7 +4050,7 @@ mod tests {
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::replacements::ReplacementEvent;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -4128,6 +4128,28 @@ mod tests {
         assert_eq!(r.abilities.len(), 1, "expected one spell ability");
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
         assert!(matches!(*r.abilities[0].effect, Effect::DealDamage { .. }));
+    }
+
+    #[test]
+    fn mindlock_orb_routes_to_static_search_prohibition() {
+        let r = parse(
+            "Players can't search libraries.",
+            "Mindlock Orb",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(
+            r.abilities.is_empty(),
+            "Mindlock Orb should not emit spell abilities"
+        );
+        assert_eq!(r.statics.len(), 1, "expected one static search prohibition");
+        assert_eq!(
+            r.statics[0].mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::AllPlayers,
+            }
+        );
     }
 
     /// CR 115.1 + CR 701.9b: "random target X" — the parser stamps

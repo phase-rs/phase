@@ -6384,23 +6384,73 @@ fn parse_filter_scoped_cant_be_activated(
     )
 }
 
-/// CR 701.23 + CR 609.3: Parse "Spells and abilities <scope> can't cause their
-/// controller to search their library" — Ashiok, Dream Render's first static.
+/// CR 701.23 + CR 609.3: Parse CantSearchLibrary statics.
 ///
-/// The scope on the `cause` axis identifies whose spells/abilities are muzzled.
-/// For Ashiok the phrasing is "your opponents control" so `cause = Opponents`.
+/// Supported Oracle classes:
+/// - "Spells and abilities <scope> can't cause their controller to search their
+///   library." (Ashiok class)
+/// - "Players can't search libraries." / "Each player can't search libraries."
+///   (Mindlock Orb class)
 fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
-    let rest_tp = nom_tag_tp(tp, "spells and abilities ")?;
-    // Strip the controller suffix — scope identifier rides on the possessive phrase.
-    let (cause, predicate) = strip_controller_possessive_scope(rest_tp.original)?;
-    // Verify the predicate continues with "can't cause their controller to search
-    // their library" — require the exact full phrase so we don't match unrelated
-    // "spells and abilities your opponents control can't ..." Oracle texts.
-    let predicate_lower = predicate.to_lowercase();
-    let trimmed_lower = predicate_lower.trim_end_matches('.').trim_end();
-    if trimmed_lower != "can't cause their controller to search their library" {
+    fn parse_search_negation_prefix(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = alt((
+            value((), tag::<_, _, OracleError<'_>>("can't ")),
+            value((), tag("cannot ")),
+            value((), tag("may not ")),
+        ))
+        .parse(input)?;
+        Ok((input, ()))
+    }
+
+    fn parse_cause_controller_search_their_library(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = parse_search_negation_prefix(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>("cause their controller to ").parse(input)?;
+        let (input, _) = tag("search ").parse(input)?;
+        let (input, _) = tag("their library").parse(input)?;
+        Ok((input, ()))
+    }
+
+    fn parse_search_libraries(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = parse_search_negation_prefix(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;
+        let (input, _) = tag("libraries").parse(input)?;
+        Ok((input, ()))
+    }
+
+    // Ashiok class: "Spells and abilities <scope> can't cause their controller to
+    // search their library."
+    if let Some(rest_tp) = nom_tag_tp(tp, "spells and abilities ") {
+        // Strip the controller suffix — scope identifier rides on the possessive phrase.
+        let (cause, predicate) = strip_controller_possessive_scope(rest_tp.original)?;
+        let predicate_lower = predicate.to_lowercase();
+        // Compose as modal + causal clause + search target; avoid verbatim phrase matching.
+        nom_on_lower(predicate, &predicate_lower, |i| {
+            let (i, _) = parse_cause_controller_search_their_library(i)?;
+            let (i, _) = opt(tag(".")).parse(i)?;
+            let (i, _) = eof(i)?;
+            Ok((i, ()))
+        })?;
+        return Some(
+            StaticDefinition::new(StaticMode::CantSearchLibrary { cause })
+                .description(text.to_string()),
+        );
+    }
+
+    // Mindlock Orb class: "Players can't search libraries." / "Each player can't
+    // search libraries." Keep this branch all-players only.
+    let (cause, predicate) = strip_casting_prohibition_subject(tp.lower)?;
+    if cause != ProhibitionScope::AllPlayers {
         return None;
     }
+    let predicate_lower = predicate.to_lowercase();
+    // Compose as modal + "search" + object noun, not a single full-string tag.
+    nom_on_lower(predicate, &predicate_lower, |i| {
+        let (i, _) = parse_search_libraries(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof(i)?;
+        Ok((i, ()))
+    })?;
+
     Some(
         StaticDefinition::new(StaticMode::CantSearchLibrary { cause })
             .description(text.to_string()),
@@ -20193,6 +20243,39 @@ mod tests {
                 cause: ProhibitionScope::Controller,
             }
         );
+    }
+
+    #[test]
+    fn cant_search_library_mindlock_orb_players() {
+        // CR 701.23 + CR 609.3: Mindlock Orb — blanket all-players search prohibition.
+        let def = parse_static_line("Players can't search libraries.")
+            .expect("Mindlock Orb Oracle text should parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::AllPlayers,
+            }
+        );
+    }
+
+    #[test]
+    fn cant_search_library_each_player_may_not_variant() {
+        // Variant phrasing uses identical all-players scope.
+        let def = parse_static_line("Each player may not search libraries.")
+            .expect("each-player variant should parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::AllPlayers,
+            }
+        );
+    }
+
+    #[test]
+    fn cant_search_library_opponents_form_deferred() {
+        // Opponent-scoped direct-search phrasing remains deferred until the runtime
+        // cause-vs-searcher axis is split.
+        assert!(parse_static_line("Your opponents can't search libraries.").is_none());
     }
 
     // --- CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers (Torpor Orb / Hushbringer) ---
