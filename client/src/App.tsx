@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { BrowserRouter, Routes, Route, useLocation } from "react-router";
+import { lazy, StrictMode, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { BrowserRouter, Routes, Route, useLocation, useSearchParams } from "react-router";
 
 import { BuildBadge } from "./components/chrome/BuildBadge";
 import { HostControlTile } from "./components/chrome/HostControlTile";
@@ -26,6 +26,24 @@ const CoveragePage = lazy(() => import("./pages/CoveragePage").then((m) => ({ de
 const DraftLandingPage = lazy(() => import("./pages/DraftLandingPage").then((m) => ({ default: m.DraftLandingPage })));
 const DraftPage = lazy(() => import("./pages/DraftPage").then((m) => ({ default: m.DraftPage })));
 const DraftPodPage = lazy(() => import("./pages/DraftPodPage").then((m) => ({ default: m.DraftPodPage })));
+
+function DevStrict({ children }: { children: ReactNode }) {
+  if (!import.meta.env.DEV) return children;
+  return <StrictMode>{children}</StrictMode>;
+}
+
+function GameRouteElement() {
+  const [searchParams] = useSearchParams();
+  const mode = searchParams.get("mode");
+  const isP2PGame = mode === "p2p-host" || mode === "p2p-join";
+
+  if (isP2PGame) return <GamePage />;
+  return (
+    <DevStrict>
+      <GamePage />
+    </DevStrict>
+  );
+}
 
 export function App() {
   return (
@@ -80,16 +98,16 @@ function AppContent() {
       )}
       <Suspense fallback={<div className="flex min-h-screen items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-500 border-t-white" /></div>}>
         <Routes>
-          <Route path="/" element={<MenuPage />} />
-          <Route path="/setup" element={<GameSetupPage />} />
-          <Route path="/multiplayer" element={<MultiplayerPage />} />
-          <Route path="/my-decks" element={<MyDecksPage />} />
-          <Route path="/deck-builder" element={<DeckBuilderPage />} />
-          <Route path="/coverage" element={<CoveragePage />} />
-          <Route path="/draft" element={<DraftLandingPage />} />
-          <Route path="/draft/quick" element={<DraftPage />} />
+          <Route path="/" element={<DevStrict><MenuPage /></DevStrict>} />
+          <Route path="/setup" element={<DevStrict><GameSetupPage /></DevStrict>} />
+          <Route path="/multiplayer" element={<DevStrict><MultiplayerPage /></DevStrict>} />
+          <Route path="/my-decks" element={<DevStrict><MyDecksPage /></DevStrict>} />
+          <Route path="/deck-builder" element={<DevStrict><DeckBuilderPage /></DevStrict>} />
+          <Route path="/coverage" element={<DevStrict><CoveragePage /></DevStrict>} />
+          <Route path="/draft" element={<DevStrict><DraftLandingPage /></DevStrict>} />
+          <Route path="/draft/quick" element={<DevStrict><DraftPage /></DevStrict>} />
           <Route path="/draft-pod" element={<DraftPodPage />} />
-          <Route path="/game/:id" element={<GamePage />} />
+          <Route path="/game/:id" element={<GameRouteElement />} />
         </Routes>
       </Suspense>
       {!location.pathname.startsWith("/game/") && <BuildBadge />}

@@ -1721,14 +1721,27 @@ impl DeckResolver for ServerDeckResolver<'_> {
     fn resolve(
         &self,
         choice: &DeckChoice,
-    ) -> Result<engine::game::deck_loading::PlayerDeckPayload, String> {
+    ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
         let deck = match choice {
             DeckChoice::Random => server_core::starter_decks::random_starter_deck(),
             DeckChoice::Named(name) => server_core::starter_decks::find_starter_deck(name)
                 .ok_or_else(|| format!("Starter deck not found: {name}"))?,
             DeckChoice::DeckList(deck) => deck.as_ref().clone(),
         };
-        server_core::resolve_deck(self.db, &deck)
+        // The reducer stays at the name-only layer (see `DeckResolver` docs),
+        // but we MUST still validate the names against the card database here
+        // — otherwise a deck containing unresolvable names propagates through
+        // `apply_seat_delta` as `None`, and `start_game` silently substitutes
+        // an empty `PlayerDeckPayload` (see `Session::start_game`). The result
+        // is CR 704.5b losing every player on their first draw step with no
+        // user-visible error. Validating here causes the reducer to return
+        // `Err`, which phase-server then surfaces to the client.
+        server_core::resolve_deck(self.db, &deck)?;
+        Ok(engine::game::deck_loading::PlayerDeckList {
+            main_deck: deck.main_deck,
+            sideboard: deck.sideboard,
+            commander: deck.commander,
+        })
     }
 }
 
@@ -3440,7 +3453,7 @@ async fn handle_client_message(
                     })
                     .collect::<Vec<_>>();
 
-                session.apply_seat_delta(seat_state, &delta);
+                session.apply_seat_delta(seat_state, &delta, db.as_ref());
                 let started = delta.now_started
                     || (session.is_full() && session.start_when_full && session.is_pregame());
                 if started {
