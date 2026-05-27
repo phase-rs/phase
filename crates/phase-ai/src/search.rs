@@ -1017,12 +1017,8 @@ pub fn score_candidates(
 
 /// Build AI context from the player's deck pool, or a neutral default if unavailable.
 fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> AiContext {
-    let deck = state
-        .deck_pools
-        .iter()
-        .find(|p| p.player == player)
-        .map(|p| p.current_main.as_slice())
-        .unwrap_or(&[]);
+    let ai_pool = state.deck_pools.iter().find(|p| p.player == player);
+    let deck = ai_pool.map(|p| p.current_main.as_slice()).unwrap_or(&[]);
     if deck.is_empty() {
         let mut ctx = AiContext::empty(&config.weights);
         ctx.player = player;
@@ -1036,6 +1032,18 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
     // Populate opponent features so archetype lookups hit the cache instead
     // of re-running `DeckProfile::analyze` per search call.
     let session = std::sync::Arc::make_mut(&mut ctx.session);
+    // `analyze_for_player` defaults the AI player's bracket tier to `Core`
+    // (it has no `state` access). Read the declared tier from the AI's
+    // `PlayerDeckPool` and refresh the session features with it so
+    // `DeckFeatures::is_cedh` (and any future tier-gated feature) reflects
+    // the real bracket — without this, `ComboLinePolicy::activation()` would
+    // never fire for cEDH decks.
+    if let Some(pool) = ai_pool {
+        if pool.bracket_tier != engine::game::bracket_estimate::CommanderBracketTier::Core {
+            session.invalidate_player_features(player);
+            session.ensure_player_features(player, deck, pool.bracket_tier);
+        }
+    }
     for pool in &state.deck_pools {
         if pool.player != player {
             session.ensure_player_features(pool.player, &pool.current_main, pool.bracket_tier);
