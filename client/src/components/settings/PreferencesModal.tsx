@@ -32,6 +32,8 @@ import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
+import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
+import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 
 export type SettingsHighlight = "board-background";
 
@@ -558,7 +560,12 @@ export function PreferencesModal({
                 </SettingsSection>
               )}
 
-              {activeTab === "data" && <DataSection />}
+              {activeTab === "data" && (
+        <>
+          <CloudSyncSection />
+          <DataSection />
+        </>
+      )}
 
               {activeTab === "experimental" && <ExperimentalSection />}
             </div>
@@ -623,6 +630,186 @@ function ExperimentalSection() {
           </div>
         </label>
       </SettingGroup>
+    </SettingsSection>
+  );
+}
+
+function SyncSpinner() {
+  return (
+    <svg
+      className="h-3.5 w-3.5 animate-spin"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z"
+      />
+    </svg>
+  );
+}
+
+const SYNC_BUTTON_CLASS =
+  "rounded-[14px] border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50";
+
+function CloudSyncSection() {
+  const { t } = useTranslation("settings");
+  const available = useCloudSyncStore((s) => s.available);
+  const identity = useCloudSyncStore((s) => s.identity);
+  const sessionResolved = useCloudSyncStore((s) => s.sessionResolved);
+  const status = useCloudSyncStore((s) => s.status);
+  const error = useCloudSyncStore((s) => s.error);
+  const lastSyncedAt = useCloudSyncStore((s) => s.lastSyncedAt);
+  const conflict = useCloudSyncStore((s) => s.conflict);
+  const conflictDiff = useCloudSyncStore((s) => s.conflictDiff);
+  const signIn = useCloudSyncStore((s) => s.signIn);
+  const signOut = useCloudSyncStore((s) => s.signOut);
+  const syncNow = useCloudSyncStore((s) => s.syncNow);
+  const resolveConflict = useCloudSyncStore((s) => s.resolveConflict);
+
+  // Hidden entirely on deployments without a configured provider (self-hosters),
+  // who keep file backup as their data-portability path.
+  if (!available) return null;
+
+  const syncing = status === "syncing";
+
+  const statusLine =
+    status === "error" ? (
+      <span className="text-rose-400">
+        {t("sync.statusError")}
+        {error ? `: ${error}` : ""}
+      </span>
+    ) : syncing ? (
+      t("sync.statusSyncing")
+    ) : (
+      t("sync.lastSynced", {
+        time: lastSyncedAt
+          ? new Date(lastSyncedAt).toLocaleString()
+          : t("sync.never"),
+      })
+    );
+
+  return (
+    <SettingsSection title={t("sync.title")}>
+      <p className="text-xs text-slate-400">{t("sync.description")}</p>
+      <p className="text-xs text-slate-500">{t("sync.savesNote")}</p>
+
+      {!sessionResolved ? (
+        // Session restore in flight — withhold the sign-in CTA so a signed-in
+        // user doesn't see the prompt flash before identity adopts.
+        <p className="text-xs text-slate-500">{t("sync.statusSyncing")}</p>
+      ) : !identity ? (
+        <div className="flex flex-wrap gap-2">
+          <button
+            className={SYNC_BUTTON_CLASS}
+            onClick={() => void signIn("discord")}
+          >
+            <span className="flex items-center gap-2">
+              <DiscordIcon className="h-4 w-4" />
+              {t("sync.signInWith", { provider: t("sync.providerDiscord") })}
+            </span>
+          </button>
+          <button
+            className={SYNC_BUTTON_CLASS}
+            onClick={() => void signIn("google")}
+          >
+            <span className="flex items-center gap-2">
+              <GoogleIcon className="h-4 w-4" />
+              {t("sync.signInWith", { provider: t("sync.providerGoogle") })}
+            </span>
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2">
+            {identity.avatarUrl && (
+              <img
+                src={identity.avatarUrl}
+                alt=""
+                className="h-6 w-6 rounded-full"
+                referrerPolicy="no-referrer"
+              />
+            )}
+            <span className="text-sm text-slate-200">
+              {t("sync.signedInAs", { name: identity.label })}
+            </span>
+          </div>
+
+          {conflict ? (
+            <div className="flex flex-col gap-2 rounded-[14px] border border-amber-400/30 bg-amber-400/10 p-3">
+              <p className="text-sm font-medium text-amber-200">
+                {t("sync.conflictTitle")}
+              </p>
+              <p className="text-xs text-amber-100/80">
+                {t("sync.conflictBody")}
+              </p>
+              {conflictDiff && (
+                <ul className="space-y-0.5 text-xs text-amber-100/70">
+                  {(conflictDiff.decksAdded > 0 ||
+                    conflictDiff.decksModified > 0 ||
+                    conflictDiff.decksRemoved > 0) && (
+                    <li>
+                      {t("sync.diffDecks", {
+                        added: conflictDiff.decksAdded,
+                        modified: conflictDiff.decksModified,
+                        removed: conflictDiff.decksRemoved,
+                      })}
+                    </li>
+                  )}
+                  {conflictDiff.prefsChanged && <li>{t("sync.diffPrefs")}</li>}
+                  {conflictDiff.feedsChanged && <li>{t("sync.diffFeeds")}</li>}
+                  {conflictDiff.otherChanged && <li>{t("sync.diffOther")}</li>}
+                </ul>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className={SYNC_BUTTON_CLASS}
+                  onClick={() => void resolveConflict("cloud")}
+                >
+                  {t("sync.keepCloud")}
+                </button>
+                <button
+                  className={SYNC_BUTTON_CLASS}
+                  onClick={() => void resolveConflict("local")}
+                >
+                  {t("sync.keepLocal")}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                className={SYNC_BUTTON_CLASS}
+                disabled={syncing}
+                onClick={() => void syncNow()}
+              >
+                <span className="flex items-center gap-2">
+                  {syncing && <SyncSpinner />}
+                  {t("sync.syncNow")}
+                </span>
+              </button>
+              <button
+                className={SYNC_BUTTON_CLASS}
+                onClick={() => void signOut()}
+              >
+                {t("sync.signOut")}
+              </button>
+            </div>
+          )}
+
+          <p className="text-xs text-slate-500">{statusLine}</p>
+        </div>
+      )}
     </SettingsSection>
   );
 }

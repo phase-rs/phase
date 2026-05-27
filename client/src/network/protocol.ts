@@ -83,6 +83,7 @@ export type P2PMessage =
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
       assignedPlayerId: number;
       state: GameState;
+      playerNames?: Record<number, string>;
     } & LegalActionsWire)
   | { type: "reconnect_rejected"; reason: string }
   // Kick / forced removal (host → target).

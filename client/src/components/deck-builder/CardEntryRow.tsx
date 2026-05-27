@@ -66,6 +66,12 @@ export interface CardEntryRowProps {
    *  opens the printing picker — the touch path for art selection (right-click
    *  context menus don't exist on touch). */
   onOpenArtPicker?: (name: string) => void;
+  /** Destination name shown on the move button (e.g. "Sideboard",
+   *  "Maybeboard", "Main"). When provided, the move control renders as a
+   *  labelled "→ {label}" pill so the move target is explicit on touch (where
+   *  the title/aria-label tooltip is invisible). When omitted, the control
+   *  falls back to a bare directional arrow (used by the BO3 sideboard modal). */
+  moveTargetLabel?: string;
 }
 
 export function CardEntryRow({
@@ -80,6 +86,7 @@ export function CardEntryRow({
   isCommanderEligible,
   density = "compact",
   onOpenArtPicker,
+  moveTargetLabel,
 }: CardEntryRowProps) {
   const { t } = useTranslation("deck-builder");
   const comfortable = density === "comfortable";
@@ -97,11 +104,19 @@ export function CardEntryRow({
   const printingsLoaded = usePrintingsLoaded();
   const oracleId = printingsLoaded ? resolveOracleIdSync(entry.name) : null;
   const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;
-  const moveLabel = section === "main" ? "→" : "←";
-  const moveAriaLabel =
-    section === "main"
+  // Labelled "→ {target}" pill when the destination name is known (deck
+  // builder); bare directional arrow otherwise (BO3 sideboard modal). The
+  // labelled variant widens to fit text, so it overrides the square sizing.
+  const moveAriaLabel = moveTargetLabel
+    ? t("card.moveToTarget", { name: entry.name, target: moveTargetLabel })
+    : section === "main"
       ? t("card.moveToSideboard", { name: entry.name })
       : t("card.moveToMain", { name: entry.name });
+  const moveControlSize = moveTargetLabel
+    ? comfortable
+      ? "h-9 px-2 text-xs lg:h-7"
+      : "h-5 px-1.5 text-[11px]"
+    : controlSize;
 
   return (
     <div data-card-name={entry.name.toLowerCase()}>
@@ -171,11 +186,20 @@ export function CardEntryRow({
           <button
             type="button"
             onClick={() => onMove(entry.name, section)}
-            className={`${controlVisibility} ml-2 ${controlSize} rounded text-sky-300 hover:bg-sky-900/40`}
+            className={`${controlVisibility} ml-2 ${moveControlSize} inline-flex items-center justify-center gap-0.5 whitespace-nowrap rounded text-sky-300 hover:bg-sky-900/40`}
             aria-label={moveAriaLabel}
             title={moveAriaLabel}
           >
-            {moveLabel}
+            {moveTargetLabel ? (
+              <>
+                <span aria-hidden="true">→</span>
+                <span>{moveTargetLabel}</span>
+              </>
+            ) : section === "main" ? (
+              "→"
+            ) : (
+              "←"
+            )}
           </button>
           {onRemove && (
             <button

@@ -265,6 +265,24 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         // apply to the draw step's mandatory first draw.
         if has_except_first_draw_in_draw_step_clause(&lower) {
             def = def.condition(ReplacementCondition::ExceptFirstDrawInDrawStep);
+        } else {
+            // CR 614.11 + CR 614.1a: "...while your library has no cards in
+            // it..." antecedent — gate the replacement so a win-on-draw
+            // (Laboratory Maniac, Jace, Wielder of Mysteries) fires only on an
+            // empty-library draw. CR 614.11: draw replacements apply even when
+            // the library is empty, which is precisely the case this gate
+            // selects. Without the gate the WinTheGame post-effect replaces
+            // *every* draw, which both wins spuriously and leaks an un-drained
+            // post-replacement continuation into later turns.
+            match parse_while_antecedent(&lower, "would draw a card") {
+                WhileAntecedent::Parsed(condition) => def = def.condition(condition),
+                // Guard present but unparseable: fail closed. Emitting an
+                // unconditional Draw replacement would fire the (often
+                // game-ending) effect on every draw — the exact regression
+                // this discipline exists to prevent.
+                WhileAntecedent::Unparsed => return None,
+                WhileAntecedent::Absent => {}
+            }
         }
         return Some(def);
     }
@@ -310,16 +328,18 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
         }
         // else: "you would gain life" → valid_player stays None (controller-only).
-        // CR 614.12 + CR 614.1a: A "while [condition]" gate in the antecedent
-        // suppresses the replacement when the condition is false. Phial of
-        // Galadriel ("If you would gain life while you have 5 or less life,
-        // you gain twice that much life instead") uses this shape — without
-        // the gate, the doubler fires unconditionally. Reuses the
-        // `parse_inner_condition` building block (already used by
-        // `parse_conditional_draw_replacement`) and the
-        // `ReplacementCondition::OnlyIfQuantity` typed surface.
-        if let Some(condition) = parse_while_condition_antecedent(&lower, "would gain life") {
-            def = def.condition(condition);
+        // CR 614.1a: A "while [condition]" gate in the antecedent suppresses the
+        // replacement when the condition is false. Phial of Galadriel ("If you
+        // would gain life while you have 5 or less life, you gain twice that
+        // much life instead") uses this shape — without the gate, the doubler
+        // fires unconditionally. Reuses the `parse_inner_condition` building
+        // block and the `ReplacementCondition::OnlyIfQuantity` typed surface.
+        match parse_while_antecedent(&lower, "would gain life") {
+            WhileAntecedent::Parsed(condition) => def = def.condition(condition),
+            // Guard present but unparseable: fail closed rather than emit an
+            // unconditional life-gain doubler.
+            WhileAntecedent::Unparsed => return None,
+            WhileAntecedent::Absent => {}
         }
         return Some(def);
     }
@@ -3547,55 +3567,79 @@ fn parse_scry_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr,
     .parse(input)
 }
 
-/// CR 614.12 + CR 614.1a: Extract a "while [condition]" gate clause that
-/// appears in the antecedent of a "would [verb]" replacement (between the verb
-/// phrase and the comma terminating the antecedent), and lift it to a typed
-/// `ReplacementCondition::OnlyIfQuantity`. `verb_anchor` is the lowercase
-/// verb phrase used to locate the antecedent (e.g. "would gain life").
+/// Outcome of inspecting the `"...would <verb> while <condition>,"` antecedent
+/// of a replacement line. The three states are deliberately distinct: a guard
+/// that is *present but unparseable* must never be silently collapsed into
+/// *absent*, or a conditional replacement degrades into one that fires on every
+/// event — the Jace, Wielder of Mysteries / Laboratory Maniac spurious-win
+/// class. Making `Unparsed` a first-class variant forces every caller to decide
+/// what to do with an unrecognized guard rather than defaulting to "ungated".
+enum WhileAntecedent {
+    /// No `" while ...,"` guard is attached to the verb clause.
+    Absent,
+    /// A guard is present and understood as a typed `ReplacementCondition`.
+    Parsed(ReplacementCondition),
+    /// A guard is structurally present but could not be parsed into a typed
+    /// condition. Callers MUST fail closed (skip the replacement) rather than
+    /// emit it unconditionally.
+    Unparsed,
+}
+
+/// CR 614.1a: Inspect the "while [condition]" gate clause that appears in the
+/// antecedent of a "would [verb]" replacement (between the verb phrase and the
+/// comma terminating the antecedent) and lift it to a typed
+/// `ReplacementCondition::OnlyIfQuantity`. `verb_anchor` is the lowercase verb
+/// phrase used to locate the antecedent (e.g. "would gain life").
 ///
-/// Returns `None` when the antecedent has no "while" clause, when the clause
-/// doesn't parse via `parse_inner_condition`, or when the parsed condition
-/// isn't a quantity comparison the typed surface can carry.
+/// Returns [`WhileAntecedent::Absent`] only when there is no "while" clause at
+/// all. When a "while" clause *is* present but cannot be lifted to a quantity
+/// comparison (unparseable body, trailing text, or a non-quantity condition the
+/// typed surface can't carry), returns [`WhileAntecedent::Unparsed`] so the
+/// caller fails closed instead of emitting an unconditional replacement.
 ///
 /// Example: "If you would gain life while you have 5 or less life, you gain
-/// twice that much life instead." → `OnlyIfQuantity { lhs: LifeTotal,
-/// comparator: LE, rhs: Fixed{5}, active_player_req: None }`.
-fn parse_while_condition_antecedent(
-    lower: &str,
-    verb_anchor: &str,
-) -> Option<ReplacementCondition> {
+/// twice that much life instead." → `Parsed(OnlyIfQuantity { lhs: LifeTotal,
+/// comparator: LE, rhs: Fixed{5}, active_player_req: None })`.
+fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
     // Locate the antecedent's "while " clause: it appears between
     // " {verb_anchor} while " and the comma terminating the antecedent.
     // Single nom combinator chain — locate verb anchor, consume gate marker,
     // capture condition body in one pass.
-    let (after_verb, (_, _)) = (
+    let Ok((after_verb, _)) = (
         take_until::<_, _, OracleError<'_>>(verb_anchor),
         tag::<_, _, OracleError<'_>>(verb_anchor),
     )
         .parse(lower)
-        .ok()?;
-    let (_, condition_text) = nom::sequence::preceded(
+    else {
+        return WhileAntecedent::Absent;
+    };
+    let Ok((_, condition_text)) = nom::sequence::preceded(
         tag::<_, _, OracleError<'_>>(" while "),
         take_until::<_, _, OracleError<'_>>(","),
     )
-    .parse(after_verb)
-    .ok()?;
-    let (rest, condition) = parse_inner_condition(condition_text.trim()).ok()?;
+    .parse(after_verb) else {
+        return WhileAntecedent::Absent;
+    };
+    // A guard clause IS present from here on; every failure path below must fail
+    // closed (`Unparsed`), never `Absent`.
+    let Ok((rest, condition)) = parse_inner_condition(condition_text.trim()) else {
+        return WhileAntecedent::Unparsed;
+    };
     if !rest.trim().is_empty() {
-        return None;
+        return WhileAntecedent::Unparsed;
     }
-    // Only QuantityComparison conditions are carried by OnlyIfQuantity;
-    // other StaticCondition shapes are skipped (caller leaves the line
-    // ungated rather than misclassifying).
+    // Only QuantityComparison conditions can be carried by OnlyIfQuantity. A
+    // non-quantity guard is still a real guard, so it fails closed rather than
+    // leaving the replacement ungated.
     let StaticCondition::QuantityComparison {
         lhs,
         comparator,
         rhs,
     } = condition
     else {
-        return None;
+        return WhileAntecedent::Unparsed;
     };
-    Some(ReplacementCondition::OnlyIfQuantity {
+    WhileAntecedent::Parsed(ReplacementCondition::OnlyIfQuantity {
         lhs,
         comparator,
         rhs,
@@ -9497,6 +9541,68 @@ mod snapshot_tests {
         )
         .unwrap();
         insta::assert_json_snapshot!(def);
+    }
+
+    /// CR 104.2b + CR 104.3c: The "draw from empty library → win" class
+    /// (Laboratory Maniac, Jace, Wielder of Mysteries) must gate its WinTheGame
+    /// post-effect on the "while your library has no cards in it" antecedent.
+    /// Without the gate the replacement fires on every draw — winning spuriously
+    /// and leaking an un-drained post-replacement continuation across turns.
+    #[test]
+    fn draw_replacement_win_gated_on_empty_library() {
+        let def = parse_replacement_line(
+            "If you would draw a card while your library has no cards in it, you win the game instead.",
+            "Laboratory Maniac",
+        )
+        .expect("must parse the empty-library win replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert!(
+            matches!(
+                def.execute.as_deref().map(|a| &*a.effect),
+                Some(crate::types::ability::Effect::WinTheGame)
+            ),
+            "execute must be WinTheGame, got {:?}",
+            def.execute
+        );
+        match def.condition {
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneCardCount {
+                                zone: crate::types::ability::ZoneRef::Library,
+                                ref card_types,
+                                scope: crate::types::ability::CountScope::Controller,
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                ..
+            }) => assert!(card_types.is_empty(), "library count must be unfiltered"),
+            other => panic!(
+                "expected OnlyIfQuantity(library == 0) gate, got {other:?}; \
+                 the empty-library antecedent was dropped"
+            ),
+        }
+    }
+
+    /// Discipline guard: a draw replacement whose "while [condition]"
+    /// antecedent is structurally present but unparseable must fail closed
+    /// (produce no replacement) rather than emit an unconditional one. A
+    /// silently-ungated win-on-draw is the regression `WhileAntecedent::Unparsed`
+    /// exists to prevent. "while there is a full moon" has no typed condition.
+    #[test]
+    fn draw_replacement_with_unparseable_guard_fails_closed() {
+        let def = parse_replacement_line(
+            "If you would draw a card while there is a full moon, you win the game instead.",
+            "Made Up Card",
+        );
+        assert!(
+            def.is_none(),
+            "unparseable while-guard must fail closed, not emit an unconditional \
+             replacement; got {def:?}"
+        );
     }
 
     // CR 614.1a + CR 614.9: building-block coverage for the one-shot

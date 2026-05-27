@@ -1,36 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { detectAndParseDeck, exportDeck, resolveCommander } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
-import {
-  sideboardPolicyForFormat,
-  type SideboardPolicy,
-} from "../../services/engineRuntime";
-import type { GameFormat } from "../../adapter/types";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 
 import { MoveList } from "./MoveList";
-
-/**
- * Map the lowercase deck-builder format string (e.g. "standard", "commander")
- * to the engine's `GameFormat` PascalCase identifier. Derived from the
- * engine-authored FORMAT_REGISTRY so adding a format is automatic here.
- */
-function mapToEngineFormat(format: string | undefined): GameFormat | null {
-  if (!format) return null;
-  const lower = format.toLowerCase();
-  const match = FORMAT_REGISTRY.find((m) => m.format.toLowerCase() === lower);
-  return match?.format ?? null;
-}
-
-/**
- * Used only when the deck's format string doesn't resolve to a known
- * GameFormat (e.g. user-imported "casual" labels). Constructed formats are
- * the common case for unfamiliar labels, so Limited(15) is the right default.
- */
-const FALLBACK_CONSTRUCTED_POLICY: SideboardPolicy = { type: "Limited", data: 15 };
+import { mouseHoverPreview } from "./hoverPreview";
+import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckListProps {
   deck: ParsedDeck;
@@ -48,6 +25,14 @@ interface DeckListProps {
   isCommanderEligible?: (name: string) => boolean;
   /** Touch path for art selection — forwarded to each row's ✦ badge. */
   onOpenArtPicker?: (name: string) => void;
+  /** Designated commander(s). Rendered as a pinned section above the section
+   *  tabs (mirroring the visual stack's Commander lane) so the commander stays
+   *  visible/removable in list view — on mobile the Info-panel CommanderPanel
+   *  is on a different tab. Empty in non-commander formats, so the section
+   *  self-hides. */
+  commanders?: string[];
+  /** Demotes a commander back into the main deck. Paired with `commanders`. */
+  onRemoveCommander?: (name: string) => void;
 }
 
 
@@ -85,6 +70,8 @@ export function DeckList({
   onSetAsCommander,
   isCommanderEligible,
   onOpenArtPicker,
+  commanders = [],
+  onRemoveCommander,
 }: DeckListProps) {
   const { t } = useTranslation("deck-builder");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -100,38 +87,25 @@ export function DeckList({
 
   // CR 100.4a: Ask the engine for the format's sideboard policy rather than
   // hardcoding 15. The engine is the single authority for format rules; the
-  // frontend only renders what the engine tells it.
-  const [sideboardPolicy, setSideboardPolicy] = useState<SideboardPolicy>(
-    FALLBACK_CONSTRUCTED_POLICY,
-  );
-  useEffect(() => {
-    const engineFormat = mapToEngineFormat(format);
-    if (!engineFormat) {
-      setSideboardPolicy(FALLBACK_CONSTRUCTED_POLICY);
-      return;
-    }
-    let cancelled = false;
-    sideboardPolicyForFormat(engineFormat)
-      .then((policy) => {
-        if (!cancelled) setSideboardPolicy(policy);
-      })
-      .catch(() => {
-        if (!cancelled) setSideboardPolicy(FALLBACK_CONSTRUCTED_POLICY);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [format]);
+  // frontend only renders what the engine tells it. Forbidden-sideboard
+  // formats (Commander/Brawl) repurpose the second section as a builder-only
+  // "Maybeboard" staging area — see useSideboardPolicy.
+  const sideboardPolicy = useSideboardPolicy(format);
+  const isMaybeboard = isMaybeboardPolicy(sideboardPolicy);
+  const mainName = t("deckList.mainName");
+  const sectionName = isMaybeboard ? t("deckList.maybeboardName") : t("deckList.sideboardName");
 
-  const { sideboardTitle, sideboardWarning, hideSideboard } = useMemo(() => {
+  const { sideboardTitle, sideboardWarning } = useMemo(() => {
     switch (sideboardPolicy.type) {
       case "Forbidden":
-        return { sideboardTitle: "", sideboardWarning: undefined, hideSideboard: true };
+        return {
+          sideboardTitle: t("deckList.maybeboard", { count: sideTotal }),
+          sideboardWarning: undefined,
+        };
       case "Unlimited":
         return {
           sideboardTitle: t("deckList.sideboardUnlimited", { count: sideTotal }),
           sideboardWarning: undefined,
-          hideSideboard: false,
         };
       case "Limited": {
         const max = sideboardPolicy.data;
@@ -139,15 +113,10 @@ export function DeckList({
           sideboardTitle: t("deckList.sideboardLimited", { count: sideTotal, max }),
           sideboardWarning:
             sideTotal > max ? t("deckList.sideboardExceeds", { max }) : undefined,
-          hideSideboard: false,
         };
       }
     }
   }, [sideboardPolicy, sideTotal, t]);
-
-  useEffect(() => {
-    if (hideSideboard && viewMode === "sideboard") setViewMode("main");
-  }, [hideSideboard, viewMode]);
 
   const unsupportedMap = useMemo(() => {
     const map = new Map<string, UnsupportedCard>();
@@ -225,48 +194,86 @@ export function DeckList({
         </div>
       </div>
 
-      {/* Section selector: tab pair for Main / Sideboard. Full-width and
-          prominent so the sideboard view is discoverable even on the
-          narrow 256px right panel. Hidden when the format forbids a
-          sideboard (Commander/Brawl). */}
-      {!hideSideboard ? (
-        <div className="mb-2 grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-black/18 p-1">
-          <button
-            onClick={() => setViewMode("main")}
-            className={
-              viewMode === "main"
-                ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
-                : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
-            }
-          >
-            {t("deckList.mainTab", { count: mainTotal })}
-          </button>
-          <button
-            onClick={() => setViewMode("sideboard")}
-            className={
-              viewMode === "sideboard"
-                ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
-                : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
-            }
-          >
-            {t("deckList.sideboardTab", { count: sideTotal })}
-          </button>
+      {/* Commander section: pinned above the tabs (not inside one) so it's
+          visible on whichever tab is active. CR 903.5a — the commander lives in
+          the command zone, not the deck, so it's shown separately and excluded
+          from the main count. Self-hides outside commander formats (commanders
+          is empty). Designation still happens via the ♛ crown on eligible rows;
+          this section only displays + demotes the current commander(s). */}
+      {commanders.length > 0 && (
+        <div className="mb-2 rounded-xl border border-fuchsia-300/25 bg-fuchsia-500/8 p-2">
+          <div className="mb-1 flex items-center gap-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-fuchsia-200/80">
+            <span aria-hidden="true">♛</span>
+            {t("deckList.commanderHeading")}
+          </div>
+          {commanders.map((name) => (
+            <div
+              key={name}
+              data-card-name={name.toLowerCase()}
+              className="group flex items-center justify-between py-0.5 text-sm"
+            >
+              <span
+                className={`text-fuchsia-50 ${onCardHover ? "cursor-pointer" : ""}`}
+                onClick={() => onCardHover?.(name)}
+                {...mouseHoverPreview(onCardHover, name)}
+              >
+                {name}
+              </span>
+              {onRemoveCommander && (
+                <button
+                  type="button"
+                  onClick={() => onRemoveCommander(name)}
+                  className="ml-2 h-9 w-9 rounded text-red-400 hover:bg-red-900/40 lg:h-7 lg:w-7"
+                  aria-label={t("deckList.removeCommander", { name })}
+                  title={t("deckList.removeCommander", { name })}
+                >
+                  -
+                </button>
+              )}
+            </div>
+          ))}
         </div>
-      ) : (
-        <h3 className="mb-2 text-sm font-bold text-white">
-          {t("deckList.mainDeckHeading", { count: mainTotal })}
-        </h3>
       )}
+
+      {/* Section selector: tab pair for Main / Sideboard (or Main / Maybeboard
+          in Commander/Brawl). Full-width and prominent so the second section is
+          discoverable even on the narrow 256px right panel — and so cards moved
+          there are always recoverable, rather than vanishing into a hidden
+          section. */}
+      <div className="mb-2 grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-black/18 p-1">
+        <button
+          onClick={() => setViewMode("main")}
+          className={
+            viewMode === "main"
+              ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
+              : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
+          }
+        >
+          {t("deckList.mainTab", { count: mainTotal })}
+        </button>
+        <button
+          onClick={() => setViewMode("sideboard")}
+          className={
+            viewMode === "sideboard"
+              ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
+              : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
+          }
+        >
+          {isMaybeboard
+            ? t("deckList.maybeboardTab", { count: sideTotal })
+            : t("deckList.sideboardTab", { count: sideTotal })}
+        </button>
+      </div>
 
       {/* Validation warnings now pin as a banner at the Deck-surface level (so
           they show in both list and stack views); format legality & engine
           coverage live in StatsPanel. The per-card unsupported `!` flags remain
           inline via unsupportedMap below. */}
 
-      {/* Main and sideboard share this column; the header toggle (mirroring
-          the "Show Browser" pattern) flips between them so the sideboard
-          can't be pushed off-screen by a long main deck. The sideboard
-          toggle itself is hidden for Commander/Brawl (SideboardPolicy::Forbidden). */}
+      {/* Main and the second section share this column; the tab toggle flips
+          between them so neither can be pushed off-screen by a long deck. Each
+          row's move button is labelled with its destination (→ Sideboard /
+          → Maybeboard / → Main) so the move target is explicit on touch. */}
       <div>
         {viewMode === "main"
           ? (["Creatures", "Spells", "Lands"] as const).map((group) => (
@@ -284,9 +291,10 @@ export function DeckList({
                 isCommanderEligible={isCommanderEligible}
                 density="comfortable"
                 onOpenArtPicker={onOpenArtPicker}
+                moveTargetLabel={sectionName}
               />
             ))
-          : !hideSideboard && (
+          : (
               <MoveList
                 title={sideboardTitle}
                 entries={deck.sideboard}
@@ -296,11 +304,16 @@ export function DeckList({
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
                 alwaysShow
-                emptyHint={t("deckList.sideboardEmptyHint")}
+                emptyHint={
+                  isMaybeboard
+                    ? t("deckList.maybeboardEmptyHint")
+                    : t("deckList.sideboardEmptyHint")
+                }
                 warning={sideboardWarning}
                 onChooseArt={onChooseArt}
                 density="comfortable"
                 onOpenArtPicker={onOpenArtPicker}
+                moveTargetLabel={mainName}
               />
             )}
       </div>

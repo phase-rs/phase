@@ -38,6 +38,7 @@ local_resource('frontend',
     serve_cmd = 'pnpm dev',
     serve_dir = 'client',
     auto_init = 'tauri' not in enabled,
+    allow_parallel = True,
     links = ['http://localhost:5173'],
     labels = ['serve'],
 )

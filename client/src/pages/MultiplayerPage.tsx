@@ -500,14 +500,14 @@ export function MultiplayerPage() {
 
   // Host setup complete → execute immediately if deck exists, otherwise prompt
   const handleHostSetupComplete = useCallback(
-    (settings: HostSettings) => {
+    async (settings: HostSettings): Promise<boolean> => {
       const action: PendingAction = { type: "host", settings, connectionMode };
       if (activeDeckName) {
-        void executeAction(action);
-      } else {
-        setPendingAction(action);
-        setView("deck-select");
+        return executeAction(action);
       }
+      setPendingAction(action);
+      setView("deck-select");
+      return true;
     },
     [connectionMode, activeDeckName, executeAction],
   );

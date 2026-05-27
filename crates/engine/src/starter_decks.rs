@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// A deck specified as card name strings — the wire format used by clients
 /// and the starter deck module. Distinct from `PlayerDeckPayload` which
 /// contains fully-parsed `CardFace` data resolved against the card database.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeckData {
     pub main_deck: Vec<String>,
     #[serde(default)]

@@ -4456,14 +4456,25 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         });
     }
 
-    let (target, _rem) = parse_target(rest_orig);
+    // CR 107.3i + CR 202.3 + CR 608.2b: A trailing "where X is <expression>"
+    // defining clause (Spellstutter Sprite: "counter target spell with mana
+    // value X or less, where X is the number of Faeries you control") binds
+    // the literal X in the type filter's `Cmc` bound. Without this
+    // substitution the bound stays `QuantityRef::Variable("X")` with no
+    // defining expression, collapses to 0 at resolution, and the target
+    // legality re-check at CR 608.2b (target legality is verified again as a
+    // spell or ability resolves) fails every legal spell. The strip-and-apply
+    // pattern mirrors the Birthing Ritual callsite (see
+    // `oracle_effect/mod.rs:16859`).
+    let (without_where_tp, where_x_expression) =
+        super::strip_trailing_where_x(crate::parser::oracle_util::TextPair::new(rest_orig, rest));
+    let (target, _rem) = parse_target(without_where_tp.original);
     #[cfg(debug_assertions)]
     assert_no_compound_remainder(_rem, text);
-    let target = if nom_primitives::scan_contains(rest, "spell") {
-        super::constrain_filter_to_stack(target)
-    } else {
-        target
-    };
+    // `parse_target("... spell with mana value X or less")` already scopes
+    // the spell phrase to the stack through the shared target parser. Keep this
+    // path on that building block and only apply the trailing X definition.
+    let target = super::apply_where_x_to_filter(target, where_x_expression.as_deref());
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
     let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
     Some(ZoneCounterImperativeAst::Counter {
@@ -6686,6 +6697,68 @@ mod tests {
         );
     }
 
+    /// Issue #899 regression — "counter target spell with mana value X or
+    /// less, where X is the number of Faeries you control" (Spellstutter
+    /// Sprite) must resolve the `Cmc` bound to the defining `where X is …`
+    /// expression rather than leaving it as the bare `Variable("X")` that
+    /// collapses to 0 at resolution. Building-block coverage: this exercises
+    /// `strip_trailing_where_x` + `apply_where_x_to_filter` composed under
+    /// `parse_counter_ast`, so every counter-target-spell-with-where-X card
+    /// (Faerie Trickery, Filigree Sages variants, etc.) is covered by the
+    /// same path.
+    /// CR 107.3i (shared X on an object) + CR 202.3 (mana value). Target
+    /// legality re-check on resolution (CR 608.2b) is exercised by the
+    /// integration tests in
+    /// `tests/integration/spellstutter_sprite_counter_with_x.rs`.
+    #[test]
+    fn parse_counter_target_spell_with_where_x_cmc_bound() {
+        let text = "counter target spell with mana value X or less, where X is the number of Faeries you control.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("Spellstutter Sprite counter clause should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        let typed = typed_leg(&target).unwrap_or_else(|| {
+            panic!("expected a typed leg under the stack constraint, got {target:?}")
+        });
+        let cmc = typed
+            .properties
+            .iter()
+            .find_map(|p| match p {
+                FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a Cmc bound in the typed leg, got {typed:?}"));
+        assert_eq!(
+            *cmc.0,
+            crate::types::ability::Comparator::LE,
+            "Spellstutter's 'or less' clause must parse as a <= mana-value bound"
+        );
+        let cmc = cmc.1;
+        let QuantityExpr::Ref { qty } = cmc else {
+            panic!("expected the Cmc bound to be a dynamic Ref, got {cmc:?}");
+        };
+        let QuantityRef::ObjectCount { filter } = qty else {
+            panic!("expected the Cmc bound to resolve to ObjectCount(Faeries you control), got {qty:?} — the where-X binding was dropped");
+        };
+        let object_typed = match filter {
+            TargetFilter::Typed(tf) => tf,
+            other => panic!("expected ObjectCount over a Typed filter, got {other:?}"),
+        };
+        assert!(
+            object_typed
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Faerie"))),
+            "ObjectCount filter must include the Faerie subtype: {object_typed:?}"
+        );
+        assert_eq!(
+            object_typed.controller,
+            Some(ControllerRef::You),
+            "ObjectCount filter must be controller-scoped to You: {object_typed:?}"
+        );
+    }
+
     /// Issue #408 regression guard — a plain "Counter target spell"
     /// (Counterspell) must still yield a stack-spell filter; the new
     /// stack-object combinator must not steal the simple case.
@@ -8116,6 +8189,56 @@ mod tests {
                 "Expected Power {{ Anaphoric }}, got {amount:?}"
             ),
             other => panic!("Expected GainLife, got {other:?}"),
+        }
+    }
+
+    /// CR 119.3 + CR 208.1: "loses life equal to its power plus its toughness" —
+    /// Phthisis class. Both operands use Anaphoric scope so the enclosing
+    /// clause's subject-injection applies identically to the individual
+    /// "its power" / "its toughness" single-value forms. The destroy effect
+    /// that precedes this clause sets `effect_context_object` to the destroyed
+    /// creature's LKI, providing the correct runtime referent.
+    #[test]
+    fn parse_lose_life_equal_to_power_plus_toughness() {
+        let text = "lose life equal to its power plus its toughness";
+        let lower = text.to_lowercase();
+        let result = parse_numeric_imperative_ast(text, &lower);
+        assert!(
+            result.is_some(),
+            "Should parse 'lose life equal to its power plus its toughness'"
+        );
+        match result.unwrap() {
+            NumericImperativeAst::LoseLife { amount } => match amount {
+                QuantityExpr::Sum { exprs } => {
+                    assert_eq!(exprs.len(), 2, "Sum should have two operands");
+                    assert!(
+                        matches!(
+                            exprs[0],
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::Power {
+                                    scope: crate::types::ability::ObjectScope::Anaphoric
+                                }
+                            }
+                        ),
+                        "First operand should be Power(Anaphoric), got {:?}",
+                        exprs[0]
+                    );
+                    assert!(
+                        matches!(
+                            exprs[1],
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::Toughness {
+                                    scope: crate::types::ability::ObjectScope::Anaphoric
+                                }
+                            }
+                        ),
+                        "Second operand should be Toughness(Anaphoric), got {:?}",
+                        exprs[1]
+                    );
+                }
+                other => panic!("Expected Sum, got {other:?}"),
+            },
+            other => panic!("Expected LoseLife, got {other:?}"),
         }
     }
 

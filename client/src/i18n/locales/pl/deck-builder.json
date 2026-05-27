@@ -68,7 +68,8 @@
     "unsupportedExpand_one": "{{count}} nieobsługiwana mechanika; rozwiń szczegóły",
     "unsupportedExpand_other": "{{count}} nieobsługiwanych mechanik; rozwiń szczegóły",
     "unsupportedTitle_one": "{{count}} nieobsługiwana mechanika — kliknij, aby rozwinąć",
-    "unsupportedTitle_other": "{{count}} nieobsługiwanych mechanik — kliknij, aby rozwinąć"
+    "unsupportedTitle_other": "{{count}} nieobsługiwanych mechanik — kliknij, aby rozwinąć",
+    "moveToTarget": "Przenieś jedną kartę {{name}} do {{target}}"
   },
   "grid": {
     "allFormats": "Wszystkie",
@@ -102,7 +103,15 @@
     "exportModalTitle": "Eksportuj talię",
     "saveToFile": "Zapisz do pliku",
     "copied": "Skopiowano!",
-    "copy": "Kopiuj"
+    "copy": "Kopiuj",
+    "maybeboardTab": "Maybeboard ({{count}})",
+    "mainName": "Główna",
+    "sideboardName": "Zaplecze",
+    "maybeboardName": "Maybeboard",
+    "maybeboard": "Maybeboard ({{count}})",
+    "maybeboardEmptyHint": "Karty, które rozważasz. Dotknij → Maybeboard na karcie talii, aby ją tu umieścić.",
+    "commanderHeading": "Dowódca",
+    "removeCommander": "Usuń {{name}} jako dowódcę"
   },
   "moveList": {
     "empty": "Pusto"
@@ -132,7 +141,13 @@
     "addOne": "Dodaj jedną kartę {{name}}",
     "copyLimit": "{{name}} osiągnęła limit kopii",
     "removeOne": "Usuń jedną kartę {{name}}",
-    "removeCommander": "Usuń {{name}} jako dowódcę"
+    "removeCommander": "Usuń {{name}} jako dowódcę",
+    "maybeboardBadge": "Maybeboard {{count}}",
+    "mainName": "Główna",
+    "sideboardName": "Zaplecze",
+    "maybeboardName": "Maybeboard",
+    "mainMaybeBadge": "{{main}} główna + {{side}} maybe",
+    "maybeboardGroup": "Maybeboard"
   },
   "printingPicker": {
     "title": "Wybierz grafikę",

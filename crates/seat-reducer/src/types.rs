@@ -19,6 +19,7 @@ pub enum SeatKind {
 pub enum DeckChoice {
     Random,
     Named(String),
+    DeckList(Box<engine::starter_decks::DeckData>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

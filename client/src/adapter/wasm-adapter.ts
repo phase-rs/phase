@@ -147,24 +147,44 @@ export class WasmAdapter implements EngineAdapter {
     return pending;
   }
 
-  private async ensureCardDb(): Promise<void> {
-    if (this.cardDbLoaded) return;
-    try {
-      if (this.engine) {
-        const count = await this.engine.loadCardDbFromUrl();
-        console.log(`Card database loaded in worker: ${count} cards`);
-      } else if (this.fallback) {
-        const count = await this.fallback.ensureCardDatabase();
-        console.log(`Card database loaded: ${count} cards`);
+  // In-flight card-DB load dedupe. `cardDbLoaded` only flips true *after* the
+  // ~3-5s fetch+parse completes, so without this every caller that arrives
+  // during that window (menu warm racing bracket/compat/feed prewarm, all of
+  // which call ensureCardDb directly and bypass cardDataStore's warmInFlight)
+  // sees the flag still false and queues its own `loadCardDbFromUrl` on the
+  // worker. The worker drains its queue serially, re-fetching and re-parsing
+  // the full ~90 MB DB for each — a staggered burst of redundant loads.
+  // Concurrent callers now share one load; mirrors `initPromise` above.
+  private cardDbPromise: Promise<void> | null = null;
+
+  private ensureCardDb(): Promise<void> {
+    if (this.cardDbLoaded) return Promise.resolve();
+    if (this.cardDbPromise) return this.cardDbPromise;
+    const pending = (async () => {
+      try {
+        if (this.engine) {
+          const count = await this.engine.loadCardDbFromUrl();
+          console.log(`Card database loaded in worker: ${count} cards`);
+        } else if (this.fallback) {
+          const count = await this.fallback.ensureCardDatabase();
+          console.log(`Card database loaded: ${count} cards`);
+        }
+        this.cardDbLoaded = true;
+        // Also load into AI pool if it's already initialized
+        if (this.aiPool && !this.aiPool.isCardDbLoaded) {
+          await this.aiPool.loadCardDb();
+        }
+      } catch (err) {
+        console.warn("Failed to load card database:", err);
       }
-      this.cardDbLoaded = true;
-      // Also load into AI pool if it's already initialized
-      if (this.aiPool && !this.aiPool.isCardDbLoaded) {
-        await this.aiPool.loadCardDb();
-      }
-    } catch (err) {
-      console.warn("Failed to load card database:", err);
-    }
+    })();
+    // Clear the in-flight ref once settled so a *failed* load (cardDbLoaded
+    // still false) can be retried by a later caller. A successful load
+    // short-circuits on the `cardDbLoaded` latch above and never re-enters.
+    this.cardDbPromise = pending.finally(() => {
+      this.cardDbPromise = null;
+    });
+    return this.cardDbPromise;
   }
 
   /** Drain the captured panic, defaulting to `null` for the main-thread
@@ -485,6 +505,7 @@ export class WasmAdapter implements EngineAdapter {
     this.initialized = false;
     this.initPromise = null;
     this.cardDbLoaded = false;
+    this.cardDbPromise = null;
   }
 
   async ping(): Promise<string> {

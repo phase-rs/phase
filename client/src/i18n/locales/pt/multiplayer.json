@@ -185,6 +185,7 @@
     "setPassword": "Definir senha",
     "passwordPlaceholder": "Senha do jogo",
     "back": "Voltar",
+    "opening": "Abrindo…",
     "hostP2PGame": "Hospedar Jogo P2P",
     "hostGame": "Hospedar Jogo"
   },

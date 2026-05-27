@@ -1,6 +1,6 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_until, take_while};
 use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
@@ -177,6 +177,40 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
     parsed
 }
 
+// CR 100.2a / CR 903.5b: Deck-construction overrides like "A deck can have
+// any number of cards named X." (Tempest Hawk, Rat Colony, Relentless Rats,
+// Persistent Petitioners, Shadowborn Apostle, etc.) are deck-construction
+// metadata that override CR 100.2a's four-of limit and the CR 903.5b
+// Commander singleton rule. They have no runtime effect to resolve. The
+// recognizer matches this exact phrase shape to avoid false-positives
+// against legitimate "up to N cards named ..." patterns (e.g. Seven Dwarves).
+fn parse_deck_can_have_any_number_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = tag("a deck can have any number of cards named ").parse(input)?;
+    let (input, subject) = take_while(|c: char| {
+        c.is_alphanumeric() || c == ' ' || c == '\'' || c == ',' || c == '-' || c == '~'
+    })
+    .parse(input)?;
+    if subject.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
+}
+
+/// Recognizer for "A deck can have any number of cards named X." —
+/// deck-construction text consumed silently by the parser so it does not
+/// fall through to `Effect::Unimplemented { name: "static_structure", .. }`.
+pub(crate) fn is_deck_construction_any_number_sentence(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    let parsed = all_consuming(parse_deck_can_have_any_number_sentence)
+        .parse(lower.as_str())
+        .is_ok();
+    parsed
+}
+
 /// Whether Oracle text explicitly permits this card to be a commander.
 pub fn oracle_text_allows_commander(oracle_text: &str, card_name: &str) -> bool {
     let normalized = normalize_card_name_refs(oracle_text, card_name);
@@ -271,7 +305,7 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
 ///   1. CR 122.1: an optional "with [N] [type] counter(s) on it" clause →
 ///      populates `Effect::ChangeZone::enter_with_counters`.
 ///   2. An optional "If you do, [effect]" follow-up sentence → becomes a
-///      `sub_ability` gated by `AbilityCondition::IfYouDo`, so the dependent
+///      `sub_ability` gated by `AbilityCondition::effect_performed()`, so the dependent
 ///      effect only fires when the player accepts the begin-game opt-in.
 ///
 /// Mirrors `try_parse_opening_hand_reveal_delayed_trigger` end-to-end shape and
@@ -345,7 +379,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
         if has_unimplemented(&sub) {
             return None;
         }
-        def = def.sub_ability(sub.condition(AbilityCondition::IfYouDo));
+        def = def.sub_ability(sub.condition(AbilityCondition::effect_performed()));
     }
 
     Some(def)
@@ -773,7 +807,10 @@ fn is_spell_resolution_instruction_line(
     let loyalty_snap = ctx.diagnostics.len();
     let is_loyalty = try_parse_loyalty_line(line, ctx).is_some();
     ctx.diagnostics.truncate(loyalty_snap);
-    if is_commander_permission_sentence(line) || is_loyalty {
+    if is_commander_permission_sentence(line)
+        || is_deck_construction_any_number_sentence(line)
+        || is_loyalty
+    {
         return false;
     }
 
@@ -1651,6 +1688,11 @@ pub(crate) fn parse_oracle_ir(
         }
 
         if is_commander_permission_sentence(&line) {
+            i += 1;
+            continue;
+        }
+
+        if is_deck_construction_any_number_sentence(&line) {
             i += 1;
             continue;
         }
@@ -4930,6 +4972,88 @@ mod tests {
         assert!(r.replacements.is_empty());
     }
 
+    // CR 100.2a / CR 903.5b: "A deck can have any number of cards named X."
+    // is deck-construction metadata, not an in-game ability. The recognizer
+    // must accept the raw card name, the engine's normalized self-reference
+    // "~", and reject "up to N" patterns (Seven Dwarves).
+    #[test]
+    fn deck_construction_any_number_sentence_positive_cases() {
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Tempest Hawk."
+        ));
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Relentless Rats."
+        ));
+        // After normalize_self_refs_for_static rewrites the card name to "~".
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named ~."
+        ));
+        // Trailing period is optional.
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Tempest Hawk"
+        ));
+    }
+
+    #[test]
+    fn deck_construction_any_number_sentence_negative_cases() {
+        // Wrong determiner — must be "A deck", not "Your deck".
+        assert!(!is_deck_construction_any_number_sentence(
+            "Your deck can have any number of cards named X."
+        ));
+        // "Up to seven" is a different deck-construction pattern (Seven Dwarves).
+        // It must NOT be silently consumed by this recognizer.
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have up to seven cards named Seven Dwarves."
+        ));
+        // Unrelated static lines must not match.
+        assert!(!is_deck_construction_any_number_sentence(
+            "Creatures you control get +1/+1."
+        ));
+        // Empty subject after the "named " prefix.
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named ."
+        ));
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named"
+        ));
+    }
+
+    #[test]
+    fn tempest_hawk_oracle_text_produces_no_unimplemented_static() {
+        // Full Oracle text fixture for Tempest Hawk — the bug surface from
+        // GitHub issue #1074. Before the fix, the "A deck can have any number
+        // of cards named Tempest Hawk." line fell through to
+        // Effect::Unimplemented { name: "static_structure", .. }. After the
+        // fix, it must be silently consumed.
+        let r = parse(
+            "Flying\n\
+             Whenever this creature deals combat damage to a player, you may search your library for a card named Tempest Hawk, reveal it, put it into your hand, then shuffle.\n\
+             A deck can have any number of cards named Tempest Hawk.",
+            "Tempest Hawk",
+            &[Keyword::Flying],
+            &["Creature"],
+            &["Bird"],
+        );
+
+        // No ability should be Unimplemented with name "static_structure".
+        let static_unimplemented: Vec<&AbilityDefinition> = r
+            .abilities
+            .iter()
+            .filter(|a| {
+                matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name == "static_structure"
+                )
+            })
+            .collect();
+        assert!(
+            static_unimplemented.is_empty(),
+            "deck-construction line must be silently consumed, but produced \
+             {} static_structure Unimplemented entries: {:#?}",
+            static_unimplemented.len(),
+            static_unimplemented
+        );
+    }
     #[test]
     fn oracle_text_allows_commander_uses_commander_permission_parser() {
         assert!(oracle_text_allows_commander(
@@ -5328,7 +5452,7 @@ mod tests {
             .sub_ability
             .as_deref()
             .expect("'If you do, exile a card from your hand' must create a sub-ability");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
         assert!(
             !has_unimplemented(sub),
             "exile-from-hand sub-ability must not be Unimplemented: {:?}",
@@ -8103,6 +8227,74 @@ mod tests {
             }
         ));
         assert_eq!(def.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
+    }
+
+    // ── Phthisis: destroy + lose life equal to power plus toughness ──────
+
+    /// CR 119.3 + CR 208.1: Phthisis — "Destroy target creature. Its controller
+    /// loses life equal to its power plus its toughness." The second clause is a
+    /// chained LoseLife whose amount is Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+    /// The destroy effect sets `effect_context_object` to the destroyed creature's
+    /// LKI, supplying the Anaphoric referent at runtime.
+    #[test]
+    fn phthisis_destroy_then_lose_life_power_plus_toughness() {
+        let oracle = "Destroy target creature. Its controller loses life equal to its power plus its toughness.";
+        let def = parse_effect_chain(oracle, AbilityKind::Spell);
+        // The root effect is Destroy.
+        assert!(
+            matches!(&*def.effect, Effect::Destroy { .. }),
+            "root effect should be Destroy, got {:?}",
+            def.effect,
+        );
+        // The chained sub-ability must be LoseLife.
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("Phthisis must have a chained sub_ability for the life loss");
+        assert!(
+            matches!(&*sub.effect, Effect::LoseLife { .. }),
+            "sub_ability effect should be LoseLife, got {:?}",
+            sub.effect,
+        );
+        // The life-loss amount must be Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+        let Effect::LoseLife { amount, .. } = &*sub.effect else {
+            panic!("expected LoseLife");
+        };
+        match amount {
+            QuantityExpr::Sum { exprs } => {
+                assert_eq!(exprs.len(), 2, "Sum must have exactly two operands");
+                assert!(
+                    matches!(
+                        exprs[0],
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Anaphoric
+                            }
+                        }
+                    ),
+                    "first operand must be Power(Anaphoric), got {:?}",
+                    exprs[0]
+                );
+                assert!(
+                    matches!(
+                        exprs[1],
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Toughness {
+                                scope: ObjectScope::Anaphoric
+                            }
+                        }
+                    ),
+                    "second operand must be Toughness(Anaphoric), got {:?}",
+                    exprs[1]
+                );
+            }
+            other => panic!("amount must be Sum, got {other:?}"),
+        }
+        // No Unimplemented anywhere in the chain.
+        assert!(
+            !matches!(&*sub.effect, Effect::Unimplemented { .. }),
+            "LoseLife sub-effect must not be Unimplemented"
+        );
     }
 
     // ── Coverage batch: gold tokens ──────────────────────────────────

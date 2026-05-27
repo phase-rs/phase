@@ -2459,10 +2459,42 @@ fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             },
             alt((tag("~ is suspended"), tag("this card is suspended"))),
         ),
+        // CR 104.2b + CR 104.3c: "your library has no cards in it" / "your
+        // library is empty" — the empty-library antecedent shared by the
+        // alternate-win-on-draw class (Laboratory Maniac, Jace, Wielder of
+        // Mysteries: "If you would draw a card while your library has no cards
+        // in it, you win the game instead"). Maps to a controller library
+        // count of zero so the gate composes through `parse_inner_condition`
+        // for replacement antecedents, trigger intervening-ifs, and statics.
+        parse_library_empty_condition,
         // CR 113.6b: Generic "<source> is <zone> [or <zone>]" form.
         parse_source_in_zone_condition,
     ))
     .parse(input)
+}
+
+/// CR 401.1: Count of cards in the controller's library, compared against zero.
+///
+/// Recognizes "your library has no cards in it" and "your library is empty"
+/// (the empty-library win antecedent). The library count is expressed with the
+/// existing `ZoneCardCount` building block (zone = Library, no type filter,
+/// controller scope) rather than a bespoke leaf, so the resolver path is shared
+/// with every other zone-count condition.
+fn parse_library_empty_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("your library ").parse(input)?;
+    let (rest, _) = alt((tag("has no cards in it"), tag("is empty"))).parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_comparison(
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Library,
+                card_types: Vec::new(),
+                scope: CountScope::Controller,
+            },
+            Comparator::EQ,
+            0,
+        ),
+    ))
 }
 
 fn parse_day_night_condition(input: &str) -> OracleResult<'_, StaticCondition> {

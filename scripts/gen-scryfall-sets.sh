@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/scryfall-fetch.sh"
+
 DATA_DIR="data/scryfall"
 SETS_FILE="$DATA_DIR/sets.json"
 OUTPUT="client/public/scryfall-sets.json"
@@ -11,7 +14,7 @@ echo "=== Scryfall Sets Data Generation ==="
 if [ ! -f "$SETS_FILE" ]; then
   echo "Downloading Scryfall sets data..."
   mkdir -p "$DATA_DIR"
-  curl -sL "https://api.scryfall.com/sets" -o "$SETS_FILE"
+  scryfall_download "https://api.scryfall.com/sets" "$SETS_FILE"
   echo "Downloaded $SETS_FILE."
 fi
 

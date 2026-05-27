@@ -3347,6 +3347,15 @@ pub enum StackEntryKind {
         /// like monarch draw use `ObjectId(0)`).
         #[serde(default, skip_serializing_if = "String::is_empty")]
         source_name: String,
+        /// CR 603.2c: For batched triggers with a `valid_card` filter, the
+        /// count of subjects in the firing event batch that satisfied the
+        /// filter. Flows from `collect_matching_triggers` →
+        /// `push_pending_trigger_to_stack_with_event_batch` →
+        /// `state.current_trigger_match_count` at resolution start. `None` for
+        /// non-batched triggers and for batched triggers without a
+        /// `valid_card` filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject_match_count: Option<u32>,
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
@@ -4061,6 +4070,16 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_trigger_event: Option<crate::types::events::GameEvent>,
 
+    /// CR 603.2c: Saves/restores the firing batched trigger's filtered subject
+    /// count across an `OptionalEffectChoice` round-trip so a "you may"
+    /// sub-ability (e.g. The Ur-Dragon: "you may put a permanent card from
+    /// your hand onto the battlefield") resumes with the same
+    /// `EventContextAmount` the pre-pause resolution observed. Mirror of
+    /// `pending_optional_trigger_event`. Set ONLY when stashing into
+    /// `pending_optional_effect`; taken by `handle_optional_effect_choice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_optional_trigger_match_count: Option<u32>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
 
@@ -4233,6 +4252,16 @@ pub struct GameState {
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_trigger_event: Option<GameEvent>,
+    /// CR 603.2c: Count of subjects in the firing trigger's event batch that
+    /// satisfied the trigger's `valid_card` filter. Set in lockstep with
+    /// `current_trigger_event`/`current_trigger_events` when a batched
+    /// triggered ability begins resolving. Read by
+    /// `QuantityRef::EventContextAmount` so "that many" resolves to the
+    /// filtered subject count (e.g. The Ur-Dragon: "Whenever one or more
+    /// Dragons you control attack, draw that many cards"). `None` outside
+    /// batched-trigger resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_trigger_match_count: Option<u32>,
     /// CR 707.10: Transient snapshot of the spell or ability stack entry
     /// currently resolving. `resolve_top` pops the entry off `state.stack`
     /// before running its effect, so a `CopySpell { target: SelfRef }` carried
@@ -4590,6 +4619,7 @@ impl GameState {
             pending_choose_one_of: None,
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
+            pending_optional_trigger_match_count: None,
             may_trigger_auto_choices: Vec::new(),
             pending_begin_game_abilities: Vec::new(),
             resolving_begin_game_abilities: false,
@@ -4616,6 +4646,7 @@ impl GameState {
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
             current_trigger_event: None,
+            current_trigger_match_count: None,
             resolving_stack_entry: None,
             current_trigger_events: Vec::new(),
             stack_trigger_event_batches: HashMap::new(),
@@ -4877,6 +4908,9 @@ impl PartialEq for GameState {
             && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count
             && self.last_effect_counts_by_player == other.last_effect_counts_by_player
+            && self.current_trigger_match_count == other.current_trigger_match_count
+            && self.pending_optional_trigger_match_count
+                == other.pending_optional_trigger_match_count
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
             && self.lki_cache == other.lki_cache
             && self.city_blessing == other.city_blessing
@@ -5573,6 +5607,7 @@ mod tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
@@ -5637,6 +5672,7 @@ mod tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let json = serde_json::to_string(&state).unwrap();
