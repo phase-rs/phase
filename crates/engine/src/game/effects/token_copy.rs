@@ -1377,7 +1377,7 @@ mod tests {
         );
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let token_id = ObjectId(state.next_object_id - 1);
+        let token_id = state.last_created_token_ids[0];
 
         // Run state-based actions; the legend rule SBA must NOT fire because
         // the token is not Legendary.
