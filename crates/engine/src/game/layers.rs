@@ -956,6 +956,14 @@ pub fn evaluate_layers(state: &mut GameState) {
         return;
     }
 
+    // CR 603.6a + CR 611.2e: Layer evaluation just finalized post-layer
+    // trigger sets on every battlefield permanent (granted triggers from
+    // sliver lords, Changeling, Bramble Sovereign, suppress-triggers statics).
+    // Rebuild the TriggerIndex so the next event scan reads the post-layer
+    // trigger set — CR 603.2 requires the post-layer view. Destructive
+    // rebuild replaces both `by_key` and `unclassified` from scratch.
+    crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+
     // Step 5: Clear dirty flag
     state.layers_dirty = false;
 }

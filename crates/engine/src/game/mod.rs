@@ -67,6 +67,7 @@ pub mod static_abilities;
 pub mod targeting;
 pub mod token_presets;
 pub mod transform;
+pub mod trigger_index;
 pub(crate) mod trigger_matchers;
 pub mod triggers;
 pub mod turn_control;

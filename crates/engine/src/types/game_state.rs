@@ -3592,6 +3592,39 @@ pub struct StackPaidSnapshot {
     pub convoked_creatures: usize,
 }
 
+/// CR 603.2: Maintained index from `TriggerEventKey` to the candidate set of
+/// battlefield permanents whose triggers could match an event with that key.
+/// Consulted by `collect_pending_triggers` to skip the full battlefield scan
+/// that previously asked every permanent on every event whether it cared.
+///
+/// CR 603.2 invariant: every battlefield object whose trigger could match
+/// event E must appear in the union of buckets `keys_from_event(E)` looks up
+/// OR in `unclassified`. Over-approximation is correctness-preserving; under-
+/// approximation is a silent trigger drop.
+///
+/// CR 603.6a + CR 611.2e: Granted triggers (sliver lords, Cairn Wanderer,
+/// Bramble Sovereign) are materialized by `evaluate_layers` into
+/// `obj.trigger_definitions`. The index's battlefield-scoped portion is
+/// rebuilt at the end of `evaluate_layers` so it always reflects post-layer
+/// trigger sets. That rebuild is the **authoritative correctness path**; the
+/// `move_to_zone` hooks (`game::zones`) are incremental optimization only.
+///
+/// Backed by `im::HashMap` so `GameState::clone()` (hot path through AI
+/// search, casting affordability simulation, restriction probes) stays O(1)
+/// structural share rather than O(buckets × ObjectIds) deep copy.
+#[derive(Debug, Clone, Default)]
+pub struct TriggerIndex {
+    /// Buckets keyed by event shape. `SmallVec` keeps allocation off the heap
+    /// for the typical bucket size (≤ 4 candidates for most keys on most
+    /// battlefields).
+    pub by_key: im::HashMap<super::triggers::TriggerEventKey, smallvec::SmallVec<[ObjectId; 4]>>,
+    /// Catch-all bucket: any battlefield object whose trigger definitions
+    /// could not be statically classified by `keys_from_trigger_def`.
+    /// Consulted on every event regardless of `keys_from_event` output.
+    /// Empty for the common case where every trigger's mode is known.
+    pub unclassified: smallvec::SmallVec<[ObjectId; 4]>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub turn_number: u32,
@@ -3715,6 +3748,14 @@ pub struct GameState {
 
     // Layer system
     pub layers_dirty: bool,
+    /// CR 603.2: Candidate pre-filter for `collect_pending_triggers`. Rebuilt
+    /// lazily after deserialize via a sentinel check at the top of the consult
+    /// site; rebuilt eagerly at the end of `evaluate_layers` (CR 611.2e) so the
+    /// post-layer trigger set is reflected. `#[serde(skip)]` because the index
+    /// is derived state — reconstructed from `state.battlefield` + per-object
+    /// `trigger_definitions` whenever needed.
+    #[serde(skip)]
+    pub trigger_index: TriggerIndex,
     pub next_timestamp: u64,
     #[serde(skip, default = "PublicStateDirty::all_dirty")]
     pub public_state_dirty: PublicStateDirty,
@@ -4696,6 +4737,7 @@ impl GameState {
             pending_spell_resolution: None,
             deferred_entry_events: Vec::new(),
             layers_dirty: true,
+            trigger_index: TriggerIndex::default(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
             state_revision: 0,

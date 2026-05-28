@@ -765,8 +765,49 @@ fn collect_pending_triggers(
         if event_is_suppressed_by_static_triggers(state, event) {
             continue;
         }
-        // Scan all permanents on the battlefield for matching triggers
-        for obj_id in trigger_source_ids_for_zone(state, Zone::Battlefield) {
+
+        // CR 603.2 over-approximation differential check (debug-only):
+        // snapshot the dedup sets BEFORE the production loop mutates them so
+        // the shadow scan operates on the same pre-event state the production
+        // loop saw. Without this, batched triggers the production loop would
+        // have found get falsely skipped as "already batched this pass" in
+        // the shadow path.
+        #[cfg(debug_assertions)]
+        let (mut shadow_batched, mut shadow_registered) =
+            (batched_this_pass.clone(), registered_this_event.clone());
+
+        // CR 603.2 + CR 603.6a + CR 611.2e: Consult the maintained TriggerIndex
+        // for candidate battlefield objects. Replaces the legacy full
+        // battlefield scan with an event-keyed bucket union. The
+        // `evaluate_layers` rebuild at the top of `collect_pending_triggers`
+        // guarantees the index reflects post-layer trigger sets.
+        //
+        // Lazy-rebuild sentinel: TriggerIndex is `#[serde(skip)]` and defaults
+        // to empty after deserialize. A genuinely-empty index over a
+        // non-empty battlefield means we need to rebuild before reading; the
+        // common steady-state case (empty index, empty battlefield) is a
+        // harmless no-op.
+        if state.trigger_index.by_key.is_empty()
+            && state.trigger_index.unclassified.is_empty()
+            && !state.battlefield.is_empty()
+        {
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+        }
+        let candidates = crate::game::trigger_index::candidates_for_event(state, event);
+
+        // CR 603.2 differential test (debug-only): run a SHADOW scan over the
+        // full battlefield with cloned dedup sets and verify every matched
+        // (source_id, trig_idx) pair found by the legacy path is also found
+        // by the index path. Compares matched-context sets — not visited
+        // candidate IDs — so vanilla creatures invisible to the index by
+        // design do not falsely panic.
+        #[cfg(debug_assertions)]
+        let mut shadow_matched: HashSet<(ObjectId, usize)> = HashSet::new();
+        #[cfg(debug_assertions)]
+        let mut production_matched: HashSet<(ObjectId, usize)> = HashSet::new();
+
+        // Scan candidate permanents for matching triggers
+        for obj_id in candidates.iter().copied() {
             let (
                 controller,
                 timestamp,
@@ -829,6 +870,8 @@ fn collect_pending_triggers(
             };
 
             for matched in matched_triggers {
+                #[cfg(debug_assertions)]
+                production_matched.insert((obj_id, matched.trig_idx));
                 record_trigger_fired(state, matched.constraint.as_ref(), obj_id, matched.trig_idx);
                 if matched.batched {
                     batched_this_pass.insert((obj_id, matched.trig_idx));
@@ -1131,6 +1174,45 @@ fn collect_pending_triggers(
                     }
                 }
             }
+        }
+
+        // CR 603.2 over-approximation differential test (debug-only): after the
+        // production loop completes, run a SHADOW battlefield scan with the
+        // pre-event-snapshot dedup sets. Compare matched `(source_id, trig_idx)`
+        // contexts — every match found by the legacy full scan must appear in
+        // the index path's match set. Vanilla creatures visited by the legacy
+        // scan but invisible to the index by design return zero matches and
+        // do not enter the comparison.
+        #[cfg(debug_assertions)]
+        {
+            for obj_id in trigger_source_ids_for_zone(state, Zone::Battlefield) {
+                let Some(obj) = state.objects.get(&obj_id) else {
+                    continue;
+                };
+                let matched = collect_matching_triggers(
+                    state,
+                    event,
+                    events,
+                    obj,
+                    obj.entered_battlefield_turn.unwrap_or(0),
+                    Some(Zone::Battlefield),
+                    &mut shadow_batched,
+                    &mut shadow_registered,
+                );
+                for m in matched {
+                    shadow_matched.insert((obj_id, m.trig_idx));
+                }
+            }
+            let dropped: Vec<(ObjectId, usize)> = shadow_matched
+                .difference(&production_matched)
+                .copied()
+                .collect();
+            debug_assert!(
+                dropped.is_empty(),
+                "TriggerIndex under-approximation (CR 603.2 silent trigger drop): \
+                 event={event:?} dropped_matches={dropped:?} \
+                 candidates_visited={candidates:?}",
+            );
         }
 
         // CR 603.10a: Leaves-the-battlefield abilities look back in time. Objects that
@@ -14361,6 +14443,44 @@ pub mod tests {
             state.players[0].life, 21,
             "the Blood Artist-class dies-observer must resolve from the \
              deferred-trigger flush (issue #423)"
+        );
+    }
+
+    /// CR 603.2 performance benchmark: replay the production Scute Swarm
+    /// snapshot (619 permanents, 2886 batched landfall triggers queued on
+    /// the stack) and report frames/sec. Baseline before the TriggerIndex
+    /// was ~5 frames/sec; target with the index is ≥ 50 frames/sec.
+    ///
+    /// Requires `/tmp/gamestate.json` to be present (the captured snapshot
+    /// is not committed). Skips cleanly when absent.
+    #[test]
+    #[ignore = "perf benchmark; run with `cargo test -p engine scute_swarm_throughput -- --ignored --nocapture`"]
+    fn scute_swarm_throughput() {
+        let path = "/tmp/gamestate.json";
+        let raw = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("snapshot {path} not present; skipping benchmark");
+                return;
+            }
+        };
+        // Snapshot is wrapped as `{"gameState": {...}}`; unwrap to GameState.
+        let wrapper: serde_json::Value = serde_json::from_str(&raw).expect("snapshot is JSON");
+        let inner = wrapper.get("gameState").cloned().unwrap_or(wrapper);
+        let mut state: GameState =
+            serde_json::from_value(inner).expect("snapshot parses as GameState");
+        let start = std::time::Instant::now();
+        let mut frames = 0u32;
+        while !state.stack.is_empty() && frames < 200 {
+            let actor = state.priority_player;
+            let _ = crate::game::engine::apply(&mut state, actor, GameAction::PassPriority);
+            frames += 1;
+        }
+        let elapsed = start.elapsed();
+        let fps = frames as f64 / elapsed.as_secs_f64().max(f64::EPSILON);
+        eprintln!(
+            "Resolved {} frames in {:?} ({:.1} frames/sec)",
+            frames, elapsed, fps
         );
     }
 }
