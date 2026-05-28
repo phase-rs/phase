@@ -157,6 +157,68 @@ Apply `.claude/agents/pr-review-comment-resolver.md` directly:
 
 When a comment asks for a questionable design, satisfy the underlying concern while preserving this repo's architecture. If reviewer feedback conflicts with rules-correct engine behavior, document the conflict in the final report and implement the rules-correct path.
 
+### Canonical comment fetching
+
+Fetch from three sources, in this order:
+
+**1. Inline review threads — GraphQL (preferred for inline feedback).**
+
+GraphQL exposes `isResolved` natively and returns threads pre-grouped with all replies. This is materially better than reconstructing threads from the flat REST `pulls/{N}/comments` endpoint — use it as the canonical source for inline feedback.
+
+```bash
+gh api graphql -f query='
+{
+  repository(owner: "phase-rs", name: "phase") {
+    pullRequest(number: <N>) {
+      reviewThreads(first: 100) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          path
+          comments(last: 1) {
+            nodes { databaseId body author { login } createdAt }
+          }
+        }
+      }
+    }
+  }
+}'
+```
+
+If `pageInfo.hasNextPage` is true, request the next page with `after: "<endCursor>"` and repeat until exhausted.
+
+**Filter to unresolved threads only** — skip any thread where `isResolved: true`. `comments(last: 1)` returns the most recent comment, which reflects the reviewer's final ask. Use the thread `id` (Relay global ID) to identify threads across polls.
+
+**2. Top-level reviews — REST with `--paginate`.**
+
+```bash
+gh api repos/phase-rs/phase/pulls/<N>/reviews --paginate
+```
+
+**Always `--paginate`.** Reviews default to 30 per page. PRs that have gone through several CI cycles or several rounds of bot review can have 80+ review entries (most empty resolution events). Without pagination you miss reviews past the first page — including structured bot reviews that often arrive late.
+
+Extract:
+- **Overall state**: `CHANGES_REQUESTED` or `APPROVED` reviews.
+- **Actionable feedback**: non-empty bodies only. Empty-body reviews are thread-resolution events with no feedback to act on.
+
+**3. Conversation comments — REST with `--paginate`.**
+
+```bash
+gh api repos/phase-rs/phase/issues/<N>/comments --paginate
+```
+
+Mostly bot summaries and CI/conflict-detection comments. Scan for non-empty messages from non-bot reviewers that aren't the PR author — those are the ones needing a response.
+
+### Reply mechanics
+
+When you fix a comment, reply **inline** (not as a new top-level comment), referencing the fixing commit. This is what resolves the conversation for bot reviewers (CodeRabbit, Sentry):
+
+| Comment source | Reply recipe |
+|---|---|
+| Inline thread (`pulls/{N}/comments/{ID}`) | `gh api repos/phase-rs/phase/pulls/{N}/comments/{ID}/replies -f body="🤖 Fixed in <commit-sha>: <one-line description>"` |
+| Conversation (`issues/{N}/comments`) | `gh api repos/phase-rs/phase/issues/{N}/comments -f body="🤖 Fixed in <commit-sha>: <one-line description>"` |
+
 ## Architecture Review
 
 After comment resolution, run `$review-impl` against the PR diff.
@@ -281,17 +343,76 @@ Suggested commit shapes:
 
 Do not push unless the user requested pushing or the invocation explicitly says to update the PR branch. If push access is unavailable, report the local commits and branch.
 
+## Babysit Mode (optional)
+
+When the user explicitly asks to "babysit", "watch", "monitor", or "keep an eye on" a PR — or when CI is slow and bots (CodeRabbit, Sentry) routinely post late — enter babysit mode after pushing fixes. The goal is to detect new comments and CI failures and react before the maintainer has to.
+
+**Don't use `gh pr checks --watch`.** It blocks the entire Bash tool call, so the agent can't react to new comments while CI is running. Always poll manually.
+
+### Polling cadence
+
+Every 30 seconds, in parallel:
+
+1. **CI status.**
+
+   ```bash
+   gh pr checks <N> --repo phase-rs/phase --json bucket,name,link
+   ```
+
+   If every check's `bucket` is `pass` or `skipping`, CI is green. If any is `fail`, CI failed. Anything else = pending.
+
+2. **Merge conflicts.**
+
+   ```bash
+   gh pr view <N> --repo phase-rs/phase --json mergeable --jq '.mergeable'
+   ```
+
+   `CONFLICTING` → resolve before continuing (merge `origin/main` in, fix conflicts, commit, push). `UNKNOWN` → GitHub is still computing mergeability; wait and re-check next poll.
+
+3. **New / changed comments** — re-fetch all three sources from "Canonical comment fetching" above. Track baselines:
+
+   - **Inline threads (GraphQL):** for each unresolved thread, record `{thread_id → last_comment_databaseId}`. New action needed when a new `id` appears OR an existing thread's `last_comment_databaseId` changes.
+   - **Top-level reviews (REST):** track total count + newest `id`. New non-empty `CHANGES_REQUESTED` or `COMMENTED` review = action needed.
+   - **Conversation comments (REST):** track total count + newest `id`. Filter to non-empty, non-bot, non-author-update.
+
+### Reaction precedence (first match wins)
+
+| What happened | Action |
+|---|---|
+| Merge conflict detected | Merge `origin/main` into the PR branch, resolve conflicts, push, restart polling. |
+| Mergeability `UNKNOWN` | Sleep 30s, restart polling. GitHub is still computing. |
+| New comments detected | Address them (fix → commit → push → inline reply). Update baselines. Restart polling — your push invalidated CI status. |
+| CI `fail` | Fetch failed-check logs: `gh pr checks <N> --json bucket,link --jq '.[] \| select(.bucket=="fail") \| .link'`. Extract run ID from the link, then `gh run view <run-id> --repo phase-rs/phase --log-failed`. Fix → commit → push → restart polling. |
+| CI `pass` + no new comments | **Don't exit immediately.** Bots often post within 60s of CI settling. Poll **2 more cycles (~60s)** quiet before exiting. |
+| CI `pending` + no new comments | Sleep 30s, restart polling. |
+
+### Loop termination
+
+Exit babysit mode only when:
+
+1. CI is fully green, AND
+2. All comments are addressed, AND
+3. **2 consecutive 30s polls passed with no new comments after CI went green.**
+
+After exit, proceed to Enqueue. The two-quiet-cycles rule exists specifically because bot reviewers (CodeRabbit, Sentry, others) routinely post late and a premature enqueue means racing a fresh `CHANGES_REQUESTED` review.
+
+### When NOT to babysit
+
+- One-shot PR handling (the default mode for this skill) — push fixes and report, let the maintainer enqueue when ready.
+- CI takes >10 minutes per cycle and the PR isn't urgent — burn cache for nothing.
+- The PR is blocked on a hard-stop security issue or a non-CI condition — babysitting won't help.
+
 ## Enqueue
 
 `main` is protected by a GitHub merge queue. The enqueue command is:
 
 ```bash
-gh pr merge <PR> --auto
+gh pr merge <PR> --squash --auto
 ```
 
 `--auto` under a merge queue means "add to queue when required checks pass." The queue speculatively rebases the PR against the latest `main`, runs CI once on the synthesized future-main commit (batching up to the configured group size with any other queued PRs), and merges all green PRs in order. Failed PRs are bisected out of the group and kicked back to the author.
 
-**The merge queue dictates the merge method (squash).** Do not pass `--squash`, `--merge`, or `--rebase` — the queue's ruleset overrides per-call flags. Passing a strategy flag triggers a CLI advisory ("The merge strategy for main is set by the merge queue") and is a no-op.
+**Squash is the only merge method allowed on `main`.** Do not pass `--merge` or `--rebase`. The repo's `allow_merge_commit` and `allow_rebase_merge` are both disabled, so those flags will fail — but pass `--squash` explicitly anyway.
 
 ### Authorization
 
@@ -316,7 +437,7 @@ Every item must be satisfied before running `gh pr merge`. Failing any item mean
 
 ### After enqueue
 
-After running `gh pr merge <PR> --auto`:
+After running `gh pr merge <PR> --squash --auto`:
 
 1. Capture the auto-merge confirmation (the CLI prints "Pull request #N will be automatically merged via the merge queue when all requirements are met" or similar).
 2. Do NOT wait for the queue to land the PR — the queue is async and may take minutes (CI run + queue position). Move on to the next PR in the batch.
@@ -337,7 +458,7 @@ For each PR, report:
 - verification commands and results
 - commits created and push status
 - **enqueue status**:
-  - In **default mode** (no enqueue authority): the exact `gh pr merge <PR> --auto` command for the maintainer to run, OR an explicit reason not to enqueue (hard-stop security issue, blocking review comment, requires full-cycle work first, etc.).
+  - In **default mode** (no enqueue authority): the exact `gh pr merge <PR> --squash --auto` command for the maintainer to run, OR an explicit reason not to enqueue (hard-stop security issue, blocking review comment, requires full-cycle work first, etc.).
   - In **authorized mode**: `enqueued: yes` (with timestamp + any queue-position output from the CLI), OR `enqueued: no` with the failed enqueue-checklist item(s) and evidence.
 
 Include evidence for claims, mark assumptions separately, and state confidence. Also include a short self-challenge: what evidence would contradict the conclusion that the PR is ready?

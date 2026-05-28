@@ -51,6 +51,7 @@ Skip checks CI already enforces:
 - Check React effect dependencies, unmount cleanup, touch equivalents, mobile scroll containment, and empty/loading/error states.
 - Type-check passing is not proof of feature correctness; say when browser verification was not performed.
 - **i18n:** Flag frontend-authored user-facing text (titles, labels, buttons, tooltips, placeholders, log templates) hardcoded in JSX instead of routed through `t()`. Conversely, flag engine/card pass-through (card names, Oracle text, interpolated enum strings) that was wrongly wrapped in `t()` — it belongs to the content pipeline, not chrome. Boundary rule: a string gets `t()` iff the frontend authored it (`client/src/i18n/README.md`). Also flag hand-rolled pluralization (`count === 1 ? …`) that should use `key_one`/`key_other`, and any direct `i18n.changeLanguage` call (the preferences store owns language).
+- **Performance hot paths:** when the diff touches game-state subscriptions (`useGameStore`, `useUiStore`, `useAnimationStore`), animation loops, board re-renders, or large list rendering (graveyard, exile, log), cross-check against the `vercel-react-best-practices` skill — especially the `rerender-*` and `rendering-*` categories. New Zustand selectors that subscribe to whole slices instead of derived booleans are the most common regression.
 
 ### Multiplayer / Transport
 
@@ -72,10 +73,53 @@ Skip checks CI already enforces:
 
 ## Output
 
-Use this exact finding shape:
+### Local report (default)
+
+Use this exact finding shape for local/agent-driven reports:
 
 ```text
 **[HIGH/MED/LOW]** <short summary>. Evidence: <path:line>. Why it matters: <one sentence>. Suggested fix: <one line>.
 ```
 
 Findings first. No praise, no diff recap.
+
+### Inline PR comments (optional)
+
+When the user explicitly asks to post findings to a PR (phrasing like "post this to the PR", "leave inline comments", "comment on the PR"), use the four-tier emoji badge scheme. The tiers add a nit level above LOW and prefix every comment with `🤖` so the source is obvious in the timeline:
+
+| Tier | Badge | Maps from local tier | Meaning |
+|------|-------|---------------------|---------|
+| Blocker | `🔴 **Blocker**` | HIGH | Must fix before merge — correctness, security, rules incorrectness, broken multiplayer filtering. |
+| Should Fix | `🟠 **Should Fix**` | MED | Important architectural or test gap — sibling coverage, missing edge case, building-block bypass. |
+| Nice to Have | `🟡 **Nice to Have**` | LOW | Minor improvement — small refactor, additional test coverage, documentation. |
+| Nit | `🔵 **Nit**` | (new tier) | Style, naming, wording. Add sparingly — CI already enforces formatting. |
+
+Inline-comment shape:
+
+```text
+🤖 🔴 **Blocker**: <short summary>. Evidence: <path:line>. Why it matters: <one sentence>. Suggested fix: <one line>.
+```
+
+Post each finding inline on the offending file/line (not as a top-level review comment) so it threads naturally and `pr-contribution-handler` can resolve it via inline reply:
+
+```bash
+PR_NUMBER=<N>
+REPO=phase-rs/phase
+COMMIT_SHA=$(gh api repos/${REPO}/pulls/${PR_NUMBER} --jq '.head.sha')
+
+# Optional: dedupe by re-fetching existing comments first
+gh api repos/${REPO}/pulls/${PR_NUMBER}/comments --paginate \
+  | jq -r '.[] | "\(.path):\(.line) \(.body[:80])"' \
+  | sort -u
+
+# Post a single inline finding:
+gh api repos/${REPO}/pulls/${PR_NUMBER}/comments \
+  -f body="🤖 🔴 **Blocker**: <finding>. Evidence: …. Why it matters: …. Suggested fix: …." \
+  -f commit_id="$COMMIT_SHA" \
+  -f path="<file path>" \
+  -F line=<line number>
+```
+
+Before posting, fetch existing inline comments and de-duplicate — don't repost a finding another reviewer (or bot) already raised.
+
+Posting is opt-in; the default output target is the local report. Many invocations of this skill are agent-internal reviews (`engine-implementer`, `pr-contribution-handler`'s Architecture Review step) where posting would be wrong.
