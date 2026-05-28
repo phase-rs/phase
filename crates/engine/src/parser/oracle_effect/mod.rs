@@ -2092,15 +2092,27 @@ fn try_parse_tap_or_untap_choice(
 }
 
 /// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
-/// "put your choice of A counter-pattern or B counter-pattern on TARGET".
+/// "put your choice of A counter-pattern, B counter-pattern, or C
+/// counter-pattern on TARGET" (N-ary branches).
 ///
-/// Inspirit, Flagship Vessel is the motivating case:
+/// Inspirit, Flagship Vessel is the binary motivating case:
 /// "put your choice of a +1/+1 counter or two charge counters on up to one
 /// other target artifact".
 ///
-/// We split the shared choice payload and reparse each branch as a full
-/// `put ... on ...` clause so existing counter parsing (including multi-target
-/// extraction for "up to N") stays authoritative.
+/// Invoke the Ancients is the N-ary motivating case:
+/// "put your choice of a vigilance counter, a reach counter, or a trample
+/// counter on it".
+///
+/// Aragorn, Company Leader is the "from among" motivating case:
+/// "put your choice of a counter from among first strike, vigilance,
+/// deathtouch, and lifelink on Aragorn".
+///
+/// We split the shared choice payload into N items using the Oxford-comma
+/// pattern (", or " as the final separator, ", " between earlier items),
+/// or the "from among" pattern (", and " as the final separator with bare
+/// keyword names), then reparse each branch as a full `put ... on ...`
+/// clause so existing counter parsing (including multi-target extraction
+/// for "up to N") stays authoritative.
 fn try_parse_put_counter_choice(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
@@ -2112,48 +2124,89 @@ fn try_parse_put_counter_choice(
     let consumed = tp.original.len() - after_choice_original.len();
     let after_choice = TextPair::new(after_choice_original, &tp.lower[consumed..]);
     let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
-    let (left_tp, right_tp) = choices_tp.split_around(" or ")?;
 
-    // Reject 3+ branches; this helper only handles binary choices.
-    if nom_primitives::split_once_on(left_tp.lower, " or ").is_ok()
-        || nom_primitives::split_once_on(right_tp.lower, " or ").is_ok()
+    // Split the choices text into individual items.
+    // Three patterns:
+    //   1. "from among" list: "a counter from among X, Y, and Z"
+    //   2. Oxford comma: "a X counter, a Y counter, or a Z counter"
+    //   3. Binary: "a X counter or a Y counter"
+    let choices_text = choices_tp.original;
+    let (choice_items, from_among): (Vec<&str>, bool) = if let Ok((keywords_text, _)) =
+        tag::<_, _, nom::error::Error<&str>>("a counter from among ")(choices_text)
     {
+        // CR 122.1b: "from among" pattern — bare keyword names.
+        let items: Vec<&str> = if let Some(pos) = keywords_text.rfind(", and ") {
+            let prefix = &keywords_text[..pos];
+            let last = &keywords_text[pos + 6..]; // skip ", and "
+            let mut v: Vec<&str> = prefix.split(", ").collect();
+            v.push(last);
+            v
+        } else {
+            let pos = keywords_text.rfind(" and ")?;
+            // Binary: "X and Y".
+            let left = &keywords_text[..pos];
+            let right = &keywords_text[pos + 5..]; // skip " and "
+            vec![left, right]
+        };
+        (items, true)
+    } else if let Some(pos) = choices_text.rfind(", or ") {
+        // Oxford comma: split on ", or " for the last item, then ", " for
+        // earlier items.
+        let prefix = &choices_text[..pos];
+        let last = &choices_text[pos + 5..]; // skip ", or "
+        let mut items: Vec<&str> = prefix.split(", ").collect();
+        items.push(last);
+        (items, false)
+    } else {
+        let pos = choices_text.rfind(" or ")?;
+        // Binary: "A or B".
+        let left = &choices_text[..pos];
+        let right = &choices_text[pos + 4..]; // skip " or "
+        (vec![left, right], false)
+    };
+
+    // Require at least 2 branches.
+    if choice_items.len() < 2 {
         return None;
     }
 
-    let left_choice = left_tp.original.trim();
-    let right_choice = right_tp.original.trim();
     let target_text = target_tp.original.trim().trim_end_matches('.');
-    if left_choice.is_empty() || right_choice.is_empty() || target_text.is_empty() {
+    if target_text.is_empty() {
         return None;
     }
 
-    let left_text = format!("put {left_choice} on {target_text}");
-    let right_text = format!("put {right_choice} on {target_text}");
+    // Validate each choice item is non-empty.
+    if choice_items.iter().any(|item| item.trim().is_empty()) {
+        return None;
+    }
 
+    // Parse each branch as "put <choice> on <target>".
     let diagnostics_snapshot = ctx.diagnostics.len();
-    let left_clause = parse_effect_clause(&left_text, ctx);
-    let right_clause = parse_effect_clause(&right_text, ctx);
-
-    if !matches!(left_clause.effect, Effect::PutCounter { .. })
-        || !matches!(right_clause.effect, Effect::PutCounter { .. })
-        || matches!(left_clause.effect, Effect::Unimplemented { .. })
-        || matches!(right_clause.effect, Effect::Unimplemented { .. })
-        || matches!(left_clause.effect, Effect::TargetOnly { .. })
-        || matches!(right_clause.effect, Effect::TargetOnly { .. })
-    {
-        ctx.diagnostics.truncate(diagnostics_snapshot);
-        return None;
+    let mut branches: Vec<AbilityDefinition> = Vec::with_capacity(choice_items.len());
+    for item in &choice_items {
+        // For "from among" items, synthesize "a <keyword> counter" noun phrase;
+        // for regular items, use the text as-is.
+        let branch_text = if from_among {
+            format!("put a {} counter on {target_text}", item.trim())
+        } else {
+            format!("put {} on {target_text}", item.trim())
+        };
+        let clause = parse_effect_clause(&branch_text, ctx);
+        if !matches!(clause.effect, Effect::PutCounter { .. })
+            || matches!(clause.effect, Effect::Unimplemented { .. })
+            || matches!(clause.effect, Effect::TargetOnly { .. })
+        {
+            ctx.diagnostics.truncate(diagnostics_snapshot);
+            return None;
+        }
+        let mut def = ability_definition_from_clause(AbilityKind::Spell, clause);
+        def.description = Some(branch_text);
+        branches.push(def);
     }
-
-    let mut left_def = ability_definition_from_clause(AbilityKind::Spell, left_clause);
-    left_def.description = Some(left_text);
-    let mut right_def = ability_definition_from_clause(AbilityKind::Spell, right_clause);
-    right_def.description = Some(right_text);
 
     Some(parsed_clause(Effect::ChooseOneOf {
         chooser: PlayerFilter::Controller,
-        branches: vec![left_def, right_def],
+        branches,
     }))
 }
 
@@ -36285,6 +36338,49 @@ mod tests {
             branches[1].multi_target.is_some(),
             "second branch should preserve up-to target cap"
         );
+    }
+
+    #[test]
+    fn choose_one_of_detects_from_among_counter_choice() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+
+        let ability = parse_effect_chain(
+            "Put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on Aragorn.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseOneOf { chooser, branches } = &*ability.effect else {
+            panic!("expected ChooseOneOf, got {:?}", ability.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 4);
+
+        // Verify each branch is a PutCounter with the correct keyword counter.
+        let expected = [
+            KeywordKind::FirstStrike,
+            KeywordKind::Vigilance,
+            KeywordKind::Deathtouch,
+            KeywordKind::Lifelink,
+        ];
+        for (i, kind) in expected.iter().enumerate() {
+            match &*branches[i].effect {
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    ..
+                } => {
+                    assert_eq!(
+                        *counter_type,
+                        CounterType::Keyword(*kind),
+                        "branch {i} should be {:?}",
+                        kind
+                    );
+                    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                }
+                other => panic!("expected branch {i} PutCounter, got {other:?}"),
+            }
+        }
     }
 
     #[test]
