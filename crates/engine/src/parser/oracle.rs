@@ -4528,17 +4528,16 @@ mod tests {
             &[],
         );
 
-        match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Required(AbilityCost::PayLife { amount }) => {
-                assert!(matches!(
-                    amount,
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::Variable { ref name }
-                    } if name == "X"
-                ));
-            }
-            other => panic!("expected required X life cost, got {other:?}"),
-        }
+        assert_eq!(
+            r.additional_cost,
+            Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }))
+        );
         assert_eq!(r.abilities.len(), 1);
         match r.abilities[0].effect.as_ref() {
             Effect::PumpAll {
