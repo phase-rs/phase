@@ -12,6 +12,7 @@ import { isMultiplayerMode, useGameStore, legalResultState, saveGame, saveCheckp
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
+import { stackPressureFromLength } from "../utils/stackPressure";
 import { applySpellPaymentPreference } from "./castPaymentMode";
 
 /**
@@ -582,6 +583,15 @@ export async function restoreGameState(
 }
 
 const BATCH_CHUNK_SIZE = 5;
+// Under "Instant" stack pressure (a multi-hundred/thousand identical-trigger
+// storm, e.g. Scute Swarm) the 5-at-a-time animated countdown is wasted: the
+// dominant cost becomes the per-chunk full-state `getState` (~12MB serialize)
+// + `getLegalActions` + the inter-chunk delay, repeated once per 5 items. We
+// drain in large chunks instead — the engine can resolve unboundedly in one
+// call, but a bounded chunk keeps each WASM call short enough that the main
+// thread yields between chunks (no "page unresponsive" freeze) while still
+// collapsing ~580 round-trips into a handful.
+const BATCH_CHUNK_INSTANT = 200;
 const BATCH_CHUNK_BASE_DELAY_MS = 150;
 let batchResolveInProgress = false;
 
@@ -601,8 +611,14 @@ export async function dispatchResolveAll(
 
   try {
     for (;;) {
+      // Re-evaluate pressure each iteration: a storm shrinks as it drains, so
+      // it eventually drops back to the animated 5-at-a-time path near the end.
+      const stackLen = useGameStore.getState().gameState?.stack.length ?? 0;
+      const instant = stackPressureFromLength(stackLen) === "Instant";
+      const chunkSize = instant ? BATCH_CHUNK_INSTANT : BATCH_CHUNK_SIZE;
+
       const batchResult: BatchResolveResult = await adapter.resolveAll(
-        requester, aiSeats, BATCH_CHUNK_SIZE,
+        requester, aiSeats, chunkSize,
       );
 
       const newState = await adapter.getState();
@@ -620,6 +636,10 @@ export async function dispatchResolveAll(
         batchResult.waitingFor.type === "GameOver" ||
         batchResult.waitingFor.type !== "Priority";
       if (done) break;
+
+      // Skip the inter-chunk pacing delay while draining a storm — the delay
+      // exists for visual countdown pacing, which Instant pressure forgoes.
+      if (instant) continue;
 
       const chunkDelay = Math.round(BATCH_CHUNK_BASE_DELAY_MS * multiplier);
       if (chunkDelay > 0) {
