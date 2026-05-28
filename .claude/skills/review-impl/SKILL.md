@@ -51,7 +51,6 @@ Skip checks CI already enforces:
 - Check React effect dependencies, unmount cleanup, touch equivalents, mobile scroll containment, and empty/loading/error states.
 - Type-check passing is not proof of feature correctness; say when browser verification was not performed.
 - **i18n:** Flag frontend-authored user-facing text (titles, labels, buttons, tooltips, placeholders, log templates) hardcoded in JSX instead of routed through `t()`. Conversely, flag engine/card pass-through (card names, Oracle text, interpolated enum strings) that was wrongly wrapped in `t()` — it belongs to the content pipeline, not chrome. Boundary rule: a string gets `t()` iff the frontend authored it (`client/src/i18n/README.md`). Also flag hand-rolled pluralization (`count === 1 ? …`) that should use `key_one`/`key_other`, and any direct `i18n.changeLanguage` call (the preferences store owns language).
-- **Performance hot paths:** when the diff touches game-state subscriptions (`useGameStore`, `useUiStore`, `useAnimationStore`), animation loops, board re-renders, or large list rendering (graveyard, exile, log), cross-check against the `vercel-react-best-practices` skill — especially the `rerender-*` and `rendering-*` categories. New Zustand selectors that subscribe to whole slices instead of derived booleans are the most common regression.
 
 ### Multiplayer / Transport
 
