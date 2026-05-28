@@ -23818,6 +23818,13 @@ mod tests {
     /// 702.62b + CR 611.2a): the suspend mechanic owns the card's lifetime, so
     /// the grant has no turn-scoped expiry. Keyed on the typed `Keyword::Suspend`
     /// variant in `build_continuous_clause`.
+    ///
+    /// NOTE: The parsed `SourceLacksKeyword { Suspend }` condition on this clause
+    /// resolves against the activating object (Jhoira / The Tenth Doctor), not
+    /// the exiled card. For these two cards this is inert — neither granter ever
+    /// has Suspend, so the grant fires unconditionally. A future "if it doesn't
+    /// have X" pattern whose subject is the cost-paid object will need a typed
+    /// `CostPaidObjectLacksKeyword` variant; flag and skip here.
     #[test]
     fn suspend_keyword_grant_carries_permanent_duration() {
         use crate::types::keywords::Keyword;
