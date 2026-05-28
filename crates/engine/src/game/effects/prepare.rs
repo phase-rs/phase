@@ -407,6 +407,7 @@ mod tests {
     fn enters_prepared_replacement_marks_permanent_before_priority_actions() {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
+        state.phase = crate::types::Phase::PreCombatMain;
         state.priority_player = PlayerId(0);
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
@@ -469,6 +470,7 @@ mod tests {
     fn effect_zone_move_enters_prepared_replacement_marks_permanent() {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
+        state.phase = crate::types::Phase::PreCombatMain;
         state.priority_player = PlayerId(0);
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
