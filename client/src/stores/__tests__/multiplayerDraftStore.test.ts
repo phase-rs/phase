@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useMultiplayerDraftStore } from "../multiplayerDraftStore";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
+import { DraftPauseReason } from "../../network/draftProtocol";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -28,6 +29,7 @@ const mockHostAdapter = {
   kickPlayer: vi.fn(),
   requestPause: vi.fn(),
   requestResume: vi.fn(),
+  overrideMatchResult: vi.fn(async () => {}),
   dispose: vi.fn(async () => {}),
   status: "idle" as const,
   roomCode: null,
@@ -180,6 +182,128 @@ describe("multiplayerDraftStore", () => {
       expect(state.total).toBe(8);
       expect(state.seats).toHaveLength(1);
     });
+
+    it("projects restored MatchInProgress views into match phase", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        setPoolJson: "{}",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      const view = mockView("MatchInProgress");
+      capturedHostEventHandler!({ type: "viewUpdated", view });
+
+      const state = useMultiplayerDraftStore.getState();
+      expect(state.phase).toBe("matchInProgress");
+      expect(state.view).toBe(view);
+    });
+
+    it("handles host-seat Bo3 prompt messages", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        setPoolJson: "{}",
+        kind: "Traditional",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      capturedHostEventHandler!({
+        type: "bo3ChoosePlayDraw",
+        matchId: "match-1",
+        gameNumber: 2,
+        score: { p0_wins: 0, p1_wins: 1, draws: 0 },
+        timerMs: 10_000,
+      });
+
+      let state = useMultiplayerDraftStore.getState();
+      expect(state.playDrawPrompt).toEqual({
+        matchId: "match-1",
+        gameNumber: 2,
+        score: { p0_wins: 0, p1_wins: 1, draws: 0 },
+        timerMs: 10_000,
+      });
+      expect(state.timerRemainingMs).toBe(10_000);
+
+      capturedHostEventHandler!({
+        type: "bo3GameStart",
+        matchId: "match-1",
+        gameNumber: 2,
+        firstPlayerSeat: 0,
+      });
+
+      state = useMultiplayerDraftStore.getState();
+      expect(state.phase).toBe("matchInProgress");
+      expect(state.playDrawPrompt).toBeNull();
+      expect(state.sideboardSubmitted).toBe(false);
+    });
+
+    it("reports active bot match results back to the pod host", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        setPoolJson: "{}",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      useMultiplayerDraftStore.setState({
+        matchPairing: {
+          type: "Bot",
+          matchId: "match-1",
+          round: 1,
+          localSeat: 0,
+          botSeat: 4,
+          botName: "Chandra",
+          deckPayload: {
+            player: { main_deck: [], sideboard: [], commander: [] },
+            opponent: { main_deck: [], sideboard: [], commander: [] },
+            ai_decks: [],
+          },
+          matchConfig: { match_type: "Bo1" },
+        },
+      });
+
+      await useMultiplayerDraftStore.getState().reportActiveMatchGameResult(1);
+
+      expect(mockHostAdapter.overrideMatchResult).toHaveBeenCalledWith("match-1", 4);
+    });
+
+    it("reports active match concessions as opponent wins", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        setPoolJson: "{}",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      useMultiplayerDraftStore.setState({
+        matchPairing: {
+          type: "Bot",
+          matchId: "match-2",
+          round: 1,
+          localSeat: 0,
+          botSeat: 5,
+          botName: "Jace",
+          deckPayload: {
+            player: { main_deck: [], sideboard: [], commander: [] },
+            opponent: { main_deck: [], sideboard: [], commander: [] },
+            ai_decks: [],
+          },
+          matchConfig: { match_type: "Bo1" },
+        },
+      });
+
+      await useMultiplayerDraftStore.getState().reportActiveMatchConcession();
+
+      expect(mockHostAdapter.overrideMatchResult).toHaveBeenCalledWith("match-2", 5);
+    });
   });
 
   describe("joinDraft", () => {
@@ -219,12 +343,12 @@ describe("multiplayerDraftStore", () => {
 
       capturedGuestEventHandler!({
         type: "draftPaused",
-        reason: "Player disconnected",
+        reason: DraftPauseReason.PlayerDisconnected,
       });
 
       let state = useMultiplayerDraftStore.getState();
       expect(state.paused).toBe(true);
-      expect(state.pauseReason).toBe("Player disconnected");
+      expect(state.pauseReason).toBe(DraftPauseReason.PlayerDisconnected);
 
       capturedGuestEventHandler!({ type: "draftResumed" });
       state = useMultiplayerDraftStore.getState();

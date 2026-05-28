@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
-    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, ShardChoice,
+    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterMoveChoice,
+    ShardChoice,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -91,6 +92,18 @@ pub enum UnlessCostBranch {
     Pay { index: usize },
 }
 
+/// CR 400.11 + CR 406.3: One discriminated selection committed for an
+/// outside-game choice. The two source pools (sideboard and face-up exile) are
+/// expressed as parallel variants so the action wire format is uniform.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum OutsideGameSelection {
+    /// CR 400.11a: A copy from the player's sideboard, identified by its slot.
+    Sideboard { sideboard_index: usize },
+    /// CR 406.3: A face-up exile object the player owns.
+    FaceUpExile { object_id: ObjectId },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type", content = "data")]
 pub enum GameAction {
@@ -162,8 +175,11 @@ pub enum GameAction {
     SelectCards {
         cards: Vec<ObjectId>,
     },
+    /// CR 400.11 + CR 406.3: Player commits one or more selections from the
+    /// offered outside-game pool. Each selection is a discriminated source —
+    /// a sideboard slot (wishboard) or a face-up exile object (Karn / Coax).
     ChooseOutsideGameCards {
-        sideboard_indices: Vec<usize>,
+        selections: Vec<OutsideGameSelection>,
     },
     SelectTargets {
         targets: Vec<TargetRef>,
@@ -502,6 +518,10 @@ pub enum GameAction {
     DistributeAmong {
         distribution: Vec<(TargetRef, u32)>,
     },
+    /// CR 122.5 + CR 608.2d: Submit resolution-time counter-move distribution.
+    ChooseCounterMoveDistribution {
+        selections: Vec<CounterMoveChoice>,
+    },
     /// CR 107.1c + CR 107.14: Submit the chosen amount for a
     /// `WaitingFor::PayAmountChoice` prompt ("pay any amount of {E}" and
     /// similar resource-choice patterns).
@@ -538,8 +558,17 @@ pub enum GameAction {
     /// Shape mirrors the prompt variant (`SingleColor` or `Combination`).
     /// `AnyCombination` prompts submit a `Combination` vector with one entry
     /// per produced mana unit.
+    ///
+    /// CR 605.3a: `count` (default 1) bulk-activates `count - 1` additional
+    /// identical, choice-free mana sources (e.g. a player's other Treasures)
+    /// with the same color in one round-trip — each is an independent mana
+    /// ability that resolves before the next (CR 605.3c). Only honored for a
+    /// `SingleColor` prompt answering a `ManaAbility` context; capped by the
+    /// engine-computed `PendingManaAbility::batch_siblings`.
     ChooseManaColor {
         choice: super::game_state::ManaChoice,
+        #[serde(default = "default_one")]
+        count: u32,
     },
     /// CR 605.3a + CR 601.2h + CR 107.4e: Answer the
     /// `WaitingFor::PayManaAbilityMana` prompt by picking one of the legal
@@ -997,6 +1026,12 @@ impl DebugAction {
     }
 }
 
+/// Serde default for `GameAction::ChooseManaColor::count` — a single activation
+/// when the field is absent (every pre-batch client/serialized action).
+fn default_one() -> u32 {
+    1
+}
+
 impl GameAction {
     /// Returns the enum variant name as a static string (e.g., `"CastSpell"`, `"PassPriority"`).
     /// Useful for structured logging without the full `Debug` representation.
@@ -1117,6 +1152,7 @@ impl GameAction {
             | GameAction::SetPhaseStops { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::DistributeAmong { .. }
+            | GameAction::ChooseCounterMoveDistribution { .. }
             | GameAction::SubmitPayAmount { .. }
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }

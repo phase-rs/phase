@@ -2,10 +2,11 @@ use serde::Serialize;
 
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Duration,
-    Effect, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-    PaymentCost, PlayerFilter, PtValue, QuantityExpr, SearchDestinationSplit,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, ControllerRef,
+    CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost, PlayerFilter, PtValue,
+    QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition,
+    TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -209,6 +210,10 @@ pub(crate) enum ContinuationAst {
     CounterSourceStatic {
         source_static: Box<StaticDefinition>,
     },
+    /// CR 701.8: "If a permanent's ability is countered this way, destroy that
+    /// permanent." — patches `source_rider = Some(CounterSourceRider::Destroy)`
+    /// on the preceding `Effect::Counter` (Teferi's Response, Green Slime).
+    CounterSourceRiderDestroy,
     /// CR 707.10c: "You may choose new targets for the copy/copies." after a
     /// CopySpell (possibly wrapped in a CreateDelayedTrigger) — patches
     /// `retarget = MayChooseNewTargets` on the inner Effect::CopySpell.
@@ -230,6 +235,10 @@ pub(crate) enum ContinuationAst {
     /// library-to-hand search continuation are already represented by the intrinsic
     /// SearchDestination + reveal flag and should be absorbed.
     SearchResultClauseHandled,
+    /// "reveal it" immediately after a SearchLibrary whose destination is handled
+    /// by a later conditional branch. Patches SearchLibrary.reveal without adding
+    /// a default ChangeZone.
+    SearchRevealResult,
     /// "Put the rest on the bottom of your library ..." after a tracked-set choice that
     /// already moved chosen cards out of the library. Appends a library-bottom placement
     /// step onto the preceding ChangeZone so the unchosen cards are handled by that chain.
@@ -552,6 +561,9 @@ pub(crate) enum TargetedImperativeAst {
     UntapAll {
         target: TargetFilter,
     },
+    Goad {
+        target: TargetFilter,
+    },
     GoadAll {
         target: TargetFilter,
     },
@@ -608,8 +620,10 @@ pub(crate) enum TargetedImperativeAst {
         origin: Option<Zone>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
-        /// CR 110.2: "under your control" — controller override.
-        under_your_control: bool,
+        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
+        /// to the player resolved from `ref`. `None` leaves the object under
+        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
+        enters_under: Option<ControllerRef>,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
@@ -694,6 +708,8 @@ pub(crate) enum SearchCreationImperativeAst {
         reveal: bool,
         destination: Zone,
         up_to: bool,
+        /// CR 400.11 + CR 406.3: Which source pool the outside-game search uses.
+        source_pool: OutsideGameSourcePool,
     },
     Dig {
         count: QuantityExpr,
@@ -759,6 +775,10 @@ pub(crate) enum UtilityImperativeAst {
         target: TargetFilter,
     },
     Attach {
+        attachment: TargetFilter,
+        target: TargetFilter,
+    },
+    UnattachAll {
         attachment: TargetFilter,
         target: TargetFilter,
     },
@@ -849,8 +869,10 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2: "under your control" — controller override on ETB.
-        under_your_control: bool,
+        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
+        /// to the player resolved from `ref`. `None` leaves the object under
+        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
+        enters_under: Option<ControllerRef>,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
         /// CR 701.28c: "transformed" — enters with its back face up.
@@ -860,6 +882,12 @@ pub(crate) enum PutImperativeAst {
         /// having been declared as one). Set by the inline-tail patcher in
         /// `try_parse_put_zone_change` for the Kaalia / Ilharg class.
         enters_attacking: bool,
+        /// "Up to one" resolution-choice zone changes may move zero matching objects.
+        up_to: bool,
+        /// CR 107.1c + CR 608.2c: Cardinality for non-targeted zone-change
+        /// choices made during resolution, e.g. "put any number of creature
+        /// cards from your hand onto the battlefield."
+        choice_count: Option<MultiTargetSpec>,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.
@@ -965,7 +993,9 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
     Counter {
         target: TargetFilter,
-        source_static: Option<Box<StaticDefinition>>,
+        /// CR 701.6 + CR 608.2c: Follow-up instruction acting on the countered
+        /// ability's source permanent. Mirrors `Effect::Counter.source_rider`.
+        source_rider: Option<CounterSourceRider>,
         /// CR 118.12: "Counter target spell unless its controller pays {X}"
         /// modifier. Lowered to `ParsedEffectClause.unless_pay` and ultimately
         /// to `AbilityDefinition.unless_pay`, so the runtime resolves the
@@ -1012,6 +1042,7 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: Option<QuantityExpr>,
         mode: crate::types::ability::CounterTransferMode,
+        selection: crate::types::ability::CounterMoveSelection,
         target: TargetFilter,
     },
 }
@@ -1106,6 +1137,25 @@ pub(crate) enum OracleBlockAst {
     TriggeredModal {
         trigger_line: String,
         header: ModalHeaderAst,
+        modes: Vec<ModeAst>,
+    },
+    /// CR 614.12c + CR 607.2d: "As [this permanent] enters, choose <A> or
+    /// <B>. \n • <A> — <linked ability>. \n • <B> — <linked ability>." The
+    /// header text is the original "As ~ enters, choose <A> or <B>" sentence
+    /// and the modes' `label` fields hold the anchor words. Lowered to:
+    ///   - One `ReplacementDefinition` (Moved → `Choose { ChoiceType::Labeled,
+    ///     persist: true }`) that records the chosen anchor word as a
+    ///     `ChosenAttribute::Label` on the entering permanent.
+    ///   - One `TriggerDefinition` or `StaticDefinition` per mode, gated on
+    ///     `ChosenLabelIs { label: <anchor word> }` so the linked ability
+    ///     only functions while its anchor word was chosen.
+    AsEntersAnchorWordModal {
+        /// Original "As ~ enters, choose <A> or <B>" sentence text used as
+        /// the description on the synthesized replacement.
+        header_text: String,
+        /// Anchor-word labels in declaration order (matches `modes[i].label`).
+        labels: Vec<String>,
+        /// The bullet-prefixed linked-ability bodies, one per anchor word.
         modes: Vec<ModeAst>,
     },
 }

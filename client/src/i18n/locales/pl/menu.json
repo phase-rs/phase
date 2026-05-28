@@ -1,0 +1,233 @@
+{
+  "backButton": {
+    "label": "Wstecz"
+  },
+  "aiDifficulty": {
+    "label": "Poziom trudności AI",
+    "ariaLabel": "Poziom trudności AI: {{difficulty}}",
+    "levels": {
+      "VeryEasy": "Bardzo łatwy",
+      "Easy": "Łatwy",
+      "Medium": "Średni",
+      "Hard": "Trudny",
+      "VeryHard": "Bardzo trudny"
+    }
+  },
+  "bracketFilter": {
+    "label": "Filtr poziomu"
+  },
+  "gamePresets": {
+    "heading": "Szybki start"
+  },
+  "shell": {
+    "disclaimer": "phase.rs to niekomercyjny projekt fanowski, niepowiązany z Wizards of the Coast ani przez nich nieautoryzowany. Magic: The Gathering jest © Wizards of the Coast LLC. Obrazy kart są pobierane ze Scryfall w czasie działania; dane kart pochodzą z MTGJSON. Żadne objęte prawem autorskim zasoby WotC nie są dołączone do tego projektu."
+  },
+  "home": {
+    "resume": {
+      "title": "Wznów grę",
+      "description": "Kontynuuj ostatnio zapisany pojedynek od bieżącej tury i stanu pola gry."
+    },
+    "setup": {
+      "title": "Graj z AI",
+      "titleSaved": "Nowy pojedynek z AI",
+      "description": "Rozegraj samotny pojedynek przeciwko przeciwnikowi AI — wybierz format, talię, archetyp i poziom trudności."
+    },
+    "online": {
+      "title": "Graj online",
+      "description": "Załóż pokój, dołącz przez kod lub połącz się ponownie z trybem wieloosobowym."
+    },
+    "draft": {
+      "title": "Draft",
+      "description": "Szybki draft przeciwko AI oraz eksperymentalne opcje draftu kostkowego i podu."
+    },
+    "decks": {
+      "title": "Talie",
+      "description": "Otwórz zapisane talie, zmień aktywną listę i edytuj konstrukcje."
+    },
+    "social": {
+      "sponsor": "Wesprzyj"
+    },
+    "preview": {
+      "cta": "Wypróbuj wersję zapowiadającą",
+      "tooltip": "Zagraj w najnowszą wersję zapowiadającą — nowe karty i poprawki trafiają tu przed każdym wydaniem."
+    },
+    "coverage": {
+      "title": "Otwórz panel obsługi kart",
+      "ariaLabel": "Otwórz panel obsługi kart",
+      "heading": "Panel obsługi kart",
+      "viewDetails": "Zobacz szczegóły"
+    },
+    "preparingCards": "Przygotowywanie kart…",
+    "alpha": {
+      "label": "Wczesna alfa",
+      "message": " — spodziewaj się niedziałających kart i brakujących funkcji."
+    },
+    "savedMatchAvailable": "Dostępny zapisany pojedynek",
+    "load": {
+      "title": "Wczytaj stan gry"
+    },
+    "exit": "Wyjdź"
+  },
+  "loadState": {
+    "title": "Wczytaj stan gry",
+    "subtitle": "Przywróć wyeksportowany lub wklejony stan i kontynuuj grę przeciwko AI.",
+    "tabPaste": "Wklej JSON",
+    "tabFile": "Z pliku",
+    "pastePlaceholder": "Wklej JSON stanu gry…",
+    "fileSupports": "Obsługuje pliki .json, .txt i .zip wyeksportowane z panelu debugowania",
+    "chooseFile": "Wybierz plik",
+    "load": "Wczytaj"
+  },
+  "aiOpponent": {
+    "heading": "Przeciwnik AI",
+    "headingMulti": "Przeciwnicy AI ({{count}})",
+    "analyzingDecks": "Analizowanie talii…",
+    "noLegalDecks": "Brak dozwolonych talii AI dla tego formatu.",
+    "catalogUnavailable": "Katalog talii AI niedostępny: {{error}}",
+    "randomPoolFilters": "Filtry losowej puli",
+    "archetype": "Archetyp",
+    "cardCoverage": "Obsługa kart",
+    "coverageThresholdHint": "Wyklucz talie poniżej tego progu obsługi przez silnik",
+    "bracket": "Poziom",
+    "bracketHint": "Losowe AI wybiera z tych poziomów. Talie bez tagów są wykluczane podczas filtrowania.",
+    "opponentLabel": "Przeciwnik {{number}}",
+    "deck": "Talia",
+    "difficulty": "Poziom trudności",
+    "deckRandom": "Losowa",
+    "deckRandomCount": "Losowa ({{count}})",
+    "source": {
+      "feed": "Kanał",
+      "user": "Użytkownik",
+      "precon": "Precon"
+    }
+  },
+  "feedManager": {
+    "title": "Zarządzaj kanałami",
+    "refreshing": "Odświeżanie…",
+    "refreshAll": "Odśwież wszystkie",
+    "refresh": "Odśwież",
+    "subscribe": "Subskrybuj",
+    "unsubscribe": "Anuluj subskrypcję",
+    "lastRefreshed": "Ostatnio odświeżono: {{date}}",
+    "addCustomFeed": "Dodaj własny kanał",
+    "add": "Dodaj",
+    "done": "Gotowe"
+  },
+  "importDeck": {
+    "title": "Importuj talię",
+    "tabPaste": "Wklej tekst",
+    "tabFile": "Z pliku",
+    "deckNamePlaceholder": "Nazwa talii",
+    "import": "Importuj",
+    "fileSupports": "Obsługuje formaty .dck, .dec, .txt oraz MTGA",
+    "chooseFile": "Wybierz plik"
+  },
+  "precon": {
+    "savePrompt": "Zapisz gotową talię jako:",
+    "overwriteConfirm": "„{{name}}” już istnieje. Nadpisać?",
+    "overwriteAllConfirm": "Wszystkie {{count}} wybrane talie już istnieją. Nadpisać?",
+    "overwriteSomeConfirm": "{{conflicts}} z {{total}} wybranych talii już istnieje. Nadpisać duplikaty? (Anuluj zachowuje istniejące kopie i importuje resztę.)",
+    "importedSkipped_one": "Zaimportowano {{count}} talię; pominięto {{skipped}} istniejących.",
+    "importedSkipped_other": "Zaimportowano {{count}} talii; pominięto {{skipped}} istniejących.",
+    "title": "Gotowe talie",
+    "subtitle": "Pochodzą z MTGJSON AllDeckFiles — każdy precon wydany przez WotC.",
+    "totalCount": "· {{count}} łącznie",
+    "searchPlaceholder": "Szukaj według nazwy, kodu dodatku lub typu…",
+    "allTypes": "Wszystkie ({{count}})",
+    "loadingCatalog": "Wczytywanie katalogu talii…",
+    "noMatch": "Brak pasujących talii.",
+    "selectDeck": "Wybierz {{name}}",
+    "cardCount_one": "{{count}} karta",
+    "cardCount_other": "{{count}} kart",
+    "commanderSuffix": " · dow.",
+    "showingFirst": "Wyświetlono pierwsze {{count}} — zawęź wyszukiwanie.",
+    "selectAllVisible": "Zaznacz wszystkie widoczne",
+    "clearSelection": "Wyczyść ({{count}})",
+    "importSelected": "Importuj {{count}} wybranych"
+  },
+  "deckTile": {
+    "feedBadge": "Kanał",
+    "edit": "Edytuj {{name}}",
+    "delete": "Usuń",
+    "deleteTitle": "Usuń talię",
+    "copy": "Kopiuj do Moich talii",
+    "copyTitle": "Kopiuj do Moich talii (usuwa śledzenie kanału)",
+    "cardCount_one": "{{count}} karta",
+    "cardCount_other": "{{count}} kart",
+    "preconBadge": "precon",
+    "unknown": "Nieznane {{count}}",
+    "unknownCardsTitle": "Nieznane karty:\n{{cards}}",
+    "unsupportedTitle": "Nieobsługiwane ({{unique}} unikalnych, {{copies}} kopii):\n{{cards}}",
+    "setIconAlt": "Ikona dodatku {{code}}"
+  },
+  "myDecks": {
+    "headingManage": "Moje talie",
+    "headingSelect": "Wybierz talię",
+    "tabDecks": "Moje talie",
+    "tabSubscriptions": "Subskrypcje",
+    "createNew": "Utwórz nową",
+    "refreshing": "Odświeżanie…",
+    "refreshAll": "Odśwież wszystkie",
+    "manageFeeds": "Zarządzaj kanałami",
+    "searchPlaceholder": "Szukaj talii…",
+    "formatLabel": "Format",
+    "browseAetherhub": "Przeglądaj talie {{format}} na Aetherhub",
+    "showAllDecks": "Pokaż wszystkie talie",
+    "showLegalOnly": "Pokaż tylko dozwolone",
+    "showAllDecksButton": "Pokaż wszystkie talie",
+    "sortName": "Nazwa",
+    "sortDateAdded": "Data dodania",
+    "sortFormat": "Format",
+    "ascending": "Rosnąco",
+    "descending": "Malejąco",
+    "saveAsPrompt": "Zapisz jako:",
+    "banner": {
+      "showingAllFor": "Wyświetlanie wszystkich zapisanych talii dla",
+      "showingLegalIn": "Wyświetlanie talii dozwolonych w",
+      "deckCount": "· {{visible}} z {{total}}"
+    },
+    "status": {
+      "fallbackUserDeck": "talia użytkownika",
+      "fallbackVisibleDeck": "widoczna talia",
+      "startingWorker": "Uruchamianie procesu zgodności…",
+      "loadingDatabase": "Wczytywanie bazy danych zgodności…",
+      "checkingDeck": "Sprawdzanie {{deck}}…",
+      "checkedDeck": "Sprawdzono {{deck}}",
+      "loadingCoverage": "Wczytywanie obsługi dla {{deck}}…",
+      "checkingSelected": "Sprawdzanie zgodności wybranej talii…",
+      "evaluatingVisible": "Ocenianie widocznych talii…",
+      "remaining": "Pozostało {{count}}"
+    },
+    "compatibilityError": "Sprawdzanie zgodności niedostępne: {{error}}",
+    "empty": {
+      "title": "Brak talii pasujących do tego filtra.",
+      "selectHint": "Zaimportuj zgodną talię lub zmień format, aby zobaczyć dostępne talie.",
+      "manageHint": "Wybierz inny filtr lub pokaż wszystkie talie, aby wybrać z całej kolekcji."
+    },
+    "sectionMyDecks": "Moje talie",
+    "sectionStarterDecks": "Talie startowe",
+    "sectionLegalPrecons": "Dozwolone precony",
+    "importDeckTile": "Importuj talię",
+    "preconstructedTile": "Gotowa talia",
+    "browseAll": "Przeglądaj wszystkie",
+    "loadMore": "Wczytaj więcej",
+    "selectedDeck": "Wybrana talia",
+    "chooseDeckToContinue": "Wybierz talię, aby kontynuować",
+    "filterAll": "Wszystkie"
+  },
+  "subscriptions": {
+    "emptyTitle": "Brak subskrypcji kanałów",
+    "emptyDescription": "Subskrybuj kanały talii, aby otrzymywać wyselekcjonowane kolekcje talii, które aktualizują się automatycznie.",
+    "feedMeta_one": "· {{count}} talia · Zaktualizowano {{date}}",
+    "feedMeta_other": "· {{count}} talii · Zaktualizowano {{date}}",
+    "error": "Błąd: {{error}}"
+  },
+  "myDecksPage": {
+    "eyebrow": "Talie",
+    "title": "Talie.",
+    "description": "Otwórz zapisaną listę, zaimportuj nową lub kontynuuj w kreatorze talii."
+  },
+  "loadGameState": {
+    "readFailed": "Nie udało się odczytać pliku"
+  }
+}

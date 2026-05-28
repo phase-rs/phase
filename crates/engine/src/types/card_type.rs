@@ -182,65 +182,181 @@ pub struct CardType {
     pub subtypes: Vec<String>,
 }
 
+pub const LAND_SUBTYPES: &[&str] = &[
+    "Cave",
+    "Desert",
+    "Forest",
+    "Gate",
+    "Island",
+    "Lair",
+    "Locus",
+    "Mine",
+    "Mountain",
+    "Plains",
+    "Planet",
+    "Power-Plant",
+    "Sphere",
+    "Swamp",
+    "Tower",
+    "Town",
+    "Urza's",
+];
+
+pub const ARTIFACT_SUBTYPES: &[&str] = &[
+    "Attraction",
+    "Blood",
+    "Bobblehead",
+    "Book",
+    "Clue",
+    "Contraption",
+    "Equipment",
+    "Food",
+    "Fortification",
+    "Gold",
+    "Incubator",
+    "Infinity",
+    "Junk",
+    "Lander",
+    "Map",
+    "Mutagen",
+    "Powerstone",
+    "Spacecraft",
+    "Stone",
+    "Treasure",
+    "Vehicle",
+];
+
+pub const ENCHANTMENT_SUBTYPES: &[&str] = &[
+    "Aura",
+    "Background",
+    "Cartouche",
+    "Case",
+    "Class",
+    "Curse",
+    "Role",
+    "Room",
+    "Rune",
+    "Saga",
+    "Shard",
+    "Shrine",
+];
+
+pub const SPELL_SUBTYPES: &[&str] = &["Adventure", "Arcane", "Lesson", "Omen", "Trap"];
+
+pub const BATTLE_SUBTYPES: &[&str] = &["Siege"];
+
+pub const PLANESWALKER_SUBTYPES: &[&str] = &[
+    "Ajani",
+    "Aminatou",
+    "Angrath",
+    "Arlinn",
+    "Ashiok",
+    "Bahamut",
+    "Basri",
+    "Bolas",
+    "Calix",
+    "Chandra",
+    "Comet",
+    "Dack",
+    "Dakkon",
+    "Daretti",
+    "Davriel",
+    "Dellian",
+    "Dihada",
+    "Domri",
+    "Dovin",
+    "Ellywick",
+    "Elminster",
+    "Elspeth",
+    "Estrid",
+    "Freyalise",
+    "Garruk",
+    "Gideon",
+    "Grist",
+    "Guff",
+    "Huatli",
+    "Jace",
+    "Jared",
+    "Jaya",
+    "Jeska",
+    "Kaito",
+    "Karn",
+    "Kasmina",
+    "Kaya",
+    "Kiora",
+    "Koth",
+    "Liliana",
+    "Lolth",
+    "Lukka",
+    "Minsc",
+    "Mordenkainen",
+    "Nahiri",
+    "Narset",
+    "Niko",
+    "Nissa",
+    "Nixilis",
+    "Oko",
+    "Quintorius",
+    "Ral",
+    "Rowan",
+    "Saheeli",
+    "Samut",
+    "Sarkhan",
+    "Serra",
+    "Sivitri",
+    "Sorin",
+    "Szat",
+    "Tamiyo",
+    "Tasha",
+    "Teferi",
+    "Teyo",
+    "Tezzeret",
+    "Tibalt",
+    "Tyvar",
+    "Ugin",
+    "Urza",
+    "Venser",
+    "Vivien",
+    "Vraska",
+    "Vronos",
+    "Will",
+    "Windgrace",
+    "Wrenn",
+    "Xenagos",
+    "Yanggu",
+    "Yanling",
+    "Zariel",
+];
+
+pub fn fixed_noncreature_subtypes() -> impl Iterator<Item = &'static str> {
+    LAND_SUBTYPES
+        .iter()
+        .chain(ARTIFACT_SUBTYPES)
+        .chain(ENCHANTMENT_SUBTYPES)
+        .chain(SPELL_SUBTYPES)
+        .chain(BATTLE_SUBTYPES)
+        .chain(PLANESWALKER_SUBTYPES)
+        .copied()
+}
+
 /// CR 205.3i: Returns true if the given string is a land subtype.
 /// Used by `SetBasicLandType` to remove only land subtypes while preserving
 /// non-land subtypes (e.g., creature subtypes on Land Creatures like Dryad Arbor).
 pub fn is_land_subtype(s: &str) -> bool {
-    matches!(
-        s,
-        "Cave"
-            | "Desert"
-            | "Forest"
-            | "Gate"
-            | "Island"
-            | "Lair"
-            | "Locus"
-            | "Mine"
-            | "Mountain"
-            | "Plains"
-            | "Planet"
-            | "Power-Plant"
-            | "Sphere"
-            | "Swamp"
-            | "Tower"
-            | "Town"
-            | "Urza's"
-    )
+    LAND_SUBTYPES.contains(&s)
 }
 
 /// CR 205.3: Return the noncreature subtype set for subtypes whose membership
 /// is fixed by the card-type rules. Creature subtypes are intentionally
 /// excluded because the runtime card database owns that list.
 pub fn noncreature_subtype_set(s: &str) -> Option<SubtypeSet> {
-    if is_land_subtype(s) {
-        return Some(SubtypeSet::Land);
-    }
     match s {
-        // CR 205.3g: Artifact subtypes.
-        "Attraction" | "Blood" | "Bobblehead" | "Book" | "Clue" | "Contraption" | "Equipment"
-        | "Food" | "Fortification" | "Gold" | "Incubator" | "Infinity" | "Junk" | "Lander"
-        | "Map" | "Mutagen" | "Powerstone" | "Spacecraft" | "Stone" | "Treasure" | "Vehicle" => {
-            Some(SubtypeSet::Artifact)
-        }
-        // CR 205.3h: Enchantment subtypes.
-        "Aura" | "Background" | "Cartouche" | "Case" | "Class" | "Curse" | "Role" | "Room"
-        | "Rune" | "Saga" | "Shard" | "Shrine" => Some(SubtypeSet::Enchantment),
-        // CR 205.3k: Spell subtypes.
-        "Adventure" | "Arcane" | "Lesson" | "Omen" | "Trap" => Some(SubtypeSet::Spell),
-        // CR 205.3q: Battle subtypes.
-        "Siege" => Some(SubtypeSet::Battle),
-        // CR 205.3j: Planeswalker subtypes.
-        "Ajani" | "Aminatou" | "Angrath" | "Arlinn" | "Ashiok" | "Bahamut" | "Basri" | "Bolas"
-        | "Calix" | "Chandra" | "Comet" | "Dack" | "Dakkon" | "Daretti" | "Davriel" | "Dellian"
-        | "Dihada" | "Domri" | "Dovin" | "Ellywick" | "Elminster" | "Elspeth" | "Estrid"
-        | "Freyalise" | "Garruk" | "Gideon" | "Grist" | "Guff" | "Huatli" | "Jace" | "Jared"
-        | "Jaya" | "Jeska" | "Kaito" | "Karn" | "Kasmina" | "Kaya" | "Kiora" | "Koth"
-        | "Liliana" | "Lolth" | "Lukka" | "Minsc" | "Mordenkainen" | "Nahiri" | "Narset"
-        | "Niko" | "Nissa" | "Nixilis" | "Oko" | "Quintorius" | "Ral" | "Rowan" | "Saheeli"
-        | "Samut" | "Sarkhan" | "Serra" | "Sivitri" | "Sorin" | "Szat" | "Tamiyo" | "Tasha"
-        | "Teferi" | "Teyo" | "Tezzeret" | "Tibalt" | "Tyvar" | "Ugin" | "Urza" | "Venser"
-        | "Vivien" | "Vraska" | "Vronos" | "Will" | "Windgrace" | "Wrenn" | "Xenagos"
-        | "Yanggu" | "Yanling" | "Zariel" => Some(SubtypeSet::Planeswalker),
+        s if LAND_SUBTYPES.contains(&s) => Some(SubtypeSet::Land),
+        s if ARTIFACT_SUBTYPES.contains(&s) => Some(SubtypeSet::Artifact),
+        s if ENCHANTMENT_SUBTYPES.contains(&s) => Some(SubtypeSet::Enchantment),
+        s if SPELL_SUBTYPES.contains(&s) => Some(SubtypeSet::Spell),
+        s if BATTLE_SUBTYPES.contains(&s) => Some(SubtypeSet::Battle),
+        s if PLANESWALKER_SUBTYPES.contains(&s) => Some(SubtypeSet::Planeswalker),
         _ => None,
     }
 }

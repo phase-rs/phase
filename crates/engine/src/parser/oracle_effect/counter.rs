@@ -7,8 +7,8 @@ use nom::sequence::terminated;
 use nom::Parser;
 
 use crate::types::ability::{
-    CounterTransferMode, DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, QuantityExpr,
-    TargetFilter,
+    CounterMoveSelection, CounterTransferMode, DoublePTMode, DoubleTarget, Effect, MultiTargetSpec,
+    QuantityExpr, TargetFilter,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
@@ -594,6 +594,7 @@ pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<
             counter_type: None,
             count: None,
             mode: CounterTransferMode::Put,
+            selection: CounterMoveSelection::StackTarget,
             target,
         },
         remainder,
@@ -607,16 +608,16 @@ pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &mut ParseContext) 
     let after_move = after_move.trim();
 
     // Parse quantity: "all", "any number of", or a count expression.
-    let (count, rest) = if let Some(((), rest)) =
+    let (count, any_number, rest) = if let Some(((), rest)) =
         nom_on_lower(after_move, after_move, |i| value((), tag("all ")).parse(i))
     {
-        (None, rest.trim_start())
+        (None, false, rest.trim_start())
     } else if let Some(((), rest)) = nom_on_lower(after_move, after_move, |i| {
         value((), tag("any number of ")).parse(i)
     }) {
-        (None, rest.trim_start())
+        (None, true, rest.trim_start())
     } else if let Some((qty, rest)) = parse_count_expr(after_move) {
-        (Some(qty), rest.trim_start())
+        (Some(qty), false, rest.trim_start())
     } else {
         // "move a +1/+1 counter" — article consumed by parse_count_expr("a" → 1)
         return None;
@@ -647,28 +648,47 @@ pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &mut ParseContext) 
     let after_from = after_from.trim();
 
     // Parse source target — delimited by " onto " or " to ".
-    let split_pos = after_from
-        .find(" onto ")
-        .or_else(|| after_from.find(" to "));
-    let pos = split_pos?;
-    let source_text = &after_from[..pos];
-    let rest = &after_from[pos..];
-    let target_text = rest
-        .strip_prefix(" onto ")
-        .or_else(|| rest.strip_prefix(" to "))
-        .unwrap_or(rest)
-        .trim();
+    let (source_text, target_text) = split_move_counter_from_clause(after_from)?;
 
     let source = resolve_counter_target(source_text, ctx);
-    let (target, _rem) = parse_target(target_text);
+    let target = resolve_counter_target(target_text, ctx);
+    let selection = if any_number {
+        if contains_target_word(target_text) {
+            CounterMoveSelection::StackTargetAnyNumber
+        } else {
+            CounterMoveSelection::ResolutionDistributionAnyNumber
+        }
+    } else {
+        CounterMoveSelection::StackTarget
+    };
 
     Some(Effect::MoveCounters {
         source,
         counter_type,
         count,
         mode: CounterTransferMode::Move,
+        selection,
         target,
     })
+}
+
+fn split_move_counter_from_clause(input: &str) -> Option<(&str, &str)> {
+    if let Ok((after_delimiter, source_text)) =
+        terminated::<_, _, OracleError<'_>, _, _>(take_until(" onto "), tag(" onto ")).parse(input)
+    {
+        return Some((source_text.trim(), after_delimiter.trim()));
+    }
+    let (after_delimiter, source_text) =
+        terminated::<_, _, OracleError<'_>, _, _>(take_until(" to "), tag(" to "))
+            .parse(input)
+            .ok()?;
+    Some((source_text.trim(), after_delimiter.trim()))
+}
+
+fn contains_target_word(input: &str) -> bool {
+    input
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|word| word == "target")
 }
 
 /// CR 701.10e: Parse "double the number of {type} counters on {target}".
@@ -1034,6 +1054,7 @@ mod tests {
             counter_type,
             count,
             mode,
+            selection,
             target,
         }) = result
         else {
@@ -1043,6 +1064,7 @@ mod tests {
         assert_eq!(counter_type, Some(CounterType::Plus1Plus1));
         assert_eq!(count, Some(QuantityExpr::Fixed { value: 1 }));
         assert_eq!(mode, CounterTransferMode::Move);
+        assert_eq!(selection, CounterMoveSelection::StackTarget);
         assert!(matches!(target, TargetFilter::Typed { .. }));
     }
 
@@ -1057,6 +1079,7 @@ mod tests {
             counter_type,
             count,
             mode,
+            selection,
             ..
         }) = result
         else {
@@ -1065,6 +1088,7 @@ mod tests {
         assert_eq!(counter_type, None, "untyped = None");
         assert_eq!(count, None, "all counters = None");
         assert_eq!(mode, CounterTransferMode::Move);
+        assert_eq!(selection, CounterMoveSelection::StackTarget);
     }
 
     #[test]
@@ -1079,6 +1103,7 @@ mod tests {
             counter_type,
             count,
             mode,
+            selection,
             target,
         }) = result
         else {
@@ -1088,7 +1113,61 @@ mod tests {
         assert_eq!(counter_type, Some(CounterType::Plus1Plus1));
         assert_eq!(count, Some(QuantityExpr::Fixed { value: 1 }));
         assert_eq!(mode, CounterTransferMode::Move);
+        assert_eq!(selection, CounterMoveSelection::StackTarget);
         assert!(matches!(target, TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn move_any_number_to_nontarget_destinations_is_resolution_distribution() {
+        let result = try_parse_move_counters_from(
+            "move any number of +1/+1 counters from this creature onto other creatures you control",
+            &mut default_ctx(),
+        );
+        let Some(Effect::MoveCounters {
+            source,
+            counter_type,
+            count,
+            mode,
+            selection,
+            target,
+        }) = result
+        else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert!(matches!(source, TargetFilter::SelfRef));
+        assert_eq!(counter_type, Some(CounterType::Plus1Plus1));
+        assert_eq!(count, None);
+        assert_eq!(mode, CounterTransferMode::Move);
+        assert_eq!(
+            selection,
+            CounterMoveSelection::ResolutionDistributionAnyNumber
+        );
+        assert!(matches!(target, TargetFilter::Typed { .. }));
+    }
+
+    #[test]
+    fn move_any_number_to_target_destination_keeps_stack_targets() {
+        let result = try_parse_move_counters_from(
+            "move any number of counters from target creature onto another target creature",
+            &mut default_ctx(),
+        );
+        let Some(Effect::MoveCounters {
+            source,
+            counter_type,
+            count,
+            mode,
+            selection,
+            target,
+        }) = result
+        else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert!(matches!(source, TargetFilter::Typed { .. }));
+        assert_eq!(counter_type, None);
+        assert_eq!(count, None);
+        assert_eq!(mode, CounterTransferMode::Move);
+        assert_eq!(selection, CounterMoveSelection::StackTargetAnyNumber);
+        assert!(matches!(target, TargetFilter::Typed { .. }));
     }
 
     /// CR 122.1 + CR 208.3: "put a number of +1/+1 counters equal to its power
@@ -1401,6 +1480,7 @@ mod tests {
                 counter_type,
                 count,
                 mode,
+                selection: _,
                 target,
             },
             _,

@@ -196,7 +196,7 @@ pub fn resolve(
                     destination: Some(destination),
                     enter_tapped: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under_player: None,
                     enters_attacking: false,
                     owner_library: false,
                     track_exiled_by_source: false,
@@ -349,7 +349,7 @@ pub fn resolve_all(
                 destination: Some(destination),
                 enter_tapped: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under_player: None,
                 enters_attacking: false,
                 owner_library: false,
                 track_exiled_by_source: false,
@@ -552,6 +552,7 @@ mod tests {
                 trigger_event: None,
                 description: None,
                 source_name: "Ability Source".to_string(),
+                subject_match_count: None,
             },
         });
 

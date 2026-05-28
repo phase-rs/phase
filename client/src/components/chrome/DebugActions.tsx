@@ -30,15 +30,28 @@ export function DebugActions() {
   const localPlayerId = usePlayerId();
   // Single-player / AI / local games leave `debug_permitted` empty, in which
   // case `debug_mode` itself is the engine gate and the panel renders as
-  // before. In a multiplayer sandbox the set is populated and only members
-  // see the action tabs.
+  // before. In a multiplayer sandbox every seat is seeded into the set by
+  // default — the grant/revoke panel only appears once a seat has been
+  // explicitly revoked, surfacing the re-grant escape hatch without making
+  // the host's default screen look like an admin console.
   const debugPermitted = useGameStore((s) => s.gameState?.debug_permitted);
+  const playerCount = useGameStore((s) => s.gameState?.players?.length ?? 0);
   const allowDebug = useGameStore(
     (s) => s.gameState?.format_config?.allow_debug_actions === true,
   );
   const isHost = localPlayerId === 0;
   const hasPermission =
     !debugPermitted || debugPermitted.length === 0 || debugPermitted.includes(localPlayerId);
+  // A revocation is present when the set was populated and then someone
+  // was removed. The empty-set case is "seeding never ran" (single-player
+  // local sandbox) and is treated as "no admin console needed", not as a
+  // revocation. The panel stays hidden in the all-permitted default; once
+  // anyone is missing from a populated set, the host sees it to re-grant.
+  const hasRevocation =
+    allowDebug &&
+    debugPermitted != null &&
+    debugPermitted.length > 0 &&
+    debugPermitted.length < playerCount;
 
   const handleDispatch = async (action: DebugAction) => {
     setStatus(null);
@@ -61,21 +74,22 @@ export function DebugActions() {
 
   return (
     <div>
-      {allowDebug && isHost && <GrantDebugPermissionPanel />}
+      {isHost && hasRevocation && <GrantDebugPermissionPanel />}
       <div className="mb-1 flex items-center justify-between">
         <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
           Debug Actions
         </h3>
         <button
           onClick={toggleDebugInteractionMode}
+          title="Click Mode: when ON, click any card on the board, in a hand, or in a zone viewer to open a debug menu for it (move zones, modify P/T, add counters, remove) instead of playing it normally. A banner appears at the top while it's active."
           className={
-            "rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors " +
+            "rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors " +
             (debugInteractionMode
-              ? "border-amber-500/60 bg-amber-500/20 text-amber-300"
-              : "border-gray-700 bg-transparent text-gray-600 hover:border-gray-600 hover:text-gray-500")
+              ? "border-amber-500/70 bg-amber-500/25 text-amber-200"
+              : "border-amber-600/40 bg-transparent text-amber-500/80 hover:border-amber-500/60 hover:bg-amber-500/10 hover:text-amber-300")
           }
         >
-          {debugInteractionMode ? "Click Mode ON" : "Click Mode"}
+          {debugInteractionMode ? "● Click Mode ON" : "Click Mode"}
         </button>
       </div>
       <div className="mb-2 flex flex-wrap gap-1">

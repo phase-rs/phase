@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
@@ -94,6 +95,7 @@ const cardStyle = {
 
 /** Renders a single opponent hand card — face or back, same sizing either way. */
 function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardName: string | null }) {
+  const { t } = useTranslation("game");
   const { src } = useCardImage(cardName ?? "", { size: "small" });
   const { handlers: hoverHandlers } = useCardHover(cardName ? cardId : null);
 
@@ -113,7 +115,7 @@ function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardNam
   return (
     <img
       src={CARD_BACK_URL}
-      alt="Card back"
+      alt={t("hand.cardBack")}
       className="rounded-lg border border-gray-600 shadow-md object-cover"
       style={cardStyle}
       draggable={false}

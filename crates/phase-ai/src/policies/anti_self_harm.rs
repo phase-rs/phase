@@ -899,7 +899,7 @@ mod tests {
                 target: TargetFilter::Typed(creature_card),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2078,7 +2078,7 @@ mod tests {
         let mut rewind = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::StackSpell,
-                source_static: None,
+                source_rider: None,
             },
             Vec::new(),
             rewind_id,
@@ -2721,7 +2721,7 @@ mod tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2739,6 +2739,7 @@ mod tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let config = AiConfig::default();
@@ -2826,7 +2827,7 @@ mod tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2844,6 +2845,7 @@ mod tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let config = AiConfig::default();

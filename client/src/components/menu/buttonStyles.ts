@@ -1,5 +1,5 @@
 export type MenuButtonTone = "neutral" | "emerald" | "amber" | "blue" | "red" | "indigo" | "slate" | "cyan" | "purple";
-export type MenuButtonSize = "icon" | "xs" | "sm" | "md" | "lg";
+export type MenuButtonSize = "icon" | "xs" | "chrome" | "sm" | "md" | "lg";
 
 const BASE =
   "border border-solid font-medium backdrop-blur-sm transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 inline-flex items-center justify-center";
@@ -34,6 +34,10 @@ const GHOST_TONES: Record<MenuButtonTone, string> = {
 const SIZES: Record<MenuButtonSize, string> = {
   icon: "min-h-8 h-8 w-8 p-0 rounded-[10px] text-base",
   xs: "min-h-8 px-2.5 py-1 rounded-lg text-xs",
+  // Chrome cluster (FullscreenButton/VolumeControl/AccountControl peers):
+  // a true 36×36 square — `min-h-9 h-9 min-w-9` together prevent any caller's
+  // `h-*` override from being defeated by an upstream `min-h-*` baseline.
+  chrome: "min-h-9 h-9 min-w-9 px-1.5 py-0 rounded-[12px] text-sm",
   sm: "min-h-11 px-4 py-2 rounded-xl text-sm",
   md: "min-h-11 px-6 py-3 rounded-[18px] text-base",
   lg: "min-h-11 px-10 py-4 rounded-[22px] text-lg",

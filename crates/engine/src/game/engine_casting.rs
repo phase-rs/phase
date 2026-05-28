@@ -230,6 +230,19 @@ pub(super) fn handle_choose_mana_color(
     mana_abilities::handle_choose_mana_color(state, pending_mana_ability, prompt, chosen, events)
 }
 
+/// CR 605.3a: Bulk-activate identical, choice-free sibling mana sources with the
+/// color just chosen (the player's other Treasures, etc.). Thin forward to the
+/// engine authority in `mana_abilities`.
+pub(super) fn batch_activate_mana_siblings(
+    state: &mut GameState,
+    pending_mana_ability: &PendingManaAbility,
+    chosen: &crate::types::game_state::ManaChoice,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    mana_abilities::batch_activate_mana_siblings(state, pending_mana_ability, chosen, count, events)
+}
+
 pub(super) fn handle_pay_mana_ability_mana(
     state: &mut GameState,
     options: &[Vec<crate::types::mana::ManaType>],

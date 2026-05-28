@@ -16,8 +16,9 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, CastingPermission, Chooser, CopyRetargetPermission, Effect,
-    LibraryPosition, PermissionGrantee, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, CastingPermission, Chooser, CopyRetargetPermission,
+    CounterSourceRider, Effect, LibraryPosition, PermissionGrantee, QuantityExpr, QuantityRef,
+    StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -51,6 +52,38 @@ fn strip_search_result_subject(lower: &str) -> &str {
     .parse(lower)
     .map(|(rest, _)| rest)
     .unwrap_or(lower)
+}
+
+fn is_search_result_reveal_clause(lower: &str) -> bool {
+    matches!(
+        lower.trim().trim_end_matches('.'),
+        "reveal that card" | "reveal those cards" | "reveal the card" | "reveal them" | "reveal it"
+    )
+}
+
+fn has_conditional_search_result_destination(lower: &str) -> bool {
+    fn parse_clause(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+        let (input, _) = alt((
+            tag::<_, _, OracleError<'_>>("put that card onto the battlefield"),
+            tag("put it onto the battlefield"),
+            tag("put them onto the battlefield"),
+            tag("put those cards onto the battlefield"),
+        ))
+        .parse(input)?;
+        let (input, _) = opt(tag(" tapped")).parse(input)?;
+        let (input, _) = alt((tag(" if it's "), tag(" if it is "))).parse(input)?;
+        let (input, _) = take_until(" card").parse(input)?;
+        let (input, _) = tag(" card").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        Ok((input, ()))
+    }
+
+    let bare = strip_search_result_subject(lower.trim().trim_end_matches('.'));
+    parse_clause(bare).is_ok()
+        || nom_primitives::scan_at_word_boundaries(lower, |input| {
+            parse_clause(strip_search_result_subject(input))
+        })
+        .is_some()
 }
 
 /// Parse count from "choose one/two/three/N of them/those" text using nom combinator.
@@ -404,6 +437,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             '"' if !in_single_quote => {
                 in_double_quote = !in_double_quote;
                 current.push(ch);
+                if !in_double_quote {
+                    let remainder = chars.clone().collect::<String>();
+                    if quote_closes_sentence_before_sequence(&current, &remainder) {
+                        push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
+                        current.clear();
+                        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+                            chars.next();
+                        }
+                    }
+                }
             }
             ',' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 let remainder = chars.clone().collect::<String>();
@@ -552,6 +595,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // correct `affected` filter inherited from the subject.
                     let have_base_pt_continuation =
                         starts_have_base_power_toughness(remainder_trimmed);
+                    let continuous_modifier_conjunct =
+                        starts_you_control_subject_predicate(&before_lower)
+                            && alt((
+                                tag::<_, _, OracleError<'_>>("gain "),
+                                tag("gains "),
+                                tag("have "),
+                                tag("has "),
+                            ))
+                            .parse(remainder_trimmed)
+                            .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -561,7 +614,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || choice_partition_remainder
                         || compound_subject_each
                         || inside_otherwise_body
-                        || have_base_pt_continuation;
+                        || have_base_pt_continuation
+                        || continuous_modifier_conjunct;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -592,6 +646,30 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
 
     push_clause_chunk(&mut chunks, &current, None);
     chunks
+}
+
+fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool {
+    let quoted_text_ends_sentence = current
+        .chars()
+        .rev()
+        .nth(1)
+        .is_some_and(|ch| matches!(ch, '.' | '!' | '?'));
+    if !quoted_text_ends_sentence {
+        return false;
+    }
+
+    let trimmed = remainder.trim_start();
+    let trimmed_lower = trimmed.to_ascii_lowercase();
+    let sequence_starts = alt((
+        tag::<_, _, OracleError<'_>>("then, if "),
+        tag("then if "),
+        tag("then "),
+        tag("if "),
+        tag("otherwise"),
+    ))
+    .parse(trimmed_lower.as_str())
+    .is_ok();
+    sequence_starts
 }
 
 fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
@@ -632,6 +710,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         let after_then = &trimmed["then ".len()..];
         let after_then_lower = &trimmed_lower["then ".len()..];
         if starts_clause_text_or_conjugated(after_then)
+            || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
@@ -651,7 +730,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
-    if starts_clause_text(trimmed) || starts_with_damage_clause(&trimmed_lower) {
+    if starts_clause_text_or_conjugated(trimmed) || starts_with_damage_clause(&trimmed_lower) {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
 
@@ -665,7 +744,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         {
             return None;
         }
-        if starts_clause_text(after_and) || starts_with_damage_clause(after_and) {
+        if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
     }
@@ -783,6 +862,31 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
     starts_clause_text_lower(&deconjugated)
 }
 
+fn starts_you_control_subject_predicate(s: &str) -> bool {
+    let Ok((after_subject, subject)) =
+        take_until::<_, _, OracleError<'_>>(" you control ").parse(s)
+    else {
+        return false;
+    };
+    if subject.trim().is_empty() {
+        return false;
+    }
+    let Ok((predicate, _)) = tag::<_, _, OracleError<'_>>(" you control ").parse(after_subject)
+    else {
+        return false;
+    };
+    alt((
+        tag::<_, _, OracleError<'_>>("get "),
+        tag("gets "),
+        tag("gain "),
+        tag("gains "),
+        tag("have "),
+        tag("has "),
+    ))
+    .parse(predicate)
+    .is_ok()
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_clause_text_lower(s: &str) -> bool {
     if starts_multiword_keyword_continuation(s) {
@@ -842,6 +946,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("conjure ")),
         value((), tag("target ")),
         value((), tag("transform ")),
+        value((), tag("unattach ")),
         value((), tag("untap ")),
         value((), tag("you may ")),
         value((), tag("you ")),
@@ -907,15 +1012,15 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 /// expansion axis in `try_parse_compound_subject_each`; new compound forms
 /// are added by extending both sites in lockstep.
 ///
-/// Currently restricted to "that player each" — the only form produced by
-/// the Council's-dilemma "for each player who chose <choice>" body. Other
-/// compound forms ("target opponent each", "an opponent each") are noted
-/// follow-ups; until they parse on the body side, the chunk splitter can
-/// safely suppress them too.
+/// Recognized forms mirror `try_parse_compound_subject_each`.
 fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool {
     let lower = remainder.to_ascii_lowercase();
-    let result: nom::IResult<&str, (), OracleError<'_>> =
-        alt((value((), tag("that player each ")),)).parse(lower.as_str());
+    let result: nom::IResult<&str, (), OracleError<'_>> = alt((
+        value((), tag("that player each ")),
+        value((), tag("target opponent each ")),
+        value((), tag("target player each ")),
+    ))
+    .parse(lower.as_str());
     result.is_ok()
 }
 
@@ -1082,9 +1187,9 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
 /// requirement> ... if able". Returns `Some(prepend)` — the subject text to
 /// seed conjunct 2 with — only when BOTH halves match:
 ///
-/// - `before_and` is a gain-keyword clause (contains the gain verb), and
+/// - `before_and` is a continuous clause (contains a gain/get predicate), and
 /// - `remainder_trimmed` is a recognized standalone combat requirement
-///   ("attack(s) ... if able" / "must be blocked ...").
+///   ("attack(s) ... if able" / "must be blocked ..." / "can block ...").
 ///
 /// The prepend keeps conjunct 2's `affected` correct: for a *targeted* subject
 /// ("target creature ...") it returns the anaphor `"it "` so the chunk loop's
@@ -1097,11 +1202,13 @@ fn combat_requirement_conjunct_prepend(
     remainder_trimmed: &str,
 ) -> Option<String> {
     let remainder_lower = remainder_trimmed.to_ascii_lowercase();
-    if !super::imperative::is_standalone_combat_requirement(&remainder_lower) {
+    if !super::imperative::is_standalone_combat_requirement(&remainder_lower)
+        && !super::subject::is_can_block_extra_predicate(&remainder_lower)
+    {
         return None;
     }
     let before_lower = before_and.to_ascii_lowercase();
-    // Conjunct 1 must be a gain-keyword clause: locate the gain verb.
+    // Conjunct 1 must be a continuous predicate: locate the gain/get verb.
     let subject_text = take_until::<_, _, OracleError<'_>>(" gain")
         .parse(before_lower.as_str())
         .ok()
@@ -1113,6 +1220,20 @@ fn combat_requirement_conjunct_prepend(
             // Map the verb position back onto the original-case slice.
             let subject = before_and[..before_verb.len()].trim();
             (!subject.is_empty()).then_some(subject)
+        })
+        .or_else(|| {
+            take_until::<_, _, OracleError<'_>>(" get")
+                .parse(before_lower.as_str())
+                .ok()
+                .and_then(|(after, before_verb)| {
+                    // Confirm a real " get " / " gets " verb boundary.
+                    alt((tag::<_, _, OracleError<'_>>(" gets "), tag(" get ")))
+                        .parse(after)
+                        .ok()?;
+                    // Map the verb position back onto the original-case slice.
+                    let subject = before_and[..before_verb.len()].trim();
+                    (!subject.is_empty()).then_some(subject)
+                })
         })?;
     // Targeted subject → anaphor; non-targeted set subject → literal subject.
     let subject_lower = subject_text.to_ascii_lowercase();
@@ -1214,6 +1335,32 @@ fn effect_wraps_copy_spell(effect: &Effect) -> bool {
     }
 }
 
+/// CR 701.8 + CR 608.2c: nom recognizer for the "if a permanent's ability is
+/// countered this way, destroy that permanent" continuation clause (Teferi's
+/// Response, Green Slime). Operates on lowercased text; tolerates a trailing
+/// period/whitespace.
+///
+/// Composed from independent axes rather than enumerated as full strings:
+///   - condition subject ("a permanent's ability" / "an ability") — the gate
+///     that scopes the destroy to *abilities* whose source is a permanent.
+///   - destroy object ("that permanent" / "that source") — the determiner that
+///     refers back to the countered ability's source permanent.
+fn recognize_counter_destroy_rider(lower: &str) -> bool {
+    let clause = lower.trim().trim_end_matches('.').trim_end();
+    value(
+        (),
+        (
+            tag::<_, _, OracleError<'_>>("if "),
+            alt((tag("a permanent's ability"), tag("an ability"))),
+            tag(" is countered this way, destroy "),
+            alt((tag("that permanent"), tag("that source"))),
+            eof,
+        ),
+    )
+    .parse(clause)
+    .is_ok()
+}
+
 /// CR 707.10c: nom recognizer for the "[you] may choose [a] new target[s] for
 /// {the,that} copy/copies" continuation clause that grants copy retargeting.
 /// Operates on lowercased text; tolerates a trailing period/whitespace.
@@ -1307,7 +1454,7 @@ pub(super) fn apply_clause_continuation(
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped,
                     enters_attacking: false,
                     up_to: false,
@@ -1380,11 +1527,28 @@ pub(super) fn apply_clause_continuation(
                 return;
             };
             if let Effect::Counter {
-                source_static: existing,
+                source_rider: existing,
                 ..
             } = &mut *previous.effect
             {
-                *existing = Some(*source_static);
+                // CR 611.2: "that permanent loses all abilities ..." rider.
+                *existing = Some(CounterSourceRider::LosesAbilities {
+                    static_def: source_static,
+                });
+            }
+        }
+        ContinuationAst::CounterSourceRiderDestroy => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::Counter {
+                source_rider: existing,
+                ..
+            } = &mut *previous.effect
+            {
+                // CR 701.8: "If a permanent's ability is countered this way,
+                // destroy that permanent." rider (Teferi's Response, Green Slime).
+                *existing = Some(CounterSourceRider::Destroy);
             }
         }
         ContinuationAst::CopyMayRetarget => {
@@ -1516,7 +1680,7 @@ pub(super) fn apply_clause_continuation(
                         },
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: is_up_to,
@@ -1539,6 +1703,14 @@ pub(super) fn apply_clause_continuation(
                     constraint: None,
                 },
             ));
+        }
+        ContinuationAst::SearchRevealResult => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::SearchLibrary { reveal, .. } = &mut *previous.effect {
+                *reveal = true;
+            }
         }
         ContinuationAst::SearchResultClauseHandled => {}
         ContinuationAst::PutChoiceRemainderOnBottom => {
@@ -1593,7 +1765,7 @@ pub(super) fn apply_clause_continuation(
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
@@ -1608,7 +1780,7 @@ pub(super) fn apply_clause_continuation(
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
@@ -1858,7 +2030,8 @@ pub(super) fn continuation_absorbs_current(
         }
         ContinuationAst::ManaRestriction { .. }
         | ContinuationAst::ManaGrant { .. }
-        | ContinuationAst::CounterSourceStatic { .. } => true,
+        | ContinuationAst::CounterSourceStatic { .. }
+        | ContinuationAst::CounterSourceRiderDestroy => true,
         // CR 707.10c: recognition was already gated on a preceding CopySpell in
         // parse_followup_continuation_ast, so absorption is unconditional —
         // identical to the CounterSourceStatic precedent.
@@ -1869,6 +2042,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::CantRegenerate => true,
         ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
+        ContinuationAst::SearchRevealResult => true,
         ContinuationAst::SearchResultClauseHandled => true,
         ContinuationAst::PutChoiceRemainderOnBottom => true,
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
@@ -1897,9 +2071,17 @@ pub(super) fn parse_intrinsic_continuation_ast(
             // here so the found set is not collapsed to a single battlefield move
             // (mirrors the `has_positional_put` suppression below).
             if split.is_some() {
-                // MUTATION: suppression disabled
+                return None;
             }
             let full_lower = full_text.to_ascii_lowercase();
+            // CR 608.2c: Conditional result destinations ("put it onto the
+            // battlefield tapped if it's a land card. Otherwise, put it into
+            // your hand" — Archdruid's Charm) are represented by the parsed
+            // conditional ChangeZone/else branch. Do not synthesize the
+            // unconditional SearchDestination continuation ahead of that branch.
+            if has_conditional_search_result_destination(&full_lower) {
+                return None;
+            }
             // CR 701.24b: If later clauses contain "put on top", suppress the default
             // ChangeZone(→Hand) — the card stays in the library and a separate
             // PutAtLibraryPosition effect in the chain handles placement.
@@ -1990,6 +2172,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
 /// - "return a permanent card from among them to your hand"
 /// - "you may reveal a creature card from among them and put it into your hand"
 /// - "put two of them into your hand and the rest on the bottom of your library in any order"
+/// - "put two of those cards into your hand"
 pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<ContinuationAst> {
     // CR 202.3 + CR 107.3i: Strip a trailing "where X is <expression>" defining
     // clause before destination/count/filter parsing. `where_x_expression`
@@ -2033,7 +2216,13 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
 
     // "put N of them into your hand [and the rest on the bottom]" — no filter, count explicit.
     // Must be checked BEFORE the "from among" path since "of them" appears in both forms.
-    if let Ok((_, before_of)) = take_until::<_, _, OracleError<'_>>(" of them").parse(lower) {
+    if let Ok((_, before_of)) = alt((
+        take_until::<_, _, OracleError<'_>>(" of those cards"),
+        take_until(" of those"),
+        take_until(" of them"),
+    ))
+    .parse(lower)
+    {
         let before_of = before_of.trim();
         let after_put = alt((tag::<_, _, OracleError<'_>>("you may put "), tag("put ")))
             .parse(before_of)
@@ -2062,6 +2251,77 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             filter: TargetFilter::Any,
             destination,
             rest_destination,
+        });
+    }
+
+    // CR 701.17c + CR 608.2c: "return a card milled this way to your hand"
+    // is the same tracked-set continuation as "from among the milled cards",
+    // but its filter appears before the "milled this way" marker rather than
+    // before "from among".
+    if let Ok((_, before_milled)) = alt((
+        take_until::<_, _, OracleError<'_>>("that was milled this way"),
+        take_until("milled this way"),
+    ))
+    .parse(lower)
+    {
+        let before_milled = before_milled.trim();
+        let (after_put, prefix_optional) = if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("you may put "),
+            tag("you may reveal "),
+            tag("you may return "),
+        ))
+        .parse(before_milled)
+        {
+            (rest, true)
+        } else if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("put "),
+            tag("reveal "),
+            tag("return "),
+        ))
+        .parse(before_milled)
+        {
+            (rest, false)
+        } else {
+            (before_milled, false)
+        };
+
+        let (count, up_to, filter_text) =
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
+                if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
+                    (n, true, remainder.trim())
+                } else {
+                    (1, true, rest)
+                }
+            } else if let Ok((rest, _)) =
+                tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
+            {
+                (255, true, rest)
+            } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
+                (1, prefix_optional, rest)
+            } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
+                (n, prefix_optional, remainder.trim())
+            } else {
+                (1, prefix_optional, after_put)
+            };
+
+        let filter = if filter_text.is_empty()
+            || filter_text == "card"
+            || filter_text == "cards"
+            || filter_text == "of them"
+        {
+            TargetFilter::Any
+        } else {
+            let (parsed_filter, _) = parse_target(filter_text);
+            parsed_filter
+        };
+        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref());
+
+        return Some(ContinuationAst::DigFromAmong {
+            count,
+            up_to,
+            filter,
+            destination,
+            rest_destination: None,
         });
     }
 
@@ -2175,7 +2435,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // cards" continuation is transparent — the continuation patches the
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
-        Effect::Sacrifice { .. } => true,
+        Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
@@ -2208,6 +2468,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GainControl { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }
@@ -2269,9 +2530,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::CreateEmblem { .. }
-        | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
         | Effect::LoseTheGame
         | Effect::WinTheGame
         | Effect::RollDie { .. }
@@ -2332,6 +2593,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
         | Effect::ChooseOneOf { .. }
+        // CR 614.12 + CR 303.4: Return-as-Aura is its own emitted sub-effect
+        // following a `ChangeZone`; it is not a lookback-transparent clause
+        // for the Dig-from-among continuation search.
+        | Effect::ReturnAsAura { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -2344,6 +2609,9 @@ pub(super) fn parse_followup_continuation_ast(
     let lower = text.to_lowercase();
 
     match previous_effect {
+        Effect::SearchLibrary { .. } if is_search_result_reveal_clause(&lower) => {
+            Some(ContinuationAst::SearchRevealResult)
+        }
         Effect::RevealHand { .. }
             if nom_primitives::scan_contains(&lower, "card from it")
                 || nom_primitives::scan_contains(&lower, "card from among")
@@ -2423,6 +2691,13 @@ pub(super) fn parse_followup_continuation_ast(
                     crate::types::ability::ContinuousModification::RemoveAllAbilities,
                 ])),
             })
+        }
+        // CR 701.8 + CR 608.2c: "If a permanent's ability is countered this way,
+        // destroy that permanent." (Teferi's Response, Green Slime). Claiming
+        // this clause as a continuation prevents the generic sequence parser
+        // from emitting a stray chained `Destroy { ParentTarget }`.
+        Effect::Counter { .. } if recognize_counter_destroy_rider(&lower) => {
+            Some(ContinuationAst::CounterSourceRiderDestroy)
         }
         // CR 707.10c: "You may choose new targets for the copy/copies." after a
         // CopySpell — directly, or wrapped in a CreateDelayedTrigger ("When you
@@ -2794,7 +3069,10 @@ pub(super) fn parse_followup_continuation_ast(
             if (nom_primitives::scan_contains(&lower, "from among them")
                 || nom_primitives::scan_contains(&lower, "from among those cards")
                 || nom_primitives::scan_contains(&lower, "from among the milled cards")
-                || nom_primitives::scan_contains(&lower, "of them"))
+                || nom_primitives::scan_contains(&lower, "milled this way")
+                || nom_primitives::scan_contains(&lower, "of them")
+                || nom_primitives::scan_contains(&lower, "of those cards")
+                || nom_primitives::scan_contains(&lower, "of those"))
                 && (nom_primitives::scan_contains(&lower, "onto the battlefield")
                     || nom_primitives::scan_contains(&lower, "into your hand")
                     || nom_primitives::scan_contains(&lower, "into their hand")
@@ -3123,6 +3401,20 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn quoted_token_ability_boundary_splits_before_then_if() {
+        let chunks = clause_texts(
+            "create a tapped 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\" Then if you control four or more Wizards, transform ~.",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "create a tapped 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\"",
+                "Then if you control four or more Wizards, transform ~",
+            ]
+        );
+    }
+
     // --- Bare " and " splitting: positive cases (should split) ---
 
     #[test]
@@ -3294,6 +3586,30 @@ mod tests {
     }
 
     #[test]
+    fn comma_then_you_control_subject_predicate_splits() {
+        let chunks = clause_texts(
+            "create a 2/2 colorless Robot artifact creature token, then creatures you control get +1/+0 and gain haste until end of turn",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "create a 2/2 colorless Robot artifact creature token",
+                "creatures you control get +1/+0 and gain haste until end of turn",
+            ]
+        );
+    }
+
+    #[test]
+    fn static_modifier_conjunct_does_not_split() {
+        let chunks =
+            clause_texts("creatures you control get +1/+0 and gain haste until end of turn");
+        assert_eq!(
+            chunks,
+            vec!["creatures you control get +1/+0 and gain haste until end of turn"]
+        );
+    }
+
+    #[test]
     fn comma_then_its_controller_clause_splits() {
         let chunks = clause_texts(
             "exile the chosen creature, then its controller gains life equal to its mana value",
@@ -3398,6 +3714,21 @@ mod tests {
     fn conjugated_verb_sacrifices_splits_after_then() {
         let chunks = clause_texts("creates a token, then sacrifices a creature");
         assert_eq!(chunks, vec!["creates a token", "sacrifices a creature"]);
+    }
+
+    #[test]
+    fn comma_conjugated_player_predicates_split() {
+        let chunks = clause_texts(
+            "target opponent sacrifices a creature, discards a card, and loses 3 life",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "target opponent sacrifices a creature",
+                "discards a card",
+                "and loses 3 life"
+            ]
+        );
     }
 
     #[test]
@@ -3894,6 +4225,41 @@ mod tests {
         assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
     }
 
+    /// CR 701.17c + CR 608.2c: Ripples of Undeath uses "a card milled this
+    /// way" instead of "from among the milled cards". It must still bind the
+    /// follow-up return to the cards moved by the preceding `Mill`.
+    #[test]
+    fn mill_return_card_milled_this_way_to_hand_emits_dig_from_among() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "Return a card milled this way to your hand.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(count, 1);
+        assert!(
+            !up_to,
+            "after the optional payment is made, returning a card is not optional"
+        );
+        assert_eq!(filter, TargetFilter::Any);
+        assert_eq!(destination, Some(Zone::Hand));
+        assert_eq!(rest_destination, None);
+    }
+
     /// CR 701.17c: `apply_clause_continuation` must PUSH a `ChangeZone`
     /// sub-ability targeting `TrackedSetFiltered` when the preceding def is a
     /// `Mill` — scoping the zone-change to the milled cards rather than the
@@ -3945,6 +4311,45 @@ mod tests {
             TargetFilter::TrackedSetFiltered { id, filter } => {
                 assert_eq!(id.0, 0, "sentinel TrackedSetId(0) — resolved at runtime");
                 assert_eq!(**filter, or_filter, "inner filter preserved");
+            }
+            other => panic!("expected TrackedSetFiltered target, got {other:?}"),
+        }
+    }
+
+    /// CR 118.3 + CR 608.2c: A payment clause between the mill and "milled this
+    /// way" return is lookback-transparent. The return must patch the earlier
+    /// `Mill`, not bind `ParentTarget` to the payment/current source.
+    #[test]
+    fn mill_pay_then_return_milled_this_way_uses_tracked_set() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Mill three cards. Then you may pay {1} and 3 life. If you do, return a card milled this way to your hand.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+
+        assert!(matches!(&*effects[0].effect, Effect::Mill { .. }));
+        assert!(matches!(&*effects[1].effect, Effect::PayCost { .. }));
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = &*effects[2].effect
+        else {
+            panic!("expected ChangeZone return, got {:?}", effects[2].effect);
+        };
+        assert_eq!(*destination, Zone::Hand);
+        match target {
+            TargetFilter::TrackedSetFiltered { id, filter } => {
+                assert_eq!(id.0, 0);
+                assert_eq!(**filter, TargetFilter::Any);
             }
             other => panic!("expected TrackedSetFiltered target, got {other:?}"),
         }

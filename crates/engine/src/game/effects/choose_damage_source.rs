@@ -36,7 +36,11 @@ pub fn resolve(
     Ok(())
 }
 
-fn damage_source_options(
+/// CR 609.7a: Enumerate the objects the controller may choose as a damage source
+/// (battlefield, stack, command zone) matching `source_filter`. Shared with
+/// `create_damage_replacement::resolve`, which prompts the same choice for an
+/// inline "a source of your choice" one-shot damage replacement.
+pub(crate) fn damage_source_options(
     state: &GameState,
     ability: &ResolvedAbility,
     source_filter: &crate::types::ability::TargetFilter,

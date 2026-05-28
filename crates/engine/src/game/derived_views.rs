@@ -440,13 +440,16 @@ fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<Trigger
             object_id: Some(*object_id),
             player: Some(*controller),
         }),
-        GameEvent::AbilityActivated { source_id } => Some(TriggerContextDisplay {
+        GameEvent::AbilityActivated {
+            player_id,
+            source_id,
+        } => Some(TriggerContextDisplay {
             label: format!(
                 "{} ability activated",
                 target_label(state, &TargetRef::Object(*source_id))
             ),
             object_id: Some(*source_id),
-            player: state.objects.get(source_id).map(|obj| obj.controller),
+            player: Some(*player_id),
         }),
         GameEvent::VehicleCrewed {
             vehicle_id,
@@ -697,6 +700,7 @@ mod tests {
                     trigger_event: None,
                     description: Some("landfall".into()),
                     source_name: String::new(),
+                    subject_match_count: None,
                 },
             });
         }
@@ -812,6 +816,8 @@ mod tests {
                 keywords: Vec::new(),
                 power: None,
                 toughness: None,
+                base_power: None,
+                base_toughness: None,
                 colors: Vec::new(),
                 mana_value: 0,
                 controller: PlayerId(1),
@@ -844,6 +850,7 @@ mod tests {
                 trigger_event: Some(trigger_event),
                 description: Some("hidden-zone trigger".to_string()),
                 source_name: "Watcher".to_string(),
+                subject_match_count: None,
             },
         });
 

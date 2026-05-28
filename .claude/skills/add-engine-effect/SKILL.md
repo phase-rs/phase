@@ -227,6 +227,8 @@ Only needed if the effect pauses for player input.
   - `client/src/components/modal/NamedChoiceModal.tsx` for `NamedChoice`
   - `client/src/components/modal/ModeChoiceModal.tsx` for `ModeChoice` and `AbilityModeChoice`
 
+  Route any new frontend-authored text (titles, prompts, buttons) through `t()` (`useTranslation("game")`, keys in `client/src/i18n/locales/en/game.json`). Card/Oracle/enum text stays raw. See `$add-frontend-component` Phase 2.5 and `client/src/i18n/README.md`.
+
 ### Phase 5b — Multiplayer State Filtering (if applicable)
 
 **Goal:** Hidden information is correctly filtered in multiplayer games.
@@ -250,7 +252,7 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
   Add the TypeScript variant.
 
 - [ ] **`client/src/components/log/` — Game log rendering**
-  Handle the new event in the log component so players see what happened.
+  Handle the new event in the log component so players see what happened. Translate the log **template** (`t("log.yourEvent", { ... })`) and interpolate engine data (object IDs, amounts, enum strings) raw.
 
 ### Phase 7 — AI (if applicable)
 

@@ -1,6 +1,7 @@
 use crate::parser::oracle_util::canonicalize_subtype_name;
 use crate::types::ability::{
-    ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::Zone;
@@ -188,12 +189,18 @@ fn parse_pt_predicate(seg: &str) -> Option<FilterProp> {
 
     if let Some(val_str) = rest.strip_prefix("GE") {
         let val: i32 = val_str.parse().ok()?;
-        Some(FilterProp::PowerGE {
+        Some(FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
             value: QuantityExpr::Fixed { value: val },
         })
     } else if let Some(val_str) = rest.strip_prefix("LE") {
         let val: i32 = val_str.parse().ok()?;
-        Some(FilterProp::PowerLE {
+        Some(FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LE,
             value: QuantityExpr::Fixed { value: val },
         })
     } else {
@@ -247,7 +254,10 @@ mod tests {
         let result = translate_filter("Creature.powerGE4").unwrap();
         match result {
             TargetFilter::Typed(tf) => {
-                assert!(tf.properties.contains(&FilterProp::PowerGE {
+                assert!(tf.properties.contains(&FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
                     value: QuantityExpr::Fixed { value: 4 }
                 }));
             }

@@ -54,7 +54,7 @@ let printingsDataPromise: Promise<PrintingsDataMap | null> | null = null;
 let tokenImagesDataPromise: Promise<TokenImagesDataMap | null> | null = null;
 let scryfallQueue: Promise<void> = Promise.resolve();
 
-function loadScryfallData(): Promise<ScryfallDataMap | null> {
+export function loadScryfallData(): Promise<ScryfallDataMap | null> {
   if (!scryfallDataPromise) {
     scryfallDataPromise = fetch(__SCRYFALL_DATA_URL__)
       .then((r) => r.json() as Promise<ScryfallDataMap>)
@@ -133,11 +133,44 @@ export function resolveOracleIdSync(cardName: string): string | null {
   return scryfallDataResolved[cardName.toLowerCase()]?.oracle_id ?? null;
 }
 
+/**
+ * Resolve the numeric Scryfall face index for an engine-reported `faceName`.
+ *
+ * The printings/art-strategy path (`resolvePrintingImageUrl`) keys off a raw
+ * numeric `faceIndex`, but for a DFC/MDFC the engine only knows the *active
+ * face's name* — and for an MDFC cast as its back face, `transformed` stays
+ * `false`, so `cardImageLookup` yields `faceIndex: 0` (the front). This helper
+ * recovers the correct index by matching `faceName` against the entry's
+ * `face_names` array, the same way the canonical oracle-id image path does.
+ * Returns `null` when the data isn't loaded yet or the face can't be matched,
+ * so callers fall back to their provided `faceIndex`.
+ */
+export function resolveFaceIndexSync(
+  oracleId: string,
+  faceName: string | undefined,
+): number | null {
+  if (!scryfallDataResolved || !faceName) return null;
+  const entry = scryfallDataResolved[oracleId.toLowerCase()];
+  if (!entry) return null;
+  const idx = entry.face_names.indexOf(faceName.toLowerCase());
+  return idx >= 0 ? idx : null;
+}
+
 export function isCardImageRotatedSync(oracleId: string, cardName: string): boolean {
   if (!scryfallDataResolved) return false;
   const entry = scryfallDataResolved[oracleId.toLowerCase()]
     ?? scryfallDataResolved[normalizeCardName(cardName).toLowerCase()];
   return isSidewaysLayout(entry?.layout);
+}
+
+/** Kamigawa-style flip cards (Scryfall `layout: "flip"`) print both halves in a
+ * single image, the alternate half rotated 180°. The preview lets the user spin
+ * the image to read that half; this reports whether a card is that layout. */
+export function isCardImageFlipLayoutSync(oracleId: string, cardName: string): boolean {
+  if (!scryfallDataResolved) return false;
+  const entry = scryfallDataResolved[oracleId.toLowerCase()]
+    ?? scryfallDataResolved[normalizeCardName(cardName).toLowerCase()];
+  return isFlipLayout(entry?.layout);
 }
 
 const SCRYFALL_DELAY_MS = 100;
@@ -153,6 +186,10 @@ export interface CardImageAsset {
 
 function isSidewaysLayout(layout: string | undefined): boolean {
   return layout === "split";
+}
+
+function isFlipLayout(layout: string | undefined): boolean {
+  return layout === "flip";
 }
 
 export interface ScryfallCard {
@@ -318,6 +355,47 @@ export async function fetchCardData(cardName: string): Promise<ScryfallCard> {
     colors: entry.colors,
     color_identity: entry.color_identity,
     keywords: entry.keywords,
+  };
+}
+
+/**
+ * Engine-authoritative fields for a card-search result. The engine owns these
+ * (mana value, color identity, legality) — see `crates/engine/src/database/search.rs`.
+ */
+export interface LocalSearchCardOverrides {
+  oracleId?: string;
+  name: string;
+  cmc: number;
+  colorIdentity: string[];
+  legalities: Record<string, string>;
+}
+
+/**
+ * Build a display `ScryfallCard` for an engine search result. Rules data comes
+ * from the engine (the `overrides`); presentation data — artwork, printed type
+ * line, colors, mana cost, keywords — is hydrated from the already-loaded local
+ * image map, keyed by `oracleId` (falling back to name). Requires
+ * `loadScryfallData()` to have resolved; returns a usable card even when the
+ * image entry is missing (the grid renders a text-tile fallback).
+ */
+export function buildLocalSearchCard(overrides: LocalSearchCardOverrides): ScryfallCard {
+  const entry =
+    (overrides.oracleId
+      ? scryfallDataResolved?.[overrides.oracleId.toLowerCase()]
+      : undefined) ?? scryfallDataResolved?.[overrides.name.toLowerCase()];
+  const face = entry?.faces[0];
+  return {
+    name: entry?.name ?? overrides.name,
+    mana_cost: entry?.mana_cost ?? "",
+    cmc: overrides.cmc,
+    type_line: entry?.type_line ?? "",
+    colors: entry?.colors ?? [],
+    color_identity: overrides.colorIdentity,
+    keywords: entry?.keywords ?? [],
+    legalities: overrides.legalities,
+    image_uris: face
+      ? { art_crop: face.art_crop, normal: face.normal, small: face.normal, large: face.normal }
+      : undefined,
   };
 }
 
@@ -585,66 +663,6 @@ function buildTokenColorClause(colors: string[] | undefined | null): string {
   if (colors == null) return "";
   const colorStr = colors.map((c) => MANA_COLOR_TO_SCRYFALL[c] ?? "").join("");
   return colorStr ? ` c=${colorStr}` : " c=c";
-}
-
-/**
- * Search Scryfall for cards matching query. Uses rate limiting and handles 429s.
- */
-export async function searchScryfall(
-  query: string,
-  signal?: AbortSignal,
-): Promise<{ cards: ScryfallCard[]; total: number }> {
-  const url = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}`;
-  const response = await rateLimitedFetch(url);
-
-  if (signal?.aborted) {
-    return { cards: [], total: 0 };
-  }
-
-  if (response.status === 404) {
-    return { cards: [], total: 0 };
-  }
-
-  if (!response.ok) {
-    throw new Error(`Scryfall search error: ${response.status}`);
-  }
-
-  const data: ScryfallSearchResponse = await response.json();
-  return { cards: data.data, total: data.total_cards };
-}
-
-/** Build Scryfall query string from filter options. */
-export function buildScryfallQuery(options: {
-  text?: string;
-  colors?: string[];
-  type?: string;
-  cmcMax?: number;
-  cmcMin?: number;
-  sets?: string[];
-  format?: string;
-}): string {
-  const parts: string[] = [];
-
-  if (options.text) parts.push(options.text);
-  if (options.colors?.length) parts.push(`c:${options.colors.join("")}`);
-  if (options.type) parts.push(`t:${options.type}`);
-  if (options.cmcMin !== undefined) parts.push(`cmc>=${options.cmcMin}`);
-  if (options.cmcMax !== undefined) parts.push(`cmc<=${options.cmcMax}`);
-  if (options.sets?.length) {
-    const uniqueSetCodes = [...new Set(
-      options.sets
-        .map((setCode) => setCode.trim().toLowerCase())
-        .filter(Boolean),
-    )];
-    if (uniqueSetCodes.length === 1) {
-      parts.push(`set:${uniqueSetCodes[0]}`);
-    } else if (uniqueSetCodes.length > 1) {
-      parts.push(`(${uniqueSetCodes.map((setCode) => `set:${setCode}`).join(" OR ")})`);
-    }
-  }
-  if (options.format) parts.push(`f:${options.format}`);
-
-  return parts.join(" ");
 }
 
 /** Get the best image URI for a card (handles double-faced cards). */

@@ -201,10 +201,29 @@ export interface DeckPoolEntry {
   count: number;
 }
 
+/**
+ * Discriminated source for a single outside-game candidate. Sideboard entries
+ * carry their full `CardFace` so the UI can render them without a sideboard
+ * lookup; face-up exile candidates are addressed by their in-game `ObjectId`.
+ * Mirrors Rust `OutsideGameChoiceSource` (engine `types/game_state.rs`).
+ */
+export type OutsideGameChoiceSource =
+  | { type: "Sideboard"; data: { sideboard_index: number; card: CardFacePartial } }
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
+
 export interface OutsideGameChoiceEntry {
-  sideboard_index: number;
-  entry: DeckPoolEntry;
+  source: OutsideGameChoiceSource;
+  count: number;
+  name: string;
 }
+
+/**
+ * One committed selection on `GameAction::ChooseOutsideGameCards`. Mirrors
+ * Rust `OutsideGameSelection` (engine `types/actions.rs`).
+ */
+export type OutsideGameSelection =
+  | { type: "Sideboard"; data: { sideboard_index: number } }
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
 
 export interface OutsideGameCardUse {
   player: PlayerId;
@@ -446,6 +465,12 @@ export type CounterMatch =
   | { type: "Any" }
   | { type: "OfType"; data: CounterType };
 
+export type CounterMoveChoice = {
+  destination_id: ObjectId;
+  counter_type: CounterType;
+  count: number;
+};
+
 export type PlayerCounterKind =
   | "Poison"
   | "Experience"
@@ -638,6 +663,14 @@ export interface GameObject {
   available_mana_pips?: ManaPip[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
+  /**
+   * CR 111.1: Whether this object is a token (not a card). Independent of
+   * `display_source`: a token-copy of a real card (Twinflame, Helm of the
+   * Host) carries `is_token = true` AND `display_source = "Card"`, so it
+   * renders visually identical to the printed card. Combine the two to flag
+   * such copies (`is_token && display_source !== "Token"`).
+   */
+  is_token?: boolean;
   /**
    * Image-lookup routing hint from the engine. "Card" → look up the image
    * in the real-card database (default; also covers token-copies of real
@@ -901,7 +934,7 @@ export type CombatTaxPending =
 // ── Additional Costs (kicker, blight, "or pay") ─────────────────────────
 
 export type AdditionalCost =
-  | { type: "Optional"; data: SerializedAbilityCost }
+  | { type: "Optional"; data: { cost: SerializedAbilityCost; repeatable?: boolean } }
   | { type: "Kicker"; data: { costs: SerializedAbilityCost[]; repeatable?: boolean } }
   | { type: "Required"; data: SerializedAbilityCost }
   | { type: "Choice"; data: [SerializedAbilityCost, SerializedAbilityCost] };
@@ -964,12 +997,13 @@ export type WaitingFor =
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
-  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]> } }
+  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidate_descriptions?: string[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
+  | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: ObjectId[]; pending_effect: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
   | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[] } }
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
@@ -980,7 +1014,7 @@ export type WaitingFor =
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; constraint?: SearchSelectionConstraint; split?: SearchDestinationSplit | null } }
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
-  | { type: "OutsideGameChoice"; data: { player: PlayerId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
+  | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
@@ -1009,10 +1043,22 @@ export type WaitingFor =
   | { type: "BeholdForCost"; data: { player: PlayerId; count: number; choices: ObjectId[]; action: "ChooseOrReveal" | "ExileChosen"; pending_cast: PendingCast } }
   | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "DiscardForManaAbility"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_mana_ability: unknown } }
-  | { type: "ExileFromBattlefieldForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
+  | { type: "ExileForManaAbility"; data: { player: PlayerId; count: number; zone: Zone; cards: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "SacrificeForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
-  | { type: "ChooseManaColor"; data: { player: PlayerId; choice: ManaChoicePrompt; context: unknown } }
+  | {
+      type: "ChooseManaColor";
+      data: {
+        player: PlayerId;
+        choice: ManaChoicePrompt;
+        // CR 605.3a: Only the ManaAbility context carries the bulk-activation
+        // siblings the UI reads (omitted from the wire when empty). The heavy
+        // PendingManaAbility / ResolvedAbility payloads stay opaque here.
+        context:
+          | { type: "ManaAbility"; data: { batch_siblings?: ObjectId[] } }
+          | { type: "ResolvingEffect"; data: unknown };
+      };
+    }
   | { type: "TapCreaturesForSpellCost"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "ExileForCost"; data: { player: PlayerId; zone: ExileCostSourceZone; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
@@ -1046,6 +1092,7 @@ export type WaitingFor =
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
   | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
+  | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId } }
   | { type: "EffectZoneChoice"; data: {
       player: PlayerId;
@@ -1059,7 +1106,10 @@ export type WaitingFor =
       destination?: Zone | null;
       enter_tapped?: boolean;
       enter_transformed?: boolean;
-      under_your_control?: boolean;
+      // CR 110.2a: pre-resolved controller override carried through the
+      // EffectZoneChoice round-trip. `null`/omitted = no override (object
+      // enters under its owner's control).
+      enters_under_player?: PlayerId | null;
       enters_attacking?: boolean;
       owner_library?: boolean;
       track_exiled_by_source?: boolean;
@@ -1293,7 +1343,7 @@ export type GameAction =
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
-  | { type: "ChooseOutsideGameCards"; data: { sideboard_indices: number[] } }
+  | { type: "ChooseOutsideGameCards"; data: { selections: OutsideGameSelection[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
   | { type: "ChooseTarget"; data: { target: TargetRef | null } }
   | { type: "ChoosePair"; data: { partner: ObjectId | null } }
@@ -1360,6 +1410,7 @@ export type GameAction =
   | { type: "SetPhaseStops"; data: { stops: Phase[] } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
+  | { type: "ChooseCounterMoveDistribution"; data: { selections: CounterMoveChoice[] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
   | { type: "LearnDecision"; data: { choice: LearnOption } }
   | { type: "ChooseDungeon"; data: { dungeon: DungeonId } }
@@ -1370,7 +1421,7 @@ export type GameAction =
   | { type: "ChooseX"; data: { value: number } }
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
-  | { type: "ChooseManaColor"; data: { choice: ManaChoice } }
+  | { type: "ChooseManaColor"; data: { choice: ManaChoice; count?: number } }
   | { type: "PayManaAbilityMana"; data: { payment: ManaType[] } }
   | { type: "CastPreparedCopy"; data: { source: ObjectId } }
   | { type: "CastParadigmCopy"; data: { source: ObjectId } }
@@ -1420,7 +1471,7 @@ export type GameEvent =
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
-  | { type: "AbilityActivated"; data: { source_id: ObjectId } }
+  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
   | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number } }

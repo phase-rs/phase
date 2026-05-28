@@ -19,14 +19,15 @@ import {
   createDraftPeerSession,
   type DraftPeerSession,
 } from "../network/draftPeerSession";
-import { DRAFT_PROTOCOL_VERSION } from "../network/draftProtocol";
-import type { DraftP2PMessage } from "../network/draftProtocol";
-import type { MatchScore } from "./types";
+import { DRAFT_PROTOCOL_VERSION, DraftPauseReason } from "../network/draftProtocol";
+import type { DraftDeckPayload, DraftMatchDeckPayload, DraftMatchLaunch, DraftP2PMessage } from "../network/draftProtocol";
+import type { MatchConfig, MatchScore } from "./types";
 import {
   saveDraftHostSession,
   clearDraftHostSession,
   type PersistedDraftHostSession,
 } from "../services/draftPersistence";
+import { assignAvatarForSeat } from "../services/playerAvatars";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ export type DraftHostEvent =
   | { type: "seatJoined"; seatIndex: number; displayName: string }
   | { type: "seatReconnected"; seatIndex: number }
   | { type: "seatDisconnected"; seatIndex: number }
-  | { type: "seatKicked"; seatIndex: number; reason: string }
+  | { type: "seatKicked"; seatIndex: number; reason: DraftPauseReason | string }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "lobbyFull" }
   | { type: "draftStarted"; view: DraftPlayerView }
@@ -54,12 +55,31 @@ export type DraftHostEvent =
   | { type: "draftComplete" }
   | { type: "deckSubmitted"; seatIndex: number }
   | { type: "allDecksSubmitted" }
+  | { type: "draftPaused"; reason: DraftPauseReason }
+  | { type: "draftResumed" }
   | { type: "error"; message: string }
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
+  | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
   | { type: "roundAdvanced"; newRound: number }
   | { type: "timerExpired" }
+  | {
+      type: "bo3SideboardPrompt";
+      matchId: string;
+      gameNumber: number;
+      score: MatchScore;
+      loserSeat: number | null;
+      timerMs: number;
+    }
+  | {
+      type: "bo3ChoosePlayDraw";
+      matchId: string;
+      gameNumber: number;
+      score: MatchScore;
+      timerMs: number;
+    }
+  | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
   | { type: "bo3SideboardPromptSent"; matchId: string }
   | { type: "bo3BothSideboardsSubmitted"; matchId: string }
   | { type: "bo3GameStarted"; matchId: string; gameNumber: number };
@@ -79,6 +99,50 @@ function pickTimerDurationMs(pickNumber: number): number {
   return PICK_TIMER_DURATIONS_MS[Math.min(pickNumber, PICK_TIMER_DURATIONS_MS.length - 1)];
 }
 
+interface PickOptions {
+  acknowledge?: boolean;
+  emit?: boolean;
+  persist?: boolean;
+  resolveBots?: boolean;
+}
+
+interface ExportedDraftSession {
+  pools?: Array<Array<{ name: string }>>;
+  submitted_decks?: Record<string, { seat: number; main_deck: string[] }>;
+}
+
+function deckPayload(mainDeck: string[], sideboard: string[]): DraftDeckPayload {
+  return { main_deck: mainDeck, sideboard, commander: [] };
+}
+
+function hashStringToSeed(value: string): number {
+  let hash = 5381;
+  for (let i = 0; i < value.length; i++) {
+    hash = ((hash * 33) ^ value.charCodeAt(i)) | 0;
+  }
+  return hash >>> 0;
+}
+
+function sideboardFromPool(
+  session: ExportedDraftSession,
+  seat: number,
+  mainDeck: string[],
+): string[] {
+  const counts = new Map<string, number>();
+  for (const card of session.pools?.[seat] ?? []) {
+    counts.set(card.name, (counts.get(card.name) ?? 0) + 1);
+  }
+  for (const name of mainDeck) {
+    const count = counts.get(name);
+    if (count === undefined) continue;
+    if (count <= 1) counts.delete(name);
+    else counts.set(name, count - 1);
+  }
+  return [...counts.entries()].flatMap(([name, count]) =>
+    Array<string>(count).fill(name),
+  );
+}
+
 // ── P2PDraftHost ───────────────────────────────────────────────────────
 
 export class P2PDraftHost {
@@ -89,7 +153,6 @@ export class P2PDraftHost {
   private seatTokens = new Map<number, string>();
   private seatNames = new Map<number, string>();
   private kickedTokens = new Set<string>();
-  private seatPeerIds = new Map<number, string>();
   private disconnectedSeats = new Map<
     number,
     { disconnectedAt: number; timer: ReturnType<typeof setTimeout> | null }
@@ -98,6 +161,7 @@ export class P2PDraftHost {
 
   private draftStarted = false;
   private draftCode = "";
+  private draftSeed: number | null = null;
   private activePodSize: number;
   private hostConnectionUnsub: (() => void) | null = null;
   private paused = false;
@@ -110,6 +174,8 @@ export class P2PDraftHost {
   // Server backup upload state (D-08)
   private backupEndpoint: string | null = null;
   private picksSinceLastBackup = 0;
+  private persistQueue = Promise.resolve();
+  private persistenceClosed = false;
   private static readonly BACKUP_INTERVAL_PICKS = 5;
 
   constructor(
@@ -162,7 +228,6 @@ export class P2PDraftHost {
   // ── Connection handling ────────────────────────────────────────────
 
   private handleNewConnection(conn: DataConnection): void {
-    const remotePeerId = conn.peer;
     const session = createDraftPeerSession(conn, {
       onSessionEnd: () => {
         for (const [seat, s] of this.guestSessions.entries()) {
@@ -181,9 +246,9 @@ export class P2PDraftHost {
       unsub();
 
       if (msg.type === "draft_join") {
-        this.handleNewGuest(session, msg.displayName, remotePeerId);
+        this.handleNewGuest(session, msg.displayName);
       } else if (msg.type === "draft_reconnect") {
-        this.handleReconnect(session, msg.draftToken, remotePeerId);
+        this.handleReconnect(session, msg.draftToken);
       } else {
         session.send({
           type: "draft_reconnect_rejected",
@@ -194,7 +259,7 @@ export class P2PDraftHost {
     });
   }
 
-  private handleNewGuest(session: DraftPeerSession, displayName: string, remotePeerId: string): void {
+  private handleNewGuest(session: DraftPeerSession, displayName: string): void {
     if (this.draftStarted) {
       session.send({ type: "draft_kicked", reason: "Draft already in progress" });
       session.close("Draft in progress");
@@ -212,7 +277,6 @@ export class P2PDraftHost {
     this.seatTokens.set(seat, token);
     this.guestSessions.set(seat, session);
     this.seatNames.set(seat, displayName);
-    this.seatPeerIds.set(seat, remotePeerId);
 
     session.onMessage((msg) => this.handleGuestMessage(seat, msg));
 
@@ -237,7 +301,7 @@ export class P2PDraftHost {
     }
   }
 
-  private handleReconnect(session: DraftPeerSession, draftToken: string, remotePeerId: string): void {
+  private handleReconnect(session: DraftPeerSession, draftToken: string): void {
     if (this.kickedTokens.has(draftToken)) {
       session.send({ type: "draft_reconnect_rejected", reason: "Player kicked" });
       session.close("Kicked");
@@ -271,13 +335,17 @@ export class P2PDraftHost {
     if (grace.timer !== null) clearTimeout(grace.timer);
     this.disconnectedSeats.delete(seat);
     this.guestSessions.set(seat, session);
-    this.seatPeerIds.set(seat, remotePeerId);
 
     session.onMessage((msg) => this.handleGuestMessage(seat!, msg));
 
-    // Send current view
+    // Send current view. Order matters: sync the engine connection bitmap
+    // BEFORE fetching the view so the reconnect_ack carries the up-to-date
+    // `seats[*].connected` snapshot. Then broadcast to siblings.
     void (async () => {
       try {
+        if (this.draftStarted) {
+          await this.adapter.setSeatConnected(seat!, true);
+        }
         const view = this.draftStarted
           ? await this.adapter.getViewForSeat(seat!)
           : this.buildLobbyView();
@@ -289,6 +357,12 @@ export class P2PDraftHost {
           view,
           draftCode: this.draftCode,
         });
+        if (this.draftStarted) {
+          await this.broadcastViews();
+        }
+        if (view.status === "MatchInProgress") {
+          await this.dispatchMatchLaunchesForSeat(view, seat!);
+        }
       } catch (err) {
         console.error("[P2PDraftHost] reconnect view failed:", err);
       }
@@ -310,6 +384,7 @@ export class P2PDraftHost {
     if (this.disconnectedSeats.size === 0 && this.paused) {
       this.paused = false;
       this.broadcastToGuests({ type: "draft_resumed" });
+      this.emit({ type: "draftResumed" });
     }
   }
 
@@ -370,6 +445,9 @@ export class P2PDraftHost {
   async startDraft(botFillEmptySeats = true): Promise<void> {
     if (this.draftStarted) return;
 
+    const seed = Math.floor(Math.random() * 0xffffffff);
+    this.draftSeed = seed;
+    const draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
     const seats: MultiplayerSeatDescriptor[] = [];
     for (let i = 0; i < this.podSize; i++) {
       const displayName = this.seatNames.get(i);
@@ -380,16 +458,14 @@ export class P2PDraftHost {
           display_name: displayName,
         });
       } else if (botFillEmptySeats) {
-        seats.push({ type: "Bot", name: this.botNameForSeat(i) });
+        seats.push({ type: "Bot", name: this.botNameForSeat(i, seed) });
       }
     }
     if (seats.length < 2) {
       throw new Error("Need at least two seats to start a pod draft");
     }
 
-    const seed = Math.floor(Math.random() * 0xffffffff);
-    const draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
-    const hostView = await this.adapter.createMultiplayerDraft(
+    await this.adapter.createMultiplayerDraft(
       this.setPoolJson,
       seats,
       this.kind,
@@ -403,6 +479,7 @@ export class P2PDraftHost {
     this.draftCode = draftCode;
     this.activePodSize = seats.length;
     this.picksThisRound.clear();
+    await this.resolveBotPicks({ emit: false, persist: false });
 
     // Send each guest their filtered view
     for (const [seat, session] of this.guestSessions) {
@@ -415,7 +492,8 @@ export class P2PDraftHost {
     }
 
     this.persistSession();
-    this.emit({ type: "draftStarted", view: hostView });
+    const freshHostView = await this.adapter.getViewForSeat(0);
+    this.emit({ type: "draftStarted", view: freshHostView });
     this.startPickTimer(0);
   }
 
@@ -438,21 +516,39 @@ export class P2PDraftHost {
     cardInstanceId: string,
     resolveBots = true,
   ): Promise<DraftPlayerView> {
+    return this.applyPick(seat, cardInstanceId, {
+      acknowledge: true,
+      emit: true,
+      persist: true,
+      resolveBots,
+    });
+  }
+
+  private async applyPick(
+    seat: number,
+    cardInstanceId: string,
+    options: PickOptions,
+  ): Promise<DraftPlayerView> {
     try {
       const view = await this.adapter.submitPickForSeat(seat, cardInstanceId);
       this.picksThisRound.add(seat);
 
       // Send pick acknowledgement to the picking player
       const session = this.guestSessions.get(seat);
-      if (session) {
+      if (options.acknowledge && session) {
         session.send({ type: "draft_pick_ack", view });
       }
 
-      this.emit({ type: "pickReceived", seatIndex: seat, cardInstanceId });
-      this.persistSession();
+      if (options.emit) {
+        this.emit({ type: "pickReceived", seatIndex: seat, cardInstanceId });
+      }
+      if (options.persist) {
+        this.persistSession();
+      }
 
-      if (resolveBots && !this.isBotSeat(seat)) {
-        await this.resolveBotPicks();
+      if (options.resolveBots && !this.isBotSeat(seat)) {
+        await this.resolveBotPicks({ emit: true, persist: true });
+        await this.broadcastViews();
       }
 
       // Check if all picks for this round are in
@@ -506,6 +602,7 @@ export class P2PDraftHost {
       const hostView = await this.adapter.getViewForSeat(0);
       if (hostView.seats.every((s) => s.has_submitted_deck || s.is_bot)) {
         this.emit({ type: "allDecksSubmitted" });
+        await this.generatePairings(1);
       }
 
       if (seat === 0) return view;
@@ -581,19 +678,46 @@ export class P2PDraftHost {
       return;
     }
 
+    // Mid-draft disconnect: sync the engine connection bitmap first so
+    // `DraftPlayerView.seats[*].connected` reflects the new state, then
+    // broadcast to all guests. Wrapped in a void-IIFE because this method
+    // is sync `: void`; matching the existing convention on lines 342 / 1267.
+    void (async () => {
+      try {
+        await this.adapter.setSeatConnected(seat, false);
+        await this.broadcastViews();
+      } catch (err) {
+        console.error(
+          `[P2PDraftHost] setSeatConnected(false) failed for seat ${seat}:`,
+          err,
+        );
+      }
+    })();
+
     // Mid-draft disconnect: grace window
     const timer = setTimeout(() => {
       // Grace expired — mark seat as abandoned but don't remove from draft
       // (other players' packs may depend on this seat's position)
       this.disconnectedSeats.delete(seat);
-      this.emit({ type: "seatKicked", seatIndex: seat, reason: "Disconnect grace expired" });
+      this.emit({
+        type: "seatKicked",
+        seatIndex: seat,
+        reason: DraftPauseReason.DisconnectGraceExpired,
+      });
     }, this.gracePeriodMs);
 
     this.disconnectedSeats.set(seat, { disconnectedAt: Date.now(), timer });
 
     if (!this.paused) {
       this.paused = true;
-      this.broadcastToGuests({ type: "draft_paused", reason: "Player disconnected" });
+      this.broadcastToGuests({
+        type: "draft_paused",
+        reason: DraftPauseReason.PlayerDisconnected,
+      });
+      this.emit({
+        type: "draftPaused",
+        reason: DraftPauseReason.PlayerDisconnected,
+      });
     }
 
     this.emit({ type: "seatDisconnected", seatIndex: seat });
@@ -665,22 +789,43 @@ export class P2PDraftHost {
   }
 
   private async autoPickAllPending(): Promise<void> {
-    // For each seat that still has a current_pack (hasn't picked), auto-pick a random card (D-02)
+    // For each seat that still has a current_pack (hasn't picked), auto-pick
+    // a random card (D-02). Skip seats already in `picksThisRound` — they've
+    // already submitted this round and the engine would reject the duplicate
+    // with `SeatAlreadyPickedThisRound`, swallowing the error and stranding
+    // the timer at zero.
+    //
+    // Pass `resolveBots: false` to `handlePick` so the per-pick bot-pick
+    // resolution and view broadcast are suppressed during the sweep. Otherwise
+    // an N-seat sweep produces N redundant broadcasts (and N redundant bot
+    // resolution sweeps). After the loop we resolve bots once and broadcast
+    // once — except when the round naturally completed via `allPicksSubmitted`
+    // inside the last `handlePick`, which already broadcast.
+    let anyPicked = false;
     for (let seat = 0; seat < this.activePodSize; seat++) {
+      if (this.picksThisRound.has(seat)) continue;
       try {
         const view = await this.adapter.getViewForSeat(seat);
         if (view.current_pack && view.current_pack.length > 0) {
           const randomIndex = Math.floor(Math.random() * view.current_pack.length);
           const card = view.current_pack[randomIndex];
-          await this.handlePick(seat, card.instance_id);
+          await this.handlePick(seat, card.instance_id, false);
+          anyPicked = true;
         }
       } catch (err) {
         console.error(`[P2PDraftHost] auto-pick failed for seat ${seat}:`, err);
       }
     }
+    if (anyPicked) {
+      await this.resolveBotPicks({ emit: true, persist: true });
+      const allPicked = await this.adapter.allPicksSubmitted();
+      if (!allPicked) {
+        await this.broadcastViews();
+      }
+    }
   }
 
-  private async resolveBotPicks(): Promise<void> {
+  private async resolveBotPicks(options: PickOptions = { emit: true, persist: true }): Promise<void> {
     const hostView = await this.adapter.getViewForSeat(0);
     if (hostView.status !== "Drafting") return;
 
@@ -691,10 +836,10 @@ export class P2PDraftHost {
       if (!pack || pack.length === 0) continue;
 
       const randomIndex = Math.floor(Math.random() * pack.length);
-      await this.handlePick(
+      await this.applyPick(
         seat.seat_index,
         pack[randomIndex].instance_id,
-        false,
+        { acknowledge: false, emit: options.emit, persist: options.persist, resolveBots: false },
       );
     }
   }
@@ -703,8 +848,8 @@ export class P2PDraftHost {
     return this.seatNames.get(seat) === undefined && !this.guestSessions.has(seat);
   }
 
-  private botNameForSeat(seat: number): string {
-    return `AI player ${seat + 1}`;
+  private botNameForSeat(seat: number, seed: number): string {
+    return assignAvatarForSeat(this.podSize, seat, seed)?.name ?? `Seat ${seat + 1}`;
   }
 
   // ── Match coordination ────────────────────────────────────────────────
@@ -716,48 +861,183 @@ export class P2PDraftHost {
   async generatePairings(round: number): Promise<void> {
     try {
       const view = await this.adapter.generatePairings(round);
+      const launchablePairings = view.pairings.filter((pairing) =>
+        pairing.round === round &&
+        (pairing.status === "Pending" || pairing.status === "InProgress")
+      );
 
-      // Send draft_match_start to each guest with their opponent info
-      for (const pairing of view.pairings) {
+      for (const pairing of launchablePairings) {
+        if (
+          this.isBotSeatFromView(view, pairing.seat_a) &&
+          this.isBotSeatFromView(view, pairing.seat_b)
+        ) {
+          await this.dispatchMatchLaunch(pairing, view);
+        }
+      }
+
+      const postBotView = await this.adapter.getViewForSeat(0);
+      for (const pairing of postBotView.pairings) {
         if (pairing.round !== round) continue;
         if (pairing.status !== "Pending" && pairing.status !== "InProgress") continue;
+        if (
+          this.isBotSeatFromView(postBotView, pairing.seat_a) &&
+          this.isBotSeatFromView(postBotView, pairing.seat_b)
+        ) {
+          continue;
+        }
 
-        const seatA = pairing.seat_a;
-        const seatB = pairing.seat_b;
-        // Lower seat# is match host
-        const matchHostSeat = Math.min(seatA, seatB);
-        const matchHostPeerId = this.getPeerIdForSeat(matchHostSeat);
-
-        // Send to seat A
-        this.sendToSeat(seatA, {
-          type: "draft_match_start",
-          matchId: pairing.match_id,
-          round: pairing.round,
-          opponentSeat: seatB,
-          opponentName: pairing.name_b,
-          matchHostPeerId,
-          isMatchHost: seatA === matchHostSeat,
-        });
-
-        // Send to seat B
-        this.sendToSeat(seatB, {
-          type: "draft_match_start",
-          matchId: pairing.match_id,
-          round: pairing.round,
-          opponentSeat: seatA,
-          opponentName: pairing.name_a,
-          matchHostPeerId,
-          isMatchHost: seatB === matchHostSeat,
-        });
+        await this.dispatchMatchLaunch(pairing, postBotView);
       }
+
+      const latestView = await this.adapter.getViewForSeat(0);
 
       // Broadcast updated views
       await this.broadcastViews();
-      this.emit({ type: "pairingsGenerated", round, pairings: view.pairings });
+      this.persistSession();
+      this.emit({ type: "pairingsGenerated", round, pairings: latestView.pairings });
+      this.emit({ type: "viewUpdated", view: latestView });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ type: "error", message: `Failed to generate pairings: ${message}` });
     }
+  }
+
+  private async dispatchMatchLaunch(pairing: PairingView, view: DraftPlayerView): Promise<void> {
+    const seatA = pairing.seat_a;
+    const seatB = pairing.seat_b;
+    const seatAIsBot = this.isBotSeatFromView(view, seatA);
+    const seatBIsBot = this.isBotSeatFromView(view, seatB);
+    const session = await this.exportDraftSession();
+
+    if (seatAIsBot && seatBIsBot) {
+      await this.reportMatchResult(pairing.match_id, Math.min(seatA, seatB));
+      return;
+    }
+
+    if (seatAIsBot || seatBIsBot) {
+      const humanSeat = seatAIsBot ? seatB : seatA;
+      const botSeat = seatAIsBot ? seatA : seatB;
+      const botName = seatAIsBot ? pairing.name_a : pairing.name_b;
+      const humanDeck = this.submittedDeckForSeat(session, humanSeat);
+      const botDeck = await this.botDeckForSeat(session, botSeat);
+      const deckPayload: DraftMatchDeckPayload = {
+        player: humanDeck,
+        opponent: botDeck,
+        ai_decks: [],
+      };
+
+      this.sendToSeat(humanSeat, {
+        type: "draft_match_start",
+        launch: {
+          type: "Bot",
+          matchId: pairing.match_id,
+          round: pairing.round,
+          localSeat: humanSeat,
+          botSeat,
+          botName,
+          deckPayload,
+          matchConfig: this.matchConfig(),
+        },
+      });
+      return;
+    }
+
+    const matchHostSeat = Math.min(seatA, seatB);
+    const guestSeat = matchHostSeat === seatA ? seatB : seatA;
+    const matchRoomCode = `${this.draftCode ?? "draft"}-${pairing.match_id}`;
+    const hostDeck = this.submittedDeckForSeat(session, matchHostSeat);
+    const guestDeck = this.submittedDeckForSeat(session, guestSeat);
+    const hostOpponentName = matchHostSeat === seatA ? pairing.name_b : pairing.name_a;
+    const guestOpponentName = matchHostSeat === seatA ? pairing.name_a : pairing.name_b;
+    const deckPayload: DraftMatchDeckPayload = {
+      player: hostDeck,
+      opponent: guestDeck,
+      ai_decks: [],
+    };
+
+    this.sendToSeat(matchHostSeat, {
+      type: "draft_match_start",
+      launch: {
+        type: "HumanHost",
+        matchId: pairing.match_id,
+        matchRoomCode,
+        round: pairing.round,
+        localSeat: matchHostSeat,
+        opponentSeat: guestSeat,
+        opponentName: hostOpponentName,
+        matchHostPeerId: matchRoomCode,
+        deckPayload,
+        matchConfig: this.matchConfig(),
+      },
+    });
+    this.sendToSeat(guestSeat, {
+      type: "draft_match_start",
+      launch: {
+        type: "HumanGuest",
+        matchId: pairing.match_id,
+        matchRoomCode,
+        round: pairing.round,
+        localSeat: guestSeat,
+        opponentSeat: matchHostSeat,
+        opponentName: guestOpponentName,
+        matchHostPeerId: matchRoomCode,
+        localDeck: guestDeck,
+        matchConfig: this.matchConfig(),
+      },
+    });
+  }
+
+  private async dispatchMatchLaunchesForSeat(view: DraftPlayerView, seat: number): Promise<void> {
+    for (const pairing of view.pairings) {
+      if (pairing.round !== view.current_round) continue;
+      if (pairing.status !== "Pending" && pairing.status !== "InProgress") continue;
+      if (pairing.seat_a !== seat && pairing.seat_b !== seat) continue;
+
+      await this.dispatchMatchLaunch(pairing, view);
+    }
+  }
+
+  private isBotSeatFromView(view: DraftPlayerView, seat: number): boolean {
+    return view.seats.find((s) => s.seat_index === seat)?.is_bot ?? this.isBotSeat(seat);
+  }
+
+  private async exportDraftSession(): Promise<ExportedDraftSession> {
+    const sessionJson = await this.adapter.exportSession();
+    return JSON.parse(sessionJson) as ExportedDraftSession;
+  }
+
+  private submittedDeckForSeat(session: ExportedDraftSession, seat: number): DraftDeckPayload {
+    const submitted = Object.values(session.submitted_decks ?? {}).find(
+      (deck) => deck.seat === seat,
+    );
+    if (!submitted) {
+      throw new Error(`Seat ${seat} has no submitted deck`);
+    }
+    return deckPayload(
+      submitted.main_deck,
+      sideboardFromPool(session, seat, submitted.main_deck),
+    );
+  }
+
+  private async botDeckForSeat(
+    session: ExportedDraftSession,
+    botSeat: number,
+  ): Promise<DraftDeckPayload> {
+    const suggested = await this.adapter.getBotDeck(botSeat);
+    const mainDeck = [
+      ...suggested.main_deck,
+      ...Object.entries(suggested.lands).flatMap(([name, count]) =>
+        Array<string>(count).fill(name),
+      ),
+    ];
+    return deckPayload(
+      mainDeck,
+      sideboardFromPool(session, botSeat, suggested.main_deck),
+    );
+  }
+
+  private matchConfig(): MatchConfig {
+    return { match_type: this.kind === "Traditional" ? "Bo3" : "Bo1" };
   }
 
   /**
@@ -771,14 +1051,12 @@ export class P2PDraftHost {
 
       // Broadcast updated views with new standings
       await this.broadcastViews();
+      this.persistSession();
+      this.emit({ type: "viewUpdated", view });
 
       // Check if the reducer auto-advanced (Competitive mode)
-      if (view.status === "RoundComplete" || view.status === "Complete") {
-        const hostView = await this.adapter.getViewForSeat(0);
-        this.emit({ type: "viewUpdated", view: hostView });
-        if (view.status === "Complete") {
-          void this.cleanupServerBackup();
-        }
+      if (view.status === "Complete") {
+        void this.cleanupServerBackup();
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -807,8 +1085,10 @@ export class P2PDraftHost {
    */
   async replaceSeatWithBot(seat: number): Promise<void> {
     try {
-      await this.adapter.replaceSeatWithBot(seat);
+      const seed = this.draftSeed ?? hashStringToSeed(this.draftCode || this.roomCode || "draft");
+      await this.adapter.replaceSeatWithBot(seat, this.botNameForSeat(seat, seed));
       await this.broadcastViews();
+      this.persistSession();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.emit({ type: "error", message: `Failed to replace seat ${seat}: ${message}` });
@@ -956,17 +1236,46 @@ export class P2PDraftHost {
   private sendToSeat(seat: number, msg: DraftP2PMessage): void {
     if (seat === 0) {
       // Host is seat 0 — emit event directly instead of sending over network
+      switch (msg.type) {
+        case "draft_match_start":
+          this.emit({ type: "matchStart", launch: msg.launch });
+          break;
+        case "draft_bo3_sideboard_prompt":
+          this.emit({
+            type: "bo3SideboardPrompt",
+            matchId: msg.matchId,
+            gameNumber: msg.gameNumber,
+            score: msg.score,
+            loserSeat: msg.loserSeat,
+            timerMs: msg.timerMs,
+          });
+          break;
+        case "draft_bo3_play_draw_prompt":
+          this.emit({
+            type: "bo3ChoosePlayDraw",
+            matchId: msg.matchId,
+            gameNumber: msg.gameNumber,
+            score: msg.score,
+            timerMs: msg.timerMs,
+          });
+          break;
+        case "draft_bo3_game_start":
+          this.emit({
+            type: "bo3GameStart",
+            matchId: msg.matchId,
+            gameNumber: msg.gameNumber,
+            firstPlayerSeat: msg.firstPlayerSeat,
+          });
+          break;
+        default:
+          break;
+      }
       return;
     }
     const session = this.guestSessions.get(seat);
     if (session && !this.disconnectedSeats.has(seat)) {
       session.send(msg);
     }
-  }
-
-  private getPeerIdForSeat(seat: number): string {
-    if (seat === 0) return this.hostPeer.id;
-    return this.seatPeerIds.get(seat) ?? "";
   }
 
   // ── Host controls ──────────────────────────────────────────────────
@@ -998,7 +1307,11 @@ export class P2PDraftHost {
     if (!this.paused) {
       this.clearActiveTimer();
       this.paused = true;
-      this.broadcastToGuests({ type: "draft_paused", reason: "Paused by host" });
+      this.broadcastToGuests({
+        type: "draft_paused",
+        reason: DraftPauseReason.PausedByHost,
+      });
+      this.emit({ type: "draftPaused", reason: DraftPauseReason.PausedByHost });
     }
   }
 
@@ -1006,6 +1319,7 @@ export class P2PDraftHost {
     if (this.paused && this.disconnectedSeats.size === 0) {
       this.paused = false;
       this.broadcastToGuests({ type: "draft_resumed" });
+      this.emit({ type: "draftResumed" });
       // Restart timer if still in drafting phase
       if (this.draftStarted && this.podPolicy === "Competitive") {
         void (async () => {
@@ -1023,12 +1337,14 @@ export class P2PDraftHost {
   // ── Persistence (P2P-05) ──────────────────────────────────────────
 
   private persistSession(): void {
-    if (!this.persistenceId) return;
-    void (async () => {
+    if (!this.persistenceId || this.persistenceClosed) return;
+    this.persistQueue = this.persistQueue.then(async () => {
       try {
+        if (this.persistenceClosed) return;
         const sessionJson = this.draftStarted
           ? await this.adapter.exportSession()
           : null;
+        if (this.persistenceClosed) return;
 
         const snapshot: PersistedDraftHostSession = {
           persistenceId: this.persistenceId!,
@@ -1058,7 +1374,7 @@ export class P2PDraftHost {
       } catch (err) {
         console.warn("[P2PDraftHost] persist failed:", err);
       }
-    })();
+    });
   }
 
   /**
@@ -1112,6 +1428,7 @@ export class P2PDraftHost {
     }
     this.draftStarted = session.draftStarted;
     this.draftCode = session.draftCode;
+    this.draftSeed = hashStringToSeed(session.draftCode || this.roomCode || "draft");
 
     if (session.draftSessionJson) {
       const view = await this.adapter.importSession(session.draftSessionJson, 2);
@@ -1129,6 +1446,17 @@ export class P2PDraftHost {
 
       if (this.disconnectedSeats.size > 0) {
         this.paused = true;
+        this.emit({
+          type: "draftPaused",
+          reason: DraftPauseReason.PlayerDisconnected,
+        });
+      }
+
+      if (view.status === "MatchInProgress") {
+        await this.dispatchMatchLaunchesForSeat(view, 0);
+      } else if (view.status === "Pairing" && view.pairings.length === 0) {
+        await this.generatePairings(view.current_round + 1);
+        return this.adapter.getViewForSeat(0);
       }
 
       return view;
@@ -1158,8 +1486,10 @@ export class P2PDraftHost {
     for (const session of this.guestSessions.values()) {
       await session.send({ type: "draft_host_left", reason: "Host left the draft" });
     }
+    this.persistenceClosed = true;
+    await this.persistQueue;
     if (this.persistenceId) {
-      void clearDraftHostSession(this.persistenceId);
+      await clearDraftHostSession(this.persistenceId);
     }
     void this.cleanupServerBackup();
     this.dispose();

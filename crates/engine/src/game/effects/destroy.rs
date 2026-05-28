@@ -7,6 +7,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
@@ -64,6 +65,83 @@ pub fn apply_destroy_after_replacement(
     }
 }
 
+/// Outcome of destroying a single object through the guarded path.
+///
+/// Lets callers (the top-level `Effect::Destroy` loop and the counter-source
+/// rider) map a single-object destruction onto their own control flow:
+/// `Completed`/`Skipped` continue, `NeedsChoice` requires returning without
+/// advancing because the replacement pipeline set `state.waiting_for`.
+pub(crate) enum DestroyOutcome {
+    /// The object was destroyed (or its destruction was replaced/prevented
+    /// inline, e.g. regeneration) — caller may continue.
+    Completed,
+    /// A guard fired (emblem CR 114.5, not on battlefield, or indestructible
+    /// CR 702.12b) so nothing was destroyed — caller may continue.
+    Skipped,
+    /// A replacement requires a player choice mid-resolution; `state.waiting_for`
+    /// is already set. Caller must return without advancing.
+    NeedsChoice,
+}
+
+/// CR 114.5 / CR 701.8a / CR 702.12b: Destroy a single object through the
+/// emblem, zone, and indestructible guards followed by the replacement-aware
+/// destruction pipeline.
+///
+/// Factored out of `resolve`'s per-target loop body so that any caller wanting
+/// to destroy one determined object (the top-level Destroy effect, the
+/// counter-source rider in `counter.rs`) shares exactly one guarded path — the
+/// guards (CR 114.5 emblem, battlefield-zone, CR 702.12b indestructible) live
+/// here, *before* `ProposedEvent::Destroy`, so they cannot be bypassed.
+pub(crate) fn destroy_single_object(
+    state: &mut GameState,
+    object_id: ObjectId,
+    source: ObjectId,
+    cant_regenerate: bool,
+    events: &mut Vec<GameEvent>,
+) -> DestroyOutcome {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return DestroyOutcome::Skipped;
+    };
+
+    // CR 114.5: Emblems are neither cards nor permanents — cannot be destroyed.
+    if obj.is_emblem {
+        return DestroyOutcome::Skipped;
+    }
+
+    // CR 701.8a: Destroy moves a permanent from the battlefield to its owner's
+    // graveyard — only battlefield objects are destroyable.
+    if obj.zone != Zone::Battlefield {
+        return DestroyOutcome::Skipped;
+    }
+
+    // CR 702.12b: A permanent with indestructible can't be destroyed.
+    if obj.has_keyword(&crate::types::keywords::Keyword::Indestructible) {
+        return DestroyOutcome::Skipped;
+    }
+
+    let proposed = ProposedEvent::Destroy {
+        object_id,
+        source: Some(source),
+        cant_regenerate,
+        applied: HashSet::new(),
+    };
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            if apply_destroy_after_replacement(state, event, events) {
+                DestroyOutcome::Completed
+            } else {
+                DestroyOutcome::NeedsChoice
+            }
+        }
+        ReplacementResult::Prevented => DestroyOutcome::Completed,
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            DestroyOutcome::NeedsChoice
+        }
+    }
+}
+
 /// CR 701.8a: Destroy moves permanent from battlefield to owner's graveyard.
 /// CR 701.8b: Indestructible permanents can't be destroyed.
 /// Skips objects with the "indestructible" keyword.
@@ -72,54 +150,19 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let cant_regenerate = matches!(
+        &ability.effect,
+        Effect::Destroy {
+            cant_regenerate: true,
+            ..
+        }
+    );
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
-            let obj = state
-                .objects
-                .get(obj_id)
-                .ok_or(EffectError::ObjectNotFound(*obj_id))?;
-
-            // CR 114.5: Emblems cannot be destroyed
-            if obj.is_emblem {
-                continue;
-            }
-
-            // Skip if not on battlefield
-            if obj.zone != Zone::Battlefield {
-                continue;
-            }
-
-            // Check for indestructible
-            if obj.has_keyword(&crate::types::keywords::Keyword::Indestructible) {
-                continue;
-            }
-
-            let cant_regenerate = matches!(
-                &ability.effect,
-                Effect::Destroy {
-                    cant_regenerate: true,
-                    ..
-                }
-            );
-            let proposed = ProposedEvent::Destroy {
-                object_id: *obj_id,
-                source: Some(ability.source_id),
-                cant_regenerate,
-                applied: HashSet::new(),
-            };
-
-            match replacement::replace_event(state, proposed, events) {
-                ReplacementResult::Execute(event) => {
-                    if !apply_destroy_after_replacement(state, event, events) {
-                        return Ok(());
-                    }
-                }
-                ReplacementResult::Prevented => {}
-                ReplacementResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
-                    return Ok(());
-                }
+            match destroy_single_object(state, *obj_id, ability.source_id, cant_regenerate, events)
+            {
+                DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
+                DestroyOutcome::NeedsChoice => return Ok(()),
             }
         }
     }

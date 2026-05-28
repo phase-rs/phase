@@ -139,9 +139,12 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "ad nauseam",
     "alchemist's talent",
     "alpha brawl",
+    "ambuscade",
     "angelic chorus",
+    "archdruid's charm",
     "archon of redemption",
     "aspiring champion",
+    "assert perfection",
     "augury adept",
     "avatar destiny",
     "backlash",
@@ -150,6 +153,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "bartz and boko",
     "be'lakor, the dark master",
     "beastie beatdown",
+    "bite down on crime",
     "blood poet",
     "bottle golems",
     "boulderbranch golem",
@@ -157,11 +161,13 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "brainstealer dragon",
     "breeches, the blastmaker",
     "brightmare",
+    "brokers charm",
     "calibrated blast",
     "champion of the path",
     "champion of wits",
     "chastise",
     "circus of the sun",
+    "clear shot",
     "cleric class",
     "common black removal",
     "conclave mentor",
@@ -170,11 +176,13 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "consuming vapors",
     "creature bond",
     "crumble",
+    "crush underfoot",
     "dark confidant",
     "dark tutelage",
     "darkstar augur",
     "daxos of meletis",
     "dead before sunrise",
+    "deadshot",
     "death",
     "death watch",
     "death's caress",
@@ -182,11 +190,13 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "delirium",
     "devour flesh",
     "devour in shadow",
+    "diplomatic relations",
     "dire tactics",
     "divine offering",
     "domri's ambush",
     "doomgape",
     "durkwood tracker",
+    "duskmantle seer",
     "efteekay, flame of the kav",
     "electrosiphon",
     "electryte",
@@ -228,7 +238,9 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "hit",
     "horrid shadowspinner",
     "hotel of fears",
+    "huatli's final strike",
     "hunter's edge",
+    "hunter's mark",
     "ian the reckless",
     "ignite memories",
     "ikra shidiqi, the usurper",
@@ -245,6 +257,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "keeper of secrets",
     "kefka, dancing mad",
     "kindle the carnage",
+    "knockout maneuver",
     "laccolith rig",
     "lagonna-band storyteller",
     "lammastide weave",
@@ -267,6 +280,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "moonlight hunt",
     "mortis dogs",
     "narset of the ancient way",
+    "nature's way",
     "neerdiv, devious diver",
     "niambi, esteemed speaker",
     "nibelheim aflame",
@@ -285,6 +299,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "pandemonium",
     "parallectric feedback",
     "passionate archaeologist",
+    "phthisis",
     "phyrexian delver",
     "planeswalker's fury",
     "planeswalker's mirth",
@@ -296,6 +311,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "pyretic rebirth",
     "pyrotechnic performer",
     "queen's bay paladin",
+    "rabid gnaw",
     "rage extractor",
     "rapacious guest",
     "rashida scalebane",
@@ -333,6 +349,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "sorin, grim nemesis",
     "south wind avatar",
     "spinal embrace",
+    "spirit flare",
     "spoils of the hunt",
     "stalking vengeance",
     "steadfast armasaur",
@@ -360,6 +377,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "thought-string analyst",
     "too greedily, too deep",
     "tracker",
+    "traitor's roar",
     "tribute to hunger",
     "trostani, selesnya's voice",
     "twisted justice",
@@ -368,6 +386,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "vein drinker",
     "vendetta",
     "vengeful rebirth",
+    "venom blast",
     "verdant sun's avatar",
     "vial smasher the fierce",
     "viashino heretic",
@@ -439,20 +458,24 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        245,
-        "Expected exactly 245 cards retaining ObjectScope::Anaphoric (the #495 \
+        264,
+        "Expected exactly 264 cards retaining ObjectScope::Anaphoric (the #495 \
          behavior-neutral floor of 156, minus four cards unlocked by #607's \
-         target-subject DamageAll source wrapper, plus 88 cards from category 4, \
+         target-subject DamageAll source wrapper, plus 89 cards from category 4, \
          plus the UUID-disambiguated Reanimate print key \
          — the Yuriko/Dark Confidant bare-anaphoric-possessive class \
-         routed onto the Anaphoric arm by `classify_possessive_referent`); \
-         count moved to {}.",
+         routed onto the Anaphoric arm by `classify_possessive_referent` \
+         — plus 17 category-3 \"pump/tap target creature, then it deals damage \
+         equal to its power\" fight spells newly parsed by the token-then-pump \
+         chain fix, anaphoric on the spell's chosen target creature, plus \
+         Phthisis — destroy-target-creature + LoseLife-equal-to-its-P+T, \
+         category-3 target-spell anaphora); count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        245,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 245 cards."
+        264,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 264 cards."
     );
 }
 

@@ -9,12 +9,13 @@ use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
-    ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition, DoublePTMode,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
+    DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp, GainLifePlayer,
+    GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -64,12 +65,19 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
+            // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
+            // Runtime enforcement is in casting.rs::is_blocked_by_cant_activate_during().
+            | StaticMode::CantActivateDuring { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
             | StaticMode::CantSearchLibrary { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
             | StaticMode::SuppressTriggers { .. }
             // CR 603.2d: DoubleTriggers carries the `TriggerCause` predicate.
             | StaticMode::DoubleTriggers { .. }
+            // CR 508.1c + CR 509.1b: Combat declaration caps carry the maximum
+            // count and are enforced by combat.rs declaration validation.
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
@@ -382,6 +390,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttackingController => parts.push("attacking you".into()),
             FilterProp::Blocking => parts.push("blocking".into()),
             FilterProp::BlockingSource => parts.push("blocking source".into()),
+            FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
             FilterProp::Unblocked => parts.push("unblocked".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
@@ -475,8 +484,34 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Another => parts.push("another".into()),
             FilterProp::OtherThanTriggerObject => parts.push("other".into()),
             FilterProp::HasColor { color } => parts.push(format!("{color:?}").to_lowercase()),
-            FilterProp::PowerLE { value } => parts.push(format!("power ≤{}", fmt_quantity(value))),
-            FilterProp::PowerGE { value } => parts.push(format!("power ≥{}", fmt_quantity(value))),
+            // CR 208 + CR 208.4b: unified power/toughness comparison display.
+            FilterProp::PtComparison {
+                stat,
+                scope,
+                comparator,
+                value,
+            } => {
+                let stat_str = match stat {
+                    PtStat::Power => "power",
+                    PtStat::Toughness => "toughness",
+                };
+                let scope_str = match scope {
+                    PtValueScope::Current => "",
+                    PtValueScope::Base => "base ",
+                };
+                let cmp_str = match comparator {
+                    Comparator::LE => "≤",
+                    Comparator::GE => "≥",
+                    Comparator::LT => "<",
+                    Comparator::GT => ">",
+                    Comparator::EQ => "=",
+                    Comparator::NE => "≠",
+                };
+                parts.push(format!(
+                    "{scope_str}{stat_str} {cmp_str}{}",
+                    fmt_quantity(value)
+                ));
+            }
             FilterProp::ColorCount { comparator, count } => {
                 let label = match (comparator, count) {
                     (Comparator::EQ, 0) => "colorless".into(),
@@ -578,12 +613,6 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Named { name } => parts.push(format!("named \"{name}\"")),
             FilterProp::IsChosenColor => parts.push("chosen color".into()),
             FilterProp::PowerGTSource => parts.push("power > source".into()),
-            FilterProp::ToughnessLE { value } => {
-                parts.push(format!("toughness ≤{}", fmt_quantity(value)));
-            }
-            FilterProp::ToughnessGE { value } => {
-                parts.push(format!("toughness ≥{}", fmt_quantity(value)));
-            }
             FilterProp::AnyOf { props } => {
                 let inner_tf = TypedFilter::default().properties(props.clone());
                 parts.push(format!("any of ({})", fmt_typed_filter(&inner_tf)));
@@ -1070,6 +1099,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::TargetZoneCardCount { .. } => "target zone card count".into(),
         QuantityRef::CostXPaid => "X paid for this spell".into(),
         QuantityRef::KickerCount => "kicker payments for this spell".into(),
+        QuantityRef::AdditionalCostPaymentCount => "additional cost payments for this spell".into(),
         QuantityRef::ConvokedCreatureCount => "creatures that convoked this spell".into(),
         QuantityRef::ManaSpentToCast { scope, metric } => {
             format!("mana spent to cast ({scope:?}, {metric:?})")
@@ -1102,6 +1132,17 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
+        }
+        QuantityRef::ControlledByEachPlayer { filter, aggregate } => {
+            let func = match aggregate {
+                AggregateFunction::Max => "most",
+                AggregateFunction::Min => "fewest",
+                AggregateFunction::Sum => "total",
+            };
+            format!(
+                "# of {} controlled by player with {func}",
+                fmt_target(filter)
+            )
         }
     }
 }
@@ -1485,6 +1526,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Fight { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::BecomeCopy { target, .. }
@@ -1541,12 +1583,18 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::Counter {
             target,
-            source_static,
+            source_rider,
             ..
         } => {
             d.push(("target".into(), fmt_target(target)));
-            if source_static.is_some() {
-                d.push(("+ static".into(), "on source".into()));
+            match source_rider {
+                Some(CounterSourceRider::LosesAbilities { .. }) => {
+                    d.push(("+ static".into(), "on source".into()));
+                }
+                Some(CounterSourceRider::Destroy) => {
+                    d.push(("+ destroy".into(), "source".into()));
+                }
+                None => {}
             }
         }
         Effect::Token {
@@ -1928,6 +1976,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             counter_type,
             count,
             mode,
+            selection: _,
             target,
         } => {
             d.push(("source".into(), fmt_target(source)));
@@ -1954,6 +2003,30 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("amount".into(), format!("{amount:?}")));
             d.push(("target".into(), fmt_target(target)));
             d.push(("scope".into(), format!("{scope:?}")));
+        }
+        Effect::CreateDamageReplacement {
+            modification,
+            redirect_to,
+            combat_scope,
+            redirect_object_filter,
+            recipient_object_filter,
+            ..
+        } => {
+            if let Some(m) = modification {
+                d.push(("modification".into(), format!("{m:?}")));
+            }
+            if let Some(r) = redirect_to {
+                d.push(("redirect_to".into(), format!("{r:?}")));
+            }
+            if let Some(cs) = combat_scope {
+                d.push(("combat_scope".into(), format!("{cs:?}")));
+            }
+            if let Some(f) = redirect_object_filter {
+                d.push(("redirect_object_filter".into(), fmt_target(f)));
+            }
+            if let Some(f) = recipient_object_filter {
+                d.push(("recipient_object_filter".into(), fmt_target(f)));
+            }
         }
         Effect::ChooseFromZone { count, zone, .. } => {
             d.push(("count".into(), count.to_string()));
@@ -2238,7 +2311,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Conjure { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::ChooseOneOf { .. } => {}
+        | Effect::ChooseOneOf { .. }
+        | Effect::ReturnAsAura { .. } => {}
     }
     d
 }
@@ -2757,7 +2831,7 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
 fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec<ParsedItem>) {
     if additional_cost_has_unimplemented(additional_cost) {
         match additional_cost {
-            AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+            AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
                 build_cost_item(cost, items);
             }
             AdditionalCost::Kicker { costs, .. } => {
@@ -2774,7 +2848,12 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
     }
 
     let label = match additional_cost {
-        AdditionalCost::Optional(_) => "AdditionalCost:Optional",
+        AdditionalCost::Optional {
+            repeatable: true, ..
+        } => "AdditionalCost:Repeatable",
+        AdditionalCost::Optional {
+            repeatable: false, ..
+        } => "AdditionalCost:Optional",
         AdditionalCost::Kicker { repeatable, .. } => {
             if *repeatable {
                 "AdditionalCost:Multikicker"
@@ -2798,7 +2877,7 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 /// Returns true if any leaf `AbilityCost` in the tree is `Unimplemented`.
 fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
-        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
             ability_cost_has_unimplemented(cost)
         }
         AdditionalCost::Kicker { costs, .. } => costs.iter().any(ability_cost_has_unimplemented),
@@ -4001,7 +4080,7 @@ fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
 
 fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
-        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
             ability_cost_has_unimplemented_parts(cost)
         }
         AdditionalCost::Kicker { costs, .. } => {
@@ -4052,7 +4131,7 @@ fn collect_additional_cost_missing_parts(
     missing: &mut Vec<String>,
 ) {
     match additional_cost {
-        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
             collect_ability_cost_missing_parts(cost, missing);
         }
         AdditionalCost::Kicker { costs, .. } => {
@@ -4924,14 +5003,21 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (crates/engine/src/game/effects/mod.rs).
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
-        AbilityCondition::IfYouDo => ("IfYouDo", Handled),
+        AbilityCondition::EffectOutcome { signal } => match signal {
+            EffectOutcomeSignal::OptionalEffectPerformed => {
+                ("EffectOutcomeOptionalPerformed", Handled)
+            }
+            EffectOutcomeSignal::CurrentScopeSucceeded => {
+                ("EffectOutcomeCurrentScopeSucceeded", Handled)
+            }
+        },
+        AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
-        AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
         AbilityCondition::QuantityCheck { .. } => ("QuantityCheck", Handled),
         AbilityCondition::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
         AbilityCondition::CastDuringPhase { .. } => ("CastDuringPhase", Handled),
@@ -4960,6 +5046,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (Fortified Beachhead, Temple of the Dragon Queen) on_decline gating.
         AbilityCondition::ControllerControlsMatching { .. } => {
             ("ControllerControlsMatching", Handled)
+        }
+        AbilityCondition::ControllerControlledMatchingAsCast { .. } => {
+            ("ControllerControlledMatchingAsCast", Handled)
         }
         AbilityCondition::ZoneChangeObjectMatchesFilter { .. } => {
             ("ZoneChangeObjectMatchesFilter", Handled)
@@ -5089,9 +5178,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TokensCreatedThisTurn { .. } => ("TokensCreatedThisTurn", Handled),
         QuantityRef::PlayerActionsThisTurn { .. } => ("PlayerActionsThisTurn", Handled),
         QuantityRef::DungeonsCompleted => ("DungeonsCompleted", Unhandled),
-        QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Unhandled),
+        QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Handled),
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
+        QuantityRef::AdditionalCostPaymentCount => ("AdditionalCostPaymentCount", Handled),
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
@@ -5104,6 +5194,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
+        QuantityRef::ControlledByEachPlayer { .. } => ("ControlledByEachPlayer", Handled),
     }
 }
 
@@ -5141,6 +5232,10 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::DevotionGE { .. } => ("DevotionGE", Handled),
         StaticCondition::IsPresent { .. } => ("IsPresent", Handled),
         StaticCondition::ChosenColorIs { .. } => ("ChosenColorIs", Handled),
+        // CR 614.12c + CR 607.2d: Anchor-word linked static abilities gated on
+        // the source's persisted `ChosenAttribute::Label`. Evaluated in
+        // `layers::evaluate_condition_with_context` alongside `ChosenColorIs`.
+        StaticCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
@@ -5186,7 +5281,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Unhandled),
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
         StaticCondition::SourceIsPaired => ("SourceIsPaired", Handled),
-        StaticCondition::SourceInZone { .. } => ("SourceInZone", Unhandled),
+        // CR 113.6b: evaluated by `layers::evaluate_condition` — checks source
+        // object's zone against the specified zone. Runtime-handled.
+        StaticCondition::SourceInZone { .. } => ("SourceInZone", Handled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
         StaticCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
     }
@@ -5299,6 +5396,34 @@ fn ability_places_counter(def: &AbilityDefinition, counter_type: &CounterType) -
             ..
         } => enter_with_counters.iter().any(|(ct, _)| ct == counter_type),
         _ => false,
+    }
+}
+
+fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) -> bool {
+    match counter_type {
+        CounterType::Plus1Plus1 => lower.contains("+1/+1 counter"),
+        CounterType::Minus1Minus1 => lower.contains("-1/-1 counter"),
+        CounterType::PowerToughness { power, toughness } => lower.contains(&format!(
+            "{}{}/{}{} counter",
+            if *power >= 0 { "+" } else { "" },
+            power,
+            if *toughness >= 0 { "+" } else { "" },
+            toughness
+        )),
+        CounterType::Keyword(kind) => {
+            let needle = format!("{kind:?} counter").to_lowercase();
+            lower.contains(&needle)
+        }
+        CounterType::Loyalty
+        | CounterType::Defense
+        | CounterType::Stun
+        | CounterType::Lore
+        | CounterType::Time
+        | CounterType::Age
+        | CounterType::Generic(_) => {
+            let needle = format!("{} counter", counter_type.as_str()).to_lowercase();
+            lower.contains(&needle)
+        }
     }
 }
 
@@ -5492,10 +5617,10 @@ fn static_has_pump_modification(
     false
 }
 
-/// Extract a +N/+M or -N/-M modifier from Oracle text. Returns (power, toughness) as i32.
-/// Finds the first positional occurrence in the string so that "+2/+2 ... +1/+1 counter"
-/// correctly identifies +2/+2 as the primary modifier (not +1/+1 which is a counter).
-fn extract_pt_modifier(lower: &str) -> Option<(i32, i32)> {
+/// Extract the first +N/+M or -N/-M occurrence from Oracle text with its byte span.
+/// The span lets the audit classify that same occurrence as pump or counter text,
+/// instead of accidentally inspecting a later P/T counter on the same line.
+fn extract_pt_modifier_span(lower: &str) -> Option<(i32, i32, usize, usize)> {
     // Find the earliest +N/ or -N/ pattern by scanning for sign+digits+slash
     let idx = lower.char_indices().find_map(|(i, c)| {
         if c != '+' && c != '-' {
@@ -5517,21 +5642,32 @@ fn extract_pt_modifier(lower: &str) -> Option<(i32, i32)> {
     })?;
 
     let rest = &lower[idx..];
-    let mut chars = rest.chars();
-    let sign1 = chars.next()?;
-    let power_str: String = chars.by_ref().take_while(|c| c.is_ascii_digit()).collect();
+    let mut chars = rest.char_indices();
+    let (_, sign1) = chars.next()?;
+    let power_str: String = chars
+        .by_ref()
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .map(|(_, c)| c)
+        .collect();
     let power: i32 = power_str.parse().ok()?;
     let power = if sign1 == '-' { -power } else { power };
 
-    let sign2 = chars.next()?;
+    let (_, sign2) = chars.next()?;
     if sign2 != '+' && sign2 != '-' {
         return None;
     }
-    let tough_str: String = chars.take_while(|c| c.is_ascii_digit()).collect();
+    let mut end = idx;
+    let tough_str: String = chars
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .map(|(i, c)| {
+            end = idx + i + c.len_utf8();
+            c
+        })
+        .collect();
     let toughness: i32 = tough_str.parse().ok()?;
     let toughness = if sign2 == '-' { -toughness } else { toughness };
 
-    Some((power, toughness))
+    Some((power, toughness, idx, end))
 }
 
 /// Returns true when the +N/+M counter mention in the Oracle line is NOT a counter-placement
@@ -5686,25 +5822,11 @@ fn is_non_effect_counter_context(lower: &str) -> bool {
     false
 }
 
-/// Returns true if the Oracle line's +N/+M pattern refers to counters rather than a pump effect.
-fn is_counter_reference(lower: &str) -> bool {
-    if lower.contains("counter") {
-        if let Some(idx) = lower.find('+').or_else(|| lower.find('-')) {
-            let rest = &lower[idx..];
-            let after_pattern = rest.find('/').map(|slash| {
-                let after_slash = &rest[slash + 1..];
-                let digits_end = after_slash
-                    .find(|c: char| !c.is_ascii_digit() && c != '+' && c != '-')
-                    .unwrap_or(after_slash.len());
-                &after_slash[digits_end..]
-            });
-            if let Some(after) = after_pattern {
-                let trimmed = after.trim_start();
-                if trimmed.starts_with("counter") {
-                    return true;
-                }
-            }
-        }
+/// Returns true if the extracted Oracle +N/+M pattern refers to counters rather than a pump effect.
+fn is_counter_reference(lower: &str, pt_end: usize) -> bool {
+    let after = lower[pt_end..].trim_start();
+    if after.starts_with("counter") {
+        return true;
     }
     if lower.contains("in the form of ") {
         return true;
@@ -6206,10 +6328,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
 
         // Also check if this line is covered by keywords, casting restrictions, or
         // other non-ability structured data
+        let after_ability_word = lower
+            .find(" \u{2014} ")
+            .map(|pos| lower[pos + 4..].trim_start());
         let covered_by_keyword = face.keywords.iter().any(|k| {
             let kw_name = format!("{k:?}").to_lowercase();
             lower.starts_with(&kw_name)
-        }) || is_keyword_line(&lower);
+                || after_ability_word.is_some_and(|aw| aw.starts_with(&kw_name))
+        }) || is_keyword_line(&lower)
+            || after_ability_word.is_some_and(is_keyword_line);
         let covered_by_casting = !face.casting_restrictions.is_empty()
             && (lower.starts_with("cast this spell only ")
                 || lower.starts_with("you can't cast ")
@@ -6262,6 +6389,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantCastDuring { .. } => {
                 effective_lower.contains("can't cast spells during")
                     || effective_lower.contains("can cast spells only during")
+            }
+            // CR 602.5 + CR 117.1b: City of Solitude class — "activate abilities
+            // only during" covers both bare and "and activate abilities" phrasings.
+            StaticMode::CantActivateDuring { .. } => {
+                effective_lower.contains("activate abilities only during")
             }
             StaticMode::PerTurnCastLimit { .. } => {
                 effective_lower.contains("can't cast more than")
@@ -6363,6 +6495,17 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
+            // CR 509.1b + CR 609.4 + CR 702.14c: qualifier-aware coverage for
+            // Ur-Drago's "creatures with <X>walk can be blocked as though they
+            // didn't have <X>walk." Anchor on the per-qualifier keyword token
+            // so unrelated landwalk lines don't false-match.
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => {
+                let kw = format!("{}walk", q.to_ascii_lowercase());
+                effective_lower.contains(&format!("creatures with {kw}"))
+                    && effective_lower.contains("as though they didn't have")
+                    && effective_lower.contains(&kw)
+            }
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: None } => false,
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 effective_lower.contains("as though those creatures had haste")
                     || effective_lower.contains("as though that creature had haste")
@@ -6390,6 +6533,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     StaticMode::CanAttackWithDefender => {
                         effective_lower.contains("as though it didn't have defender")
                     }
+                    // CR 509.1b + CR 609.4 + CR 702.14c: mirror predicate for
+                    // statics nested under a GenericEffect.
+                    StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => {
+                        let kw = format!("{}walk", q.to_ascii_lowercase());
+                        effective_lower.contains(&format!("creatures with {kw}"))
+                            && effective_lower.contains("as though they didn't have")
+                            && effective_lower.contains(&kw)
+                    }
+                    StaticMode::IgnoreLandwalkForBlocking { qualifier: None } => false,
                     _ => false,
                 })
             } else {
@@ -6401,7 +6553,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // Covers "damage can't be prevented" (AddRestriction/DamagePreventionDisabled),
         // "you may cast ... from" (CastFromZone), and similar patterns where the parser
         // produces the correct effect but doesn't attach a description string.
-        let ability_effect_type_matches: Vec<&AbilityDefinition> = {
+        let (ability_effect_type_matches, trigger_effect_type_matches): (
+            Vec<&AbilityDefinition>,
+            Vec<&AbilityDefinition>,
+        ) = {
             let line_matches_effect_type = |d: &AbilityDefinition| match &*d.effect {
                 Effect::AddRestriction { restriction, .. } => {
                     matches!(
@@ -6424,6 +6579,39 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("don't lose the game")
                         || effective_lower.contains("can't lose the game")
                 }
+                Effect::Mana { .. } => effective_lower.contains("add "),
+                Effect::PutCounter {
+                    counter_type: ct, ..
+                }
+                | Effect::PutCounterAll {
+                    counter_type: ct, ..
+                } => {
+                    effective_lower.contains("put")
+                        && effective_lower.contains("counter")
+                        && oracle_line_mentions_counter_type(&effective_lower, ct)
+                }
+                Effect::RemoveCounter {
+                    counter_type: Some(ct),
+                    ..
+                } => {
+                    effective_lower.contains("remove")
+                        && effective_lower.contains("counter")
+                        && oracle_line_mentions_counter_type(&effective_lower, ct)
+                }
+                Effect::RemoveCounter {
+                    counter_type: None, ..
+                } => effective_lower.contains("remove") && effective_lower.contains("counter"),
+                Effect::MoveCounters {
+                    counter_type: Some(ct),
+                    ..
+                } => {
+                    effective_lower.contains("move")
+                        && effective_lower.contains("counter")
+                        && oracle_line_mentions_counter_type(&effective_lower, ct)
+                }
+                Effect::MoveCounters {
+                    counter_type: None, ..
+                } => effective_lower.contains("move") && effective_lower.contains("counter"),
                 Effect::PayCost { .. } => {
                     // "You may pay {X} rather than pay ..." — alternative cost patterns
                     effective_lower.contains("rather than pay")
@@ -6459,12 +6647,22 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 }
                 _ => false,
             };
-            face.abilities
+            let ability_matches = face
+                .abilities
                 .iter()
                 .filter(|a| ability_tree_any(a, &line_matches_effect_type))
-                .collect()
+                .collect();
+            let trigger_matches = face
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_ref())
+                .map(Box::as_ref)
+                .filter(|a| ability_tree_any(a, &line_matches_effect_type))
+                .collect();
+            (ability_matches, trigger_matches)
         };
-        let covered_by_ability_effect_type = !ability_effect_type_matches.is_empty();
+        let covered_by_ability_effect_type =
+            !ability_effect_type_matches.is_empty() || !trigger_effect_type_matches.is_empty();
 
         // Replacement effects matched by event type when description doesn't align.
         // Covers "prevent ... damage", "enters with ... counter", damage redirection,
@@ -6614,6 +6812,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         let covered_ability_effect_type_any = |pred: &dyn Fn(&AbilityDefinition) -> bool| -> bool {
             ability_effect_type_matches
                 .iter()
+                .chain(trigger_effect_type_matches.iter())
                 .any(|a| ability_tree_any(a, &|d| pred(d)))
         };
         // 1. Condition check: does Oracle text contain condition language?
@@ -6674,27 +6873,23 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // 3. P/T parameter check: does Oracle text contain +N/+M that should be a pump or counter?
         let stripped_for_pt = strip_parenthesized_reminder(line);
         let lower_for_pt = stripped_for_pt.to_lowercase();
-        if let Some((power, toughness)) = extract_pt_modifier(&lower_for_pt) {
+        if let Some((power, toughness, pt_start, pt_end)) = extract_pt_modifier_span(&lower_for_pt)
+        {
             // Skip if the +N/+M pattern is inside a quoted sub-ability
             let pt_in_quotes = lower_for_pt
                 .find('"')
-                .zip(lower_for_pt.find(&format!("{}{}/", if power >= 0 { "+" } else { "" }, power)))
-                .is_some_and(|(quote_pos, pt_pos)| pt_pos > quote_pos);
+                .is_some_and(|quote_pos| pt_start > quote_pos);
 
             // Check if the +N/+M is preceded by "additional" — this is a conditional
             // addendum to a base pump on the same line, not independently checkable.
-            let pt_is_additional = {
-                let pt_str = format!("{}{}/", if power >= 0 { "+" } else { "" }, power);
-                lower_for_pt
-                    .find(&pt_str)
-                    .is_some_and(|pos| pos >= 11 && lower_for_pt[..pos].contains("additional"))
-            };
+            let pt_is_additional =
+                pt_start >= 11 && lower_for_pt[..pt_start].contains("additional");
 
             if power == 0 && toughness == 0 {
                 // +0/+0 is meaningless, skip
             } else if pt_in_quotes || pt_is_additional {
                 // +N/+M is inside a quoted sub-ability — not a property of this line's element
-            } else if is_counter_reference(&lower_for_pt) {
+            } else if is_counter_reference(&lower_for_pt, pt_end) {
                 // Skip false positives: counter mentioned in filter, condition, cost,
                 // quantity reference, replacement, or quoted sub-ability context
                 if !is_non_effect_counter_context(&lower_for_pt) {
@@ -6711,6 +6906,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     } else {
                         matched.iter().any(|e| e.has_counter_effect(&normalized))
                             || modal_any(&|d: &AbilityDefinition| {
+                                ability_places_counter(d, &normalized)
+                            })
+                            || covered_ability_effect_type_any(&|d: &AbilityDefinition| {
                                 ability_places_counter(d, &normalized)
                             })
                     };
@@ -7374,6 +7572,7 @@ fn is_keyword_line(lower: &str) -> bool {
         "prowess",
         "protection from ",
         "ward",
+        "firebending ",
         "changeling",
         "partner",
         "shroud",
@@ -8095,9 +8294,12 @@ mod tests {
     #[test]
     fn card_face_with_unimplemented_additional_cost_is_detected() {
         let mut face = make_face();
-        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Unimplemented {
-            description: "mystery cost".to_string(),
-        }));
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::Unimplemented {
+                description: "mystery cost".to_string(),
+            },
+            repeatable: false,
+        });
 
         assert!(card_face_has_unimplemented_parts(&face));
     }
@@ -8526,6 +8728,7 @@ mod tests {
                         mode: StaticMode::MustBeBlocked,
                     }],
                     condition: None,
+                    per_player_condition: None,
                     affected_zone: None,
                     effect_zone: None,
                     active_zones: vec![],
@@ -8568,6 +8771,7 @@ mod tests {
                         },
                     ],
                     condition: None,
+                    per_player_condition: None,
                     affected_zone: None,
                     effect_zone: None,
                     active_zones: vec![],
@@ -8617,6 +8821,20 @@ mod tests {
         assert_eq!(
             features.get("quantity_ref:Speed"),
             Some(&FeatureSupport::Handled)
+        );
+    }
+
+    #[test]
+    fn target_zone_card_count_quantity_feature_is_marked_handled() {
+        let (name, support) = quantity_ref_feature(&QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Library,
+        });
+
+        assert_eq!(name, "TargetZoneCardCount");
+        assert_eq!(
+            support,
+            FeatureSupport::Handled,
+            "TargetZoneCardCount is resolved by game::quantity and should not block coverage",
         );
     }
 
@@ -8815,6 +9033,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: Some(QuantityExpr::Fixed { value: 1 }),
                     mode: CounterTransferMode::Move,
+                    selection: crate::types::ability::CounterMoveSelection::StackTarget,
                     target: TargetFilter::Any,
                 },
             )
@@ -8930,6 +9149,63 @@ mod tests {
     }
 
     #[test]
+    fn test_audit_accepts_descriptionless_counter_trigger_and_mana_sub_ability() {
+        let mut face = make_face();
+        let oracle =
+            "At the beginning of your upkeep, remove a depletion counter from this land.\n\
+            {T}: Add {W} or {U}. Put a depletion counter on this land.";
+        face.name = "Land Cap".to_string();
+        face.oracle_text = Some(oracle.to_string());
+
+        let remove_counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Generic("depletion".to_string())),
+                count: 1,
+                target: TargetFilter::SelfRef,
+            },
+        );
+        face.triggers.push(
+            TriggerDefinition::new(TriggerMode::Phase)
+                .execute(remove_counter)
+                .description("At the beginning of your upkeep".to_string()),
+        );
+
+        let mut mana = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::White, ManaColor::Blue],
+                    contribution: crate::types::ability::ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        mana.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("depletion".to_string()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )));
+        face.abilities.push(mana);
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "Descriptionless counter trigger and mana sub-ability should be covered: {findings:?}"
+        );
+    }
+
+    #[test]
     fn test_audit_per_line_no_false_positive_when_condition_present() {
         let mut face = make_face();
         let oracle = "Draw a card if you control an artifact.";
@@ -8966,10 +9242,84 @@ mod tests {
 
     #[test]
     fn test_extract_pt_modifier() {
-        assert_eq!(extract_pt_modifier("gets +2/+1 until"), Some((2, 1)));
-        assert_eq!(extract_pt_modifier("gets -1/-1"), Some((-1, -1)));
-        assert_eq!(extract_pt_modifier("gets +0/+3"), Some((0, 3)));
-        assert_eq!(extract_pt_modifier("no modifier here"), None);
+        assert_eq!(
+            extract_pt_modifier_span("gets +2/+1 until").map(|(p, t, _, _)| (p, t)),
+            Some((2, 1))
+        );
+        assert_eq!(
+            extract_pt_modifier_span("gets -1/-1").map(|(p, t, _, _)| (p, t)),
+            Some((-1, -1))
+        );
+        assert_eq!(
+            extract_pt_modifier_span("gets +0/+3").map(|(p, t, _, _)| (p, t)),
+            Some((0, 3))
+        );
+        assert_eq!(extract_pt_modifier_span("no modifier here"), None);
+    }
+
+    #[test]
+    fn test_audit_classifies_same_pt_occurrence_as_pump_or_counter() {
+        let mut face = make_face();
+        let oracle = "{2}{B}{B}: Target creature gets -1/-1 until end of turn. Put a +1/+1 counter on this creature.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Pump {
+                    power: PtValue::Fixed(-1),
+                    toughness: PtValue::Fixed(-1),
+                    target: TargetFilter::Any,
+                },
+            )
+            .duration(Duration::UntilEndOfTurn)
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .description(oracle.to_string()),
+        );
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::WrongParameter { .. })),
+            "Pump and later counter occurrence should both be accepted: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_ignores_pt_counter_in_activation_cost() {
+        let mut face = make_face();
+        let oracle =
+            "{B/G}, Remove a -1/-1 counter from a creature you control: This creature gets +3/+3 until end of turn.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Pump {
+                    power: PtValue::Fixed(3),
+                    toughness: PtValue::Fixed(3),
+                    target: TargetFilter::SelfRef,
+                },
+            )
+            .duration(Duration::UntilEndOfTurn)
+            .description(oracle.to_string()),
+        );
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::WrongParameter { .. })),
+            "P/T counter in an activation cost should not be audited as a pump: {findings:?}"
+        );
     }
 
     #[test]
@@ -8986,6 +9336,13 @@ mod tests {
             normalize_for_matching("when this battle enters", ""),
             "when ~ enters"
         );
+    }
+
+    #[test]
+    fn test_audit_treats_firebending_as_keyword_line() {
+        assert!(is_keyword_line(
+            "firebending x, where x is this creature's power."
+        ));
     }
 
     #[test]
@@ -9180,6 +9537,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9209,6 +9567,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9238,6 +9597,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9305,6 +9665,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9342,6 +9703,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9370,6 +9732,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9406,6 +9769,7 @@ mod tests {
                 affected: Some(TargetFilter::SelfRef),
                 modifications: vec![],
                 condition: None,
+                per_player_condition: None,
                 affected_zone: None,
                 effect_zone: None,
                 active_zones: vec![],
@@ -9418,6 +9782,34 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "CantBeBlockedExceptBy variants should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 508.1c + CR 509.1b: declaration-cap statics carry the maximum
+    /// creature count and are enforced by combat declaration validation rather
+    /// than exact registry-key lookup. Silent Arbiter is the canonical paired
+    /// attacker/blocker cap card.
+    #[test]
+    fn max_combat_creature_statics_have_no_coverage_gap() {
+        let mut face = make_face();
+        face.oracle_text = Some(
+            "No more than one creature can attack each combat.\nNo more than one creature can block each combat."
+                .to_string(),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxAttackersEachCombat { max: 1 })
+                .description("No more than one creature can attack each combat.".to_string()),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxBlockersEachCombat { max: 1 })
+                .description("No more than one creature can block each combat.".to_string()),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "Max combat creature statics should be fully supported, but got gaps: {:?}",
             gaps
         );
     }

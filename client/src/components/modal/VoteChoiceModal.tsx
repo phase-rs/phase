@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
@@ -25,6 +26,7 @@ type VoteChoice = Extract<WaitingFor, { type: "VoteChoice" }>;
  * voter list all come straight from the engine's `WaitingFor::VoteChoice`.
  */
 export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<string | null>(null);
   // Frontend renders engine-provided state. The Player struct does not yet
@@ -32,7 +34,7 @@ export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
   // engine + server), so we fall back to the 1-indexed seat ordinal here.
   // Tracked as a follow-up; the engine-side `Player.name` field is the
   // correct long-term home for this label.
-  const subjectName = `Player ${data.player + 1}`;
+  const subjectName = t("voteChoice.subjectName", { number: data.player + 1 });
 
   const handleConfirm = useCallback(() => {
     if (selected !== null) {
@@ -42,12 +44,12 @@ export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
   }, [dispatch, selected]);
 
   const isLabelingMode = data.actor.type === "Delegated";
-  const title = isLabelingMode ? "Label Player" : "Vote";
+  const title = isLabelingMode ? t("voteChoice.titleLabel") : t("voteChoice.titleVote");
   const subtitle = isLabelingMode
-    ? `Choose a label for ${subjectName}`
+    ? t("voteChoice.subtitleLabel", { name: subjectName })
     : data.remaining_votes > 1
-      ? `Cast a vote (${data.remaining_votes} remaining)`
-      : "Cast your vote";
+      ? t("voteChoice.subtitleVoteRemaining", { count: data.remaining_votes })
+      : t("voteChoice.subtitleVote");
 
   return (
     <ChoiceOverlay

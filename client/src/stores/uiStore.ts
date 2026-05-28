@@ -46,6 +46,10 @@ interface UiStoreState {
   enchantmentsDialogPlayer: number | null;
   mobileHandOpen: boolean;
   debugPanelOpen: boolean;
+  /** Which top-level tab the debug panel shows. Lifted out of DebugPanel's
+   *  local state so entry points (Sandbox Tools nudge/button) can open the
+   *  panel straight to "actions" instead of the default "console" log view. */
+  debugPanelTab: "console" | "actions";
   debugInteractionMode: boolean;
   debugContextMenu: { objectId: ObjectId; x: number; y: number } | null;
   helpSheetOpen: boolean;
@@ -88,6 +92,9 @@ interface UiStoreActions {
   setEnchantmentsDialogPlayer: (id: number | null) => void;
   setMobileHandOpen: (open: boolean) => void;
   toggleDebugPanel: () => void;
+  setDebugPanelTab: (tab: "console" | "actions") => void;
+  /** Open the debug panel directly to the Actions ("Sandbox Tools") tab. */
+  openSandboxTools: () => void;
   toggleDebugInteractionMode: () => void;
   openDebugContextMenu: (menu: { objectId: ObjectId; x: number; y: number }) => void;
   closeDebugContextMenu: () => void;
@@ -126,6 +133,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   enchantmentsDialogPlayer: null,
   mobileHandOpen: false,
   debugPanelOpen: false,
+  debugPanelTab: "console",
   debugInteractionMode: false,
   debugContextMenu: null,
   helpSheetOpen: false,
@@ -270,6 +278,8 @@ export const useUiStore = create<UiStore>()((set) => ({
   setEnchantmentsDialogPlayer: (id) => set({ enchantmentsDialogPlayer: id }),
   setMobileHandOpen: (open) => set({ mobileHandOpen: open }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
+  setDebugPanelTab: (tab) => set({ debugPanelTab: tab }),
+  openSandboxTools: () => set({ debugPanelOpen: true, debugPanelTab: "actions" }),
   toggleDebugInteractionMode: () => set((state) => ({
     debugInteractionMode: !state.debugInteractionMode,
     debugContextMenu: null,

@@ -423,6 +423,16 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .and_then(|obj| obj.chosen_color())
             .is_some_and(|chosen| &chosen == color),
+        // CR 614.12c + CR 607.2d: An anchor-word linked static ability is
+        // active iff the source permanent's persisted `ChosenAttribute::Label`
+        // matches the anchor word. The comparison is case-insensitive so a
+        // capitalised anchor word ("Jeskai") matches a label persisted in
+        // any canonicalisation. Mirrors `ChosenColorIs`'s lookup pattern.
+        StaticCondition::ChosenLabelIs { label } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.chosen_label())
+            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,
@@ -758,6 +768,10 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
             obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
             obj.color = obj.base_color.clone();
+            // Reset the display-identity pointer to its baseline; the Copy layer
+            // re-applies the copied source's `printed_ref` below for objects
+            // under a copy effect, so a temporary copy's art reverts on expiry.
+            obj.printed_ref = obj.base_printed_ref.clone();
             // CR 613.1b: Reset controller to the object's base controller;
             // Layer 2 re-applies continuous control-changing effects.
             obj.controller = obj.base_controller.unwrap_or(obj.owner);
@@ -1993,8 +2007,15 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         };
 
         match &effect.modification {
-            ContinuousModification::CopyValues { values } => {
+            ContinuousModification::CopyValues {
+                values,
+                printed_ref,
+            } => {
                 apply_copiable_values(obj, values);
+                // Display identity follows the copy: override the baseline
+                // restored by the layer reset so the copy renders the source's
+                // art. Reverts automatically when the copy effect expires.
+                obj.printed_ref = printed_ref.clone();
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -2500,6 +2521,7 @@ pub(crate) fn compute_current_copiable_values(
         match &effect.modification {
             ContinuousModification::CopyValues {
                 values: effect_values,
+                ..
             } => {
                 values = (**effect_values).clone();
                 for trigger in state
@@ -5373,6 +5395,54 @@ mod tests {
         );
     }
 
+    // CR 113.6b + CR 408: SourceInZone evaluator — used by the Eminence /
+    // Anger / Squee class of statics that name a non-battlefield zone.
+    #[test]
+    fn evaluate_source_in_zone_command_true_when_in_command_zone() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Cmdr", 2, 2, PlayerId(0));
+        // Move from battlefield to command zone for this scenario.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Command;
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceInZone {
+                zone: Zone::Command
+            },
+            PlayerId(0),
+            id,
+        ));
+    }
+
+    /// CR 113.6b: An Eminence-style Or-disjunction ("~ is in the command zone
+    /// or on the battlefield") must evaluate true for either zone individually
+    /// and false outside both.
+    #[test]
+    fn evaluate_source_in_zone_or_disjunction_command_or_battlefield() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Cmdr", 2, 2, PlayerId(0));
+        let cond = StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::SourceInZone {
+                    zone: Zone::Command,
+                },
+                StaticCondition::SourceInZone {
+                    zone: Zone::Battlefield,
+                },
+            ],
+        };
+        // On battlefield (created here) → true.
+        assert!(evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+        // Move to command zone → still true.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Command;
+        assert!(evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+        // Move to graveyard → false (neither zone).
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        assert!(!evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+        // Exile → false.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Exile;
+        assert!(!evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+    }
+
     #[test]
     fn evaluate_source_is_tapped_true_when_tapped() {
         let mut state = setup();
@@ -7605,6 +7675,8 @@ mod tests {
                 name: "Mortician Beetle".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
                 mana_value: 1,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -7871,6 +7943,7 @@ mod tests {
             TargetFilter::SpecificObject { id: target },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(copy_values),
+                printed_ref: None,
             }],
             None,
         );

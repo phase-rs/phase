@@ -369,7 +369,7 @@ fn translate_change_zone(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
         target,
         owner_library: false,
         enter_transformed: false,
-        under_your_control: false,
+        enters_under: None,
         enter_tapped: false,
         enters_attacking: false,
     })
@@ -502,7 +502,7 @@ fn translate_counter(params: &ForgeParams) -> Result<Effect, ForgeTranslateError
     let target = resolve_target(params, "ValidTgts");
     Ok(Effect::Counter {
         target,
-        source_static: None,
+        source_rider: None,
     })
 }
 
@@ -515,7 +515,7 @@ fn translate_bounce(params: &ForgeParams) -> Result<Effect, ForgeTranslateError>
         target,
         owner_library: false,
         enter_transformed: false,
-        under_your_control: false,
+        enters_under: None,
         enter_tapped: false,
         enters_attacking: false,
     })

@@ -141,6 +141,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::CounterAdded { .. }
+        | GameEvent::Evolved { .. }
         | GameEvent::CounterRemoved { .. }
         | GameEvent::Transformed { .. }
         | GameEvent::TurnedFaceUp { .. }
@@ -255,9 +256,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *object_id),
         ],
 
-        GameEvent::AbilityActivated { source_id } => {
-            vec![text("Ability activated: "), card_seg(state, *source_id)]
-        }
+        GameEvent::AbilityActivated {
+            player_id,
+            source_id,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" activates ability: "),
+            card_seg(state, *source_id),
+        ],
 
         GameEvent::NinjutsuActivated {
             player_id,
@@ -276,6 +282,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => {
             let label = match ability_tag {
                 AbilityTag::Boast => " activates boast: ",
+                AbilityTag::Evolve => " activates evolve: ",
                 AbilityTag::Exhaust => " activates exhaust: ",
                 AbilityTag::Outlast => " activates outlast: ",
             };
@@ -601,6 +608,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" counter(s) on "),
             card_seg(state, *object_id),
         ],
+
+        GameEvent::Evolved { object_id } => {
+            vec![card_seg(state, *object_id), text(" evolved")]
+        }
 
         GameEvent::CounterRemoved {
             object_id,
@@ -1103,6 +1114,8 @@ mod tests {
                 name: "Grizzly Bears".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
                 mana_value: 2,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

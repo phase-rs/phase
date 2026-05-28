@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { ManaCost, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
@@ -31,21 +33,24 @@ export function CombatTaxModal() {
 }
 
 function CombatTaxContent({ data }: { data: CombatTaxPayment["data"] }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
 
   const isAttacking = data.context.type === "Attacking";
-  const title = isAttacking ? "Pay to Attack" : "Pay to Block";
+  const title = isAttacking
+    ? t("combatTax.titleAttack")
+    : t("combatTax.titleBlock");
   const subtitle = isAttacking
-    ? "One or more attackers are taxed. Pay the total or remove them from the attack."
-    : "One or more blockers are taxed. Pay the total or remove them from the block.";
+    ? t("combatTax.subtitleAttack")
+    : t("combatTax.subtitleBlock");
   const declineLabel = isAttacking
-    ? "Decline (remove taxed attackers)"
-    : "Decline (remove taxed blockers)";
+    ? t("combatTax.declineAttack")
+    : t("combatTax.declineBlock");
 
   return (
     <DialogShell
-      eyebrow="Combat Tax"
+      eyebrow={t("combatTax.eyebrow")}
       title={title}
       subtitle={subtitle}
       size="md"
@@ -55,21 +60,26 @@ function CombatTaxContent({ data }: { data: CombatTaxPayment["data"] }) {
         {/* Per-creature breakdown */}
         <div className="flex flex-col gap-1 rounded-[12px] border border-white/5 bg-white/2 px-3 py-2">
           <div className="text-[0.62rem] uppercase tracking-[0.18em] text-slate-500">
-            Per-Creature Breakdown
+            {t("combatTax.perCreatureBreakdown")}
           </div>
           {data.per_creature.map(([objectId, cost]) => (
             <CreatureCostRow
               key={objectId}
               objectId={objectId}
               cost={cost}
-              name={objects?.[objectId]?.name ?? `Creature ${objectId}`}
+              name={
+                objects?.[objectId]?.name ??
+                t("combatTax.creatureFallback", { id: objectId })
+              }
             />
           ))}
         </div>
 
         {/* Total */}
         <div className="flex items-center justify-between rounded-[12px] border border-cyan-400/20 bg-cyan-500/8 px-3 py-2">
-          <span className="text-sm font-semibold text-cyan-100">Total</span>
+          <span className="text-sm font-semibold text-cyan-100">
+            {t("combatTax.total")}
+          </span>
           <ManaCostSymbols cost={data.total_cost} />
         </div>
 
@@ -80,7 +90,7 @@ function CombatTaxContent({ data }: { data: CombatTaxPayment["data"] }) {
           }
           className="rounded-[16px] border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 text-left transition hover:bg-cyan-500/20 hover:ring-1 hover:ring-cyan-400/40"
         >
-          <span className="font-semibold text-white">Pay</span>
+          <span className="font-semibold text-white">{t("combatTax.pay")}</span>
           <span className="ml-2">
             <ManaCostSymbols cost={data.total_cost} />
           </span>

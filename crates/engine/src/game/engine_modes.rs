@@ -206,7 +206,10 @@ fn handle_activated_mode_choice(
         }
     }
 
-    events.push(GameEvent::AbilityActivated { source_id });
+    events.push(GameEvent::AbilityActivated {
+        player_id: player,
+        source_id,
+    });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     if let Some(index) = ability_index {
         super::casting_targets::emit_keyword_ability_event_if_tagged(

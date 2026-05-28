@@ -1,6 +1,6 @@
 use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::counter::CounterType;
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
 
@@ -63,6 +63,12 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+        });
+        // CR 701.34a: Emit player-action event so proliferate triggers fire
+        // even when there are no eligible targets.
+        events.push(GameEvent::PlayerPerformedAction {
+            player_id: ability.controller,
+            action: PlayerActionKind::Proliferate,
         });
         return Ok(());
     }

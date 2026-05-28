@@ -17,6 +17,7 @@ import {
 import type { AIDifficulty } from "../constants/ai";
 import { DEFAULT_AI_DIFFICULTY } from "../constants/ai";
 import type { DeckArchetype } from "../services/engineRuntime";
+import { detectInitialLanguage, SUPPORTED_LNGS, type SupportedLng } from "../i18n/resources";
 
 /** Literal sentinel for "any deck" in AI deck selection. Mirrors `DeckChoice::Random`
  *  naming so the preference value is self-describing without a nullable field. */
@@ -54,6 +55,15 @@ export type LogDefaultState = "open" | "closed";
 export type BattlefieldCardDisplay = "art_crop" | "full_card";
 export type TapRotation = "mtga" | "classic";
 export type SpellPaymentMode = "auto" | "manual";
+/** Which screen edge the resolving-stack panel docks to (and collapses toward).
+ *  User-chosen so a player can keep the stack off whichever side of the
+ *  battlefield they care about — e.g. dock left to free the right action rail. */
+export type StackDockSide = "left" | "right";
+/** Opponent HUD density in the multi-opponent rail. "comfortable" = the full
+ *  two-row tab (name + life over the board-composition breakdown); "compact" =
+ *  a single thin row (small avatar + name + life) that trades the breakdown for
+ *  vertical real-estate. Player-toggleable from the rail. */
+export type OpponentHudDensity = "comfortable" | "compact";
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
@@ -94,6 +104,7 @@ const LEGACY_COMBAT_PACING_MULTIPLIERS: Record<string, number> = {
  *  `resetAllPreferences`, so they can never drift apart. */
 function buildDefaultPreferences(): PreferencesState {
   return {
+    language: detectInitialLanguage(),
     cardSize: "medium",
     hudLayout: "inline",
     followActiveOpponent: true,
@@ -117,6 +128,8 @@ function buildDefaultPreferences(): PreferencesState {
     spellPaymentMode: "auto",
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
+    stackDockSide: "right",
+    opponentHudDensity: "comfortable",
     aiSeats: [defaultAiSeat()],
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
@@ -126,12 +139,17 @@ function buildDefaultPreferences(): PreferencesState {
     lastPlayerCount: 2,
     experimentalFeatures: false,
     dismissedFlowHelpNudge: false,
+    dismissedSandboxToolsNudge: false,
     artChain: [] as ArtChainEntry[],
     artOverrides: {} as Record<string, CardArtOverride>,
   };
 }
 
 interface PreferencesState {
+  /** Active UI language. Drives react-i18next chrome translation (the store is the
+   *  single source of truth; `i18n/index.ts` mirrors changes). Closed union — not
+   *  the open `(string & {})` pattern, since the supported set is fixed. */
+  language: SupportedLng;
   cardSize: CardSizePreference;
   hudLayout: HudLayout;
   followActiveOpponent: boolean;
@@ -164,6 +182,10 @@ interface PreferencesState {
    *  previewing that opponent's nonland permanents. Disable for a quieter
    *  HUD — focus is still reachable via tab click. */
   battlefieldPeekOnHover: boolean;
+  /** Screen edge the stack panel docks to and collapses toward. */
+  stackDockSide: StackDockSide;
+  /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
+  opponentHudDensity: OpponentHudDensity;
   aiSeats: AiSeatPref[];
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
@@ -173,14 +195,18 @@ interface PreferencesState {
   lastPlayerCount: number;
   experimentalFeatures: boolean;
   dismissedFlowHelpNudge: boolean;
+  dismissedSandboxToolsNudge: boolean;
   artChain: ArtChainEntry[];
   artOverrides: Record<string, CardArtOverride>;
 }
 
 interface PreferencesActions {
+  setLanguage: (lng: SupportedLng) => void;
   setCardSize: (size: CardSizePreference) => void;
   setHudLayout: (layout: HudLayout) => void;
   setFollowActiveOpponent: (enabled: boolean) => void;
+  setStackDockSide: (side: StackDockSide) => void;
+  setOpponentHudDensity: (density: OpponentHudDensity) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
@@ -222,6 +248,7 @@ interface PreferencesActions {
   setLastPlayerCount: (count: number) => void;
   setExperimentalFeatures: (enabled: boolean) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
+  setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
   addArtChainEntry: (entry: ArtChainEntry) => void;
   removeArtChainEntry: (index: number) => void;
   moveArtChainEntry: (fromIndex: number, toIndex: number) => void;
@@ -269,9 +296,13 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     (set) => ({
       ...buildDefaultPreferences(),
 
+      // Store owns the language; i18n/index.ts subscribes and mirrors it into i18next.
+      setLanguage: (lng) => set({ language: lng }),
       setCardSize: (size) => set({ cardSize: size }),
       setHudLayout: (layout) => set({ hudLayout: layout }),
       setFollowActiveOpponent: (enabled) => set({ followActiveOpponent: enabled }),
+      setStackDockSide: (side) => set({ stackDockSide: side }),
+      setOpponentHudDensity: (density) => set({ opponentHudDensity: density }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
@@ -349,6 +380,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
       setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
+      setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),
       addArtChainEntry: (entry) =>
         set((state) => {
           const isDuplicate = state.artChain.some((e) =>
@@ -395,7 +427,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 8,
+      version: 11,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -410,6 +442,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v5 → v6: Replace artStrategy (single enum) with artChain (ordered preference list).
       // v6 → v7: Add aiBracketFilter; legacy stores default to empty (filter off).
       // v7 → v8: Add spellPaymentMode; legacy stores keep default auto.
+      // v8 → v9: Add language; legacy/invalid values fall back to the
+      //          browser-detected default so existing users keep their locale.
+      // v9 → v10: Add stackDockSide; legacy stores default to right (the prior
+      //          fixed behavior).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -501,6 +537,27 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
 
         if (version < 8) {
           migrated = { ...migrated, spellPaymentMode: "auto" };
+        }
+
+        if (version < 9) {
+          const lng = (migrated as { language?: unknown }).language;
+          migrated = {
+            ...migrated,
+            language:
+              typeof lng === "string" && (SUPPORTED_LNGS as readonly string[]).includes(lng)
+                ? lng
+                : detectInitialLanguage(),
+          };
+        }
+
+        if (version < 10) {
+          migrated = { ...migrated, stackDockSide: "right" };
+        }
+
+        // v10 → v11: Add opponentHudDensity; legacy stores default to the
+        // comfortable two-row rail (the prior fixed behavior).
+        if (version < 11) {
+          migrated = { ...migrated, opponentHudDensity: "comfortable" };
         }
 
         return migrated;

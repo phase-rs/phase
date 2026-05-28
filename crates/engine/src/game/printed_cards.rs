@@ -1,7 +1,7 @@
 use crate::database::CardDatabase;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues, Effect, PtValue,
-    ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition,
+    AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues, CounterSourceRider,
+    Effect, PtValue, ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
 use crate::types::counter::CounterType;
@@ -86,6 +86,9 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_color = color;
     obj.base_characteristics_initialized = true;
     obj.printed_ref = printed_ref_from_face(card_face);
+    // Display-identity baseline: the layer reset restores `printed_ref` from
+    // this each pass (see `game_object::base_printed_ref`).
+    obj.base_printed_ref = obj.printed_ref.clone();
     obj.source_related_token_ids = card_face.metadata.related_token_ids.clone();
     obj.modal = card_face.modal.clone();
     obj.additional_cost = card_face.additional_cost.clone();
@@ -198,6 +201,9 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
         Arc::new(back_face.static_definitions.iter_all().cloned().collect());
     obj.base_color = back_face.color;
     obj.base_characteristics_initialized = true;
+    // Display-identity baseline tracks the now-displayed face. Cloned BEFORE the
+    // move below, which consumes `back_face.printed_ref`.
+    obj.base_printed_ref = back_face.printed_ref.clone();
     obj.printed_ref = back_face.printed_ref;
     obj.modal = back_face.modal;
     obj.additional_cost = back_face.additional_cost;
@@ -406,7 +412,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         ContinuousModification::GrantAbility { definition } => walk_ability_def(definition, out),
         ContinuousModification::GrantTrigger { trigger } => walk_trigger(trigger, out),
         ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
-        ContinuousModification::CopyValues { values } => walk_copiable_values(values, out),
+        ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
         // Remaining modifications carry no nested ability/effect carriers.
         ContinuousModification::SetName { .. }
         | ContinuousModification::AddPower { .. }
@@ -575,10 +581,11 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         }
         // Carries a nested ReplacementDefinition whose execute/decline/cost may conjure.
         Effect::AddTargetReplacement { replacement, .. } => walk_replacement(replacement, out),
-        // Counter's `source_static` applies a static to the countered source; it
-        // may grant an ability that conjures.
-        Effect::Counter { source_static, .. } => {
-            if let Some(static_def) = source_static {
+        // Counter's `source_rider` may apply a static to the countered source
+        // (LosesAbilities) that grants an ability that conjures. The Destroy
+        // rider carries no static.
+        Effect::Counter { source_rider, .. } => {
+            if let Some(CounterSourceRider::LosesAbilities { static_def }) = source_rider {
                 walk_static(static_def, out);
             }
         }
@@ -630,6 +637,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GainControl { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }
@@ -741,6 +749,10 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
+        | Effect::CreateDamageReplacement { .. }
+        // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
+        // ContinuousModifications, never conjured card names.
+        | Effect::ReturnAsAura { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -1865,7 +1877,7 @@ mod tests {
         };
         walk_effect(&emblem, &mut names);
 
-        // Counter.source_static may grant an ability that conjures.
+        // Counter.source_rider (LosesAbilities) may grant an ability that conjures.
         let mut counter_static = StaticDefinition::new(StaticMode::Continuous);
         counter_static
             .modifications
@@ -1874,7 +1886,9 @@ mod tests {
             });
         let counter = Effect::Counter {
             target: TargetFilter::Any,
-            source_static: Some(counter_static),
+            source_rider: Some(CounterSourceRider::LosesAbilities {
+                static_def: Box::new(counter_static),
+            }),
         };
         walk_effect(&counter, &mut names);
 

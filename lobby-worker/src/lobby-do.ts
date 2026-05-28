@@ -11,12 +11,15 @@
 //   - snapshots the broker to storage after mutations (a hibernated DO loses
 //     in-memory state), and
 //   - drives the reaper from a DO alarm (no tokio interval in a Worker).
+// Public-lobby name moderation is intentionally applied here, not in the shared
+// Rust broker, so self-hosted native servers keep their own policy surface.
 //
 // Mirrors the engine -> engine-wasm -> React-adapter pattern: the WASM owns the
 // logic, the host language is a serialization boundary with zero game logic.
 
 import wasmModule from "./broker-wasm-pkg/broker_bg.wasm";
 import { initSync, WasmBroker } from "./broker-wasm-pkg/broker.js";
+import { moderationErrorForLobbyFrame } from "./name-filter";
 import { PROTOCOL_VERSION } from "./protocol";
 
 // Instantiate the broker WASM once per isolate, at top level (CF imports `.wasm`
@@ -103,6 +106,9 @@ export class LobbyDO {
     this.sendHello(server);
     // A new connection changes the live player count for existing subscribers.
     this.broadcastPlayerCount();
+    // Lobby occupancy heartbeat — once per connection (not per frame). Lets you
+    // see usage and spot connection leaks (count that never returns to 0).
+    console.log({ event: "lobby_connect", players: this.ctx.getWebSockets().length });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -112,6 +118,12 @@ export class LobbyDO {
     const broker = await this.loadBroker();
     const conn = ws.deserializeAttachment() ?? DEFAULT_CONN;
     const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+    const moderationError = moderationErrorForLobbyFrame(text);
+    if (moderationError) {
+      ws.send(JSON.stringify({ type: "Error", data: { message: moderationError } }));
+      console.warn({ event: "lobby_name_rejected" });
+      return;
+    }
 
     const result = JSON.parse(broker.handle(JSON.stringify(conn), text, Date.now())) as CallResult;
 
@@ -142,11 +154,16 @@ export class LobbyDO {
     this.interpret(ws, result.outbounds);
     await this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot());
     // Player-count decrement+broadcast is shell-owned on close (the broker
-    // cannot know the socket set).
+    // cannot know the socket set). getWebSockets() already excludes the closing
+    // socket, so this count reflects who remains.
     this.broadcastPlayerCount();
+    console.log({ event: "lobby_disconnect", players: this.ctx.getWebSockets().length });
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
+    // Distinguish abnormal closes (protocol/transport error) from clean ones —
+    // teardown is identical, but a spike here points at a client/network fault.
+    console.warn({ event: "lobby_ws_error" });
     await this.webSocketClose(ws);
   }
 
@@ -159,6 +176,11 @@ export class LobbyDO {
     ) as OutboundDto[];
     // Reaper emits only ToSubscribers(LobbyGameRemoved) — no connection scope.
     for (const o of outbounds) this.dispatchOutbound(null, o);
+    // One log per non-empty sweep (≤ once/REAP_INTERVAL_MS); count == entries
+    // reaped, since each removal emits exactly one LobbyGameRemoved.
+    if (outbounds.length > 0) {
+      console.log({ event: "lobby_reaped", count: outbounds.length });
+    }
     await this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot());
     // Keep reaping while entries remain; an empty lobby stops rescheduling so
     // the DO can hibernate fully.

@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { onNonFatalPanic } from "../../game/engineRecovery";
 
@@ -32,6 +34,7 @@ interface PanicSnapshot {
  * is worth re-surfacing.
  */
 export function NonFatalPanicToast() {
+  const { t } = useTranslation("game");
   const [snapshot, setSnapshot] = useState<PanicSnapshot | null>(null);
   const lastShownRef = useRef<{ panic: string | null; at: number } | null>(null);
 
@@ -62,7 +65,7 @@ export function NonFatalPanicToast() {
     sessionStorage.setItem(SESSION_SUPPRESS_KEY, "1");
     setSnapshot(null);
   };
-  const reportUrl = buildReportUrl(snapshot);
+  const reportUrl = buildReportUrl(snapshot, t);
 
   return (
     <div
@@ -71,29 +74,32 @@ export function NonFatalPanicToast() {
     >
       <div className="mb-2 flex items-start justify-between gap-3">
         <h3 className="text-sm font-semibold text-amber-200">
-          Engine warning (non-fatal)
+          {t("nonFatalPanic.heading")}
         </h3>
         <button
           type="button"
           onClick={dismiss}
-          aria-label="Dismiss"
+          aria-label={t("nonFatalPanic.dismiss")}
           className="text-gray-500 hover:text-gray-300"
         >
           &times;
         </button>
       </div>
       <p className="mb-3 text-xs text-gray-400">
-        phase.rs hit an internal warning but recovered. The game is still
-        safe to continue. Please{" "}
-        <a
-          href={reportUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-amber-400 underline hover:text-amber-300"
-        >
-          report it
-        </a>{" "}
-        so we can investigate.
+        <Trans
+          i18nKey="nonFatalPanic.body"
+          t={t}
+          components={{
+            report: (
+              <a
+                href={reportUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-amber-400 underline hover:text-amber-300"
+              />
+            ),
+          }}
+        />
       </p>
       <div className="flex justify-end">
         <button
@@ -101,7 +107,7 @@ export function NonFatalPanicToast() {
           onClick={suppressForSession}
           className="text-[11px] text-gray-500 underline hover:text-gray-300"
         >
-          Don&rsquo;t show again this session
+          {t("nonFatalPanic.dontShowAgain")}
         </button>
       </div>
     </div>
@@ -110,9 +116,9 @@ export function NonFatalPanicToast() {
 
 const MAX_DIAGNOSTIC_CHARS_IN_URL = 4000;
 
-function buildReportUrl({ reason, panic }: PanicSnapshot): string {
+function buildReportUrl({ reason, panic }: PanicSnapshot, t: TFunction<"game">): string {
   const titleSeed = panic ? extractPanicSummary(panic) : reason;
-  const title = `Non-fatal engine panic: ${titleSeed}`;
+  const title = t("nonFatalPanic.reportTitle", { summary: titleSeed });
   const diagnostic = [
     `Build: v${__APP_VERSION__} (${__BUILD_HASH__})`,
     `Diagnostic tag: ${reason}`,
@@ -125,7 +131,7 @@ function buildReportUrl({ reason, panic }: PanicSnapshot): string {
     diagnostic.length > MAX_DIAGNOSTIC_CHARS_IN_URL
       ? `${diagnostic.slice(0, MAX_DIAGNOSTIC_CHARS_IN_URL)}\n[…truncated]`
       : diagnostic;
-  const body = `**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n\`\`\`\n${truncated}\n\`\`\``;
+  const body = t("nonFatalPanic.reportWhatHappened", { diagnostic: truncated });
   const params = new URLSearchParams({
     title,
     body,

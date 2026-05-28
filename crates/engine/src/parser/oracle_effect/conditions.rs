@@ -9,6 +9,7 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
+use super::super::oracle_nom::condition::inject_controller_you;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
@@ -58,9 +59,13 @@ fn type_filter_references_subtype(filter: &TypeFilter) -> bool {
 
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
-    if tag::<_, _, OracleError<'_>>("if ")
-        .parse(lower.as_str())
-        .is_err()
+    if alt((
+        tag::<_, _, OracleError<'_>>("then, if "),
+        tag("then if "),
+        tag("if "),
+    ))
+    .parse(lower.as_str())
+    .is_err()
     {
         return None;
     }
@@ -127,7 +132,15 @@ pub(crate) fn strip_leading_general_conditional(
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
-            value((), tag("if ")).parse(i)
+            value(
+                (),
+                alt((
+                    tag::<_, _, OracleError<'_>>("then, if "),
+                    tag("then if "),
+                    tag("if "),
+                )),
+            )
+            .parse(i)
         })
         .map(|((), rest)| rest)
         .unwrap_or(&condition_fragment)
@@ -362,23 +375,32 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     if let Some((condition, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
             value(AbilityCondition::WhenYouDo, tag("when you do, ")),
-            value(AbilityCondition::IfAPlayerDoes, tag("if a player does, ")),
-            value(AbilityCondition::IfAPlayerDoes, tag("if they do, ")),
-            value(AbilityCondition::IfYouDo, tag("if that player does, ")),
-            value(AbilityCondition::IfYouDo, tag("if the player does, ")),
+            value(
+                AbilityCondition::effect_performed(),
+                tag("if a player does, "),
+            ),
+            value(AbilityCondition::effect_performed(), tag("if they do, ")),
+            value(
+                AbilityCondition::effect_performed(),
+                tag("if that player does, "),
+            ),
+            value(
+                AbilityCondition::effect_performed(),
+                tag("if the player does, "),
+            ),
             value(
                 AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::IfYouDo),
+                    condition: Box::new(AbilityCondition::effect_performed()),
                 },
                 tag("if that player doesn't, "),
             ),
             value(
                 AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::IfYouDo),
+                    condition: Box::new(AbilityCondition::effect_performed()),
                 },
                 tag("if the player doesn't, "),
             ),
-            value(AbilityCondition::IfYouDo, tag("if you do, ")),
+            value(AbilityCondition::effect_performed(), tag("if you do, ")),
         ))
         .parse(input)
     }) {
@@ -1355,6 +1377,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         return Some(condition);
     }
 
+    if let Some(condition) = parse_controller_controlled_as_cast_condition_text(text) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_cast_during_phase_condition_text(text) {
         return Some(condition);
     }
@@ -1429,6 +1455,33 @@ fn parse_urza_land_type(input: &str) -> super::super::oracle_nom::error::OracleR
         value("Tower".to_string(), tag("tower")),
     ))
     .parse(input)
+}
+
+fn parse_controller_controlled_as_cast_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(parse_controller_controlled_as_cast_condition).parse(input)
+    })
+}
+
+fn parse_controller_controlled_as_cast_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("you controlled ").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag("as you cast this spell").parse(remainder.trim_start())?;
+    Ok((
+        rest,
+        AbilityCondition::ControllerControlledMatchingAsCast {
+            filter: inject_controller_you(filter),
+        },
+    ))
 }
 
 fn parse_cast_during_phase_condition_text(text: &str) -> Option<AbilityCondition> {
@@ -1722,16 +1775,36 @@ pub(super) fn try_parse_dig_instead_alternative(
 
     // Strip "you may instead " / "instead " / "you may " from the body to get
     // the bare reveal-from-among clause. Composed with nom combinators; the
-    // "you may instead" arm is first so it wins over "you may ".
+    // "you may instead" arm is first so it wins over "you may ". Some cards
+    // print the replacement marker at the end instead ("put two ... instead"),
+    // so accept a trailing marker as the same alternative-selection grammar.
     let trimmed_body = raw_body.trim_end_matches('.').trim();
     let body_lower = trimmed_body.to_lowercase();
-    let ((), body_rest) = nom_on_lower(trimmed_body, &body_lower, |i| {
-        value(
-            (),
-            alt((tag("you may instead "), tag("instead "), tag("you may "))),
-        )
+    let (prefix_had_instead, body_rest) = nom_on_lower(trimmed_body, &body_lower, |i| {
+        alt((
+            value(true, tag::<_, _, OracleError<'_>>("you may instead ")),
+            value(true, tag("instead ")),
+            value(false, tag("you may ")),
+        ))
         .parse(i)
-    })?;
+    })
+    .unwrap_or((false, trimmed_body));
+
+    let body_rest_lower = body_rest.to_lowercase();
+    let body_rest_pair = TextPair::new(body_rest, &body_rest_lower);
+    let (body_rest, suffix_had_instead) =
+        if let Some((before, after)) = body_rest_pair.split_around(" instead") {
+            if after.original.trim().is_empty() {
+                (before.original.trim(), true)
+            } else {
+                (body_rest, false)
+            }
+        } else {
+            (body_rest, false)
+        };
+    if !prefix_had_instead && !suffix_had_instead {
+        return None;
+    }
 
     let body_rest_lower = body_rest.to_lowercase();
     let alt_continuation = parse_dig_from_among(&body_rest_lower, body_rest)?;
@@ -1746,7 +1819,8 @@ pub(super) fn try_parse_dig_instead_alternative(
         return None;
     };
 
-    let condition = try_nom_condition_as_ability_condition(cond_text, ctx)
+    let condition = parse_additional_cost_instead_condition_fragment(cond_text)
+        .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
         .or_else(|| parse_condition_text(cond_text))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
 
@@ -1769,6 +1843,25 @@ pub(super) fn try_parse_dig_instead_alternative(
     let mut result = AbilityDefinition::new(kind, alt_effect);
     result.condition = Some(condition);
     Some(result)
+}
+
+fn parse_additional_cost_instead_condition_fragment(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().to_lowercase();
+    let parsed = all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("this spell was kicked"),
+        tag("it was kicked"),
+        tag("this spell was bargained"),
+        tag("it was bargained"),
+        tag("this spell was beheld"),
+        tag("it was beheld"),
+        tag("this spell's additional cost was paid"),
+        tag("its additional cost was paid"),
+        tag("evidence was collected"),
+        tag("the gift was promised"),
+    )))
+    .parse(lower.as_str())
+    .is_ok();
+    parsed.then_some(AbilityCondition::AdditionalCostPaidInstead)
 }
 
 fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityCondition> {
@@ -2048,6 +2141,11 @@ pub(crate) fn static_condition_to_ability_condition(
         }
         StaticCondition::DevotionGE { .. }
         | StaticCondition::ChosenColorIs { .. }
+        // CR 614.12c + CR 607.2d: Anchor-word linked statics are evaluated
+        // by `layers::evaluate_condition_with_context`; no effect-resolution
+        // `AbilityCondition` equivalent (the gate only makes sense for a
+        // static ability bound to the persisted source).
+        | StaticCondition::ChosenLabelIs { .. }
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
@@ -2207,7 +2305,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
         if rest.trim().is_empty() {
             return Some(AbilityCondition::Or {
                 conditions: vec![
-                    AbilityCondition::IfYouDo,
+                    AbilityCondition::effect_performed(),
                     static_condition_to_ability_condition(&condition, ctx)?,
                 ],
             });
@@ -2227,7 +2325,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
             .parse(lower.as_str())
             .is_ok()
     {
-        return Some(AbilityCondition::IfYouDo);
+        return Some(AbilityCondition::EventOutcomeWon);
     }
 
     if alt((
@@ -2240,7 +2338,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     .is_ok()
     {
         return Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::IfYouDo),
+            condition: Box::new(AbilityCondition::effect_performed()),
         });
     }
 
@@ -3267,13 +3365,13 @@ mod tests {
     }
 
     #[test]
-    fn leading_you_win_maps_to_if_you_do_for_clash() {
+    fn leading_you_win_maps_to_event_outcome_won() {
         let (condition, body) = strip_leading_general_conditional(
             "If you win, put a +1/+1 counter on this creature.",
             &mut ParseContext::default(),
         );
         assert_eq!(body, "put a +1/+1 counter on this creature.");
-        assert_eq!(condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(condition, Some(AbilityCondition::EventOutcomeWon));
     }
 
     #[test]
@@ -3286,7 +3384,7 @@ mod tests {
         assert_eq!(
             condition,
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::IfYouDo)
+                condition: Box::new(AbilityCondition::effect_performed())
             })
         );
     }

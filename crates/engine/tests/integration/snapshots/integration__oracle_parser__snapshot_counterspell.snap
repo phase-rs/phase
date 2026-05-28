@@ -11,8 +11,7 @@ expression: result
         "type": "Counter",
         "target": {
           "type": "StackSpell"
-        },
-        "source_static": null
+        }
       },
       "cost": null,
       "sub_ability": null,

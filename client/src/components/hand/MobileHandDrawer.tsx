@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -15,6 +16,7 @@ import {
 } from "../../viewmodel/cardActionChoice.ts";
 
 export function MobileHandDrawer() {
+  const { t } = useTranslation("game");
   const isOpen = useUiStore((s) => s.mobileHandOpen);
   const setOpen = useUiStore((s) => s.setMobileHandOpen);
   const playerId = usePerspectivePlayerId();
@@ -23,6 +25,7 @@ export function MobileHandDrawer() {
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const openDebugContextMenu = useUiStore((s) => s.openDebugContextMenu);
 
   const canActForWaitingState = useCanActForWaitingState();
   const hasPriority = useGameStore((s) =>
@@ -55,6 +58,16 @@ export function MobileHandDrawer() {
   const playableObjectIds = useMemo(() => {
     return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
   }, [legalActionsByObject]);
+
+  // Close the drawer first so the context menu isn't rendered beneath the
+  // drawer's full-screen panel; coordinates flow through from the tap.
+  const handleDebugOpen = useCallback(
+    (objectId: number, x: number, y: number) => {
+      setOpen(false);
+      openDebugContextMenu({ objectId, x, y });
+    },
+    [setOpen, openDebugContextMenu],
+  );
 
   const playCard = useCallback(
     (objectId: number) => {
@@ -122,13 +135,13 @@ export function MobileHandDrawer() {
           >
             <div className="flex shrink-0 items-center justify-between px-4 pt-3 pb-2">
               <span className="text-sm font-semibold text-white/80">
-                Hand ({handObjects.length})
+                {t("hand.handTitle", { count: handObjects.length })}
               </span>
               <button
                 onClick={() => setOpen(false)}
                 className="rounded-lg px-3 py-1 text-xs font-medium text-white/70 hover:bg-white/10 active:bg-white/20"
               >
-                Close
+                {t("common:actions.close")}
               </button>
             </div>
 
@@ -147,6 +160,7 @@ export function MobileHandDrawer() {
                     isPlayable={isPlayable}
                     hasPriority={hasPriority}
                     onPlay={playCard}
+                    onDebugOpen={handleDebugOpen}
                   />
                 );
               })}
@@ -165,6 +179,7 @@ interface DrawerCardProps {
   isPlayable: boolean;
   hasPriority: boolean;
   onPlay: (objectId: number) => void;
+  onDebugOpen: (objectId: number, x: number, y: number) => void;
 }
 
 const DrawerCard = memo(function DrawerCard({
@@ -174,6 +189,7 @@ const DrawerCard = memo(function DrawerCard({
   isPlayable,
   hasPriority,
   onPlay,
+  onDebugOpen,
 }: DrawerCardProps) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
@@ -188,18 +204,30 @@ const DrawerCard = memo(function DrawerCard({
     setPreviewSticky(true);
   });
 
-  const handleClick = useCallback(() => {
-    if (longPressFired.current) {
-      longPressFired.current = false;
-      return;
-    }
-    if (isPlayable) {
-      onPlay(objectId);
-    } else {
-      inspectObject(objectId);
-      setPreviewSticky(true);
-    }
-  }, [objectId, isPlayable, onPlay, inspectObject, setPreviewSticky, longPressFired]);
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (longPressFired.current) {
+        longPressFired.current = false;
+        return;
+      }
+      // Click-mode (sandbox debug interaction) routes the tap to the debug
+      // context menu instead of the play/inspect path. The desktop fanned
+      // hand handles this in `PlayerHand.handleCardClick`; mobile users only
+      // see this drawer, so the same branch must live here too.
+      if (useUiStore.getState().debugInteractionMode) {
+        e.stopPropagation();
+        onDebugOpen(objectId, e.clientX, e.clientY);
+        return;
+      }
+      if (isPlayable) {
+        onPlay(objectId);
+      } else {
+        inspectObject(objectId);
+        setPreviewSticky(true);
+      }
+    },
+    [objectId, isPlayable, onPlay, onDebugOpen, inspectObject, setPreviewSticky, longPressFired],
+  );
 
   const glowClass = hasPriority && isPlayable
     ? "ring-2 ring-cyan-400 shadow-[0_0_12px_3px_rgba(34,211,238,0.5)]"
