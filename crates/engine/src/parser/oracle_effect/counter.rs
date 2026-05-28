@@ -600,6 +600,11 @@ pub(super) fn try_parse_move_counters<'a>(
 
     Some((
         Effect::MoveCounters {
+            // CR 122.8: when a leaves-the-battlefield trigger puts a departed
+            // object's counters onto another object, the same number/kinds the
+            // object had are placed on the destination — read from the leaving
+            // object's last-known information (CR 400.7), so the source must be
+            // the triggering object, not the ability source.
             source: resolve_it_pronoun(ctx),
             counter_type: None,
             count: None,
