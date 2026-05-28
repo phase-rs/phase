@@ -3915,6 +3915,8 @@ mod tests {
 
         state.waiting_for = WaitingFor::Priority { player: p0 };
         state.priority_player = p0;
+        state.active_player = p0;
+        state.phase = crate::types::Phase::PreCombatMain;
 
         let actions = candidate_actions(&state);
         let has_prepared_cast = actions.iter().any(|c| {
