@@ -2,13 +2,12 @@ use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::effects::prepare::open_copy_target_selection;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{
-    CastingVariant, GameState, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
-};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind, WaitingFor};
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::zones::Zone;
 
 /// CR 707.12: Cast a copy of a card/object. The copy is created from the
@@ -34,9 +33,13 @@ pub fn resolve(
 
     if source_ids.is_empty() && references_tracked_set(target_filter) {
         let ctx = FilterContext::from_ability(ability);
+        // CR 608.2c: Resolve the tracked-set sentinel from the resolving effect's
+        // last known context before collecting the affected objects.
         let effective_filter =
             crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
-        source_ids = crate::game::targeting::latest_tracked_set_id(state)
+        let tracked_set_id = tracked_set_id_from_filter(&effective_filter)
+            .or_else(|| crate::game::targeting::latest_tracked_set_id(state));
+        source_ids = tracked_set_id
             .and_then(|id| state.tracked_object_sets.get(&id).cloned())
             .unwrap_or_default()
             .into_iter()
@@ -51,7 +54,7 @@ pub fn resolve(
                 cost: cost.clone(),
             };
             resume.sub_ability = None;
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(resume)));
+            super::append_to_pending_continuation(state, Some(Box::new(resume)));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: source_ids,
@@ -117,6 +120,17 @@ fn references_tracked_set(filter: &TargetFilter) -> bool {
     }
 }
 
+fn tracked_set_id_from_filter(filter: &TargetFilter) -> Option<TrackedSetId> {
+    match filter {
+        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => Some(*id),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(tracked_set_id_from_filter)
+        }
+        TargetFilter::Not { filter } => tracked_set_id_from_filter(filter),
+        _ => None,
+    }
+}
+
 fn cast_one_copy(
     state: &mut GameState,
     source_id: ObjectId,
@@ -133,15 +147,17 @@ fn cast_one_copy(
     let copy_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
 
-    let ability_def = source.abilities.first().cloned();
+    let ability_def = spell_ability_definition(&source.abilities);
     let mut copy = source;
     copy.id = copy_id;
     copy.controller = ability.controller;
     copy.owner = ability.controller;
+    // CR 707.12 + CR 601.2a: The copy is created and cast as a spell on the stack.
     copy.zone = Zone::Stack;
-    copy.is_token = true;
+    copy.is_token = false;
     copy.tapped = false;
     copy.prepared = None;
+    // CR 707.12: The copy is created in the same zone as the source object before casting.
     copy.cast_from_zone = Some(origin_zone);
     copy.cost_x_paid = None;
     copy.kickers_paid.clear();
@@ -162,6 +178,7 @@ fn cast_one_copy(
             card_id,
             ability: resolved,
             casting_variant: CastingVariant::Normal,
+            // CR 118.9 + CR 601.2f: "Without paying its mana cost" is an alternative cost.
             actual_mana_spent: 0,
         },
     });
@@ -182,6 +199,14 @@ fn cast_one_copy(
     }
 
     Ok(copy_id)
+}
+
+fn spell_ability_definition(abilities: &[AbilityDefinition]) -> Option<AbilityDefinition> {
+    abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Spell)
+        .or_else(|| abilities.first())
+        .cloned()
 }
 
 #[cfg(test)]
@@ -247,7 +272,7 @@ mod tests {
         let copy_id = state.stack.back().expect("copy on stack").id;
         let copy = state.objects.get(&copy_id).expect("copy object exists");
         assert_eq!(copy.zone, Zone::Stack);
-        assert!(copy.is_token);
+        assert!(!copy.is_token);
         assert_eq!(copy.owner, PlayerId(0));
         assert_eq!(copy.controller, PlayerId(0));
         assert!(matches!(
@@ -299,5 +324,90 @@ mod tests {
         }
         assert!(state.pending_continuation.is_some());
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn tracked_set_choice_uses_resolved_filter_id_not_latest_set() {
+        let mut state = GameState::new_two_player(7);
+        let first = add_exiled_spell_card(&mut state, "Opt");
+        let latest = add_exiled_spell_card(&mut state, "Consider");
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![first]);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(2), vec![latest]);
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CastCopyOfCard {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(1),
+                },
+                cost: ManaCost::zero(),
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).expect("choice opens");
+
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert_eq!(cards, &vec![first]);
+            }
+            other => panic!("expected ChooseFromZoneChoice, got {other:?}"),
+        }
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn cast_copy_uses_spell_ability_when_non_spell_ability_is_first() {
+        let mut state = GameState::new_two_player(7);
+        let source_id = add_exiled_spell_card(&mut state, "Lightning Bolt");
+        let source = state
+            .objects
+            .get_mut(&source_id)
+            .expect("source object exists");
+        source.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "activated ability".to_string(),
+                    description: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "spell ability".to_string(),
+                    description: None,
+                },
+            ),
+        ]);
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CastCopyOfCard {
+                target: TargetFilter::None,
+                cost: ManaCost::zero(),
+            },
+            vec![TargetRef::Object(source_id)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).expect("cast copy resolves");
+
+        let entry = state.stack.back().expect("copy on stack");
+        match &entry.kind {
+            StackEntryKind::Spell {
+                ability: Some(resolved),
+                ..
+            } => assert!(matches!(
+                resolved.effect,
+                Effect::Unimplemented { ref name, .. } if name == "spell ability"
+            )),
+            other => panic!("expected spell with resolved ability, got {other:?}"),
+        }
     }
 }
