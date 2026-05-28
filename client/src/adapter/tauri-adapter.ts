@@ -72,14 +72,15 @@ export class TauriAdapter implements EngineAdapter {
       const ar = result as ActionResult;
       return { events: ar.events ?? [], log_entries: ar.log_entries ?? [] };
     } catch (err) {
-      // The Tauri command returns Err(e.to_string()) on cEDH bracket
-      // violation, which Tauri serializes as a plain Error string. Detect
-      // both CedhBracketError variants' Display messages (DeckNotCedh →
-      // "not declared cEDH"; TooManyPlayers → "limited to 4 seats") and
-      // rethrow as a typed AdapterError so GameProvider can surface the
-      // blocking modal (matches the WASM worker path).
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("not declared cEDH") || msg.includes("limited to 4 seats")) {
+      // The Tauri `initialize_game` command returns a structured `CommandError`
+      // (`{ kind, message }`); a rejected command surfaces it as a plain
+      // serialized object, not an Error. Discriminate on `kind` so a cEDH
+      // bracket violation becomes a typed AdapterError that GameProvider can
+      // surface as the blocking modal — matching the WASM worker path's
+      // `cedh_bracket_violation` flag rather than substring-matching Display text.
+      const ce = err as { kind?: string; message?: string } | null;
+      const msg = ce?.message ?? (err instanceof Error ? err.message : String(err));
+      if (ce?.kind === "BracketViolation") {
         throw new AdapterError(
           AdapterErrorCode.BRACKET_VIOLATION,
           msg,

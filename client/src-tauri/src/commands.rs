@@ -29,13 +29,31 @@ pub struct AppState {
     pub card_db: Mutex<Option<CardDatabase>>,
 }
 
+/// Structured error for `initialize_game` so the frontend can discriminate a
+/// cEDH bracket violation without substring-matching the Rust `Display` output.
+/// Serializes as `{ "kind": "...", "message": "..." }`, mirroring the WASM
+/// bridge's `cedh_bracket_violation` envelope flag — both transports surface the
+/// violation as a typed signal the adapter maps to `BRACKET_VIOLATION`.
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "message")]
+pub enum CommandError {
+    BracketViolation(String),
+    Generic(String),
+}
+
+impl CommandError {
+    fn generic(e: impl std::fmt::Display) -> Self {
+        Self::Generic(e.to_string())
+    }
+}
+
 #[tauri::command]
 pub fn initialize_game(
     state: tauri::State<AppState>,
     deck_data: Option<DeckPayload>,
     seed: Option<u64>,
     match_config: Option<MatchConfig>,
-) -> Result<ActionResult, String> {
+) -> Result<ActionResult, CommandError> {
     let seed = seed.unwrap_or(42);
     let mut game = GameState::new_two_player(seed);
     game.match_config = match_config.unwrap_or_default();
@@ -52,7 +70,8 @@ pub fn initialize_game(
                     .chain(std::iter::once(&payload.opponent))
                     .chain(payload.ai_decks.iter())
                     .collect();
-            validate_cedh_bracket(&all_decks).map_err(|e| e.to_string())?;
+            validate_cedh_bracket(&all_decks)
+                .map_err(|e| CommandError::BracketViolation(e.to_string()))?;
         }
 
         // Canonical init sequence shared with WASM + server-core transports.
@@ -61,12 +80,12 @@ pub fn initialize_game(
         // Meld, Prepare). Frontend loads the DB once at adapter startup via
         // `load_card_database` — if that hasn't happened yet, `db` is None
         // and `load_and_hydrate_decks` logs a once-per-process warn.
-        let db_guard = state.card_db.lock().map_err(|e| e.to_string())?;
+        let db_guard = state.card_db.lock().map_err(CommandError::generic)?;
         load_and_hydrate_decks(&mut game, &payload, db_guard.as_ref());
     }
 
     let result = start_game(&mut game);
-    *state.game.lock().map_err(|e| e.to_string())? = Some(game);
+    *state.game.lock().map_err(CommandError::generic)? = Some(game);
 
     Ok(result)
 }
