@@ -2703,6 +2703,10 @@ fn parse_zone_change_object_filter_condition(input: &str) -> OracleResult<'_, Tr
 }
 
 fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
+    if let Ok((rest, condition)) = parse_zone_change_object_token_predicate(input) {
+        return Ok((rest, condition));
+    }
+
     let (rest, negated) = alt((
         value(false, tag("was ")),
         value(true, tag("wasn't ")),
@@ -2731,6 +2735,35 @@ fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, Tr
     } else {
         Ok((rest, condition))
     }
+}
+
+fn parse_zone_change_object_token_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, contracted_negation) = alt((
+        value(true, alt((tag("isn't"), tag("wasn't")))),
+        value(false, alt((tag("is"), tag("was")))),
+    ))
+    .parse(input)?;
+    let (rest, explicit_negation) = opt(preceded(space1, tag("not"))).parse(rest)?;
+    let (rest, _) = space1.parse(rest)?;
+    let (rest, _) = tag("a").parse(rest)?;
+    let (rest, _) = space1.parse(rest)?;
+    let (rest, _) = tag("token").parse(rest)?;
+
+    // CR 111.1: Tokens represent permanents that are not represented by cards.
+    let prop = if contracted_negation || explicit_negation.is_some() {
+        FilterProp::NonToken
+    } else {
+        FilterProp::Token
+    };
+
+    Ok((
+        rest,
+        TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![prop])),
+        },
+    ))
 }
 
 fn map_attachment_kind_filter_prop(input: &str) -> OracleResult<'_, FilterProp> {
@@ -10021,6 +10054,70 @@ mod tests {
                 condition: Box::new(TriggerCondition::WasPlayed)
             })
         );
+    }
+
+    #[test]
+    fn trigger_etb_self_if_not_token_attaches_zone_change_non_token_condition() {
+        let def = parse_trigger_line(
+            "When this creature enters, if it isn't a token, create two tokens that are copies of it.",
+            "Gruff Triplets",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+
+        match def.condition {
+            Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin,
+                destination,
+                filter: TargetFilter::Typed(typed),
+            }) => {
+                assert_eq!(origin, None);
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+                assert!(
+                    typed.properties.contains(&FilterProp::NonToken),
+                    "expected NonToken condition, got {typed:?}"
+                );
+            }
+            other => panic!("expected zone-change NonToken condition, got {other:?}"),
+        }
+
+        let execute = def.execute.as_ref().expect("execute ability");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::CopyTokenOf {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zone_change_token_predicate_parses_present_and_past_negation_forms() {
+        for (text, expected_prop) in [
+            ("is a token", FilterProp::Token),
+            ("was a token", FilterProp::Token),
+            ("isn't a token", FilterProp::NonToken),
+            ("is not a token", FilterProp::NonToken),
+            ("wasn't a token", FilterProp::NonToken),
+            ("was not a token", FilterProp::NonToken),
+        ] {
+            let (rest, condition) =
+                parse_zone_change_object_token_predicate(text).expect("token predicate parses");
+            assert_eq!(rest, "");
+
+            match condition {
+                TriggerCondition::ZoneChangeObjectMatchesFilter {
+                    filter: TargetFilter::Typed(typed),
+                    ..
+                } => assert!(
+                    typed.properties.contains(&expected_prop),
+                    "expected {expected_prop:?} for {text}, got {typed:?}"
+                ),
+                other => panic!("expected token filter condition for {text}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
