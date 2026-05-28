@@ -875,6 +875,11 @@ pub struct PendingCast {
     /// quantities can resolve later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 601.2i + CR 722.3c: Optional source permanent to re-mark as
+    /// prepared if this cast is cancelled and rolled back. Used by the
+    /// prepared-copy special action to restore pre-cast state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_restore_prepared_source: Option<ObjectId>,
     #[serde(default)]
     pub payment_mode: CastPaymentMode,
 }
@@ -909,6 +914,7 @@ impl PendingCast {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
         }
     }
@@ -3098,6 +3104,33 @@ impl WaitingFor {
         }
     }
 
+    /// Mutable variant of `pending_cast_ref()` for call sites that need to
+    /// annotate in-flight cast metadata (for example rollback markers).
+    pub fn pending_cast_mut(&mut self) -> Option<&mut PendingCast> {
+        match self {
+            WaitingFor::ChooseXValue { pending_cast, .. }
+            | WaitingFor::TargetSelection { pending_cast, .. }
+            | WaitingFor::ModeChoice { pending_cast, .. }
+            | WaitingFor::OptionalCostChoice { pending_cast, .. }
+            | WaitingFor::DefilerPayment { pending_cast, .. }
+            | WaitingFor::DiscardForCost { pending_cast, .. }
+            | WaitingFor::SacrificeForCost { pending_cast, .. }
+            | WaitingFor::ReturnToHandForCost { pending_cast, .. }
+            | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::RemoveCounterForCost { pending_cast, .. }
+            | WaitingFor::BlightChoice { pending_cast, .. }
+            | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
+            | WaitingFor::BeholdForCost { pending_cast, .. }
+            | WaitingFor::ExileForCost { pending_cast, .. }
+            | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
+            WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
+                CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
+                CollectEvidenceResume::Effect { .. } => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Whether this state is part of the casting flow and can be backed out of
     /// with `CancelCast` (CR 601.2).
     ///
@@ -5230,6 +5263,7 @@ mod tests {
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
+                cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
             })
         }
@@ -5524,6 +5558,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
         });
         let choose_x = WaitingFor::ChooseXValue {

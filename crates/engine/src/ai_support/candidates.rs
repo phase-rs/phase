@@ -2435,6 +2435,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
             ));
         }
 
+        let mut prepare_castability_sim: Option<GameState> = None;
         for &obj_id in &state.battlefield {
             if let Some(obj) = state.objects.get(&obj_id) {
                 if obj.controller == player {
@@ -2458,14 +2459,18 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                     // `prepared.is_some()` (single-authority state flag managed
                     // by `game::effects::prepare`). Assign when WotC publishes
                     // SOS CR update.
-                    if obj.prepared.is_some()
-                        && prepare::can_cast_prepared_copy_now(state, player, obj_id)
-                    {
-                        actions.push(candidate(
-                            GameAction::CastPreparedCopy { source: obj_id },
-                            TacticalClass::Spell,
-                            Some(player),
-                        ));
+                    if obj.prepared.is_some() {
+                        let simulated =
+                            prepare_castability_sim.get_or_insert_with(|| state.clone());
+                        if prepare::can_cast_prepared_copy_now_with_simulation(
+                            simulated, player, obj_id,
+                        ) {
+                            actions.push(candidate(
+                                GameAction::CastPreparedCopy { source: obj_id },
+                                TacticalClass::Spell,
+                                Some(player),
+                            ));
+                        }
                     }
                 }
             }

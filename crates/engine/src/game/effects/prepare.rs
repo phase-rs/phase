@@ -196,6 +196,8 @@ fn synthesize_prepared_copy_object(
     source_id: ObjectId,
     controller: PlayerId,
 ) -> Result<(ObjectId, crate::types::identifiers::CardId), String> {
+    // CR 722.3c: As the player casts the prepared copy, synthesize a distinct
+    // copy object of the prepare face in exile to feed through normal casting.
     let (src_clone, card_id) = {
         let Some(src_obj) = state.objects.get(&source_id) else {
             return Err(format!("source {source_id:?} not found"));
@@ -239,6 +241,21 @@ fn synthesize_prepared_copy_object(
     Ok((copy_id, card_id))
 }
 
+fn can_cast_prepared_copy_now_in_simulated_state(
+    simulated: &mut GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let original_next_object_id = simulated.next_object_id;
+    let Ok((copy_id, _)) = synthesize_prepared_copy_object(simulated, source_id, controller) else {
+        return false;
+    };
+    let can_cast = casting::can_cast_object_now(simulated, controller, copy_id);
+    cleanup_failed_prepared_copy_cast(simulated, copy_id);
+    simulated.next_object_id = original_next_object_id;
+    can_cast
+}
+
 /// Fast castability probe for `GameAction::CastPreparedCopy` candidate
 /// generation. Synthesizes the same ephemeral copy object used by the actual
 /// cast path in a temporary game-state clone, then asks the canonical casting
@@ -249,11 +266,46 @@ pub fn can_cast_prepared_copy_now(
     source_id: ObjectId,
 ) -> bool {
     let mut simulated = state.clone();
-    let Ok((copy_id, _)) = synthesize_prepared_copy_object(&mut simulated, source_id, controller)
-    else {
-        return false;
-    };
-    casting::can_cast_object_now(&simulated, controller, copy_id)
+    can_cast_prepared_copy_now_in_simulated_state(&mut simulated, controller, source_id)
+}
+
+/// Shared low-allocation probe for candidate enumeration loops that can reuse
+/// one mutable simulation clone across many prepared permanents.
+pub(crate) fn can_cast_prepared_copy_now_with_simulation(
+    simulated: &mut GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    can_cast_prepared_copy_now_in_simulated_state(simulated, controller, source_id)
+}
+
+fn mark_prepare_copy_cancel_rollback(
+    state: &mut GameState,
+    waiting: &mut WaitingFor,
+    source_id: ObjectId,
+    copy_id: ObjectId,
+) {
+    if let Some(pending) = waiting.pending_cast_mut() {
+        debug_assert_eq!(
+            pending.object_id, copy_id,
+            "prepare pending_cast must point at synthesized copy"
+        );
+        pending.cancel_restore_prepared_source = Some(source_id);
+        return;
+    }
+
+    if matches!(
+        waiting,
+        WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
+    ) {
+        if let Some(pending) = state.pending_cast.as_mut() {
+            debug_assert_eq!(
+                pending.object_id, copy_id,
+                "prepare pending_cast must point at synthesized copy"
+            );
+            pending.cancel_restore_prepared_source = Some(source_id);
+        }
+    }
 }
 
 /// CR 722.3c + CR 601.2: Build an ephemeral token copy of the prepare-spell
@@ -275,13 +327,18 @@ pub fn cast_prepared_copy(
         return Err("prepared copy is not castable now".to_string());
     }
 
-    let waiting = match casting::handle_cast_spell(state, controller, copy_id, card_id, events) {
+    let mut waiting = match casting::handle_cast_spell(state, controller, copy_id, card_id, events)
+    {
         Ok(waiting) => waiting,
         Err(err) => {
             cleanup_failed_prepared_copy_cast(state, copy_id);
             return Err(format!("{err}"));
         }
     };
+
+    // CR 601.2i + CR 722.3c: If the cast is cancelled before completion,
+    // restore the source's prepared marker and remove the synthetic copy.
+    mark_prepare_copy_cancel_rollback(state, &mut waiting, source_id, copy_id);
 
     // CR 722.3c: "Doing so unprepares it." Unprepare-at-cast, not at resolve —
     // so countered / fizzled copies still leave the source unprepared. Single
@@ -848,6 +905,68 @@ mod tests {
         assert!(
             state.stack.is_empty(),
             "failed cast must not leave stack entries"
+        );
+    }
+
+    #[test]
+    fn cancel_pending_prepare_copy_restores_prepared_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = setup_creature(&mut state);
+        state.objects.get_mut(&source_id).unwrap().prepared = Some(PreparedState);
+
+        // Synthetic prepare-copy object announced on stack.
+        let copy_id = create_object(
+            &mut state,
+            CardId(77),
+            PlayerId(0),
+            "Prepared Copy".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&copy_id).unwrap().is_token = true;
+        state.stack.push_back(StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(77),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // Cast-time unprepare happened before cancellation.
+        state.objects.get_mut(&source_id).unwrap().prepared = None;
+
+        let mut pending = crate::types::game_state::PendingCast::new(
+            copy_id,
+            CardId(77),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                copy_id,
+                PlayerId(0),
+            ),
+            ManaCost::NoCost,
+        );
+        pending.cancel_restore_prepared_source = Some(source_id);
+
+        crate::game::casting::handle_cancel_cast(&mut state, &pending, &mut Vec::new());
+
+        assert!(
+            state.objects[&source_id].prepared.is_some(),
+            "cancelled cast must restore source prepared state"
+        );
+        assert!(
+            !state.objects.contains_key(&copy_id),
+            "cancelled cast must clear synthesized copy object"
+        );
+        assert!(
+            state.stack.iter().all(|entry| entry.id != copy_id),
+            "cancelled cast must remove stack placeholder for synthesized copy"
         );
     }
 

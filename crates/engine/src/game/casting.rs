@@ -33,6 +33,7 @@ use super::ability_utils::{
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
+use super::game_object::PreparedState;
 use super::mana_payment;
 use super::quantity::resolve_quantity;
 use super::restrictions;
@@ -7908,6 +7909,17 @@ pub fn handle_cancel_cast(
             state.stack.remove(pos);
             state.stack_paid_facts.remove(&pending.object_id);
         }
+    }
+
+    if let Some(source_id) = pending.cancel_restore_prepared_source {
+        // CR 601.2i + CR 722.3c: Prepare-copy cast cancellation must restore
+        // the source's prepared marker and clear the synthetic copy object.
+        if let Some(source) = state.objects.get_mut(&source_id) {
+            if source.zone == Zone::Battlefield {
+                source.prepared = Some(PreparedState);
+            }
+        }
+        state.objects.remove(&pending.object_id);
     }
 }
 
