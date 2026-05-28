@@ -578,6 +578,13 @@ pub fn validate_blockers_for_player(
             }
         }
 
+        if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
+            return Err(format!(
+                "{:?} cannot block {:?} (Ring-bearer can't be blocked by greater power)",
+                blocker_id, attacker_id
+            ));
+        }
+
         // CR 702.16f: Protection — an attacking creature with protection can't
         // be blocked by creatures with the stated quality.
         for kw in &attacker.keywords {
@@ -1896,6 +1903,9 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
             _ => {}
         }
     }
+    if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
+        return false;
+    }
     for kw in &attacker.keywords {
         if let Keyword::Protection(target) = kw {
             if crate::game::keywords::source_matches_protection_target(target, attacker, blocker) {
@@ -1944,6 +1954,17 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         return false;
     }
     true
+}
+
+fn ring_bearer_unblockable_by_greater_power(
+    state: &GameState,
+    attacker: &GameObject,
+    blocker: &GameObject,
+) -> bool {
+    // CR 701.54c: The Ring emblem says "Your Ring-bearer is legendary and
+    // can't be blocked by creatures with greater power."
+    super::effects::ring::is_current_ring_bearer(state, attacker.controller, attacker.id)
+        && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
 }
 
 /// CR 509.1a + CR 509.1b: Compute the maximum number of attackers a creature can block.

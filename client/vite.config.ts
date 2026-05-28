@@ -212,6 +212,16 @@ export default defineConfig(({ mode }) => ({
     hmr: process.env.CADDY_PROXY === "1"
       ? { protocol: "wss", host: "local.phase-rs.dev", clientPort: 443 }
       : undefined,
+    // Forward deck-import-service calls to a locally-running `wrangler dev` so
+    // the browser sees a same-origin response (no CORS) and the client can use
+    // a relative URL identical to its production same-origin proxy path. The
+    // production build sets VITE_IMPORT_DECK_URL to the absolute lobby host.
+    proxy: {
+      "/import-deck": {
+        target: process.env.VITE_IMPORT_DECK_PROXY ?? "http://localhost:8787",
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     target: "esnext",

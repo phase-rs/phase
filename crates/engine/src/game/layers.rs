@@ -14,7 +14,9 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::attribution::EffectRef;
-use crate::types::card_type::{is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet};
+use crate::types::card_type::{
+    is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
+};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState};
 use crate::types::identifiers::ObjectId;
@@ -513,10 +515,9 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .is_some_and(|obj| obj.entered_battlefield_turn == Some(state.turn_number)),
         // CR 701.54a: True when this creature is the ring-bearer for its controller.
-        StaticCondition::IsRingBearer => state
-            .ring_bearer
-            .get(&controller)
-            .is_some_and(|bearer| *bearer == Some(source_id)),
+        StaticCondition::IsRingBearer => {
+            super::effects::ring::is_current_ring_bearer(state, controller, source_id)
+        }
         // CR 701.54c: True when the controller's ring level is at least this value.
         StaticCondition::RingLevelAtLeast { level } => {
             state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
@@ -950,6 +951,10 @@ pub fn evaluate_layers(state: &mut GameState) {
     }
 
     super::pairing::cleanup_invalid_pairs(state);
+    if super::effects::ring::normalize_ring_bearers(state) {
+        evaluate_layers(state);
+        return;
+    }
 
     // Step 5: Clear dirty flag
     state.layers_dirty = false;
@@ -988,7 +993,44 @@ pub(crate) fn collect_shared_active_continuous_effects(
         effects.extend(active_continuous_effects_from_static_source(state, obj));
     });
     gather_transient_continuous_effects(state, &mut effects);
+    gather_ring_emblem_continuous_effects(state, &mut effects);
     effects
+}
+
+fn gather_ring_emblem_continuous_effects(
+    state: &GameState,
+    effects: &mut Vec<ActiveContinuousEffect>,
+) {
+    for &player in state.ring_level.keys() {
+        let Some(bearer_id) = super::effects::ring::ring_bearer_for(state, player) else {
+            continue;
+        };
+        let timestamp = state
+            .objects
+            .get(&bearer_id)
+            .map(|obj| obj.timestamp)
+            .unwrap_or_default();
+        let modification = ContinuousModification::AddSupertype {
+            supertype: Supertype::Legendary,
+        };
+        // CR 701.54c: The Ring emblem makes its controller's Ring-bearer
+        // legendary. Model the emblem's type-changing continuous effect in
+        // layer 4 with the bearer as the affected object.
+        effects.push(ActiveContinuousEffect {
+            source_id: bearer_id,
+            controller: player,
+            def_index: None,
+            transient_id: None,
+            mod_index: 0,
+            layer: modification.layer(),
+            timestamp,
+            modification,
+            affected_filter: TargetFilter::SpecificObject { id: bearer_id },
+            condition: None,
+            mode: StaticMode::Continuous,
+            characteristic_defining: false,
+        });
+    }
 }
 
 fn for_each_static_effect_source(

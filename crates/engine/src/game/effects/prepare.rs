@@ -1,33 +1,21 @@
-use std::sync::Arc;
-
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    CastingPermission, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{
-    CastingVariant, CopyTargetSlot, GameState, StackEntry, StackEntryKind, WaitingFor,
-};
+use crate::types::game_state::{CopyTargetSlot, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use crate::game::ability_utils::{build_resolved_from_def, build_target_slots};
+use crate::game::ability_utils::build_target_slots;
+use crate::game::casting;
 use crate::game::game_object::PreparedState;
+use crate::game::printed_cards::apply_back_face_to_object;
 
-// KNOWN_LIMITATION: The reminder text for Prepare says a copy of the
-// prepare-spell "appears in exile" while the creature is prepared. This design
-// does NOT materialize that copy as a GameObject. The cast-offer is produced
-// at priority time by scanning battlefield creatures whose `prepared.is_some()`
-// and whose printed `CardLayout::Prepare(_, b)` supplies face `b`. As a result,
-// exile-event triggers and "going-to-exile" replacement effects (Rest in
-// Peace, Leyline of the Void, Containment Priest) will NOT observe the copy.
-// Acceptable for the SOS-era cards — no card in the set interacts with
-// prepare-copies through those hooks — and aligned with CR 722.3c's special
-// exception for prepare-spell copies existing in exile. If a future card
-// requires the copy to be a first-class exile GameObject, materialization can
-// be retrofitted around the existing offer scan without touching the resolver
-// layer.
+// The prepare cast path now materializes a short-lived exile GameObject copy of
+// the prepare-spell face so the copy can reuse the normal casting pipeline
+// (targets/modes/mana payment/cost modifiers).
 
 /// Extract object targets from `ability.targets`, or fall back to `last_created_token_ids`
 /// for `TargetFilter::LastCreated`. Mirrors the pattern used by `suspect::resolve`.
@@ -196,26 +184,20 @@ pub(crate) fn open_copy_target_selection(
     Ok(true)
 }
 
-/// CR 702.xxx + CR 707.10f: Build a token spell-copy on the stack from the
-/// prepare-spell face (face `b`) of `source_id`'s printed card. The resulting
-/// stack entry mirrors the `copy_spell` effect's construction — a fresh
-/// ObjectId, `is_token = true`, `CastingVariant::Normal`, controller = acting
-/// player. The source creature is unprepared at cast time (reminder: "Doing
-/// so unprepares it."), not on resolution — so counter-the-copy leaves the
-/// source permanently unprepared.
-///
-/// If the prepare-face spell requires targets (e.g., Biblioplex's companion
-/// prepare cards), the caller enters `WaitingFor::CopyRetarget` so the
-/// controller can pick legal targets via `open_copy_target_selection`.
-///
-/// Returns Ok(copy_id) on success. Returns Err if the source is not prepared,
-/// lacks a prepare face, or doesn't exist.
-pub fn cast_prepared_copy(
+fn cleanup_failed_prepared_copy_cast(state: &mut GameState, copy_id: ObjectId) {
+    // Defensive cleanup for any failed cast attempt after synthesizing the
+    // ephemeral copy object.
+    state.stack.retain(|entry| entry.id != copy_id);
+    state.objects.remove(&copy_id);
+}
+
+fn synthesize_prepared_copy_object(
     state: &mut GameState,
     source_id: ObjectId,
     controller: PlayerId,
-    events: &mut Vec<GameEvent>,
-) -> Result<ObjectId, String> {
+) -> Result<(ObjectId, crate::types::identifiers::CardId), String> {
+    // CR 722.3c: As the player casts the prepared copy, synthesize a distinct
+    // copy object of the prepare face in exile to feed through normal casting.
     let (src_clone, card_id) = {
         let Some(src_obj) = state.objects.get(&source_id) else {
             return Err(format!("source {source_id:?} not found"));
@@ -231,71 +213,139 @@ pub fn cast_prepared_copy(
     if !matches!(back.layout_kind, Some(LayoutKind::Prepare)) {
         return Err("source back_face is not a Prepare face".to_string());
     }
-    // Select the first ability on face_b as the spell ability. SOS prepare
-    // spells each have a single spell ability (Sorcery-type); more complex
-    // multi-ability prepare faces are out of scope.
-    let ability_def = back
-        .abilities
-        .first()
-        .cloned()
-        .ok_or_else(|| "prepare face has no spell ability".to_string())?;
 
-    // Allocate a new object id for the copy.
     let copy_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
 
-    // Build a GameObject for the token copy — clone core characteristics from
-    // back_face so zone transitions and filter predicates see the correct
-    // face. Name from face_b, zone = Stack, is_token = true.
     let mut copy_obj = src_clone;
     copy_obj.id = copy_id;
-    copy_obj.name = back.name.clone();
-    copy_obj.power = back.power;
-    copy_obj.toughness = back.toughness;
-    copy_obj.loyalty = back.loyalty;
-    copy_obj.defense = back.defense;
-    copy_obj.card_types = back.card_types.clone();
-    copy_obj.mana_cost = back.mana_cost.clone();
-    copy_obj.keywords = back.keywords.clone();
-    copy_obj.abilities = Arc::new(back.abilities.clone());
-    copy_obj.color = back.color.clone();
-    copy_obj.printed_ref = back.printed_ref.clone();
+    copy_obj.zone = Zone::Exile;
     copy_obj.controller = controller;
     copy_obj.owner = controller;
-    copy_obj.zone = Zone::Stack;
     copy_obj.is_token = true;
-    // CR 722.3c: the copy is a distinct object — clear any per-permanent
-    // state carried over from the source's creature face.
     copy_obj.tapped = false;
     copy_obj.prepared = None;
+    // Do not re-enter alternative-face casting logic for this synthetic copy.
     copy_obj.back_face = None;
+    apply_back_face_to_object(&mut copy_obj, back.clone());
+    copy_obj
+        .casting_permissions
+        .push(CastingPermission::ExileWithAltCost {
+            cost: back.mana_cost.clone(),
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(controller),
+        });
     state.objects.insert(copy_id, copy_obj);
 
-    // CR 707.10: Build a ResolvedAbility from face_b's ability definition
-    // preserving sub-ability chains, optional flags, and duration metadata.
-    // `build_resolved_from_def` is the authoritative constructor used by
-    // normal casting (see `ability_utils`).
-    let resolved = build_resolved_from_def(&ability_def, copy_id, controller);
+    Ok((copy_id, card_id))
+}
 
-    state.stack.push_back(StackEntry {
-        id: copy_id,
-        source_id: copy_id,
-        controller,
-        kind: StackEntryKind::Spell {
-            card_id,
-            ability: Some(resolved),
-            casting_variant: CastingVariant::Normal,
-            actual_mana_spent: 0,
-        },
-    });
-    events.push(crate::types::events::GameEvent::StackPushed { object_id: copy_id });
+fn can_cast_prepared_copy_now_in_simulated_state(
+    simulated: &mut GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let original_next_object_id = simulated.next_object_id;
+    let Ok((copy_id, _)) = synthesize_prepared_copy_object(simulated, source_id, controller) else {
+        return false;
+    };
+    let can_cast = casting::can_cast_object_now(simulated, controller, copy_id);
+    cleanup_failed_prepared_copy_cast(simulated, copy_id);
+    simulated.next_object_id = original_next_object_id;
+    can_cast
+}
+
+/// Fast castability probe for `GameAction::CastPreparedCopy` candidate
+/// generation. Synthesizes the same ephemeral copy object used by the actual
+/// cast path in a temporary game-state clone, then asks the canonical casting
+/// predicate whether that copy is castable right now.
+pub fn can_cast_prepared_copy_now(
+    state: &GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let mut simulated = state.clone();
+    can_cast_prepared_copy_now_in_simulated_state(&mut simulated, controller, source_id)
+}
+
+/// Shared low-allocation probe for candidate enumeration loops that can reuse
+/// one mutable simulation clone across many prepared permanents.
+pub(crate) fn can_cast_prepared_copy_now_with_simulation(
+    simulated: &mut GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    can_cast_prepared_copy_now_in_simulated_state(simulated, controller, source_id)
+}
+
+fn mark_prepare_copy_cancel_rollback(
+    state: &mut GameState,
+    waiting: &mut WaitingFor,
+    source_id: ObjectId,
+    copy_id: ObjectId,
+) {
+    if let Some(pending) = waiting.pending_cast_mut() {
+        debug_assert_eq!(
+            pending.object_id, copy_id,
+            "prepare pending_cast must point at synthesized copy"
+        );
+        pending.cancel_restore_prepared_source = Some(source_id);
+        return;
+    }
+
+    if matches!(
+        waiting,
+        WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
+    ) {
+        if let Some(pending) = state.pending_cast.as_mut() {
+            debug_assert_eq!(
+                pending.object_id, copy_id,
+                "prepare pending_cast must point at synthesized copy"
+            );
+            pending.cancel_restore_prepared_source = Some(source_id);
+        }
+    }
+}
+
+/// CR 722.3c + CR 601.2: Build an ephemeral token copy of the prepare-spell
+/// face (face `b`) in exile, then cast it through the normal spell-casting
+/// pipeline so costs/targets/modes are handled by the same single authority as
+/// every other cast.
+pub fn cast_prepared_copy(
+    state: &mut GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, String> {
+    let (copy_id, card_id) = synthesize_prepared_copy_object(state, source_id, controller)?;
+
+    // CR 117.1d + CR 601.2g: The copy must be castable with feasible mana
+    // payment options right now; otherwise this special action is illegal.
+    if !casting::can_cast_object_now(state, controller, copy_id) {
+        cleanup_failed_prepared_copy_cast(state, copy_id);
+        return Err("prepared copy is not castable now".to_string());
+    }
+
+    let mut waiting = match casting::handle_cast_spell(state, controller, copy_id, card_id, events)
+    {
+        Ok(waiting) => waiting,
+        Err(err) => {
+            cleanup_failed_prepared_copy_cast(state, copy_id);
+            return Err(format!("{err}"));
+        }
+    };
+
+    // CR 601.2i + CR 722.3c: If the cast is cancelled before completion,
+    // restore the source's prepared marker and remove the synthetic copy.
+    mark_prepare_copy_cancel_rollback(state, &mut waiting, source_id, copy_id);
 
     // CR 722.3c: "Doing so unprepares it." Unprepare-at-cast, not at resolve —
     // so countered / fizzled copies still leave the source unprepared. Single
     // authority via `unprepare_object`.
     unprepare_object(state, source_id, events);
 
-    Ok(copy_id)
+    Ok(waiting)
 }
 
 #[cfg(test)]
@@ -311,6 +361,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::CardId;
+    use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
@@ -356,6 +407,7 @@ mod tests {
     fn enters_prepared_replacement_marks_permanent_before_priority_actions() {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
+        state.phase = crate::types::Phase::PreCombatMain;
         state.priority_player = PlayerId(0);
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
@@ -418,6 +470,7 @@ mod tests {
     fn effect_zone_move_enters_prepared_replacement_marks_permanent() {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
+        state.phase = crate::types::Phase::PreCombatMain;
         state.priority_player = PlayerId(0);
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
@@ -827,11 +880,107 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
 
+    #[test]
+    fn cast_prepared_copy_requires_payable_mana_cost() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = setup_creature(&mut state);
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.prepared = Some(PreparedState);
+            source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            }));
+        }
+
+        let mut events = Vec::new();
+        let result = cast_prepared_copy(&mut state, source_id, PlayerId(0), &mut events);
+
+        assert!(
+            result.is_err(),
+            "prepared copy cast must fail when mana cost is not payable"
+        );
+        assert!(
+            state.objects[&source_id].prepared.is_some(),
+            "source remains prepared when cast cannot start"
+        );
+        assert!(
+            state.stack.is_empty(),
+            "failed cast must not leave stack entries"
+        );
+    }
+
+    #[test]
+    fn cancel_pending_prepare_copy_restores_prepared_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = setup_creature(&mut state);
+        state.objects.get_mut(&source_id).unwrap().prepared = Some(PreparedState);
+
+        // Synthetic prepare-copy object announced on stack.
+        let copy_id = create_object(
+            &mut state,
+            CardId(77),
+            PlayerId(0),
+            "Prepared Copy".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&copy_id).unwrap().is_token = true;
+        state.stack.push_back(StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(77),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // Cast-time unprepare happened before cancellation.
+        state.objects.get_mut(&source_id).unwrap().prepared = None;
+
+        let mut pending = crate::types::game_state::PendingCast::new(
+            copy_id,
+            CardId(77),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                copy_id,
+                PlayerId(0),
+            ),
+            ManaCost::NoCost,
+        );
+        pending.cancel_restore_prepared_source = Some(source_id);
+
+        crate::game::casting::handle_cancel_cast(&mut state, &pending, &mut Vec::new());
+
+        assert!(
+            state.objects[&source_id].prepared.is_some(),
+            "cancelled cast must restore source prepared state"
+        );
+        assert!(
+            !state.objects.contains_key(&copy_id),
+            "cancelled cast must clear synthesized copy object"
+        );
+        assert!(
+            state.stack.iter().all(|entry| entry.id != copy_id),
+            "cancelled cast must remove stack placeholder for synthesized copy"
+        );
+    }
+
     /// Helper to build a minimal back-face with `layout_kind == Prepare` so
     /// the resolver's `has_prepare_face` gate passes in tests.
     struct BackFaceForTest;
     impl BackFaceForTest {
         fn prepare() -> crate::game::game_object::BackFaceData {
+            Self::prepare_with_cost(Default::default())
+        }
+
+        fn prepare_with_cost(mana_cost: ManaCost) -> crate::game::game_object::BackFaceData {
             let mut card_types = crate::types::card_type::CardType::default();
             card_types.core_types.push(CoreType::Sorcery);
             crate::game::game_object::BackFaceData {
@@ -841,7 +990,7 @@ mod tests {
                 loyalty: None,
                 defense: None,
                 card_types,
-                mana_cost: Default::default(),
+                mana_cost,
                 keywords: Vec::new(),
                 abilities: vec![AbilityDefinition::new(
                     AbilityKind::Spell,

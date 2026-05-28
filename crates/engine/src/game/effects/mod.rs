@@ -31,6 +31,7 @@ pub mod blight;
 pub mod bolster;
 pub mod bounce;
 pub mod cascade;
+pub mod cast_copy_of_card;
 pub mod cast_from_zone;
 pub mod change_targets;
 pub mod change_zone;
@@ -66,6 +67,7 @@ pub mod effect;
 pub mod endure;
 pub mod energy;
 pub mod exchange_control;
+pub mod exchange_life;
 pub mod exile_from_top_until;
 pub mod exile_top;
 pub mod exploit;
@@ -1356,6 +1358,7 @@ pub fn resolve_effect(
         Effect::SeparateIntoPiles { .. } => separate_piles::resolve(state, ability, events),
         Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
+        Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
@@ -1497,6 +1500,7 @@ pub fn resolve_effect(
         }
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
+        Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
         Effect::SetDayNight { to } => {
             crate::game::day_night::resolve_set_day_night(state, *to, events);
             Ok(())
@@ -1676,6 +1680,9 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::GrantCastingPermission {
+            target: TargetFilter::TrackedSet { .. },
+            ..
+        } | Effect::CastCopyOfCard {
             target: TargetFilter::TrackedSet { .. },
             ..
         } | Effect::PutAtLibraryPosition {
@@ -2194,6 +2201,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::UnattachAll { target, .. }
         | Effect::Transform { target, .. }
         | Effect::CopySpell { target, .. }
+        | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
         | Effect::BecomeCopy { target, .. }
         | Effect::CastFromZone { target, .. }
@@ -2329,6 +2337,22 @@ fn previous_effect_amount_from_events(
                 _ => None,
             })
             .sum(),
+        // CR 706.2 + CR 608.2c: A die roll's *actual* result (natural + modifier,
+        // clamped at 0) is the numeric value a follow-up `PreviousEffectAmount`
+        // condition reads. Unlike damage/life amounts, the relevant amount is
+        // always defined — even a clamped-to-zero result is a valid
+        // sub-ability gate (Deck of Many Things' "if the result is 0 or less,
+        // discard your hand"). We short-circuit on the first DieRolled event
+        // (the one this RollDie effect emitted; any nested rolls happen inside
+        // a deeper chain that clears `last_effect_amount` on entry, but their
+        // events still appear later in the slice and must be ignored here so
+        // the OUTER RollDie's actual is what the OUTER sub_ability sees).
+        Effect::RollDie { .. } => {
+            return events.iter().find_map(|event| match event {
+                GameEvent::DieRolled { result, .. } => Some(*result as i32),
+                _ => None,
+            });
+        }
         _ => 0,
     };
 
@@ -3642,7 +3666,16 @@ fn resolve_chain_body(
                         .description
                         .clone()
                         .or_else(|| ability.description.clone());
-                    state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+                    // CR 601.2c + CR 603.3d: Reflexive triggered ability whose
+                    // target choice is still outstanding. Push the entry to the
+                    // stack FIRST (in mid-construction state — `ability.targets`
+                    // empty), then enter `TriggerTargetSelection`. The on-stack
+                    // entry is identified by `state.pending_trigger_entry` and
+                    // mutated by `engine_stack::finalize_trigger_target_selection`
+                    // when the selection completes. The resolver refuses to
+                    // fire entries identified by `pending_trigger_entry` (see
+                    // `stack::resolve_top`).
+                    let pending = crate::game::triggers::PendingTrigger {
                         source_id: ability.source_id,
                         controller: ability.controller,
                         condition: None,
@@ -3656,7 +3689,19 @@ fn resolve_chain_body(
                         description: trigger_description.clone(),
                         may_trigger_origin: None,
                         subject_match_count: None,
-                    });
+                    };
+                    let trigger_events =
+                        crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
+                    let pending_for_state = pending.clone();
+                    let entry_id =
+                        crate::game::triggers::push_pending_trigger_to_stack_with_event_batch(
+                            state,
+                            pending,
+                            trigger_events,
+                            events,
+                        );
+                    state.pending_trigger = Some(pending_for_state);
+                    state.pending_trigger_entry = Some(entry_id);
                     state.waiting_for = WaitingFor::TriggerTargetSelection {
                         player: ability.controller,
                         target_slots,

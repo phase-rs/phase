@@ -151,6 +151,16 @@ impl KeywordTriggerInstaller {
             )],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
             Keyword::Renown(n) => vec![build_renown_trigger(*n)],
+            // CR 702.58a + CR 604.1: granted Graft installs only the
+            // "another creature enters" trigger. The ETB-with-N replacement
+            // (CR 702.58a clause 1) is a static ability that functions only as
+            // the permanent enters the battlefield — runtime-granted Graft
+            // misses that window by definition (the permanent is already on
+            // the battlefield when the keyword is granted), so the
+            // replacement is not installed here. The trigger, however, is a
+            // static-on-battlefield ability that fires from the granted-from
+            // moment on.
+            Keyword::Graft(_) => vec![build_graft_enters_trigger()],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
@@ -183,6 +193,10 @@ impl KeywordTriggerInstaller {
             }
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
             Keyword::Renown(_) => is_renown_trigger(trigger),
+            // CR 702.58a + CR 604.1: symmetric removal — `RemoveKeyword`
+            // strips the Graft enters-trigger when the granted keyword is
+            // removed.
+            Keyword::Graft(_) => is_graft_enters_trigger(trigger),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
@@ -3027,6 +3041,231 @@ fn is_modular_dies_transfer_trigger(t: &TriggerDefinition) -> bool {
     )
 }
 
+/// CR 702.58a: Graft N — represents both a static ability and a triggered
+/// ability. "Graft N" means "This permanent enters with N +1/+1 counters on
+/// it" AND "Whenever another creature enters, if this permanent has a +1/+1
+/// counter on it, you may move a +1/+1 counter from this permanent onto that
+/// creature."
+///
+/// Build-for-the-class: synthesized from `Keyword::Graft(N)` so every printed
+/// Graft card and every runtime-granted Graft (via `AddKeyword`) gets the same
+/// two abilities. Mirrors `synthesize_modular` (CR 702.43a) which is the
+/// nearest analog — ETB-with-N-P1P1 replacement + ChangesZone trigger. The
+/// trigger differs in two ways:
+///   1. It fires on *another creature* entering (CR 702.58a "another
+///      creature"), not on this permanent dying. We model the "another"
+///      exclusion via `FilterProp::Another` on the trigger's `valid_card`.
+///   2. It is gated by an intervening-if "if this permanent has a +1/+1
+///      counter on it" — `TriggerCondition::HasCounters { OfType(P1P1),
+///      minimum: 1 }` checked at detection AND on resolution per CR 603.4.
+///   3. The action is a counter MOVE (CR 122.5), not a put — so the source
+///      loses a counter as the target gains one. `Effect::MoveCounters` with
+///      `source = SelfRef`, `target = TriggeringSource`, `mode = Move`,
+///      `counter_type = P1P1`, `count = 1`.
+///
+/// CR 702.58b: Multiple Graft instances work separately, so the synthesizer
+/// emits one replacement + one trigger per instance, deduped via shape-
+/// matching idempotency predicates.
+pub fn synthesize_graft(face: &mut CardFace) {
+    let graft_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Graft(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if graft_values.is_empty() {
+        return;
+    }
+
+    // CR 702.58a clause 1 + CR 113.2c: Each Graft instance emits its own ETB
+    // replacement. Per-N idempotency mirrors `synthesize_modular` — a card
+    // carrying both a printed "enters with K +1/+1 counters" replacement AND
+    // `Keyword::Graft(N)` with K≠N must not silently dedupe.
+    for &n in &graft_values {
+        let needed = graft_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_graft_etb_replacement(r, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+        let etb_counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: n as i32 },
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!(
+            "This permanent enters with {n} +1/+1 counter{} on it",
+            if n == 1 { "" } else { "s" }
+        ));
+
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(etb_counters)),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some(format!(
+                "CR 702.58a: Graft {n} — this permanent enters with {n} +1/+1 counter{} on it.",
+                if n == 1 { "" } else { "s" }
+            )),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(replacement);
+    }
+
+    // CR 702.58a clause 2: "Whenever another creature enters, if this permanent
+    // has a +1/+1 counter on it, you may move a +1/+1 counter from this
+    // permanent onto that creature." Emit one trigger per Graft instance per
+    // CR 702.58b. Trigger shape is N-independent (the move is always exactly
+    // one +1/+1 counter), so idempotency counts triggers shape-only.
+    let needed_triggers = graft_values.len();
+    let existing_triggers = face
+        .triggers
+        .iter()
+        .filter(|t| is_graft_enters_trigger(t))
+        .count();
+    let trigger = build_graft_enters_trigger();
+    for _ in 0..needed_triggers.saturating_sub(existing_triggers) {
+        face.triggers.push(trigger.clone());
+    }
+}
+
+/// Build the Graft "another creature enters" trigger.
+///
+/// Single source of truth for the trigger shape, shared by the printed path
+/// (`synthesize_graft`) and the runtime-granted path
+/// (`KeywordTriggerInstaller::triggers_for`) per CR 604.1.
+///
+/// CR 702.58a: trigger condition is "another creature enters" — modeled as
+/// `TriggerMode::ChangesZone` with `destination = Battlefield` and
+/// `valid_card` set to a creature filter with `FilterProp::Another` (CR
+/// 109.3 + CR 603.6a). The Graft permanent itself can be a creature (e.g.,
+/// Vigean Graftmage) or a land (Llanowar Reborn) — either way the source is
+/// excluded by `Another` (the entering creature is always a different object
+/// from the source). Note also the trigger uses no controller filter — Graft
+/// fires on ANY creature ETB, not just "you control" (CR 702.58a does not
+/// restrict by controller).
+fn build_graft_enters_trigger() -> TriggerDefinition {
+    // CR 122.5: Move exactly one +1/+1 counter from this permanent (SelfRef)
+    // onto the entering creature (TriggeringSource).
+    let move_one = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::MoveCounters {
+            source: TargetFilter::SelfRef,
+            counter_type: Some(CounterType::Plus1Plus1),
+            count: Some(QuantityExpr::Fixed { value: 1 }),
+            mode: crate::types::ability::CounterTransferMode::Move,
+            selection: crate::types::ability::CounterMoveSelection::StackTarget,
+            target: TargetFilter::TriggeringSource,
+        },
+    )
+    .description("Move a +1/+1 counter from this permanent onto that creature".to_string())
+    // CR 603.5: "you may" — optional triggered ability; controller is prompted
+    // before the move resolves.
+    .optional();
+
+    // CR 702.58a "another creature enters" — match any creature except the
+    // trigger source. `FilterProp::Another` (CR 109.3) excludes the ability
+    // source, so a Graft creature that itself enters does not satisfy this
+    // (the ETB of the source is handled by the replacement, not this trigger).
+    let another_creature =
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another]));
+
+    // CR 603.4 + CR 702.58a "if this permanent has a +1/+1 counter on it" —
+    // intervening-if checked at detection AND re-checked on resolution.
+    // `CounterMatch::OfType(P1P1)` restricts to the specific counter type;
+    // `minimum: 1` enforces "has a +1/+1 counter".
+    let condition = TriggerCondition::HasCounters {
+        counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+        minimum: 1,
+        maximum: None,
+    };
+
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(another_creature)
+        .condition(condition)
+        .execute(move_one)
+        .description(
+            "CR 702.58a: Graft — whenever another creature enters, if this permanent has a +1/+1 counter on it, you may move a +1/+1 counter from this permanent onto that creature."
+                .to_string(),
+        )
+}
+
+/// Idempotency-shape predicate for `synthesize_graft`'s ETB-with-counters
+/// replacement. True iff `replacement` is a `Moved` replacement on `SelfRef`
+/// whose execute body is `Effect::PutCounter` placing exactly `expected_n`
+/// P1P1 counters on `SelfRef` with a fixed count.
+///
+/// Mirrors `is_modular_etb_replacement` — `expected_n` is load-bearing so a
+/// card carrying both a parsed "enters with K +1/+1 counters" replacement AND
+/// `Keyword::Graft(N)` with K ≠ N must NOT silently dedupe. Walking Ballista-
+/// style `count: CostXPaid` variants fail the `Fixed { .. }` pattern.
+fn is_graft_etb_replacement(replacement: &ReplacementDefinition, expected_n: u32) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target: TargetFilter::SelfRef,
+        } if *counter_type == CounterType::Plus1Plus1 && *value == expected_n as i32
+    )
+}
+
+/// Idempotency-shape predicate for `synthesize_graft`'s "another creature
+/// enters" trigger. True iff `trigger` is an enters-the-battlefield trigger
+/// (ChangesZone, destination = Battlefield) on `Another` creature whose
+/// execute body is `Effect::MoveCounters` moving one P1P1 counter from
+/// `SelfRef` onto `TriggeringSource`. The trigger shape is N-independent — a
+/// face with multiple Graft instances has multiple identical triggers.
+fn is_graft_enters_trigger(t: &TriggerDefinition) -> bool {
+    if !matches!(t.mode, TriggerMode::ChangesZone) || t.destination != Some(Zone::Battlefield) {
+        return false;
+    }
+    let Some(TargetFilter::Typed(tf)) = t.valid_card.as_ref() else {
+        return false;
+    };
+    if !tf
+        .type_filters
+        .iter()
+        .any(|f| matches!(f, TypeFilter::Creature))
+        || !tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Another))
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::MoveCounters {
+            source: TargetFilter::SelfRef,
+            counter_type: Some(ct),
+            count: Some(QuantityExpr::Fixed { value: 1 }),
+            mode: crate::types::ability::CounterTransferMode::Move,
+            target: TargetFilter::TriggeringSource,
+            ..
+        } if *ct == CounterType::Plus1Plus1
+    )
+}
+
 /// CR 702.54a + CR 702.54b: Bloodthirst is a static ability that creates an
 /// enters-with-counters replacement. Fixed-N Bloodthirst is conditional on an
 /// opponent being dealt damage this turn; Bloodthirst X is unconditional and
@@ -3674,6 +3913,12 @@ pub fn synthesize_all(face: &mut CardFace) {
     // dies-trigger transferring counters (LKI-counted) to a target artifact
     // creature. Each instance functions independently.
     synthesize_modular(face);
+    // CR 702.58a + CR 702.58b: Graft N — ETB-with-N-P1P1 replacement plus a
+    // "whenever another creature enters" trigger that optionally moves one
+    // +1/+1 counter from this permanent onto the entering creature, gated on
+    // this permanent currently having a +1/+1 counter. Each instance
+    // functions independently.
+    synthesize_graft(face);
     // CR 702.54a + CR 702.54b + CR 702.54c: Bloodthirst N/X —
     // ETB-with-P1P1 replacement. Each instance functions independently.
     synthesize_bloodthirst(face);
@@ -10011,6 +10256,692 @@ mod modular_runtime_tests {
             GameAction::DecideOptionalEffect { accept: true },
         )
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod graft_synthesis_tests {
+    //! CR 702.58a + CR 702.58b: Shape tests for the synthesized Graft pair.
+    //! Pinned to the exact wire-up the runtime resolver consumes:
+    //!   * ETB-with-counters: `ReplacementEvent::Moved` with `valid_card =
+    //!     SelfRef`, execute `Effect::PutCounter { counter_type: Plus1Plus1,
+    //!     count: Fixed(N), target: SelfRef }`.
+    //!   * "Another creature enters" trigger: `TriggerMode::ChangesZone`
+    //!     (destination = Battlefield) with `valid_card` = Creature +
+    //!     `FilterProp::Another` filter, condition
+    //!     `HasCounters { OfType(P1P1), minimum: 1 }`, optional execute
+    //!     `Effect::MoveCounters { source: SelfRef, target: TriggeringSource,
+    //!     mode: Move, count: 1, counter_type: P1P1 }`.
+    use super::*;
+
+    fn face_with_graft(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Graft(n));
+        face
+    }
+
+    /// CR 702.58a clause 1: ETB-with-N-counters replacement.
+    #[test]
+    fn synthesize_graft_adds_etb_counters_replacement() {
+        let mut face = face_with_graft(2);
+        synthesize_graft(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_graft_etb_replacement(r, 2))
+            .expect("graft should synthesize an ETB-with-counters replacement");
+
+        assert!(matches!(replacement.event, ReplacementEvent::Moved));
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("ETB replacement requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("graft ETB execute body should be Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert!(matches!(target, TargetFilter::SelfRef));
+        assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+    }
+
+    /// CR 702.58a clause 2: "Whenever another creature enters" trigger.
+    /// Shape pins the wire-up the runtime expects:
+    ///   - `ChangesZone` → Battlefield (creature ETB)
+    ///   - `valid_card` includes `FilterProp::Another` (CR 109.3)
+    ///   - `condition = HasCounters { OfType(P1P1), minimum: 1 }`
+    ///   - execute body is `MoveCounters` with the right shape
+    ///   - execute is `.optional()` (CR 603.5 "you may")
+    #[test]
+    fn synthesize_graft_adds_another_creature_enters_trigger() {
+        let mut face = face_with_graft(2);
+        synthesize_graft(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_graft_enters_trigger(t))
+            .expect("graft should synthesize an enters-battlefield trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+
+        // valid_card must be a Creature filter with FilterProp::Another to
+        // exclude the source object from "another creature".
+        let TargetFilter::Typed(ref tf) = trigger.valid_card.as_ref().unwrap() else {
+            panic!("graft trigger valid_card must be Typed");
+        };
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|f| matches!(f, TypeFilter::Creature)));
+        assert!(tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Another)));
+
+        // CR 603.4 + CR 702.58a "if this permanent has a +1/+1 counter on it".
+        let Some(TriggerCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        }) = trigger.condition.as_ref()
+        else {
+            panic!("graft trigger condition must be HasCounters");
+        };
+        assert_eq!(*counters, CounterMatch::OfType(CounterType::Plus1Plus1));
+        assert_eq!(*minimum, 1);
+        assert_eq!(*maximum, None);
+
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("trigger requires execute body");
+
+        // CR 603.5: "you may" — optional triggered ability.
+        assert!(
+            execute.optional,
+            "graft trigger must be optional per CR 702.58a 'you may'"
+        );
+
+        let Effect::MoveCounters {
+            source,
+            counter_type,
+            count,
+            mode,
+            target,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("graft trigger execute body should be Effect::MoveCounters");
+        };
+        assert!(matches!(source, TargetFilter::SelfRef));
+        assert_eq!(*counter_type, Some(CounterType::Plus1Plus1));
+        assert!(matches!(count, Some(QuantityExpr::Fixed { value: 1 })));
+        assert_eq!(*mode, crate::types::ability::CounterTransferMode::Move);
+        assert!(matches!(target, TargetFilter::TriggeringSource));
+    }
+
+    /// CR 702.58a is controller-agnostic: the trigger fires on ANY creature
+    /// entering, not just on creatures the Graft controller controls. The
+    /// `valid_card` filter must therefore NOT carry a `ControllerRef`
+    /// constraint.
+    #[test]
+    fn graft_trigger_has_no_controller_restriction() {
+        let mut face = face_with_graft(1);
+        synthesize_graft(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_graft_enters_trigger(t))
+            .expect("graft trigger present");
+        let TargetFilter::Typed(ref tf) = trigger.valid_card.as_ref().unwrap() else {
+            panic!("graft trigger valid_card must be Typed");
+        };
+        assert_eq!(
+            tf.controller, None,
+            "CR 702.58a does not restrict by controller — Graft fires on any creature ETB"
+        );
+    }
+
+    /// Re-running synthesis must not duplicate the replacement or the trigger.
+    #[test]
+    fn synthesize_graft_is_idempotent() {
+        let mut face = face_with_graft(2);
+        synthesize_graft(&mut face);
+        synthesize_graft(&mut face);
+
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_graft_etb_replacement(r, 2))
+                .count(),
+            1,
+            "ETB replacement should be deduped"
+        );
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_graft_enters_trigger(t))
+                .count(),
+            1,
+            "enters-creature trigger should be deduped"
+        );
+    }
+
+    /// A face without `Keyword::Graft` is unaffected.
+    #[test]
+    fn synthesize_graft_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_graft(&mut face);
+        assert!(face.replacements.is_empty());
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 113.2c + CR 702.58b: each Graft instance emits its own ETB-counters
+    /// replacement. The trigger is N-independent in shape (move one P1P1
+    /// counter), so the trigger count equals the keyword count. No printed
+    /// card today carries two Graft instances; the test pins the rule so a
+    /// future printing (or a granted-Graft case) routes correctly.
+    #[test]
+    fn synthesize_graft_emits_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Graft(1));
+        face.keywords.push(Keyword::Graft(3));
+        synthesize_graft(&mut face);
+
+        // CR 113.2c: each instance emits its own ETB replacement; the
+        // predicate is per-N so we filter by either N.
+        let n1 = face
+            .replacements
+            .iter()
+            .filter(|r| is_graft_etb_replacement(r, 1))
+            .count();
+        let n3 = face
+            .replacements
+            .iter()
+            .filter(|r| is_graft_etb_replacement(r, 3))
+            .count();
+        assert_eq!(n1, 1, "Graft(1) emits one Fixed(1) ETB replacement");
+        assert_eq!(n3, 1, "Graft(3) emits one Fixed(3) ETB replacement");
+
+        // CR 702.58b: each instance is its own trigger too.
+        let trigger_count = face
+            .triggers
+            .iter()
+            .filter(|t| is_graft_enters_trigger(t))
+            .count();
+        assert_eq!(trigger_count, 2, "two Graft instances → two triggers");
+    }
+
+    /// Pre-existing ETB-with-counters replacement at K ≠ N does NOT dedupe a
+    /// Graft N synthesis. Mirrors `synthesize_modular`'s per-N idempotency:
+    /// a card that prints both "enters with K +1/+1 counters" AND Graft N
+    /// where K ≠ N must still get its N-counter ETB replacement.
+    #[test]
+    fn graft_etb_does_not_dedupe_against_mismatched_fixed_replacement() {
+        let mut face = face_with_graft(2);
+
+        // Install a pre-existing Fixed(3) ETB replacement (shape-match for
+        // is_graft_etb_replacement but at the wrong N).
+        let pre_existing = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))),
+            valid_card: Some(TargetFilter::SelfRef),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(pre_existing);
+
+        synthesize_graft(&mut face);
+
+        let fixed2 = face
+            .replacements
+            .iter()
+            .filter(|r| is_graft_etb_replacement(r, 2))
+            .count();
+        let fixed3 = face
+            .replacements
+            .iter()
+            .filter(|r| is_graft_etb_replacement(r, 3))
+            .count();
+        assert_eq!(fixed2, 1, "Fixed(2) Graft ETB must still be emitted");
+        assert_eq!(fixed3, 1, "Pre-existing Fixed(3) replacement preserved");
+    }
+
+    /// `KeywordTriggerInstaller::triggers_for(Keyword::Graft(_))` returns the
+    /// enters-creature trigger — this is the runtime-granted Graft path
+    /// (CR 604.1). Pins the shape consistency between the printed synthesis
+    /// path and the runtime-granted path.
+    #[test]
+    fn keyword_installer_returns_graft_enters_trigger() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Graft(5));
+        assert_eq!(
+            triggers.len(),
+            1,
+            "granted Graft installs exactly one trigger (CR 604.1 — the ETB \
+             replacement is missed by definition when granted)"
+        );
+        assert!(
+            is_graft_enters_trigger(&triggers[0]),
+            "granted Graft trigger must match the same shape predicate as the \
+             printed synthesis path"
+        );
+    }
+
+    /// `KeywordTriggerInstaller::trigger_matches_keyword_kind` recognizes the
+    /// Graft trigger shape so `RemoveKeyword` correctly strips it when the
+    /// keyword is removed.
+    #[test]
+    fn keyword_installer_recognizes_graft_trigger_for_removal() {
+        let trigger = build_graft_enters_trigger();
+        assert!(
+            KeywordTriggerInstaller::trigger_matches_keyword_kind(&trigger, &Keyword::Graft(2)),
+            "trigger_matches_keyword_kind must identify the Graft trigger \
+             shape so RemoveKeyword can symmetrically strip it"
+        );
+    }
+
+    /// CR 702.58a: `KeywordKind::Graft` is the canonical kind for the Graft
+    /// variant — pins the mapping so the coverage layer reports Graft as a
+    /// recognized keyword (not `Unknown`).
+    #[test]
+    fn graft_maps_to_dedicated_keyword_kind() {
+        use crate::types::keywords::KeywordKind;
+        assert_eq!(Keyword::Graft(1).kind(), KeywordKind::Graft);
+        assert_eq!(Keyword::Graft(5).kind(), KeywordKind::Graft);
+    }
+}
+
+#[cfg(test)]
+mod graft_runtime_tests {
+    //! CR 702.58a runtime integration: a Graft N creature enters with N +1/+1
+    //! counters via the synthesized Moved replacement, and on subsequent
+    //! creature ETB pushes a trigger that optionally moves one P1P1 counter
+    //! from the Graft source onto the entering creature. The "you may" gate
+    //! parks the engine in `WaitingFor::OptionalEffectChoice` per CR 603.5.
+    //! Mirrors `modular_runtime_tests` patterns end-to-end.
+
+    use super::*;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::stack::resolve_top;
+    use crate::game::triggers::process_triggers;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
+    use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+
+    /// Build a Graft creature face. Vigean Graftmage / Plaxcaster Frogling
+    /// class — a creature with `Keyword::Graft(n)`.
+    fn graft_creature_face(name: &str, n: u32) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(0)),
+            toughness: Some(PtValue::Fixed(0)),
+            keywords: vec![Keyword::Graft(n)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    /// Plain creature face (no Graft). Used as the ETB observer that triggers
+    /// the Graft source's "another creature enters" ability.
+    fn plain_creature_face(name: &str) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(1)),
+            toughness: Some(PtValue::Fixed(1)),
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        face
+    }
+
+    fn setup_state_with_priority(controller: PlayerId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = controller;
+        state.priority_player = controller;
+        state.waiting_for = WaitingFor::Priority { player: controller };
+        state
+    }
+
+    /// Place a creature directly on the battlefield with `counters` P1P1
+    /// counters pre-installed. Used by trigger tests that isolate the trigger
+    /// behavior from the ETB replacement (which is exercised separately in
+    /// the synthesis_tests module's shape tests).
+    fn place_creature_with_counters(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+        counters: u32,
+    ) -> ObjectId {
+        let next_card = CardId(state.next_object_id);
+        let obj_id = create_object(
+            state,
+            next_card,
+            controller,
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+        if counters > 0 {
+            state
+                .objects
+                .get_mut(&obj_id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Plus1Plus1, counters);
+        }
+        obj_id
+    }
+
+    /// Spawn a creature on the battlefield via the move_to_zone path so that
+    /// the engine emits a `Moved` event the trigger machinery can observe.
+    /// Used to fire the Graft source's "another creature enters" trigger.
+    fn spawn_creature_via_zone_change(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let next_card = CardId(state.next_object_id);
+        let obj_id = create_object(state, next_card, controller, face.name.clone(), Zone::Hand);
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+        let mut events = Vec::new();
+        move_to_zone(state, obj_id, Zone::Battlefield, &mut events);
+        process_triggers(state, &events);
+        obj_id
+    }
+
+    /// CR 702.58a clause 1: A Graft N creature entering the battlefield places
+    /// N +1/+1 counters on itself via the synthesized Moved replacement.
+    #[test]
+    fn graft_etb_places_n_p1p1_counters() {
+        let face = graft_creature_face("Vigean Graftmage", 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+
+        // Drive a Hand→Battlefield ZoneChange through the replacement pipeline
+        // and read back the counter state.
+        let next_card = CardId(state.next_object_id);
+        let obj_id = create_object(
+            &mut state,
+            next_card,
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, &face);
+        }
+
+        let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+            obj_id,
+            Zone::Hand,
+            Zone::Battlefield,
+            None,
+        );
+        let mut events = Vec::new();
+        let result = crate::game::replacement::replace_event(&mut state, proposed, &mut events);
+        let crate::game::replacement::ReplacementResult::Execute(event) = result else {
+            panic!(
+                "Graft ETB replacement is Mandatory — pipeline must execute directly, got {result:?}"
+            );
+        };
+        let crate::types::proposed_event::ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            enter_with_counters,
+            ..
+        } = event
+        else {
+            panic!("pipeline must yield a ZoneChange execute event");
+        };
+        move_to_zone(&mut state, object_id, to, &mut events);
+        let actor = state
+            .objects
+            .get(&object_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(PlayerId(0));
+        for (counter_type, count) in &enter_with_counters {
+            crate::game::effects::counters::add_counter_with_replacement(
+                &mut state,
+                actor,
+                object_id,
+                counter_type.clone(),
+                *count,
+                &mut events,
+            );
+        }
+
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(obj.zone, Zone::Battlefield);
+        let p1p1 = *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0);
+        assert_eq!(
+            p1p1, 2,
+            "Graft 2 must place exactly 2 +1/+1 counters via the synthesized \
+             Moved replacement"
+        );
+    }
+
+    /// CR 702.58a clause 2 happy path: with a Graft source already on the
+    /// battlefield holding +1/+1 counters, when another creature ETBs the
+    /// trigger fires and (after the controller accepts the may-prompt) moves
+    /// one P1P1 counter from the source onto the new creature.
+    #[test]
+    fn graft_trigger_moves_counter_to_entering_creature_when_accepted() {
+        let graft_face = graft_creature_face("Vigean Graftmage", 2);
+        let other_face = plain_creature_face("Llanowar Elves");
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        let graft_id = place_creature_with_counters(&mut state, &graft_face, PlayerId(0), 2);
+
+        // Spawn the second creature, which fires the Graft trigger.
+        let other_id = spawn_creature_via_zone_change(&mut state, &other_face, PlayerId(0));
+
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { .. })),
+            "graft trigger must land on the stack"
+        );
+
+        // Resolve the optional trigger.
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+
+        // Accept the may-prompt; the engine auto-binds the single legal target.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        let source_p1p1 = *state
+            .objects
+            .get(&graft_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        let target_p1p1 = *state
+            .objects
+            .get(&other_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            source_p1p1, 1,
+            "Graft source loses one +1/+1 counter (2 → 1)"
+        );
+        assert_eq!(target_p1p1, 1, "Entering creature gains one +1/+1 counter");
+    }
+
+    /// CR 603.5 "you may" — declining the optional trigger leaves both
+    /// objects' counter totals unchanged.
+    #[test]
+    fn graft_trigger_no_op_when_controller_declines() {
+        let graft_face = graft_creature_face("Vigean Graftmage", 2);
+        let other_face = plain_creature_face("Llanowar Elves");
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        let graft_id = place_creature_with_counters(&mut state, &graft_face, PlayerId(0), 2);
+        let other_id = spawn_creature_via_zone_change(&mut state, &other_face, PlayerId(0));
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        let source_p1p1 = *state
+            .objects
+            .get(&graft_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        let target_p1p1 = *state
+            .objects
+            .get(&other_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(source_p1p1, 2, "declining leaves the source unchanged");
+        assert_eq!(target_p1p1, 0, "declining leaves the target unchanged");
+    }
+
+    /// CR 702.58a "if this permanent has a +1/+1 counter on it" intervening-if:
+    /// when the Graft source has zero P1P1 counters the trigger must NOT land
+    /// on the stack (intervening-if fails at detection per CR 603.4).
+    #[test]
+    fn graft_trigger_does_not_fire_when_source_has_no_counters() {
+        let graft_face = graft_creature_face("Vigean Graftmage", 2);
+        let other_face = plain_creature_face("Llanowar Elves");
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // Source on battlefield with ZERO +1/+1 counters.
+        place_creature_with_counters(&mut state, &graft_face, PlayerId(0), 0);
+        spawn_creature_via_zone_change(&mut state, &other_face, PlayerId(0));
+
+        assert!(
+            state.stack.is_empty(),
+            "with zero +1/+1 counters the intervening-if `HasCounters` must \
+             fail at detection — no trigger on the stack"
+        );
+    }
+
+    /// CR 702.58a is controller-agnostic: an opponent's creature entering also
+    /// fires the Graft trigger (the rule does not say "you control"). The
+    /// move-counter resolution still places the counter on the opponent's
+    /// creature, which is honest to the rule even if strategically inverted.
+    #[test]
+    fn graft_trigger_fires_for_opponent_controlled_creature() {
+        let graft_face = graft_creature_face("Vigean Graftmage", 2);
+        let opp_face = plain_creature_face("Goblin Guide");
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        place_creature_with_counters(&mut state, &graft_face, PlayerId(0), 2);
+        // Opponent (PlayerId(1)) controls the entering creature.
+        let opp_id = spawn_creature_via_zone_change(&mut state, &opp_face, PlayerId(1));
+
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { .. })),
+            "graft trigger must fire on opponent's creature ETB — CR 702.58a \
+             does not restrict by controller"
+        );
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        let target_p1p1 = *state
+            .objects
+            .get(&opp_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            target_p1p1, 1,
+            "the counter lands on the opponent's creature when the controller \
+             accepts the may-prompt"
+        );
+    }
+
+    /// CR 702.58a "another creature": the Graft source's own ETB must NOT
+    /// trigger itself. `FilterProp::Another` excludes the source object.
+    #[test]
+    fn graft_trigger_does_not_fire_on_own_etb() {
+        let graft_face = graft_creature_face("Vigean Graftmage", 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+
+        // Drive the Graft creature itself through ETB. The synthesized ETB
+        // replacement places 2 counters, but the "another creature" trigger
+        // must NOT fire for the source's own entry.
+        spawn_creature_via_zone_change(&mut state, &graft_face, PlayerId(0));
+
+        // After ETB the stack should be empty (the synthesized Moved
+        // replacement is consumed by the pipeline, not pushed to the stack;
+        // the "another creature" trigger excludes self).
+        assert!(
+            state.stack.is_empty(),
+            "Graft source's own ETB must not fire the another-creature trigger"
+        );
     }
 }
 

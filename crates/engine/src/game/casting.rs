@@ -33,6 +33,7 @@ use super::ability_utils::{
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
+use super::game_object::PreparedState;
 use super::mana_payment;
 use super::quantity::resolve_quantity;
 use super::restrictions;
@@ -7919,6 +7920,17 @@ pub fn handle_cancel_cast(
             state.stack_paid_facts.remove(&pending.object_id);
         }
     }
+
+    if let Some(source_id) = pending.cancel_restore_prepared_source {
+        // CR 601.2i + CR 722.3c: Prepare-copy cast cancellation must restore
+        // the source's prepared marker and clear the synthetic copy object.
+        if let Some(source) = state.objects.get_mut(&source_id) {
+            if source.zone == Zone::Battlefield {
+                source.prepared = Some(PreparedState);
+            }
+        }
+        state.objects.remove(&pending.object_id);
+    }
 }
 
 // Cost payment handlers are in casting_costs module.
@@ -13581,6 +13593,70 @@ mod tests {
         assert_eq!(state.objects[&own_creature].toughness, Some(2));
         assert_eq!(state.objects[&opposing_creature].power, Some(2));
         assert_eq!(state.objects[&opposing_creature].toughness, Some(2));
+    }
+
+    #[test]
+    fn toxic_deluge_style_x_life_additional_cost_still_pays_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_object(
+            &mut state,
+            CardId(12363),
+            PlayerId(0),
+            "Toxic Deluge Style Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 2,
+            };
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PumpAll {
+                    power: PtValue::Variable("-X".to_string()),
+                    toughness: PtValue::Variable("-X".to_string()),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ));
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CardId(12363),
+            &mut Vec::new(),
+        )
+        .expect("X life additional cost should prompt before mana payment");
+        state.waiting_for = waiting;
+        match state.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 20),
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 5 }).unwrap();
+
+        assert_eq!(state.players[0].life, 15);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.stack.len(), 1);
+        match &state.stack[0].kind {
+            StackEntryKind::Spell {
+                ability: Some(ability),
+                ..
+            } => assert_eq!(ability.chosen_x, Some(5)),
+            other => panic!("expected spell on stack, got {other:?}"),
+        }
     }
 
     #[test]

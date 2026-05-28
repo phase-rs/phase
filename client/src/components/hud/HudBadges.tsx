@@ -125,9 +125,10 @@ type CounterBadgeKind = "poison" | "speed" | "rad" | "energy" | "ring";
 interface CounterBadgeProps {
   kind: CounterBadgeKind;
   value: number;
+  ringBearerName?: string | null;
 }
 
-export function CounterBadge({ kind, value }: CounterBadgeProps) {
+export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps) {
   const { t } = useTranslation("game");
   if (kind === "poison") {
     return (
@@ -172,11 +173,24 @@ export function CounterBadge({ kind, value }: CounterBadgeProps) {
   }
 
   if (kind === "ring") {
+    const ringTitle = [
+      t("badges.ringTooltip", { level: value }),
+      ringBearerName
+        ? t("badges.ringBearerTooltip", { name: ringBearerName })
+        : t("badges.noRingBearerTooltip"),
+      t("badges.ringLevel1"),
+      t("badges.ringLevel2"),
+      t("badges.ringLevel3"),
+      t("badges.ringLevel4"),
+    ].join("\n");
     return (
       <span
         role="img"
-        aria-label={t("badges.ringAriaLabel", { level: value })}
-        title={t("badges.ringTooltip", { level: value })}
+        aria-label={t("badges.ringAriaLabel", {
+          level: value,
+          bearer: ringBearerName ?? t("badges.noRingBearer"),
+        })}
+        title={ringTitle}
         className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center gap-px overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-amber-950 ring-1 bg-yellow-600 ring-yellow-300/70 shadow-[0_0_12px_rgba(202,138,4,0.55)]"
       >
         <span

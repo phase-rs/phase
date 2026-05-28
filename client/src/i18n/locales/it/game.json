@@ -74,7 +74,9 @@
     "underAttack_other": "Attaccato da {{count}} creature",
     "target": "Bersaglio",
     "copy": "Copia",
-    "copyTooltip": "Copia pedina di una carta reale"
+    "copyTooltip": "Copia pedina di una carta reale",
+    "ringBearer": "Anello",
+    "ringBearerTooltip": "Portatore dell'Anello"
   },
   "player": {
     "opponent": "Avv {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} segnalino energia",
     "energyAriaLabel_other": "{{count}} segnalini energia",
     "energyTooltip": "Energia: {{count}}",
-    "ringAriaLabel": "L'Anello ti tenta (livello {{level}})",
+    "ringAriaLabel": "L'Anello ti tenta (livello {{level}}), portatore dell'Anello: {{bearer}}",
     "ringTooltip": "L'Anello ti tenta — livello {{level}}",
+    "ringBearerTooltip": "Portatore dell'Anello: {{name}}",
+    "noRingBearer": "nessuno",
+    "noRingBearerTooltip": "Nessun portatore dell'Anello",
+    "ringLevel1": "1. Il portatore dell'Anello è leggendario e non può essere bloccato da creature con forza maggiore.",
+    "ringLevel2": "2. Quando attacca, pesca una carta, poi scarta una carta.",
+    "ringLevel3": "3. Quando viene bloccato da una creatura, il controllore di quella creatura la sacrifica alla fine del combattimento.",
+    "ringLevel4": "4. Quando infligge danno da combattimento a un giocatore, ogni avversario perde 3 punti vita.",
     "radAriaLabel_one": "{{count}} segnalino radiazione",
     "radAriaLabel_other": "{{count}} segnalini radiazione",
     "radTooltip": "Segnalini radiazione: {{count}}",
