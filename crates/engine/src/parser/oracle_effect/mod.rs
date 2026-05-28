@@ -10850,6 +10850,29 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 608.2 + CR 109.5: Apply `rewrite_player_scope_refs` rooted at every def in
+/// the chain that carries `player_scope` — not only the outermost one. A scoped
+/// clause routinely appears NESTED as a sub-ability: Betor, Kin to All chains
+/// "draw a card", "untap each creature you control", then "each opponent loses
+/// half their life, rounded up", so `player_scope: Opponent` sits on the third
+/// sub-ability while the outermost effect (Draw) has none. Gating the rewrite on
+/// the outermost def's scope left the nested clause's "their life" as
+/// `LifeTotal { Target }`, which resolves to 0 (no player target). Once a scoped
+/// root is found, `rewrite_player_scope_refs` already recurses through its own
+/// sub-chain, so we stop descending here to avoid rewriting it twice.
+fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
+    if def.player_scope.is_some() {
+        rewrite_player_scope_refs(def);
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        apply_player_scope_rewrites(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        apply_player_scope_rewrites(else_branch);
+    }
+}
+
 /// CR 107.1a: Back-apply a rounding mode to every `DivideRounded` in an ability
 /// tree. Used by `parse_effect_chain_ir` after stripping a trailing
 /// "Round down each time" / "Round up each time" sentence (Pox Plague), so
@@ -13903,12 +13926,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         })
     };
 
-    // CR 608.2 + CR 107.2: If the outermost ability carries `player_scope`,
-    // rewrite target-scoped refs ("their life", "their hand") to their
-    // controller-scoped equivalents so they resolve per-iterating-player.
-    if result.player_scope.is_some() {
-        rewrite_player_scope_refs(&mut result);
-    }
+    // CR 608.2 + CR 107.2: Wherever an ability in the chain carries
+    // `player_scope` (outermost OR a nested sub-ability), rewrite target-scoped
+    // refs ("their life", "their hand") to their per-iterating-player
+    // equivalents. Walks the whole tree so a scoped clause buried under earlier
+    // non-scoped clauses (Betor, Kin to All) is still rewritten.
+    apply_player_scope_rewrites(&mut result);
 
     // CR 107.1a: Apply the chain-level rounding annotation (captured above)
     // to every DivideRounded in the built tree. No-op when the sentence was
@@ -28477,6 +28500,50 @@ mod tests {
             }
             other => panic!("Expected LoseLife, got {other:?}"),
         }
+    }
+
+    /// CR 107.1a + CR 109.5 regression (Betor, Kin to All): an "each opponent
+    /// loses half their life, rounded up" clause NESTED as a sub-ability (not
+    /// the outermost effect) must still pick up the player-scope rewrite, so
+    /// "their life" binds to each iterating opponent (`ScopedPlayer`). Before
+    /// the fix the rewrite only ran when the OUTERMOST def carried
+    /// `player_scope`, so the nested clause kept `LifeTotal { Target }` — which
+    /// resolves to 0 (no player target), making the life loss a no-op.
+    #[test]
+    fn nested_each_opponent_loses_half_life_uses_scoped_player() {
+        use crate::types::ability::{PlayerFilter, RoundingMode};
+        let def = parse_effect_chain(
+            "Draw a card. Then each opponent loses half their life, rounded up.",
+            AbilityKind::Spell,
+        );
+        // Walk the sub_ability chain to the LoseLife clause.
+        let mut node = &def;
+        let lose = loop {
+            if matches!(&*node.effect, Effect::LoseLife { .. }) {
+                break node;
+            }
+            node = node
+                .sub_ability
+                .as_deref()
+                .expect("LoseLife present in chain");
+        };
+        assert_eq!(lose.player_scope, Some(PlayerFilter::Opponent));
+        let Effect::LoseLife { amount, .. } = &*lose.effect else {
+            unreachable!()
+        };
+        assert_eq!(
+            *amount,
+            QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Up,
+            },
+            "nested each-opponent 'their life' must rebind to ScopedPlayer, got {amount:?}",
+        );
     }
 
     /// CR 107.1a: Cut Your Losses — "Target player mills half their library,
