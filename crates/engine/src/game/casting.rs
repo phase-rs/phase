@@ -26683,6 +26683,156 @@ mod tests {
         );
     }
 
+    /// CR 601.2b + CR 608.2n + CR 701.23a: Green Sun's Zenith — cast with X=2 searches
+    /// the library for a green creature with CMC ≤ X, puts it onto the battlefield, then
+    /// shuffles GSZ into its owner's library rather than the graveyard (the SequentialSibling
+    /// printed sentence overrides the default final-resolution graveyard placement from CR 608.2n).
+    #[test]
+    fn green_suns_zenith_creature_enters_battlefield_and_gsz_shuffles_into_library() {
+        use crate::parser::oracle::parse_oracle_text;
+        let mut state = setup_game_at_main_phase();
+        let gsz_card_id = CardId(200);
+        let gsz_id = create_object(
+            &mut state,
+            gsz_card_id,
+            PlayerId(0),
+            "Green Sun's Zenith".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&gsz_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Green],
+                generic: 0,
+            };
+            let parsed = parse_oracle_text(
+                "Search your library for a green creature card with mana value X or less, put it onto the battlefield, then shuffle. Shuffle Green Sun's Zenith into its owner's library.",
+                "Green Sun's Zenith",
+                &[],
+                &[String::from("Sorcery")],
+                &[],
+            );
+            obj.abilities = Arc::new(parsed.abilities.clone());
+            obj.base_abilities = Arc::new(parsed.abilities);
+        }
+        // Library contains a CMC-2 green creature (matches X=2) and a CMC-7 green creature (exceeds X).
+        // create_object(Zone::Library) already pushes the id into state.players[0].library via add_to_zone.
+        let small_green = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&small_green).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.color.push(crate::types::mana::ManaColor::Green);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            };
+        }
+        let large_green = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Verdant Force".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&large_green).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.color.push(crate::types::mana::ManaColor::Green);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Green,
+                    ManaCostShard::Green,
+                    ManaCostShard::Green,
+                ],
+                generic: 4,
+            };
+        }
+        // 3 green mana: pays the fixed {G} and allows X up to 2.
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 3);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: gsz_id,
+                card_id: gsz_card_id,
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        let max = match result.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => max,
+            other => panic!("expected ChooseXValue after casting GSZ, got {other:?}"),
+        };
+        assert_eq!(max, 2, "3 green minus fixed {{G}}=1 bounds X at 2");
+
+        let result = apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
+        assert!(
+            !matches!(result.waiting_for, WaitingFor::ManaPayment { .. }),
+            "mana should auto-pay from pool after ChooseX"
+        );
+        assert_eq!(state.stack.len(), 1);
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        let search_cards = match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, player, .. } => {
+                assert_eq!(*player, PlayerId(0));
+                cards.clone()
+            }
+            other => panic!("expected SearchChoice after GSZ resolution, got {other:?}"),
+        };
+        assert!(
+            search_cards.contains(&small_green),
+            "CMC-2 green creature must be in search results for X=2"
+        );
+        assert!(
+            !search_cards.contains(&large_green),
+            "CMC-7 green creature must be excluded from search results for X=2"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![small_green],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&small_green].zone, Zone::Battlefield);
+        // CR 608.2n: a sorcery's final-resolution step would put it into its owner's graveyard;
+        // GSZ's printed SequentialSibling sentence overrides that placement and shuffles it
+        // into its owner's library instead.
+        assert_eq!(
+            state.objects[&gsz_id].zone,
+            Zone::Library,
+            "GSZ must shuffle into its owner's library, not go to the graveyard (issue #882)"
+        );
+        assert!(
+            !state.players[0].graveyard.iter().any(|&id| id == gsz_id),
+            "GSZ must not appear in its owner's graveyard"
+        );
+        assert!(
+            state.players[0].library.iter().any(|&id| id == gsz_id),
+            "GSZ must appear in its owner's library"
+        );
+        assert!(state.stack.is_empty());
+    }
+
     /// CR 602.5 + CR 117.1b: Display/FromStr round-trip preserves the (who, when) axes.
     /// `exemption` is data-carrying and defaults to `None` (mirrors `CantBeActivated`).
     #[test]
