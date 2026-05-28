@@ -6144,6 +6144,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         if let Some(else_ab) = &def.else_ability {
             push_ability_tree(else_ab, out);
         }
+        if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
+            for branch in branches {
+                push_ability_tree(branch, out);
+            }
+        }
     }
     for a in face.abilities.iter() {
         push_ability_tree(a, &mut elements);
@@ -9196,6 +9201,49 @@ mod tests {
                 |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
             ),
             "ChooseOneOf counter branches should satisfy counter parameter audit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_per_line_matches_choose_one_of_branch_descriptions() {
+        let mut face = make_face();
+        let oracle =
+            "Destroy target creature.\nReturn target creature to its owner's hand.";
+        face.oracle_text = Some(oracle.to_string());
+
+        let destroy_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+        )
+        .description("Destroy target creature.".to_string());
+
+        let bounce_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: Some(Zone::Hand),
+            },
+        )
+        .description("Return target creature to its owner's hand.".to_string());
+
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![destroy_branch, bounce_branch],
+            },
+        ));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "ChooseOneOf branch descriptions should be reachable in per-line audit: {findings:?}"
         );
     }
 
