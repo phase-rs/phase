@@ -183,7 +183,7 @@ export class P2PDraftHost {
     private readonly onGuestConnected: (
       handler: (conn: DataConnection) => void,
     ) => () => void,
-    private readonly setPoolJson: string,
+    private readonly poolInput: PoolInput,
     private readonly kind: "Premier" | "Traditional",
     private readonly podSize: number,
     private readonly hostDisplayName: string,
@@ -465,13 +465,8 @@ export class P2PDraftHost {
       throw new Error("Need at least two seats to start a pod draft");
     }
 
-    // TRANSIENT (removed in Commit 3 when setPoolJson field is replaced by poolInput).
-    const poolInput: PoolInput = {
-      type: "Set",
-      data: { set_pool_json: this.setPoolJson },
-    };
     await this.adapter.createMultiplayerDraft(
-      poolInput,
+      this.poolInput,
       seats,
       this.kind,
       seed,
@@ -1365,7 +1360,7 @@ export class P2PDraftHost {
           draftStarted: this.draftStarted,
           draftCode: this.draftCode,
           draftSessionJson: sessionJson,
-          setPoolJson: this.setPoolJson,
+          poolInput: this.poolInput,
         };
 
         await saveDraftHostSession(this.persistenceId!, snapshot);

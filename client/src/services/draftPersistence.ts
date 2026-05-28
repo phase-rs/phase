@@ -12,7 +12,10 @@
 
 import { createStore, del, get, set } from "idb-keyval";
 
+import type { PoolInput } from "../adapter/draft-adapter";
 import { ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
+
+export type { PoolInput } from "../adapter/draft-adapter";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -42,8 +45,8 @@ export interface PersistedDraftHostSession {
   draftCode: string;
   /** Serialized DraftSession JSON from draft-wasm. Null if draft hasn't started. */
   draftSessionJson: string | null;
-  /** Original set pool JSON for re-initialization on resume. */
-  setPoolJson: string;
+  /** Pool source for re-initialization on resume (Set pool JSON or Cube list + settings). */
+  poolInput: PoolInput;
 }
 
 /**

@@ -173,7 +173,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         // Create the pod via multiplayerDraftStore
         const persistenceId = crypto.randomUUID();
         const hostConfig: DraftPodHostConfig = {
-          setPoolJson: poolJson,
+          poolInput: { type: "Set", data: { set_pool_json: poolJson } },
           kind: config.kind,
           podSize: config.podSize,
           hostDisplayName: hostDisplayName.trim(),
@@ -218,6 +218,13 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           return;
         }
 
+        // Transient: derive a legacy setPoolJson cache for set-mode resume
+        // until Commit 5 branches resumeHostedPod on poolInput.type.
+        const persistedSetPoolJson =
+          persisted.poolInput.type === "Set"
+            ? persisted.poolInput.data.set_pool_json
+            : null;
+
         set({
           config: {
             setCode: "",
@@ -228,13 +235,13 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             podPolicy: persisted.podPolicy,
           },
           hostDisplayName: persisted.hostDisplayName,
-          setPoolJson: persisted.setPoolJson,
+          setPoolJson: persistedSetPoolJson,
           loadingPool: false,
           configError: null,
         });
 
         const hostConfig: DraftPodHostConfig = {
-          setPoolJson: persisted.setPoolJson,
+          poolInput: persisted.poolInput,
           kind: persisted.kind,
           podSize: persisted.podSize,
           hostDisplayName: persisted.hostDisplayName,

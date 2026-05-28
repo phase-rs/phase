@@ -114,7 +114,7 @@ describe("multiplayerDraftStore", () => {
   describe("hostDraft", () => {
     it("sets role to host and phase to connecting", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -129,7 +129,7 @@ describe("multiplayerDraftStore", () => {
 
     it("updates roomCode on roomCreated event", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -144,7 +144,7 @@ describe("multiplayerDraftStore", () => {
 
     it("updates view on draftStarted event", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -162,7 +162,7 @@ describe("multiplayerDraftStore", () => {
 
     it("tracks lobby state from lobbyUpdate events", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -185,7 +185,7 @@ describe("multiplayerDraftStore", () => {
 
     it("projects restored MatchInProgress views into match phase", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -203,7 +203,7 @@ describe("multiplayerDraftStore", () => {
 
     it("handles host-seat Bo3 prompt messages", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Traditional",
         podSize: 8,
         hostDisplayName: "Host",
@@ -243,7 +243,7 @@ describe("multiplayerDraftStore", () => {
 
     it("reports active bot match results back to the pod host", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -275,7 +275,7 @@ describe("multiplayerDraftStore", () => {
 
     it("reports active match concessions as opponent wins", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -398,7 +398,7 @@ describe("multiplayerDraftStore", () => {
   describe("shared actions", () => {
     it("selectCard and confirmPick work together", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -415,7 +415,7 @@ describe("multiplayerDraftStore", () => {
 
     it("autoPickCard submits from the visible pack without manual selection", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -478,7 +478,7 @@ describe("multiplayerDraftStore", () => {
   describe("leave", () => {
     it("resets state to initial", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",

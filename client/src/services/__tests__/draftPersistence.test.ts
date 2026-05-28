@@ -49,7 +49,7 @@ describe("draftPersistence", () => {
       draftStarted: true,
       draftCode: "draft-12345678",
       draftSessionJson: '{"status":"Drafting"}',
-      setPoolJson: '{"code":"TST"}',
+      poolInput: { type: "Set", data: { set_pool_json: '{"code":"TST"}' } },
     };
 
     it("saves and loads a host session", async () => {

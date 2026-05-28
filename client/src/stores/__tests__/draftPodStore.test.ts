@@ -53,7 +53,7 @@ const persistedSession = {
   draftStarted: true,
   draftCode: "ABCDE",
   draftSessionJson: "{}",
-  setPoolJson: "{}",
+  poolInput: { type: "Set" as const, data: { set_pool_json: "{}" } },
 };
 
 describe("draftPodStore", () => {
