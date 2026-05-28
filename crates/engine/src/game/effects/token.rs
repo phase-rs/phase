@@ -951,6 +951,13 @@ pub(crate) fn try_resolve_batch(
         return None;
     }
 
+    // Resolve the per-resolution TokenSpec read-only, mirroring `resolve`.
+    // HIGH-1: resolve ONCE here — `resolve_token_spec` parses token scripts,
+    // resolves quantities, and builds attributes, so the perf-path must not
+    // resolve it twice. The resolved spec's `core_types` feed the disjointness
+    // invariance proof below directly.
+    let (spec, owner, enter_tapped, resolved_count) = resolve_token_spec(state, ability)?;
+
     // CR 608.2c: A sub-ability changes the resolved effect. Only a
     // `ConditionInstead`-gated sub that is currently NOT met (so the base
     // `Token` resolves) AND is provably invariant across the run is acceptable.
@@ -964,8 +971,7 @@ pub(crate) fn try_resolve_batch(
                     return None;
                 }
                 // Token core types feed the disjointness invariance proof.
-                let token_core_types = resolve_token_core_types(state, ability);
-                if !condition_invariant_for_token(inner, &token_core_types) {
+                if !condition_invariant_for_token(inner, &spec.characteristics.core_types) {
                     return None;
                 }
             }
@@ -974,9 +980,6 @@ pub(crate) fn try_resolve_batch(
             _ => return None,
         }
     }
-
-    // Resolve the per-resolution TokenSpec read-only, mirroring `resolve`.
-    let (spec, owner, enter_tapped, resolved_count) = resolve_token_spec(state, ability)?;
 
     // v1 batches a single base token per resolution. A non-unit per-resolution
     // count (e.g. "create two Insects") is correct to batch but the count-fusion
@@ -1022,14 +1025,6 @@ fn base_token_trigger_defs(spec: &TokenSpec) -> Vec<TriggerDefinition> {
         }
     }
     out
-}
-
-/// Resolve the base token's produced core types read-only (for the §2.2
-/// disjointness proof) without creating any object.
-fn resolve_token_core_types(state: &GameState, ability: &ResolvedAbility) -> Vec<CoreType> {
-    resolve_token_spec(state, ability)
-        .map(|(spec, ..)| spec.characteristics.core_types.clone())
-        .unwrap_or_default()
 }
 
 /// CR 111.1 + CR 111.4: Resolve a base `Effect::Token`'s per-resolution

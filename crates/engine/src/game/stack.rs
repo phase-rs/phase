@@ -1088,8 +1088,7 @@ pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                         {
                             crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
                         }
-                        let run_sources = collect_run_source_ids(state, plan.consumed());
-                        if observers_are_batch_safe(state, &plan, &run_sources) {
+                        if observers_are_batch_safe(state, &plan) {
                             return resolve_batched(state, &plan, &ability, events);
                         }
                     }
@@ -1164,21 +1163,21 @@ fn resolve_batched(
 }
 
 /// CR 603.2 + CR 603.3 + CR 603.6a: Layer C — battlefield-wide
-/// observer-order-invariance gate. A batched run is order-invariant iff no
-/// third-party battlefield trigger fans out on the token-ETB events the batch
-/// will emit. Build the REAL `ZoneChanged` + `TokenCreated` events one produced
-/// token emits (from the resolved spec's true characteristics) and route each
-/// through the public `candidates_for_event` — the same `keys_from_event` path
-/// the real events take downstream, with NO hand-picked key set. If any non-run
-/// observer fires, sequential resolution interleaves it per-token (CR 603.3
-/// topmost-on-stack), so the batch ("all tokens, then all observers") may
-/// diverge — refuse, fall back per-entry. The §2.2a emits-exactly gate makes
-/// this two-event probe complete by construction for ALL observer axes.
-fn observers_are_batch_safe(
-    state: &GameState,
-    plan: &effects::BatchPlan,
-    run_source_ids: &std::collections::HashSet<ObjectId>,
-) -> bool {
+/// observer-order-invariance gate. A batched run is order-invariant iff NO
+/// battlefield trigger fans out on the token-ETB events the batch will emit.
+/// Build the REAL `ZoneChanged` + `TokenCreated` events one produced token
+/// emits (from the resolved spec's true characteristics) and route each through
+/// the public `candidates_for_event` — the same `keys_from_event` path the real
+/// events take downstream, with NO hand-picked key set. If ANY observer is
+/// registered for those events — including one on the run's own source (HIGH-2:
+/// a source carrying a second observer trigger keyed on the produced token's
+/// ETB/TokenCreated must NOT be excluded; doing so would skip the per-trigger
+/// priority interleaving CR 603.3 requires) — sequential resolution interleaves
+/// it per-token (CR 603.3 topmost-on-stack), so the batch ("all tokens, then
+/// all observers") may diverge. Refuse, fall back per-entry. The §2.2a
+/// emits-exactly gate makes this two-event probe complete by construction for
+/// ALL observer axes.
+fn observers_are_batch_safe(state: &GameState, plan: &effects::BatchPlan) -> bool {
     for spec in plan.produced_token_specs() {
         let record = zone_change_record_from_spec(spec);
         let zc = GameEvent::ZoneChanged {
@@ -1195,8 +1194,10 @@ fn observers_are_batch_safe(
             // unclassified ∪ buckets matching keys_from_event(ev). The
             // unclassified bucket (Always/Immediate/dynamic/synthetic-keyword)
             // is unconditionally included → any catch-all observer forces refuse.
+            // CR 603.3: any registered observer (including the run's own source)
+            // forces sequential resolution so priority interleaves per-token.
             let candidates = crate::game::trigger_index::candidates_for_event(state, ev);
-            if candidates.iter().any(|id| !run_source_ids.contains(id)) {
+            if !candidates.is_empty() {
                 return false;
             }
         }
@@ -1234,20 +1235,6 @@ fn zone_change_record_from_spec(
         is_token: true,
         combat_status: Default::default(),
     }
-}
-
-/// Collect the `ObjectId` set of the `run_len` top entries' source objects, for
-/// Layer C's defensive run-source exclusion (so a run-source that observed its
-/// own produced tokens could not self-veto — the predicate means "no THIRD-PARTY
-/// observer").
-fn collect_run_source_ids(state: &GameState, run_len: u32) -> std::collections::HashSet<ObjectId> {
-    let len = state.stack.len();
-    state
-        .stack
-        .iter()
-        .skip(len.saturating_sub(run_len as usize))
-        .map(|e| e.source_id)
-        .collect()
 }
 
 /// Resolution-grade run key (stricter than the display `StackGroupKey`, §4.1).
@@ -3139,8 +3126,7 @@ mod tests {
     mod batch_resolve {
         // Driver internals under test (the stack module).
         use super::super::{
-            batch_run_len, collect_run_source_ids, effects, observers_are_batch_safe, resolve_next,
-            resolve_top,
+            batch_run_len, effects, observers_are_batch_safe, resolve_next, resolve_top,
         };
         // Test fixtures from the parent `tests` module.
         use super::setup;
@@ -3204,8 +3190,9 @@ mod tests {
 
         /// Create a Scute-Swarm-style source permanent (landfall trigger) on the
         /// battlefield and return its id. The landfall trigger registers under
-        /// `EnterBattlefield(Some(Land))`, so it never matches the creature-token
-        /// probe — exercising the defensive run-source exclusion.
+        /// `EnterBattlefield(Some(Land))`, so (mirroring real Scute Swarm) it
+        /// never matches the creature-token probe — the source's own trigger does
+        /// not block batching, while a creature-keyed observer (CR 603.3) does.
         fn add_scute_source(state: &mut GameState) -> ObjectId {
             let id = create_object(
                 state,
@@ -3342,8 +3329,7 @@ mod tests {
             assert_eq!(run_len, 5);
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
-            let sources = collect_run_source_ids(&state, run_len);
-            assert!(observers_are_batch_safe(&state, &plan, &sources));
+            assert!(observers_are_batch_safe(&state, &plan));
         }
 
         // §9.4a — Cathars'-class creature-ETB observer forces refusal + the
@@ -3396,9 +3382,8 @@ mod tests {
                 let run_len = batch_run_len(&state).unwrap();
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
                 let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
-                let sources = collect_run_source_ids(&state, run_len);
                 assert!(
-                    !observers_are_batch_safe(&state, &plan, &sources),
+                    !observers_are_batch_safe(&state, &plan),
                     "creature-ETB observer must force refusal"
                 );
             }
@@ -4043,6 +4028,71 @@ mod tests {
             );
         }
 
+        // CR 603.3 (HIGH-2 loophole regression) — the run's OWN source carries a
+        // SECOND observer trigger keyed on the produced token's creature-ETB
+        // (e.g. "Whenever a land enters, create a 1/1 creature token. Whenever a
+        // creature enters, draw a card."). Under CR 603.3 each token-creation and
+        // each observer firing goes on the stack one at a time, with priority in
+        // between, so batching ("all tokens, then all observers") would skip the
+        // priority interleaving and let a player act between resolutions. Layer C
+        // MUST refuse. This test would have FALSELY PASSED (batch wrongly allowed)
+        // when `observers_are_batch_safe` excluded the run's own source IDs: the
+        // creature-ETB candidate == the run source, so the old `run_source_ids`
+        // exclusion filtered it out and reported the run batch-safe. With the
+        // exclusion removed, any registered observer — including the source's own
+        // second trigger — forces sequential resolution.
+        #[test]
+        fn source_with_own_token_etb_observer_forces_refusal() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            // `add_scute_source` registers the LAND-ETB token-creating trigger
+            // (the run). It never self-matches the creature-token probe.
+            let src = add_scute_source(&mut state);
+
+            // Attach a SECOND trigger to the SAME source, keyed on creature-ETB —
+            // exactly the produced token's type. This is the loophole gemini
+            // flagged: the run source observing its own produced tokens.
+            {
+                let obj = state.objects.get_mut(&src).unwrap();
+                let creature_observer = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(creature_observer.clone());
+                obj.trigger_definitions.push(creature_observer);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
+
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+            // The creature-ETB candidate IS the run source `src`. Pre-fix, the
+            // exclusion dropped it and this assertion would FAIL (batch allowed);
+            // post-fix it must hold (refuse to batch).
+            assert!(
+                !observers_are_batch_safe(&state, &plan),
+                "run source's own token-ETB observer must force sequential resolution (CR 603.3)"
+            );
+
+            // End-to-end: the batch driver must fall back to one entry at a time.
+            let steps = resolve_to_empty_batched(&mut state);
+            assert!(
+                steps.iter().all(|&c| c == 1),
+                "source-observed run must resolve one-at-a-time, got {steps:?}"
+            );
+        }
+
         // §9.4a HIGH-1 regression — a live non-run battlefield observer keyed on a
         // NARROW non-Creature ETB subtype (artifact creature) that the produced
         // token matches must force Layer C to refuse. A round-2-style fixed
@@ -4096,9 +4146,8 @@ mod tests {
             let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
-            let sources = collect_run_source_ids(&state, run_len);
             assert!(
-                !observers_are_batch_safe(&state, &plan, &sources),
+                !observers_are_batch_safe(&state, &plan),
                 "narrow artifact-ETB observer must force refusal (Some(Artifact) bucket)"
             );
         }
@@ -4149,9 +4198,8 @@ mod tests {
             let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
-            let sources = collect_run_source_ids(&state, run_len);
             assert!(
-                !observers_are_batch_safe(&state, &plan, &sources),
+                !observers_are_batch_safe(&state, &plan),
                 "broad permanent-ETB observer must force refusal (None bucket)"
             );
         }
