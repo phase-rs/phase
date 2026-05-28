@@ -188,6 +188,8 @@ pub fn turn_order_for(state: &GameState, player: PlayerId) -> TurnOrder {
 
 #[cfg(test)]
 mod cedh_registration_tests {
+    use engine::game::bracket_estimate::CommanderBracketTier;
+
     use super::*;
     use crate::features::DeckFeatures;
     use crate::plan::PlanSnapshot;
@@ -287,6 +289,59 @@ mod cedh_registration_tests {
         assert!(
             !decision.keep,
             "ForceMulligan without ForceKeep must produce keep=false"
+        );
+    }
+
+    /// End-to-end: the REAL `CedhKeepablesMulligan` floor must override a real
+    /// `ForceMulligan` through the registry. This exercises the actual cEDH
+    /// policy (not a synthetic `ForceKeep` stub) so the floor's `ForceKeep`
+    /// wins the three-way aggregation — the whole point of the feature.
+    #[test]
+    fn cedh_floor_force_keep_overrides_force_mulligan_in_registry() {
+        let cedh_features = DeckFeatures {
+            bracket_tier: CommanderBracketTier::Cedh,
+            ..DeckFeatures::default()
+        };
+        // Default `waiting_for` → free_first = false, so the floor engages at
+        // mulligans_taken == 3 (`kept_hand_size_after(4, false) == 3 < 4`). An
+        // empty hand is fine — the floor check runs before the land-count branch.
+        let state = GameState::new_two_player(0);
+
+        let registry = MulliganRegistry {
+            policies: vec![
+                Box::new(CedhKeepablesMulligan::new()),
+                Box::new(AlwaysForceMulligan),
+            ],
+        };
+        let decision = registry.evaluate_hand(
+            &[],
+            &state,
+            &cedh_features,
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            3,
+        );
+        assert!(
+            decision.keep,
+            "real cEDH floor ForceKeep must override a real ForceMulligan; \
+             expected keep=true at mulligans_taken=3, got keep=false"
+        );
+
+        // Contrast: at mulligans_taken == 0 the floor is not engaged, so the
+        // real cEDH policy force-mulligans the empty hand (< 2 lands) and the
+        // registry mulligans.
+        let decision_no_floor = registry.evaluate_hand(
+            &[],
+            &state,
+            &cedh_features,
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+        assert!(
+            !decision_no_floor.keep,
+            "without the floor engaged, the real cEDH policy must mulligan; \
+             expected keep=false at mulligans_taken=0, got keep=true"
         );
     }
 }

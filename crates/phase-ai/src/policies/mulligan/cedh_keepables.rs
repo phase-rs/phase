@@ -18,17 +18,17 @@ use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 
-/// Minimum kept-hand size for a cEDH AI. A 3-card hand essentially can't win
-/// at a cEDH table, so we never take a mulligan that would leave fewer cards
-/// than this floor.
-const CEDH_MULLIGAN_FLOOR: usize = 4;
-
 use crate::combo::ComboRegistry;
 use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
 use super::{MulliganPolicy, MulliganScore, TurnOrder};
+
+/// Minimum kept-hand size for a cEDH AI. A 3-card hand essentially can't win
+/// at a cEDH table, so we never take a mulligan that would leave fewer cards
+/// than this floor.
+const CEDH_MULLIGAN_FLOOR: usize = 4;
 
 #[derive(Default)]
 pub struct CedhKeepablesMulligan {
