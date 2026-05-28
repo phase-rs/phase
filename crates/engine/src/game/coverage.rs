@@ -9208,8 +9208,7 @@ mod tests {
     #[test]
     fn test_audit_per_line_matches_choose_one_of_branch_descriptions() {
         let mut face = make_face();
-        let oracle =
-            "Destroy target creature.\nReturn target creature to its owner's hand.";
+        let oracle = "Destroy target creature.\nReturn target creature to its owner's hand.";
         face.oracle_text = Some(oracle.to_string());
 
         let destroy_branch = AbilityDefinition::new(
@@ -9226,6 +9225,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: Some(Zone::Hand),
+                selection: crate::types::ability::BounceSelection::Targeted,
             },
         )
         .description("Return target creature to its owner's hand.".to_string());
