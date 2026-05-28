@@ -96,6 +96,11 @@
     "difficulty": "Difficoltà",
     "deckRandom": "Casuale",
     "deckRandomCount": "Casuale ({{count}})",
+    "cedhToggle": {
+      "label": "Modalità cEDH",
+      "hint": "Tutti gli avversari giocano cEDH. Ogni mazzo deve essere bracket 5.",
+      "badge": "cEDH"
+    },
     "source": {
       "feed": "Feed",
       "user": "Utente",

@@ -96,6 +96,11 @@
     "difficulty": "Difficulté",
     "deckRandom": "Aléatoire",
     "deckRandomCount": "Aléatoire ({{count}})",
+    "cedhToggle": {
+      "label": "Mode cEDH",
+      "hint": "Tous les adversaires jouent en cEDH. Chaque deck doit être de palier 5.",
+      "badge": "cEDH"
+    },
     "source": {
       "feed": "Flux",
       "user": "Utilisateur",

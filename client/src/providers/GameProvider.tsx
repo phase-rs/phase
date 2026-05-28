@@ -16,6 +16,7 @@ import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
+import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
@@ -268,7 +269,7 @@ async function buildLocalAiDeckList(
   selectedMatchType?: MatchType,
   playerBracket?: CommanderBracket | null,
 ): Promise<DeckListPayload> {
-  const { aiSeats, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
+  const { aiSeats, cedhMode, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
   const catalog = await buildLegalAiDeckCatalog({
     selectedFormat: formatConfig?.format,
     selectedMatchType,
@@ -306,7 +307,11 @@ async function buildLocalAiDeckList(
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
   // to ai_decks. Missing seat prefs default to "Medium".
-  const aiDifficulties = picks.map((_, i) => aiSeats[i]?.difficulty ?? "Medium");
+  // cEDH is a table-wide toggle: every seat resolves to "CEDH" when it's on,
+  // regardless of the remembered per-seat difficulty.
+  const aiDifficulties = picks.map((_, i) =>
+    effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+  );
   return {
     player: { ...playerExpanded, bracket_tier: playerTier },
     opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },

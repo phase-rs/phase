@@ -96,6 +96,11 @@
     "difficulty": "Poziom trudności",
     "deckRandom": "Losowa",
     "deckRandomCount": "Losowa ({{count}})",
+    "cedhToggle": {
+      "label": "Tryb cEDH",
+      "hint": "Wszyscy przeciwnicy grają w cEDH. Każda talia musi być w przedziale 5.",
+      "badge": "cEDH"
+    },
     "source": {
       "feed": "Kanał",
       "user": "Użytkownik",

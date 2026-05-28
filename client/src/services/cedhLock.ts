@@ -1,45 +1,41 @@
-import type { AiSeatPref } from "../stores/preferencesStore";
+import type { AIDifficulty } from "../constants/ai";
 import type { CommanderBracket } from "../types/bracket";
 
 /**
- * Single source of truth for cEDH bracket-lock semantics on the frontend.
+ * Single source of truth for cEDH semantics on the frontend.
  *
- * - `anyAiOpponentIsCedh` — does any AI seat want cEDH difficulty?
- * - `applyCedhCascade` — when one AI is cEDH, all AI seats must be cEDH.
- *   Pure: returns a new array; never mutates input.
+ * cEDH is a table-wide property (every deck must be bracket 5), not a per-seat
+ * difficulty. The user enables it via the `cedhMode` toggle (preferencesStore);
+ * these helpers translate that flag into the engine's per-seat contract and
+ * deck-legality checks.
+ *
+ * - `effectiveAiDifficulty` — resolve a seat's engine difficulty given `cedhMode`.
  * - `isDeckCedhLegal` — does this deck's declared bracket qualify as B5 cEDH?
  *
- * Every cEDH-lock decision in the frontend flows through these three helpers.
- * Adding new checks elsewhere is a defect — they belong here.
+ * Every cEDH decision in the frontend flows through these helpers. Adding new
+ * checks elsewhere is a defect — they belong here.
  */
 
-/** The difficulty string used by the Rust engine for cEDH. */
-export const CEDH_DIFFICULTY = "CEDH";
+/** The difficulty string the Rust engine uses for cEDH. */
+export const CEDH_DIFFICULTY: AIDifficulty = "CEDH";
 
 /** The numeric bracket tier for cEDH (bracket 5). */
 export const CEDH_BRACKET: CommanderBracket = 5;
 
 /**
- * Returns true when at least one AI seat has cEDH difficulty selected.
+ * Resolve a seat's engine difficulty given the table-wide cEDH toggle.
  *
- * Accepts `AiSeatPref[]` directly rather than the full `GameSetupConfig` to
- * avoid coupling the helper to the store's shape.
+ * When cEDH mode is on, every AI seat plays at cEDH (bracket 5) regardless of
+ * its remembered per-seat difficulty; otherwise the seat's own difficulty
+ * applies. This is the single chokepoint mapping the UX-level `cedhMode` to the
+ * engine's per-seat difficulty contract — used both when persisting the game's
+ * seat snapshot and when building the deck list at game start.
  */
-export function anyAiOpponentIsCedh(seats: AiSeatPref[]): boolean {
-  return seats.some((s) => s.difficulty === CEDH_DIFFICULTY);
-}
-
-/**
- * When any AI seat is set to cEDH, all AI seats must also be cEDH (the
- * bracket-5 lock is table-wide). Returns a new array; never mutates input.
- *
- * If no seat is cEDH, returns the original array reference unchanged.
- */
-export function applyCedhCascade(seats: AiSeatPref[]): AiSeatPref[] {
-  if (!anyAiOpponentIsCedh(seats)) {
-    return seats;
-  }
-  return seats.map((s) => ({ ...s, difficulty: CEDH_DIFFICULTY as AiSeatPref["difficulty"] }));
+export function effectiveAiDifficulty(
+  difficulty: AIDifficulty,
+  cedhMode: boolean,
+): AIDifficulty {
+  return cedhMode ? CEDH_DIFFICULTY : difficulty;
 }
 
 /**

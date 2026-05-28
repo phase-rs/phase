@@ -21,7 +21,7 @@ import { menuButtonClass } from "../components/menu/buttonStyles";
 import { ACTIVE_DECK_KEY, loadSavedDeckBracket, touchDeckPlayed } from "../constants/storage";
 import { useCardImage } from "../hooks/useCardImage";
 import { BRACKET_LABEL } from "../types/bracket";
-import { anyAiOpponentIsCedh, isDeckCedhLegal } from "../services/cedhLock";
+import { effectiveAiDifficulty, isDeckCedhLegal } from "../services/cedhLock";
 import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useCardDataStore } from "../stores/cardDataStore";
@@ -161,8 +161,12 @@ export function GameSetupPage() {
     const prefs = usePreferencesStore.getState();
     prefs.ensureAiSeatCount(opponentCount);
     const prefSeats = usePreferencesStore.getState().aiSeats.slice(0, opponentCount);
+    // cEDH is a table-wide toggle, not a per-seat difficulty: when it's on,
+    // every seat's engine difficulty resolves to "CEDH" (the per-seat value is
+    // preserved in prefs for when cEDH is turned off).
+    const cedhMode = prefs.cedhMode;
     const aiSeats = prefSeats.map((s) => ({
-      difficulty: s.difficulty,
+      difficulty: effectiveAiDifficulty(s.difficulty, cedhMode),
       deckId: s.deckId === "Random" ? null : s.deckId,
     }));
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
@@ -185,12 +189,13 @@ export function GameSetupPage() {
   const cardDataLoading = cardStatus === "loading";
   const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
 
-  // cEDH warning: shown when the human deck is not bracket 5 but any AI is cEDH.
-  const aiSeats = usePreferencesStore((s) => s.aiSeats);
+  // cEDH warning: shown when the human deck is not bracket 5 but the table is
+  // in cEDH mode (all AI play cEDH).
+  const cedhMode = usePreferencesStore((s) => s.cedhMode);
   const humanDeckBracket = activeDeckName ? loadSavedDeckBracket(activeDeckName) : null;
   const showCedhWarning =
     activeDeckName !== null &&
-    anyAiOpponentIsCedh(aiSeats) &&
+    cedhMode &&
     !isDeckCedhLegal(humanDeckBracket);
   const representativeCard = useMemo(
     () => (activeDeckName ? getRepresentativeCard(activeDeckName) : null),

@@ -17,27 +17,10 @@ describe("AiDifficultyDropdown", () => {
 
     expect(onChange).toHaveBeenCalledWith("Hard");
   });
-});
 
-describe("AiDifficultyDropdown — cEDH", () => {
-  it("renders the cEDH option in the select", () => {
+  it("does not offer cEDH as a selectable difficulty (it is a table-wide toggle)", () => {
     render(<AiDifficultyDropdown difficulty="Medium" onChange={() => {}} />);
-    // The option label is "cEDH (B5 lock)" from AI_DIFFICULTIES; query all in
-    // case the select renders an option for each ID including "CEDH".
-    const options = screen.getAllByRole("option", { name: /cEDH/i });
-    expect(options.length).toBeGreaterThan(0);
-    expect(options[0]).toBeInTheDocument();
-  });
-
-  it("renders the B5 badge when difficulty is CEDH", () => {
-    render(<AiDifficultyDropdown difficulty="CEDH" onChange={() => {}} />);
-    const badge = screen.getByLabelText("B5 lock");
-    expect(badge).toBeInTheDocument();
-  });
-
-  it("does not render the B5 badge when difficulty is not CEDH", () => {
-    const { container } = render(<AiDifficultyDropdown difficulty="Hard" onChange={() => {}} />);
-    const badge = container.querySelector('[aria-label="B5 lock"]');
-    expect(badge).not.toBeInTheDocument();
+    const options = screen.queryAllByRole("option", { name: /cEDH/i });
+    expect(options).toHaveLength(0);
   });
 });

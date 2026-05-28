@@ -3,7 +3,7 @@
  *
  * The warning chip renders when:
  *   activeDeckName !== null
- *   && anyAiOpponentIsCedh(aiSeats)
+ *   && cedhMode
  *   && !isDeckCedhLegal(humanDeckBracket)
  *
  * `activeDeckName` is read from localStorage (ACTIVE_DECK_KEY) on mount.
@@ -124,22 +124,24 @@ function renderGameSetupPage() {
 beforeEach(() => {
   localStorage.clear();
   act(() => {
-    // Reset to a single seat at Medium so each test starts from a known state.
+    // Reset to a single seat at Medium with cEDH mode off so each test starts
+    // from a known state.
     usePreferencesStore.getState().ensureAiSeatCount(1);
     usePreferencesStore.getState().setAiSeatDifficulty(0, "Medium");
+    usePreferencesStore.getState().setCedhMode(false);
   });
 });
 
 afterEach(cleanup);
 
 describe("GameSetupPage — cEDH bracket warning chip", () => {
-  it("shows the warning chip when the human deck is non-cEDH and any AI is cEDH", async () => {
+  it("shows the warning chip when the human deck is non-cEDH and cEDH mode is on", async () => {
     // Deck with bracket 2 (Core) — not cEDH-legal.
     seedDeck("My Deck", 2);
     setActiveDeck("My Deck");
 
     act(() => {
-      usePreferencesStore.getState().setAiSeatDifficulty(0, "CEDH");
+      usePreferencesStore.getState().setCedhMode(true);
     });
 
     renderGameSetupPage();
@@ -158,7 +160,7 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
     setActiveDeck("cEDH Deck");
 
     act(() => {
-      usePreferencesStore.getState().setAiSeatDifficulty(0, "CEDH");
+      usePreferencesStore.getState().setCedhMode(true);
     });
 
     renderGameSetupPage();
@@ -173,14 +175,14 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("does not show the warning chip when no AI seat is cEDH", async () => {
-    // Deck with bracket 2 — would trigger the warning if any AI were cEDH.
+  it("does not show the warning chip when cEDH mode is off", async () => {
+    // Deck with bracket 2 — would trigger the warning if cEDH mode were on.
     seedDeck("Casual Deck", 2);
     setActiveDeck("Casual Deck");
 
-    // All AI seats are non-cEDH (Hard).
+    // cEDH mode is off (reset in beforeEach); per-seat difficulty is irrelevant.
     act(() => {
-      usePreferencesStore.getState().setAiSeatDifficulty(0, "Hard");
+      usePreferencesStore.getState().setCedhMode(false);
     });
 
     renderGameSetupPage();

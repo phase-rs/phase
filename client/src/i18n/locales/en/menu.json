@@ -96,6 +96,11 @@
     "difficulty": "Difficulty",
     "deckRandom": "Random",
     "deckRandomCount": "Random ({{count}})",
+    "cedhToggle": {
+      "label": "cEDH mode",
+      "hint": "All opponents play cEDH. Every deck must be bracket 5.",
+      "badge": "cEDH"
+    },
     "source": {
       "feed": "Feed",
       "user": "User",

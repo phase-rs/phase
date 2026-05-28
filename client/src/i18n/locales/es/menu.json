@@ -96,6 +96,11 @@
     "difficulty": "Dificultad",
     "deckRandom": "Aleatorio",
     "deckRandomCount": "Aleatorio ({{count}})",
+    "cedhToggle": {
+      "label": "Modo cEDH",
+      "hint": "Todos los oponentes juegan cEDH. Cada mazo debe ser bracket 5.",
+      "badge": "cEDH"
+    },
     "source": {
       "feed": "Feed",
       "user": "Usuario",

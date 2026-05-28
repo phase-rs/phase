@@ -42,16 +42,18 @@ beforeEach(() => {
     usePreferencesStore.getState().setAiBracketFilter([]);
     usePreferencesStore.getState().setAiArchetypeFilter("Any");
     usePreferencesStore.getState().setAiCoverageFloor(50);
-    // Reset to a single AI seat at Medium difficulty to avoid cascade state from a prior test.
+    // Reset to a single AI seat at Medium difficulty with cEDH mode off so each
+    // test starts from a known state.
     usePreferencesStore.getState().ensureAiSeatCount(1);
     usePreferencesStore.getState().setAiSeatDifficulty(0, "Medium");
+    usePreferencesStore.getState().setCedhMode(false);
   });
 });
 
 afterEach(cleanup);
 
-describe("AiOpponentConfig — cEDH cascade", () => {
-  it("cascades all AI seats to cEDH when one seat is set to cEDH", async () => {
+describe("AiOpponentConfig — cEDH toggle", () => {
+  it("enabling cEDH mode sets the table flag without touching per-seat difficulties", async () => {
     const user = userEvent.setup();
 
     // Seed: two AI seats — seat 0 at Easy, seat 1 at Hard.
@@ -63,22 +65,20 @@ describe("AiOpponentConfig — cEDH cascade", () => {
 
     render(<AiOpponentConfig selectedFormat="Commander" opponentCount={2} />);
 
-    // Expand the first seat panel (multi-AI starts collapsed).
-    await user.click(screen.getByRole("button", { name: /Opponent 1/i }));
+    // Flip the table-wide cEDH toggle.
+    await user.click(screen.getByRole("switch", { name: /cEDH mode/i }));
 
-    // Select cEDH from seat 0's difficulty dropdown.
-    const difficultySelects = screen.getAllByRole("combobox", { name: /Difficulty/i });
-    await user.selectOptions(difficultySelects[0], "CEDH");
-
-    // Both seats in the store should now be CEDH.
+    // cEDH mode is on, but each seat's remembered difficulty is preserved
+    // (no cascade) so turning it back off restores the per-seat choices.
     await waitFor(() => {
+      expect(usePreferencesStore.getState().cedhMode).toBe(true);
       const seats = usePreferencesStore.getState().aiSeats;
-      expect(seats[0].difficulty).toBe("CEDH");
-      expect(seats[1].difficulty).toBe("CEDH");
+      expect(seats[0].difficulty).toBe("Easy");
+      expect(seats[1].difficulty).toBe("Hard");
     });
   });
 
-  it("does not cascade on selecting a non-cEDH difficulty", async () => {
+  it("per-seat difficulty changes are independent (no cascade to other seats)", async () => {
     const user = userEvent.setup();
 
     // Seed: two AI seats — seat 0 at Easy, seat 1 at Hard.
@@ -90,47 +90,22 @@ describe("AiOpponentConfig — cEDH cascade", () => {
 
     render(<AiOpponentConfig selectedFormat="Commander" opponentCount={2} />);
 
-    // Expand the first seat panel.
+    // Expand the first seat panel and change only seat 0.
     await user.click(screen.getByRole("button", { name: /Opponent 1/i }));
-
-    // Change seat 0 from Easy to Medium.
     const difficultySelects = screen.getAllByRole("combobox", { name: /Difficulty/i });
     await user.selectOptions(difficultySelects[0], "Medium");
 
-    // Seat 1 must still be Hard — no cascade fired.
+    // Seat 1 must still be Hard — changing one seat never affects another.
     await waitFor(() => {
       const seats = usePreferencesStore.getState().aiSeats;
       expect(seats[0].difficulty).toBe("Medium");
       expect(seats[1].difficulty).toBe("Hard");
     });
   });
-
-  it("shows the cEDH cascade notice when cascading from a non-cEDH seat", async () => {
-    const user = userEvent.setup();
-
-    // Seed: two AI seats — both non-cEDH so the cascade fires on first selection.
-    act(() => {
-      usePreferencesStore.getState().ensureAiSeatCount(2);
-      usePreferencesStore.getState().setAiSeatDifficulty(0, "Easy");
-      usePreferencesStore.getState().setAiSeatDifficulty(1, "Hard");
-    });
-
-    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={2} />);
-
-    // Expand seat 0 and select cEDH.
-    await user.click(screen.getByRole("button", { name: /Opponent 1/i }));
-    const difficultySelects = screen.getAllByRole("combobox", { name: /Difficulty/i });
-    await user.selectOptions(difficultySelects[0], "CEDH");
-
-    // The cascade notice should appear.
-    await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(/All AI opponents set to cEDH/i);
-    });
-  });
 });
 
-describe("AiOpponentConfig — B5 lock badge", () => {
-  it("renders the B5 lock badge when the seat difficulty is CEDH", async () => {
+describe("AiOpponentConfig — cEDH badge + disabled difficulty", () => {
+  it("badges the seat and disables the difficulty dropdown when cEDH mode is on", async () => {
     const user = userEvent.setup();
 
     act(() => {
@@ -140,26 +115,26 @@ describe("AiOpponentConfig — B5 lock badge", () => {
 
     render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
 
-    // Badge should not appear before cEDH is selected.
-    expect(screen.queryByLabelText("B5 lock")).not.toBeInTheDocument();
+    // Before enabling: no badge, dropdown enabled.
+    expect(screen.queryByLabelText("cEDH")).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /Difficulty/i })).toBeEnabled();
 
-    // Select cEDH difficulty.
-    const difficultySelect = screen.getByRole("combobox", { name: /Difficulty/i });
-    await user.selectOptions(difficultySelect, "CEDH");
+    await user.click(screen.getByRole("switch", { name: /cEDH mode/i }));
 
     await waitFor(() => {
-      expect(screen.getByLabelText("B5 lock")).toBeInTheDocument();
+      expect(screen.getByLabelText("cEDH")).toBeInTheDocument();
+      expect(screen.getByRole("combobox", { name: /Difficulty/i })).toBeDisabled();
     });
   });
 
-  it("hides the B5 lock badge when the seat difficulty is not CEDH", () => {
+  it("hides the cEDH badge when cEDH mode is off", () => {
     act(() => {
       usePreferencesStore.getState().ensureAiSeatCount(1);
       usePreferencesStore.getState().setAiSeatDifficulty(0, "Hard");
     });
 
     render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
-    expect(screen.queryByLabelText("B5 lock")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("cEDH")).not.toBeInTheDocument();
   });
 });
 
