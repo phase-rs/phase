@@ -3671,6 +3671,7 @@ async fn handle_client_message(
                         draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
                             set_code,
                             draft_kind: format!("{kind:?}"),
+                            cube_name: None,
                         }),
                     },
                     &SysEnv,
