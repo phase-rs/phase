@@ -9035,6 +9035,25 @@ fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
     .parse(input)
 }
 
+/// CR 400.3: Shared parser for possessive hand forms in zone-change triggers.
+/// Recognises "your hand", "an opponent's hand", "its owner's hand",
+/// "their owner's hand", "their owners' hands", "a player's hand", "a hand",
+/// and bare "hand". Returns `Some(controller)` when the possessive constrains
+/// the destination owner, `None` when any player's hand matches.
+fn parse_hand_possessive(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+    alt((
+        value(Some(ControllerRef::You), tag("your hand")),
+        value(Some(ControllerRef::Opponent), tag("an opponent's hand")),
+        value(None, tag("its owner's hand")),
+        value(None, tag("their owner's hand")),
+        value(None, tag("their owners' hands")),
+        value(None, tag("a player's hand")),
+        value(None, tag("a hand")),
+        value(None, tag("hand")),
+    ))
+    .parse(input)
+}
+
 /// Parse "[subject] is/are put into [possessive] hand from [zone]" — dredge-style
 /// zone-change triggers that fire when a card moves from graveyard (or library) to
 /// its owner's hand. Mirrors `try_parse_put_into_graveyard` with hand as the
@@ -9055,25 +9074,9 @@ fn try_parse_put_into_hand_from(
     .parse(rest)
     .ok()?;
 
-    fn parse_hand_possessive(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
-        alt((
-            value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
-                )),
-                tag("your hand"),
-            ),
-            value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
-                tag("an opponent's hand"),
-            ),
-            value(None, tag("a hand")),
-        ))
-        .parse(input)
-    }
-    let (after_hand, valid_target) = parse_hand_possessive.parse(after_verb).ok()?;
+    let (after_hand, hand_owner) = parse_hand_possessive.parse(after_verb).ok()?;
+    let valid_target =
+        hand_owner.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
 
     let after_hand = after_hand.trim_start();
     let origin = if let Ok((after_from, ())) =
@@ -9113,14 +9116,17 @@ fn try_parse_put_into_hand_from(
     Some((TriggerMode::ChangesZone, def))
 }
 
-/// Parse "[subject] is/are returned to [possessive] hand" — zone-change trigger
-/// for bounce effects (CR 603.6c + CR 603.10a). The verb "returned" implies the object moved
-/// from the battlefield to a player's hand. Examples:
+/// CR 603.6c + CR 603.10a: "[subject] is/are returned to [possessive] hand" —
+/// zone-change trigger for bounce effects. The verb "returned" implies the
+/// object moved from the battlefield to a player's hand. Examples:
 /// - Warped Devotion: "Whenever a permanent is returned to a player's hand"
 /// - Azorius Aethermage: "Whenever a permanent is returned to your hand"
 /// - Stormfront Riders: "Whenever … is returned to your hand"
 ///
 /// Maps to `ChangesZone` with `origin: Battlefield`, `destination: Hand`.
+/// The hand-owner qualifier ("your"/"opponent's") is merged into `valid_card`
+/// via `add_controller` so that `match_changes_zone` correctly filters by
+/// the bounced permanent's controller.
 fn try_parse_returned_to_hand(
     subject: &TargetFilter,
     rest: &str,
@@ -9132,35 +9138,22 @@ fn try_parse_returned_to_hand(
     .parse(rest)
     .ok()?;
 
-    // Parse the possessive hand form.
-    fn parse_returned_hand(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
-        alt((
-            // "your hand" → controller
-            value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
-                )),
-                tag("your hand"),
-            ),
-            // "its owner's hand" / "their owner's hand" → owner (no constraint)
-            value(None, tag("its owner's hand")),
-            value(None, tag("their owner's hand")),
-            value(None, tag("their owners' hands")),
-            // "a player's hand" → any player (no constraint)
-            value(None, tag("a player's hand")),
-            // bare "hand" (Tameshi)
-            value(None, tag("hand")),
-        ))
-        .parse(input)
-    }
-    let (_after_hand, valid_target) = parse_returned_hand.parse(after_verb).ok()?;
+    let (_after_hand, hand_owner) = parse_hand_possessive.parse(after_verb).ok()?;
+
+    // CR 400.3: Objects always go to their owner's zone, so "your hand"
+    // means the bounced permanent was controlled by you. Merge the
+    // constraint into `valid_card` because `match_changes_zone` only
+    // inspects `valid_card`, not `valid_target`.
+    let valid_card = match hand_owner {
+        Some(ctrl) => add_controller(subject.clone(), ctrl),
+        None => subject.clone(),
+    };
 
     let mut def = make_base();
     def.mode = TriggerMode::ChangesZone;
     def.origin = Some(Zone::Battlefield);
     def.destination = Some(Zone::Hand);
-    def.valid_card = Some(subject.clone());
-    def.valid_target = valid_target;
+    def.valid_card = Some(valid_card);
     // Self-referential bounce triggers (e.g. "when ~ is returned to your hand")
     // must fire from hand because the source has already moved.
     if filter_references_self(subject) {
@@ -12590,9 +12583,16 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.origin, Some(Zone::Battlefield));
         assert_eq!(def.destination, Some(Zone::Hand));
-        assert!(def.valid_card.is_some());
-        // "your hand" — controller constraint.
-        assert!(def.valid_target.is_some());
+        // "your hand" — controller constraint merged into valid_card.
+        let vc = def.valid_card.as_ref().expect("valid_card should be set");
+        match vc {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            _ => panic!("expected Typed filter with controller"),
+        }
+        // Owner constraint is on valid_card, not valid_target.
+        assert!(def.valid_target.is_none());
     }
 
     #[test]
