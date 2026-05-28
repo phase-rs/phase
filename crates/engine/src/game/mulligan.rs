@@ -60,6 +60,13 @@ fn bottom_count_for(mulligan_count: u8, free_first: bool) -> u8 {
     }
 }
 
+/// CR 103.5: Number of cards a player keeps after deciding to keep with
+/// `mulligan_count` mulligans taken (free-first discount applied when the
+/// game grants one). Starting hand size minus the bottoms owed.
+pub fn kept_hand_size_after(mulligan_count: u8, free_first: bool) -> usize {
+    STARTING_HAND_SIZE.saturating_sub(bottom_count_for(mulligan_count, free_first) as usize)
+}
+
 /// CR 103.4: Start the mulligan process — shuffle libraries and draw 7 for each player.
 ///
 /// CR 103.5 + 103.5b: All players decide simultaneously. The returned
@@ -1642,6 +1649,26 @@ mod tests {
             "game should start after all four kept in non-seat order, got {:?}",
             state.waiting_for
         );
+    }
+
+    /// CR 103.5: Kept hand size = 7 minus the bottom count owed, with no
+    /// free-first discount (Standard / non-free-first format).
+    #[test]
+    fn kept_hand_size_after_normal() {
+        assert_eq!(kept_hand_size_after(0, false), 7);
+        assert_eq!(kept_hand_size_after(3, false), 4);
+        assert_eq!(kept_hand_size_after(4, false), 3);
+    }
+
+    /// CR 103.5c: Kept hand size in a free-first format (Commander / cEDH /
+    /// multiplayer). The first mulligan is discounted, so count 1 still yields
+    /// a 7-card kept hand, and later counts are shifted up by one.
+    #[test]
+    fn kept_hand_size_after_free_first() {
+        assert_eq!(kept_hand_size_after(0, true), 7);
+        assert_eq!(kept_hand_size_after(1, true), 7);
+        assert_eq!(kept_hand_size_after(4, true), 4);
+        assert_eq!(kept_hand_size_after(5, true), 3);
     }
 
     /// CR 103.5 + CR 800.4a: A player who concedes during the mulligan
