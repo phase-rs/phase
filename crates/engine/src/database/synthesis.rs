@@ -3236,8 +3236,7 @@ fn is_graft_enters_trigger(t: &TriggerDefinition) -> bool {
     if !matches!(t.mode, TriggerMode::ChangesZone) || t.destination != Some(Zone::Battlefield) {
         return false;
     }
-    let TargetFilter::Typed(ref tf) = t.valid_card.as_ref().cloned().unwrap_or(TargetFilter::None)
-    else {
+    let Some(TargetFilter::Typed(tf)) = t.valid_card.as_ref() else {
         return false;
     };
     if !tf
