@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{battlefield_active_statics, game_functioning_statics};
@@ -30,6 +31,20 @@ pub struct StaticCheckContext {
     pub target_id: Option<ObjectId>,
     pub player_id: Option<PlayerId>,
     pub card_name: Option<String>,
+}
+
+/// Process-wide cached static-ability registry.
+///
+/// Mirrors [`crate::game::trigger_matchers::trigger_registry`]: the registry
+/// is a pure constant (`StaticMode` → fn-pointer), so it is built once.
+/// `unimplemented_mechanics` consults it per battlefield object per `apply()`;
+/// rebuilding it per call was a display-derivation hot-path cost.
+static STATIC_REGISTRY: LazyLock<HashMap<StaticMode, StaticAbilityHandler>> =
+    LazyLock::new(build_static_registry);
+
+/// Cached accessor for the static-ability registry. Built once on first use.
+pub fn static_registry() -> &'static HashMap<StaticMode, StaticAbilityHandler> {
+    &STATIC_REGISTRY
 }
 
 /// CR 604.1: Static ability registry — maps StaticMode keys to handlers.
