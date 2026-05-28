@@ -137,7 +137,6 @@ function buildDefaultPreferences(): PreferencesState {
     lastFormat: null,
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
-    experimentalFeatures: false,
     dismissedFlowHelpNudge: false,
     dismissedSandboxToolsNudge: false,
     artChain: [] as ArtChainEntry[],
@@ -193,7 +192,6 @@ interface PreferencesState {
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
-  experimentalFeatures: boolean;
   dismissedFlowHelpNudge: boolean;
   dismissedSandboxToolsNudge: boolean;
   artChain: ArtChainEntry[];
@@ -246,7 +244,6 @@ interface PreferencesActions {
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
-  setExperimentalFeatures: (enabled: boolean) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
   setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
   addArtChainEntry: (entry: ArtChainEntry) => void;
@@ -378,7 +375,6 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
-      setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
       setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),
       addArtChainEntry: (entry) =>

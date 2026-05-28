@@ -18,7 +18,6 @@ import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { runLimits } from "../services/quickDraftPersistence";
 import type { DraftRunFormat, DraftRunState } from "../services/quickDraftPersistence";
-import { usePreferencesStore } from "../stores/preferencesStore";
 
 // ── Format Picker ─────────────────────────────────────────────────────
 
@@ -300,7 +299,6 @@ export function DraftPage() {
   const { t } = useTranslation("draft");
   const phase = useDraftStore((s) => s.phase);
   const reset = useDraftStore((s) => s.reset);
-  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const requestedSetupMode = searchParams.get("mode");
@@ -308,7 +306,7 @@ export function DraftPage() {
   const [introDismissed, setIntroDismissed] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
   const [setupMode, setSetupMode] = useState<DraftSetupMode>(() =>
-    requestedSetupMode === "cube" && experimentalFeatures ? "cube" : "set",
+    requestedSetupMode === "cube" ? "cube" : "set",
   );
 
   useEffect(() => {
@@ -331,14 +329,8 @@ export function DraftPage() {
   }, [searchParams]);
 
   useEffect(() => {
-    if (requestedSetupMode === "cube") {
-      setSetupMode(experimentalFeatures ? "cube" : "set");
-    }
-  }, [requestedSetupMode, experimentalFeatures]);
-
-  useEffect(() => {
-    if (!experimentalFeatures) setSetupMode("set");
-  }, [experimentalFeatures]);
+    setSetupMode(requestedSetupMode === "cube" ? "cube" : "set");
+  }, [requestedSetupMode]);
 
   useEffect(() => {
     return () => {
@@ -397,24 +389,22 @@ export function DraftPage() {
             <h1 className="mb-8 menu-display text-3xl text-white">
               {setupMode === "cube" ? t("page.cubeDraftTitle") : t("page.quickDraftTitle")}
             </h1>
-            {experimentalFeatures && (
-              <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
-                {(["set", "cube"] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setSetupMode(mode)}
-                    className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
-                      setupMode === mode
-                        ? "bg-emerald-400/18 text-emerald-100"
-                        : "text-white/50 hover:bg-white/6 hover:text-white/75"
-                    }`}
-                  >
-                    {mode === "set" ? t("page.setDraftTab") : t("page.cubeTab")}
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
+              {(["set", "cube"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setSetupMode(mode)}
+                  className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                    setupMode === mode
+                      ? "bg-emerald-400/18 text-emerald-100"
+                      : "text-white/50 hover:bg-white/6 hover:text-white/75"
+                  }`}
+                >
+                  {mode === "set" ? t("page.setDraftTab") : t("page.cubeTab")}
+                </button>
+              ))}
+            </div>
             {setupMode === "set" ? (
               <SetSelector onStartDraft={handleStartDraft} />
             ) : (

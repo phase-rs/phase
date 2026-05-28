@@ -38,7 +38,7 @@
     },
     "draft": {
       "title": "Draft",
-      "description": "Szybki draft przeciwko AI oraz eksperymentalne opcje draftu kostkowego i podu."
+      "description": "Szybki draft przeciwko AI, draft kostkowy lub hostuj draft podu."
     },
     "decks": {
       "title": "Talie",
