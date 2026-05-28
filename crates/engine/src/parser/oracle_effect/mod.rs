@@ -32070,6 +32070,47 @@ mod tests {
     }
 
     #[test]
+    fn frodo_source_condition_preserves_lifelink_grant() {
+        // CR 608.2c + CR 613.1d/f: the source subtype gate is separate from the
+        // permanent continuous effect that changes type, sets base P/T, and
+        // grants lifelink.
+        let def = parse_effect_chain(
+            "If this creature is a Citizen, it becomes a Halfling Scout with base power and toughness 2/3 and lifelink.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            matches!(
+                def.condition,
+                Some(AbilityCondition::SourceMatchesFilter { .. })
+            ),
+            "Expected SourceMatchesFilter condition, got {:?}",
+            def.condition
+        );
+
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = def.effect.as_ref()
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        let modifications = &static_abilities[0].modifications;
+        assert!(modifications.contains(&ContinuousModification::SetPower { value: 2 }));
+        assert!(modifications.contains(&ContinuousModification::SetToughness { value: 3 }));
+        assert!(modifications.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }));
+        assert!(modifications.contains(&ContinuousModification::AddSubtype {
+            subtype: "Halfling".to_string(),
+        }));
+        assert!(modifications.contains(&ContinuousModification::AddSubtype {
+            subtype: "Scout".to_string(),
+        }));
+        assert!(modifications.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Lifelink,
+        }));
+    }
+
+    #[test]
     fn source_condition_rebinds_it_pronoun_to_source_in_trigger_context() {
         let mut ctx = ParseContext {
             subject: Some(TargetFilter::Typed(
