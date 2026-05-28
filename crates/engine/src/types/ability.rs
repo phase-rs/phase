@@ -66,7 +66,15 @@ pub enum CategoryChooserScope {
 }
 
 /// Additional selection constraints for tracked-set card picks during resolution.
+///
+/// Internally tagged (`{ "type": "DistinctCardTypes", "categories": [...] }`) to
+/// match the sibling [`SearchSelectionConstraint`] convention and the frontend's
+/// `ChooseFromZoneConstraint` type, which discriminates on the `type` field. The
+/// `CardChoiceModal` confirm gate reads `constraint.type`; without the tag the
+/// default external representation (`{ "DistinctCardTypes": {...} }`) leaves
+/// `type` undefined and the modal can never validate a selection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ChooseFromZoneConstraint {
     /// The chosen cards must admit an injective assignment to distinct card types
     /// from the listed categories.
