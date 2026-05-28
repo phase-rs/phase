@@ -6654,6 +6654,21 @@ pub enum Effect {
         target: TargetFilter,
         amount: QuantityExpr,
     },
+    /// CR 701.12a: Exchange a player's life total with the source permanent's
+    /// power or toughness. The player's life total becomes the stat's current
+    /// value (CR 119.5 gain/lose-to-reach), and the source gains an indefinite
+    /// layer-7b continuous effect setting that stat to the player's previous
+    /// life total (CR 613.4b). All-or-nothing per CR 701.12a: if the life change
+    /// is forbidden (CR 119.7/119.8 can't-gain/can't-lose), no part occurs.
+    /// `player` selects the player (Controller for "your", Opponent for "target
+    /// opponent"); `stat` selects which of the source's stats is exchanged.
+    /// Tree of Redemption (your life ↔ toughness), Tree of Perdition (target
+    /// opponent's life ↔ toughness), Evra, Halcyon Witness (your life ↔ power).
+    ExchangeLifeWithStat {
+        #[serde(default = "default_target_filter_any")]
+        player: TargetFilter,
+        stat: PtStat,
+    },
     /// CR 730.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
     SetDayNight {
@@ -7346,6 +7361,7 @@ impl Effect {
 
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
+            | Effect::ExchangeLifeWithStat { player, .. }
             | Effect::ExileFromTopUntil { player, .. } => Some(player),
 
             // CR 115.1a + CR 601.2c: "Create a [Role/Aura] token attached to
@@ -7661,6 +7677,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::BlightEffect { .. } => "BlightEffect",
         Effect::Seek { .. } => "Seek",
         Effect::SetLifeTotal { .. } => "SetLifeTotal",
+        Effect::ExchangeLifeWithStat { .. } => "ExchangeLifeWithStat",
         Effect::SetDayNight { .. } => "SetDayNight",
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
@@ -7836,6 +7853,7 @@ pub enum EffectKind {
     BlightEffect,
     Seek,
     SetLifeTotal,
+    ExchangeLifeWithStat,
     SetDayNight,
     GiveControl,
     RemoveFromCombat,
@@ -8018,6 +8036,7 @@ impl From<&Effect> for EffectKind {
             Effect::BlightEffect { .. } => EffectKind::BlightEffect,
             Effect::Seek { .. } => EffectKind::Seek,
             Effect::SetLifeTotal { .. } => EffectKind::SetLifeTotal,
+            Effect::ExchangeLifeWithStat { .. } => EffectKind::ExchangeLifeWithStat,
             Effect::SetDayNight { .. } => EffectKind::SetDayNight,
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,

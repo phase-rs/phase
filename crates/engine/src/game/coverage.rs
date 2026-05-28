@@ -1738,6 +1738,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::LoseLife { amount, .. } => {
             d.push(("amount".into(), fmt_quantity(amount)));
         }
+        Effect::ExchangeLifeWithStat { player, stat } => {
+            d.push(("player".into(), fmt_target(player)));
+            d.push((
+                "stat".into(),
+                match stat {
+                    PtStat::Power => "power".into(),
+                    PtStat::Toughness => "toughness".into(),
+                },
+            ));
+        }
         Effect::ChangeZone {
             origin,
             destination,

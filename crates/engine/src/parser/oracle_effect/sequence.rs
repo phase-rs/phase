@@ -2589,6 +2589,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::BlightEffect { .. }
         | Effect::Seek { .. }
         | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }

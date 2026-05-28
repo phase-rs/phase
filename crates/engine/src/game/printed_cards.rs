@@ -617,6 +617,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::CounterAll { .. }
         | Effect::GainLife { .. }
         | Effect::LoseLife { .. }
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::Tap { .. }
         | Effect::Untap { .. }
         | Effect::TapAll { .. }

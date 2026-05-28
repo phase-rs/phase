@@ -5,7 +5,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, BounceSelection, CastingPermission,
     ControllerRef, CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction,
     ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost,
-    PlayerFilter, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
     StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
@@ -347,6 +347,14 @@ pub(crate) enum ImperativeFamilyAst {
     ExchangeControl {
         target_a: TargetFilter,
         target_b: TargetFilter,
+    },
+    /// CR 701.12a: Exchange a player's life total with the source's power or
+    /// toughness (Tree of Perdition, Tree of Redemption, Evra). `player` is the
+    /// player whose life is exchanged (`Controller` for "your", an opponent
+    /// filter for "target opponent's"); `stat` selects which source stat.
+    ExchangeLifeWithStat {
+        player: TargetFilter,
+        stat: PtStat,
     },
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,

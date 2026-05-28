@@ -27,7 +27,7 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
     FilterProp, GainLifePlayer, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool,
-    PaymentCost, PlayerScope, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
+    PaymentCost, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr,
     QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
@@ -5389,6 +5389,12 @@ pub(super) fn parse_imperative_family_ast(
         // Both shapes lower to ExchangeControl { target_a, target_b }; in the
         // quantified case both filters are identical.
         "exchange" => {
+            // CR 701.12a: "exchange <player>'s life total with ~'s power/toughness"
+            // (Tree of Perdition, Tree of Redemption, Evra) — checked before
+            // "exchange control of" since the two shapes share only the verb.
+            if let Some((player, stat)) = try_parse_exchange_life_with_stat(lower) {
+                return Some(ImperativeFamilyAst::ExchangeLifeWithStat { player, stat });
+            }
             let (rest, _) = tag::<_, _, OracleError<'_>>("exchange control of ")
                 .parse(lower)
                 .ok()?;
@@ -5578,6 +5584,66 @@ pub(super) fn parse_imperative_family_ast(
             None
         }
     }
+}
+
+/// CR 701.12a: Parse "exchange <player>'s life total with ~'s power/toughness"
+/// (Tree of Perdition, Tree of Redemption, Evra, Halcyon Witness) into the
+/// exchanged player filter and the source stat. Returns `None` for any other
+/// "exchange" shape so the caller falls through to "exchange control of".
+///
+/// The whole clause must be consumed (only a trailing terminator may remain) so
+/// unrelated "exchange" phrasings don't match partially.
+fn try_parse_exchange_life_with_stat(lower: &str) -> Option<(TargetFilter, PtStat)> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("exchange ")
+        .parse(lower)
+        .ok()?;
+    let (rest, player) = parse_exchange_life_player(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("life total with ")
+        .parse(rest)
+        .ok()?;
+    // Source possessive: "~'s " (self-reference normalization) or the literal
+    // "this creature's " form, both naming the ability's source permanent.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("~'s "),
+        tag("this creature's "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, stat) = alt((
+        value(PtStat::Toughness, tag::<_, _, OracleError<'_>>("toughness")),
+        value(PtStat::Power, tag("power")),
+    ))
+    .parse(rest)
+    .ok()?;
+    if !rest
+        .trim_start()
+        .trim_end_matches(['.', ';'])
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    Some((player, stat))
+}
+
+/// CR 119: Parse the player whose life total is exchanged. "your" binds to the
+/// ability's controller (no target); "target opponent's" / "target player's"
+/// declare a player target. Returns the filter and the remaining text after the
+/// possessive.
+fn parse_exchange_life_player(input: &str) -> Option<(&str, TargetFilter)> {
+    alt((
+        value(
+            TargetFilter::Controller,
+            tag::<_, _, OracleError<'_>>("your "),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag("target opponent's "),
+        ),
+        value(TargetFilter::Player, tag("target player's ")),
+    ))
+    .parse(input)
+    .ok()
 }
 
 /// CR 701.12a: Extract the two per-slot target filters from the "<...>" body of
@@ -6092,6 +6158,9 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // objects.
         ImperativeFamilyAst::ExchangeControl { target_a, target_b } => {
             Effect::ExchangeControl { target_a, target_b }
+        }
+        ImperativeFamilyAst::ExchangeLifeWithStat { player, stat } => {
+            Effect::ExchangeLifeWithStat { player, stat }
         }
         // CR 509.1c: Must be blocked — grant transient MustBeBlocked static via GenericEffect.
         // Uses AddStaticMode so the mode propagates through the layer system to

@@ -66,6 +66,7 @@ pub mod effect;
 pub mod endure;
 pub mod energy;
 pub mod exchange_control;
+pub mod exchange_life;
 pub mod exile_from_top_until;
 pub mod exile_top;
 pub mod exploit;
@@ -1497,6 +1498,7 @@ pub fn resolve_effect(
         }
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
+        Effect::ExchangeLifeWithStat { .. } => exchange_life::resolve(state, ability, events),
         Effect::SetDayNight { to } => {
             crate::game::day_night::resolve_set_day_night(state, *to, events);
             Ok(())

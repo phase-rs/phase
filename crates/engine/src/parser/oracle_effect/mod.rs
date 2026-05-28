@@ -35688,6 +35688,57 @@ mod tests {
         assert!(matches!(&*effect.effect, Effect::Draw { .. }));
     }
 
+    /// CR 701.12a: Tree of Perdition / Tree of Redemption / Evra — "exchange
+    /// <player>'s life total with ~'s power/toughness" parses to
+    /// `ExchangeLifeWithStat` with the right player filter and stat, not the
+    /// previous `Unimplemented { name: "exchange" }` (which surfaced no target
+    /// slot, so the player could never be chosen).
+    #[test]
+    fn exchange_life_with_stat_parses_tree_and_evra() {
+        use crate::types::ability::{ControllerRef, PtStat, TypedFilter};
+
+        // Tree of Perdition: target opponent's life ↔ source toughness.
+        let perdition = parse_effect_chain(
+            "Exchange target opponent's life total with ~'s toughness.",
+            AbilityKind::Activated,
+        );
+        assert_eq!(
+            *perdition.effect,
+            Effect::ExchangeLifeWithStat {
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ),
+                stat: PtStat::Toughness,
+            }
+        );
+
+        // Tree of Redemption: your life ↔ source toughness (no target).
+        let redemption = parse_effect_chain(
+            "Exchange your life total with ~'s toughness.",
+            AbilityKind::Activated,
+        );
+        assert_eq!(
+            *redemption.effect,
+            Effect::ExchangeLifeWithStat {
+                player: TargetFilter::Controller,
+                stat: PtStat::Toughness,
+            }
+        );
+
+        // Evra, Halcyon Witness: your life ↔ source power.
+        let evra = parse_effect_chain(
+            "Exchange your life total with ~'s power.",
+            AbilityKind::Activated,
+        );
+        assert_eq!(
+            *evra.effect,
+            Effect::ExchangeLifeWithStat {
+                player: TargetFilter::Controller,
+                stat: PtStat::Power,
+            }
+        );
+    }
+
     #[test]
     fn kindred_dominance_excludes_chosen_creature_type() {
         use crate::types::ability::{ChoiceType, TypedFilter};
