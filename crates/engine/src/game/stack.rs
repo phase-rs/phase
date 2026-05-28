@@ -73,6 +73,19 @@ fn move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
 
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
+    // is still being constructed (mode / target / division pending). Such an
+    // entry MUST NOT resolve — it is mid-flight while the controller is
+    // gathering inputs via the active `WaitingFor`. The
+    // `pending_trigger_entry` cursor is cleared when construction completes
+    // (target chosen, distribution assigned, etc.); only then is resolution
+    // permitted.
+    if let Some(pending_id) = state.pending_trigger_entry {
+        if state.stack.back().map(|e| e.id) == Some(pending_id) {
+            return;
+        }
+    }
+
     // CR 707.10: A fresh resolution invalidates any previously stashed
     // resolving entry. `resolving_stack_entry` is set below and must persist
     // across an optional-choice round-trip (the Chain cycle's "you may copy

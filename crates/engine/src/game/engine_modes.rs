@@ -284,6 +284,12 @@ fn handle_triggered_mode_choice(
                 state, trigger, resolved, events,
             ));
         } else {
+            // CR 601.2c + CR 603.3d: Mode chosen but target choice still
+            // outstanding. The entry is already on the stack (pushed at modal
+            // pause-time); mutate its ability with the resolved mode so the
+            // target prompt operates on the chosen mode. `pending_trigger_entry`
+            // stays set — construction continues through target selection.
+            mutate_pending_trigger_entry_ability(state, &trigger.ability);
             let description = trigger.description.clone();
             state.pending_trigger = Some(trigger);
             let pending_trigger = state
@@ -306,16 +312,79 @@ fn handle_triggered_mode_choice(
             });
         }
     } else {
-        triggers::push_pending_trigger_to_stack(state, trigger, events);
+        // CR 603.3c: Mode chosen and no further input needed. Entry is already
+        // on the stack (pushed at modal pause-time); mutate its ability with
+        // the resolved mode and clear `pending_trigger_entry` so the resolver
+        // may fire this entry.
+        finalize_pending_trigger_entry_ability(state, &trigger.ability);
         state.priority_passes.clear();
         state.priority_pass_count = 0;
         // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred behind this
         // modal trigger so each independent instance reaches the stack
         // (issue #416).
+        debug_assert!(
+            !triggers::is_pending_trigger_construction_active(state),
+            "deferred-trigger drain entered with construction still active",
+        );
         if let Some(waiting_for) = triggers::drain_deferred_trigger_queue(state, events) {
             return Ok(waiting_for);
         }
     }
 
     Ok(WaitingFor::Priority { player })
+}
+
+/// CR 603.3c: Mutate the in-construction stack entry's resolved ability
+/// without clearing `pending_trigger_entry`. Used when the controller has
+/// chosen a mode but target selection is still outstanding.
+///
+/// Invariants (panic in debug; see `finalize_pending_trigger_entry_ability`):
+/// * `state.pending_trigger_entry` is `Some(_)`.
+/// * Entry id references a `TriggeredAbility` `StackEntry` in `state.stack`.
+fn mutate_pending_trigger_entry_ability(
+    state: &mut GameState,
+    source_ability: &crate::types::ability::ResolvedAbility,
+) {
+    let entry_id = state
+        .pending_trigger_entry
+        .expect("mutate_pending_trigger_entry_ability: pending_trigger_entry must be set");
+    let entry = state
+        .stack
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.id == entry_id)
+        .expect("mutate_pending_trigger_entry_ability: pending_trigger_entry must reference a stack entry");
+    let ability = entry
+        .ability_mut()
+        .expect("mutate_pending_trigger_entry_ability: pending_trigger_entry must reference a TriggeredAbility");
+    *ability = source_ability.clone();
+}
+
+/// CR 603.3c: Mutate the in-construction stack entry's resolved ability AND
+/// clear `pending_trigger_entry` — construction is complete, the resolver is
+/// now free to fire this entry.
+///
+/// Invariants (no recovery path; violations panic in debug, otherwise leave
+/// the engine in an internally inconsistent state):
+/// * `state.pending_trigger_entry` is `Some(_)` (every caller pushed under the
+///   "push first" contract).
+/// * Entry id references a `TriggeredAbility` `StackEntry` in `state.stack`.
+fn finalize_pending_trigger_entry_ability(
+    state: &mut GameState,
+    source_ability: &crate::types::ability::ResolvedAbility,
+) {
+    let entry_id = state
+        .pending_trigger_entry
+        .take()
+        .expect("finalize_pending_trigger_entry_ability: pending_trigger_entry must be set under the push-first contract");
+    let entry = state
+        .stack
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.id == entry_id)
+        .expect("finalize_pending_trigger_entry_ability: pending_trigger_entry must reference a stack entry");
+    let ability = entry
+        .ability_mut()
+        .expect("finalize_pending_trigger_entry_ability: pending_trigger_entry must reference a TriggeredAbility stack entry");
+    *ability = source_ability.clone();
 }
