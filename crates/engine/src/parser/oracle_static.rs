@@ -1308,6 +1308,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    if let Some(def) = parse_contextual_continuous_subject_static(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Creatures you control [with counter condition] get/have ..." ---
     // Must come BEFORE parse_typed_you_control to prevent core type words like
     // "Creatures" from falling through to the subtype path (A1 fix: 162+ cards).
@@ -4129,12 +4133,72 @@ fn contextual_continuous_subject_filter(
     }
 
     let subject_tp = TextPair::new(subject_original, subject_lower);
+    if let Some(filter) = parse_controlled_compound_continuous_subject_filter(&subject_tp) {
+        return Some(filter);
+    }
+
     let group_subject_tp = nom_tag_tp(&subject_tp, "~ and ")
         .or_else(|| nom_tag_tp(&subject_tp, "this creature and "))?;
     let group_filter = parse_continuous_subject_filter(group_subject_tp.original)?;
     Some(TargetFilter::Or {
         filters: vec![TargetFilter::SelfRef, group_filter],
     })
+}
+
+/// CR 613.1: A single continuous static may name multiple controlled subjects
+/// before one shared predicate ("Skeletons you control and other Zombies you
+/// control get ..."). Parse each complete subject phrase and union them rather
+/// than letting the first subject consume the whole predicate.
+fn parse_controlled_compound_continuous_subject_filter(
+    subject: &TextPair<'_>,
+) -> Option<TargetFilter> {
+    let (left_lower, _, right_lower) = nom_primitives::scan_preceded(subject.lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("and ")).parse(input)
+    })?;
+    let right_start = subject.lower.len() - right_lower.len();
+    let left_original = subject.original[..left_lower.len()].trim();
+    let right_original = &subject.original[right_start..];
+
+    let left_filter = parse_continuous_subject_filter(left_original)?;
+    let right_filter = if let Some(filter) = parse_controlled_compound_continuous_subject_filter(
+        &TextPair::new(right_original, right_lower),
+    ) {
+        filter
+    } else {
+        parse_continuous_subject_filter(right_original)?
+    };
+
+    if !filter_has_source_or_controller_anchor(&left_filter)
+        || !filter_has_source_or_controller_anchor(&right_filter)
+    {
+        return None;
+    }
+
+    let mut filters = Vec::new();
+    push_or_filter_branch(&mut filters, left_filter);
+    push_or_filter_branch(&mut filters, right_filter);
+    Some(TargetFilter::Or { filters })
+}
+
+fn push_or_filter_branch(filters: &mut Vec<TargetFilter>, filter: TargetFilter) {
+    match filter {
+        TargetFilter::Or { filters: inner } => filters.extend(inner),
+        other => filters.push(other),
+    }
+}
+
+fn filter_has_source_or_controller_anchor(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SelfRef | TargetFilter::Controller => true,
+        TargetFilter::Typed(typed) => matches!(
+            typed.controller,
+            Some(ControllerRef::You | ControllerRef::Opponent)
+        ),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_has_source_or_controller_anchor)
+        }
+        _ => false,
+    }
 }
 
 fn exactly_one_creature_you_control_filter(condition: &StaticCondition) -> Option<&TargetFilter> {
@@ -5284,6 +5348,10 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return parse_continuous_subject_filter(rest_tp.original.trim());
     }
 
+    if let Some(filter) = parse_controlled_compound_continuous_subject_filter(&tp) {
+        return Some(filter);
+    }
+
     if let Some(rest_tp) = nom_tag_tp(&tp, "other ") {
         return parse_continuous_subject_filter(rest_tp.original.trim()).map(add_another_filter);
     }
@@ -5323,6 +5391,10 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(filter);
     }
 
+    if let Some(filter) = parse_typed_you_control_subject_filter(&tp) {
+        return Some(filter);
+    }
+
     // CR 903.3d: "commander(s) you control" / "commander(s)" subject phrase.
     // Must run before parse_creature_subject_filter because the bare token
     // "Commanders" otherwise falls into the capitalized-subtype fallback and
@@ -5341,6 +5413,104 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     }
 
     parse_rule_static_subject_filter(trimmed)
+}
+
+/// CR 109.5: In a static ability, "you" and "your" refer to the current
+/// controller of the object with that ability.
+fn parse_typed_you_control_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
+    if let Some(descriptor) = parse_subject_suffix(subject, " creatures you control") {
+        let descriptor = descriptor.trim_end();
+        if descriptor.is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ));
+        }
+        return typed_you_control_descriptor_filter(descriptor, true);
+    }
+
+    let descriptor = parse_subject_suffix(subject, " you control")?.trim_end();
+    if descriptor.is_empty() {
+        return None;
+    }
+    typed_you_control_descriptor_filter(descriptor, false)
+}
+
+/// CR 109.5: Keep the subject descriptor paired with its "you control" suffix
+/// so controller-scoped subjects can lower to the source controller.
+fn parse_subject_suffix<'a>(subject: &TextPair<'a>, suffix: &str) -> Option<TextPair<'a>> {
+    let (_, descriptor_lower) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(suffix),
+        tag::<_, _, OracleError<'_>>(suffix),
+    ))
+    .parse(subject.lower)
+    .ok()?;
+    Some(TextPair::new(
+        &subject.original[..descriptor_lower.len()],
+        descriptor_lower,
+    ))
+}
+
+/// CR 109.5 + CR 205.3: Controller-scoped subject descriptors may name object
+/// types, colors, or subtypes controlled by the source's controller.
+fn typed_you_control_descriptor_filter(
+    descriptor: TextPair<'_>,
+    creature_subject: bool,
+) -> Option<TargetFilter> {
+    if descriptor_is_negation(descriptor.original) {
+        return None;
+    }
+
+    if matches!(descriptor.lower, "creature" | "creatures") {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+    }
+
+    if let Some(color) = parse_named_color(descriptor.original) {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::HasColor { color }]),
+        ));
+    }
+
+    if let Some(filter) = try_parse_compound_subtypes(descriptor.original, &[], false) {
+        return Some(filter);
+    }
+
+    let singular_core_descriptor = strip_one_trailing_ascii_s(descriptor.lower);
+    if let Some(core_type) = try_parse_core_type_descriptor(descriptor.lower)
+        .or_else(|| try_parse_core_type_descriptor(singular_core_descriptor))
+    {
+        let typed = if creature_subject {
+            TypedFilter::creature().with_type(core_type)
+        } else {
+            TypedFilter::new(core_type)
+        };
+        return Some(TargetFilter::Typed(typed.controller(ControllerRef::You)));
+    }
+
+    if is_capitalized_words(descriptor.original) {
+        let subtype_name = parse_subtype(descriptor.original)
+            .map(|(canonical, _)| canonical)
+            .unwrap_or_else(|| descriptor.original.to_string());
+        return Some(TargetFilter::Typed(
+            typed_filter_for_subtype(&subtype_name).controller(ControllerRef::You),
+        ));
+    }
+
+    None
+}
+
+/// CR 205.2a: Core card type descriptors may appear in singular or regular
+/// plural form in Oracle subject phrases; remove at most one ASCII plural `s`
+/// for core-type lookup only.
+fn strip_one_trailing_ascii_s(text: &str) -> &str {
+    if text.as_bytes().last() == Some(&b's') {
+        &text[..text.len() - 1]
+    } else {
+        text
+    }
 }
 
 /// CR 205.3m: Parse "creature [you control] that's a Wolf or a Werewolf" subjects.
@@ -11628,6 +11798,110 @@ mod tests {
     fn static_other_subtype_you_control() {
         let def = parse_static_line("Other Zombies you control get +1/+1.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
+    }
+
+    #[test]
+    fn static_controlled_compound_subject_shares_continuous_predicate() {
+        let def = parse_static_line(
+            "Skeletons you control and other Zombies you control get +1/+1 and have deathtouch.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Or { ref filters })
+                if filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.controller == Some(ControllerRef::You)
+                            && typed.type_filters.iter().any(|type_filter| matches!(
+                                type_filter,
+                                TypeFilter::Subtype(subtype) if subtype == "Skeleton"
+                            ))
+                            && !typed.properties.contains(&FilterProp::Another)
+                ))
+                    && filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(typed)
+                            if typed.controller == Some(ControllerRef::You)
+                                && typed.type_filters.iter().any(|type_filter| matches!(
+                                    type_filter,
+                                    TypeFilter::Subtype(subtype) if subtype == "Zombie"
+                                ))
+                                && typed.properties.contains(&FilterProp::Another)
+                    ))
+        ));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Deathtouch,
+            }));
+    }
+
+    #[test]
+    fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
+        let def = parse_static_line(
+            "Skeletons your opponents control and other Zombies your opponents control get -1/-1.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Or { ref filters })
+                if filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.controller == Some(ControllerRef::Opponent)
+                            && typed.type_filters.iter().any(|type_filter| matches!(
+                                type_filter,
+                                TypeFilter::Subtype(subtype) if subtype == "Skeleton"
+                            ))
+                            && !typed.properties.contains(&FilterProp::Another)
+                ))
+                    && filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(typed)
+                            if typed.controller == Some(ControllerRef::Opponent)
+                                && typed.type_filters.iter().any(|type_filter| matches!(
+                                    type_filter,
+                                    TypeFilter::Subtype(subtype) if subtype == "Zombie"
+                                ))
+                                && typed.properties.contains(&FilterProp::Another)
+                    ))
+        ));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: -1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: -1 }));
+    }
+
+    #[test]
+    fn static_custom_capitalized_subtype_you_control_preserves_s_suffix() {
+        let affected = parse_continuous_subject_filter("Anubis you control")
+            .expect("subject should produce a filter");
+        let TargetFilter::Typed(typed) = affected else {
+            panic!("expected typed subject filter");
+        };
+
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(
+            typed.type_filters.iter().any(|type_filter| matches!(
+                type_filter,
+                TypeFilter::Subtype(subtype) if subtype == "Anubis"
+            )),
+            "expected Anubis subtype, got {:?}",
+            typed.type_filters
+        );
     }
 
     #[test]

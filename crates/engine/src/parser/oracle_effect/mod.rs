@@ -32,8 +32,8 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
-    parse_event_context_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
-    parse_type_phrase,
+    parse_event_context_ref, parse_target, parse_target_with_ctx, parse_target_with_syntax,
+    parse_that_clause_suffix, parse_type_phrase, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
@@ -43,14 +43,14 @@ use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, CardPlayMode,
-    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
-    CombatDamageScope, Comparator, ConjureCard, ContinuousModification, ControllerRef,
-    DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget, Duration, Effect,
-    FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission,
-    MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope,
-    PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef,
-    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
+    BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
+    ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
+    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
+    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction,
+    ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr,
+    QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
     StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TargetChoiceTiming,
     TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
     TypedFilter, UnlessPayModifier, UntilCondition,
@@ -2043,6 +2043,72 @@ fn try_parse_create_token_choice(
     }))
 }
 
+/// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
+/// "put your choice of A counter-pattern or B counter-pattern on TARGET".
+///
+/// Inspirit, Flagship Vessel is the motivating case:
+/// "put your choice of a +1/+1 counter or two charge counters on up to one
+/// other target artifact".
+///
+/// We split the shared choice payload and reparse each branch as a full
+/// `put ... on ...` clause so existing counter parsing (including multi-target
+/// extraction for "up to N") stays authoritative.
+fn try_parse_put_counter_choice(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let ((), after_choice_original) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("put your choice of ")).parse(i)
+    })?;
+
+    let consumed = tp.original.len() - after_choice_original.len();
+    let after_choice = TextPair::new(after_choice_original, &tp.lower[consumed..]);
+    let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
+    let (left_tp, right_tp) = choices_tp.split_around(" or ")?;
+
+    // Reject 3+ branches; this helper only handles binary choices.
+    if nom_primitives::split_once_on(left_tp.lower, " or ").is_ok()
+        || nom_primitives::split_once_on(right_tp.lower, " or ").is_ok()
+    {
+        return None;
+    }
+
+    let left_choice = left_tp.original.trim();
+    let right_choice = right_tp.original.trim();
+    let target_text = target_tp.original.trim().trim_end_matches('.');
+    if left_choice.is_empty() || right_choice.is_empty() || target_text.is_empty() {
+        return None;
+    }
+
+    let left_text = format!("put {left_choice} on {target_text}");
+    let right_text = format!("put {right_choice} on {target_text}");
+
+    let diagnostics_snapshot = ctx.diagnostics.len();
+    let left_clause = parse_effect_clause(&left_text, ctx);
+    let right_clause = parse_effect_clause(&right_text, ctx);
+
+    if !matches!(left_clause.effect, Effect::PutCounter { .. })
+        || !matches!(right_clause.effect, Effect::PutCounter { .. })
+        || matches!(left_clause.effect, Effect::Unimplemented { .. })
+        || matches!(right_clause.effect, Effect::Unimplemented { .. })
+        || matches!(left_clause.effect, Effect::TargetOnly { .. })
+        || matches!(right_clause.effect, Effect::TargetOnly { .. })
+    {
+        ctx.diagnostics.truncate(diagnostics_snapshot);
+        return None;
+    }
+
+    let mut left_def = ability_definition_from_clause(AbilityKind::Spell, left_clause);
+    left_def.description = Some(left_text);
+    let mut right_def = ability_definition_from_clause(AbilityKind::Spell, right_clause);
+    right_def.description = Some(right_text);
+
+    Some(parsed_clause(Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller,
+        branches: vec![left_def, right_def],
+    }))
+}
+
 /// CR 700.2 + CR 608.2d: Detect inline binary-choice imperatives of the form
 /// "A or B" where both A and B parse independently as supported effects.
 /// Emits `Effect::ChooseOneOf { branches: [A, B] }` so the second branch is
@@ -3026,6 +3092,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // generic inline splitter and token dispatch so "create a Food token or a
     // Treasure token" does not collapse to the first token branch.
     if let Some(clause) = try_parse_create_token_choice(tp, ctx) {
+        return clause;
+    }
+
+    // CR 122.1 + CR 608.2d: Shared-target counter choice with a shared
+    // trailing target phrase (Inspirit class).
+    if let Some(clause) = try_parse_put_counter_choice(tp, ctx) {
         return clause;
     }
 
@@ -6532,12 +6604,26 @@ fn try_parse_verb_and_target<'a>(
         } else {
             (false, target_text)
         };
-        let (target, mut rem) = parse_target_with_ctx(target_text, ctx);
+        // CR 115.1 + Whitemane Lion ruling: Use `parse_target_with_syntax` so
+        // the "target"-keyword vs descriptor discriminator flows back from
+        // this parse alone, with no cross-clause residue to clear.
+        let (target, mut rem, target_syntax) = parse_target_with_syntax(target_text, ctx);
         if rem.is_empty() {
             rem = dest_remainder;
         }
         let origin = infer_origin_zone(rest_lower);
         let target = add_inferred_origin_constraints_to_target(target, origin, rest_lower);
+        // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
+        // the word "target" AND the filter has a controller scope to enumerate
+        // against. Computed here so both Hand-destined and default-None
+        // branches below can stamp it onto the AST.
+        let selection = if matches!(target_syntax, TargetSyntax::Descriptor)
+            && imperative::filter_has_controller_scope(&target)
+        {
+            BounceSelection::AtResolution
+        } else {
+            BounceSelection::Targeted
+        };
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
                 if is_mass && d.enter_with_counters.is_empty() {
@@ -6576,7 +6662,7 @@ fn try_parse_verb_and_target<'a>(
                         rem,
                     ))
                 } else {
-                    Some((TargetedImperativeAst::Return { target }, rem))
+                    Some((TargetedImperativeAst::Return { target, selection }, rem))
                 }
             }
             Some(d) => {
@@ -6601,7 +6687,7 @@ fn try_parse_verb_and_target<'a>(
                     ))
                 }
             }
-            None => Some((TargetedImperativeAst::Return { target }, rem)),
+            None => Some((TargetedImperativeAst::Return { target, selection }, rem)),
         };
     }
 
@@ -10426,6 +10512,40 @@ fn rewrite_filter_parent_to_tracked_set(filter: &mut TargetFilter) {
     }
 }
 
+fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
+    let mut index = 0;
+    while index + 1 < defs.len() {
+        let copies_parent_card = matches!(
+            &*defs[index].effect,
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        );
+        let casts_the_copy_without_paying = matches!(
+            &*defs[index + 1].effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                ..
+            }
+        );
+
+        if copies_parent_card && casts_the_copy_without_paying {
+            *defs[index].effect = Effect::CastCopyOfCard {
+                target: tracked_set_filter(),
+                cost: ManaCost::zero(),
+            };
+            defs[index].optional = false;
+            defs[index].repeat_for = None;
+            defs.remove(index + 1);
+        } else {
+            index += 1;
+        }
+    }
+}
+
 fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
     match effect {
         Effect::Tap { target }
@@ -10441,6 +10561,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
         | Effect::PutCounter { target, .. }
         | Effect::AddCounter { target, .. }
@@ -13812,6 +13933,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // `state.last_created_token_ids` (snapshotted at delayed-trigger
     // creation for the Sacrifice case — CR 603.7c).
     resolve_populated_token_anaphors(&mut defs);
+
+    // CR 707.12: "Copy [a card]. You may cast the copy ..." is not a stack
+    // copy (CR 707.10). It creates a card copy in the source zone, then casts
+    // that copy during resolution. Fold the two parsed imperative clauses into
+    // the dedicated engine primitive before generic chain assembly.
+    fold_cast_copy_of_card_defs(&mut defs);
 
     // CR 706 + CR 705: Consolidate die result table lines into their parent RollDie,
     // and coin flip conditional branches into their parent FlipCoin.
@@ -18169,13 +18296,13 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityCondition, AggregateFunction, CardTypeSetSource, CastVariantPaid, ChoiceType,
-        CombatRelation, CombatRelationSubject, Comparator, ContinuousModification, ControllerRef,
-        CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp, GainLifePlayer,
-        LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty,
-        ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValueScope, QuantityExpr,
-        QuantityRef, SearchSelectionConstraint, TargetChoiceTiming, TypeFilter, TypedFilter,
-        ZoneRef,
+        AbilityCondition, AggregateFunction, BounceSelection, CardTypeSetSource, CastVariantPaid,
+        ChoiceType, CombatRelation, CombatRelationSubject, Comparator, ContinuousModification,
+        ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp,
+        GainLifePlayer, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
+        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, SearchSelectionConstraint, TargetChoiceTiming, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -21870,6 +21997,48 @@ mod tests {
             matches!(e, Effect::Bounce { .. }),
             "single-target return must stay Bounce, got {e:?}"
         );
+    }
+
+    /// CR 115.1 + Whitemane Lion ruling (issue #563): "Return a creature you
+    /// control to its owner's hand" does NOT contain the word "target" — per
+    /// the Whitemane Lion ruling, the controller chooses at resolution time
+    /// and the effect bypasses the targeting pipeline. The parser must produce
+    /// `Effect::Bounce { selection: AtResolution, .. }` so the resolver and
+    /// targeting pipeline pick the non-targeted branch.
+    #[test]
+    fn effect_bounce_non_targeting_when_target_keyword_absent() {
+        let e = parse_effect("Return a creature you control to its owner's hand");
+        match e {
+            Effect::Bounce {
+                selection, target, ..
+            } => {
+                assert!(
+                    matches!(selection, BounceSelection::AtResolution),
+                    "no 'target' keyword + controller-scoped filter must produce AtResolution; got target={target:?}"
+                );
+            }
+            other => panic!("expected Effect::Bounce, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1 (issue #563 boundary): "Return target creature you control to
+    /// its owner's hand" DOES contain the word "target" — the spell follows
+    /// standard target selection and must produce `selection: Targeted`. Pins
+    /// the keyword-presence axis against the non-targeting carve-out.
+    #[test]
+    fn effect_bounce_targeting_when_target_keyword_present() {
+        let e = parse_effect("Return target creature you control to its owner's hand");
+        match e {
+            Effect::Bounce {
+                selection, target, ..
+            } => {
+                assert!(
+                    matches!(selection, BounceSelection::Targeted),
+                    "explicit 'target' keyword must produce Targeted; got target={target:?}"
+                );
+            }
+            other => panic!("expected Effect::Bounce, got {other:?}"),
+        }
     }
 
     /// CR 400.7: "Return all <filter> to the battlefield" (Open the Vaults,
@@ -27414,6 +27583,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn mizzix_mastery_folds_card_copy_cast_to_cr_707_12_effect() {
+        let def = parse_effect_chain(
+            "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it. You may cast the copy without paying its mana cost.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+
+        let cast_copy = def
+            .sub_ability
+            .as_deref()
+            .expect("card-copy cast sub-ability");
+        let Effect::CastCopyOfCard { target, cost } = cast_copy.effect.as_ref() else {
+            panic!("expected CastCopyOfCard, got {:?}", cast_copy.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(cost, &ManaCost::zero());
+        assert!(
+            cast_copy.repeat_for.is_none(),
+            "resolver chooses and casts the tracked-set copies as one CR 707.12 instruction"
+        );
+        assert!(!cast_copy.optional);
+        assert!(cast_copy.sub_ability.is_none());
     }
 
     #[test]
@@ -35632,6 +35837,57 @@ mod tests {
         assert!(matches!(&*effect.effect, Effect::Draw { .. }));
     }
 
+    /// CR 701.12a: Tree of Perdition / Tree of Redemption / Evra — "exchange
+    /// <player>'s life total with ~'s power/toughness" parses to
+    /// `ExchangeLifeWithStat` with the right player filter and stat, not the
+    /// previous `Unimplemented { name: "exchange" }` (which surfaced no target
+    /// slot, so the player could never be chosen).
+    #[test]
+    fn exchange_life_with_stat_parses_tree_and_evra() {
+        use crate::types::ability::{ControllerRef, PtStat, TypedFilter};
+
+        // Tree of Perdition: target opponent's life ↔ source toughness.
+        let perdition = parse_effect_chain(
+            "Exchange target opponent's life total with ~'s toughness.",
+            AbilityKind::Activated,
+        );
+        assert_eq!(
+            *perdition.effect,
+            Effect::ExchangeLifeWithStat {
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ),
+                stat: PtStat::Toughness,
+            }
+        );
+
+        // Tree of Redemption: your life ↔ source toughness (no target).
+        let redemption = parse_effect_chain(
+            "Exchange your life total with ~'s toughness.",
+            AbilityKind::Activated,
+        );
+        assert_eq!(
+            *redemption.effect,
+            Effect::ExchangeLifeWithStat {
+                player: TargetFilter::Controller,
+                stat: PtStat::Toughness,
+            }
+        );
+
+        // Evra, Halcyon Witness: your life ↔ source power.
+        let evra = parse_effect_chain(
+            "Exchange your life total with ~'s power.",
+            AbilityKind::Activated,
+        );
+        assert_eq!(
+            *evra.effect,
+            Effect::ExchangeLifeWithStat {
+                player: TargetFilter::Controller,
+                stat: PtStat::Power,
+            }
+        );
+    }
+
     #[test]
     fn kindred_dominance_excludes_chosen_creature_type() {
         use crate::types::ability::{ChoiceType, TypedFilter};
@@ -35728,6 +35984,54 @@ mod tests {
             }
             other => panic!("expected ChooseOneOf, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn choose_one_of_detects_shared_target_counter_choice() {
+        use crate::types::counter::CounterType;
+
+        let ability = parse_effect_chain(
+            "Put your choice of a +1/+1 counter or two charge counters on up to one other target artifact.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseOneOf { chooser, branches } = &*ability.effect else {
+            panic!("expected ChooseOneOf, got {:?}", ability.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 2);
+
+        match &*branches[0].effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected first branch PutCounter, got {other:?}"),
+        }
+        assert!(
+            branches[0].multi_target.is_some(),
+            "first branch should preserve up-to target cap"
+        );
+
+        match &*branches[1].effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Generic("charge".to_string()));
+                assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+            }
+            other => panic!("expected second branch PutCounter, got {other:?}"),
+        }
+        assert!(
+            branches[1].multi_target.is_some(),
+            "second branch should preserve up-to target cap"
+        );
     }
 
     #[test]

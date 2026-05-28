@@ -3720,13 +3720,14 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, AggregateFunction, CardTypeSetSource, CastManaObjectScope,
-        CastManaSpentMetric, Comparator, ContinuousModification, CountScope, CounterTransferMode,
-        Duration, Effect, FilterProp, GameRestriction, LibraryPosition, ModalChoice,
-        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity,
-        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry,
-        RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        AbilityCost, AbilityKind, AggregateFunction, BounceSelection, CardTypeSetSource,
+        CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification, CountScope,
+        CounterTransferMode, Duration, Effect, FilterProp, GameRestriction, LibraryPosition,
+        ModalChoice, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope,
+        ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality,
+        SharedQualityRelation, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -3900,6 +3901,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
         )];
 

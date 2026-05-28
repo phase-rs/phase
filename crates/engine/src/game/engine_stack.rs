@@ -43,6 +43,11 @@ pub(super) fn finalize_trigger_target_selection(
             if assigned_targets.len() == 1 {
                 trigger.ability.distribution = Some(vec![(assigned_targets[0].clone(), total)]);
             } else {
+                // CR 601.2d: Distribution still outstanding. Entry is already
+                // on the stack with empty `distribution`; mutate the on-stack
+                // ability's targets (so they match what was just chosen) and
+                // keep `pending_trigger_entry` set until division completes.
+                triggers::mutate_pending_trigger_entry(state, &trigger.ability);
                 state.pending_trigger = Some(trigger);
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
@@ -56,7 +61,12 @@ pub(super) fn finalize_trigger_target_selection(
         }
     }
 
-    triggers::push_pending_trigger_to_stack(state, trigger, events);
+    // CR 603.3c + CR 603.3d: Construction complete. The entry is already on
+    // the stack (pushed by the pause-path that started selection); mutate its
+    // ability with the resolved targets/distribution and clear
+    // `pending_trigger_entry` so the resolver may now fire this entry.
+    triggers::finalize_pending_trigger_entry(state, &trigger.ability);
+
     state.priority_passes.clear();
     state.priority_pass_count = 0;
     // CR 113.2c + CR 603.2 + CR 603.3b: After the active trigger is on the
@@ -64,6 +74,10 @@ pub(super) fn finalize_trigger_target_selection(
     // input (e.g., the second Boggart Prankster's "you attack" trigger waiting
     // behind the first). If a deferred trigger itself needs input, hand back
     // its WaitingFor; otherwise continue to Priority.
+    debug_assert!(
+        !triggers::is_pending_trigger_construction_active(state),
+        "deferred-trigger drain entered with construction still active",
+    );
     if let Some(waiting_for) = triggers::drain_deferred_trigger_queue(state, events) {
         return waiting_for;
     }

@@ -130,6 +130,7 @@ fn self_recursion_trigger_zone(
         crate::types::ability::Effect::Bounce {
             target: TargetFilter::SelfRef,
             destination,
+            ..
         } if destination.is_none_or(|zone| zone == Zone::Hand) => {
             parse_self_return_origin_zone(source_lower)
         }
@@ -9854,11 +9855,11 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, CastingPermission,
-        Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
-        DelayedTriggerCondition, Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope,
-        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, BounceSelection,
+        CastingPermission, Comparator, ContinuousModification, ControllerRef, CountScope,
+        DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp,
+        ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -16271,6 +16272,7 @@ mod tests {
             Some(Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             })
         ));
     }
@@ -16290,6 +16292,7 @@ mod tests {
             Some(Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             })
         ));
     }
@@ -16313,6 +16316,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             }
         ));
         assert!(matches!(

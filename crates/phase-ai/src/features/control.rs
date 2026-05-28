@@ -314,7 +314,7 @@ mod tests {
     use super::*;
     use engine::game::DeckEntry;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, BounceSelection, Effect, QuantityExpr, TargetFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
@@ -362,6 +362,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
         )
     }

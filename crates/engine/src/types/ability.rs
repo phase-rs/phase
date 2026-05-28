@@ -418,6 +418,19 @@ pub struct DieResultBranch {
     pub effect: Box<AbilityDefinition>,
 }
 
+/// CR 706.2: Modifier applied to a die roll's natural result before the
+/// effect's result table is consulted. "Roll a d20 and add the number of
+/// cards in your hand" → `Add(QuantityExpr::Ref(HandSize { player: Controller }))`.
+/// "Roll a d20 and subtract the number of cards in your hand" → `Subtract(...)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DieRollModifier {
+    /// Add the resolved quantity to the natural roll.
+    Add { value: QuantityExpr },
+    /// Subtract the resolved quantity from the natural roll.
+    Subtract { value: QuantityExpr },
+}
+
 impl std::str::FromStr for Parity {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {
@@ -4942,6 +4955,26 @@ impl StepSkipTarget {
     }
 }
 
+/// CR 115.1: Whether the `Bounce` effect selects its affected object at
+/// cast/activation time ("target", locked) or at resolution time (controller-
+/// scoped filter like "a creature you control" — Whitemane Lion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BounceSelection {
+    /// Default — target chosen at cast/activation via the targeting pipeline.
+    #[default]
+    Targeted,
+    /// CR 608.2c: Controller chooses an eligible object at resolution.
+    AtResolution,
+}
+
+impl BounceSelection {
+    /// Helper for `#[serde(skip_serializing_if = ...)]`.
+    pub fn is_targeted(&self) -> bool {
+        matches!(self, Self::Targeted)
+    }
+}
+
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
 // clippy::large_enum_variant: `Effect` is the engine's central 100+ variant
@@ -5376,6 +5409,12 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default)]
         destination: Option<Zone>,
+        /// CR 115.1 + Whitemane Lion ruling: Controls whether this effect uses
+        /// the targeting pipeline (`Targeted`) or selects at resolution
+        /// (`AtResolution` — Whitemane Lion class). Card-data.json records
+        /// predating this field deserialize as `Targeted` via the default.
+        #[serde(default, skip_serializing_if = "BounceSelection::is_targeted")]
+        selection: BounceSelection,
     },
     /// CR 400.7 + CR 611.2c: Mass-bounce — return every permanent matching
     /// `target` to its owner's hand (default) or `destination` if set. Mirrors
@@ -5509,6 +5548,16 @@ pub enum Effect {
         /// CR 707.10c: whether the controller may choose new targets for the copy.
         #[serde(default = "default_copy_keep_targets")]
         retarget: CopyRetargetPermission,
+    },
+    /// CR 707.12: Create a copy of a card/object in its zone and cast that
+    /// copy while the resolving spell or ability continues resolving.
+    CastCopyOfCard {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        /// CR 118.9 + CR 601.2f: Alternative mana cost used to cast the copy.
+        /// Mizzix's Mastery and Cipher use `ManaCost::zero()`.
+        #[serde(default)]
+        cost: ManaCost,
     },
     /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
     /// Copies copiable characteristics (name, mana cost, color, types, P/T, abilities, keywords)
@@ -6164,10 +6213,14 @@ pub enum Effect {
     WinTheGame,
     /// CR 706: Roll a die with the given number of sides.
     /// If `results` is non-empty, execute the matching branch.
+    /// CR 706.2: `modifier` adjusts the natural roll before result-branch lookup.
+    /// `None` means the natural result is used unchanged.
     RollDie {
         sides: u8,
         #[serde(default)]
         results: Vec<DieResultBranch>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifier: Option<DieRollModifier>,
     },
     /// CR 705: Flip a coin. Optionally execute different effects on win/lose.
     FlipCoin {
@@ -6635,6 +6688,21 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
         amount: QuantityExpr,
+    },
+    /// CR 701.12a: Exchange a player's life total with the source permanent's
+    /// power or toughness. The player's life total becomes the stat's current
+    /// value (CR 119.5 gain/lose-to-reach), and the source gains an indefinite
+    /// layer-7b continuous effect setting that stat to the player's previous
+    /// life total (CR 613.4b). All-or-nothing per CR 701.12a: if the life change
+    /// is forbidden (CR 119.7/119.8 can't-gain/can't-lose), no part occurs.
+    /// `player` selects the player (Controller for "your", Opponent for "target
+    /// opponent"); `stat` selects which of the source's stats is exchanged.
+    /// Tree of Redemption (your life ↔ toughness), Tree of Perdition (target
+    /// opponent's life ↔ toughness), Evra, Halcyon Witness (your life ↔ power).
+    ExchangeLifeWithStat {
+        #[serde(default = "default_target_filter_any")]
+        player: TargetFilter,
+        stat: PtStat,
     },
     /// CR 730.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
@@ -7248,6 +7316,7 @@ impl Effect {
             | Effect::Bounce { target, .. }
             | Effect::SwitchPT { target, .. }
             | Effect::CopySpell { target, .. }
+            | Effect::CastCopyOfCard { target, .. }
             | Effect::BecomeCopy { target, .. }
             | Effect::ChooseCard { target, .. }
             | Effect::PutCounter { target, .. }
@@ -7328,6 +7397,7 @@ impl Effect {
 
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
+            | Effect::ExchangeLifeWithStat { player, .. }
             | Effect::ExileFromTopUntil { player, .. } => Some(player),
 
             // CR 115.1a + CR 601.2c: "Create a [Role/Aura] token attached to
@@ -7536,6 +7606,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SeparateIntoPiles { .. } => "SeparateIntoPiles",
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
+        Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::Myriad => "Myriad",
         Effect::BecomeCopy { .. } => "BecomeCopy",
@@ -7643,6 +7714,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::BlightEffect { .. } => "BlightEffect",
         Effect::Seek { .. } => "Seek",
         Effect::SetLifeTotal { .. } => "SetLifeTotal",
+        Effect::ExchangeLifeWithStat { .. } => "ExchangeLifeWithStat",
         Effect::SetDayNight { .. } => "SetDayNight",
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
@@ -7715,6 +7787,7 @@ pub enum EffectKind {
     SeparateIntoPiles,
     SwitchPT,
     CopySpell,
+    CastCopyOfCard,
     CopyTokenOf,
     Myriad,
     BecomeCopy,
@@ -7818,6 +7891,7 @@ pub enum EffectKind {
     BlightEffect,
     Seek,
     SetLifeTotal,
+    ExchangeLifeWithStat,
     SetDayNight,
     GiveControl,
     RemoveFromCombat,
@@ -7893,6 +7967,7 @@ impl From<&Effect> for EffectKind {
             Effect::SeparateIntoPiles { .. } => EffectKind::SeparateIntoPiles,
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
+            Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::Myriad => EffectKind::Myriad,
             Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,
@@ -8000,6 +8075,7 @@ impl From<&Effect> for EffectKind {
             Effect::BlightEffect { .. } => EffectKind::BlightEffect,
             Effect::Seek { .. } => EffectKind::Seek,
             Effect::SetLifeTotal { .. } => EffectKind::SetLifeTotal,
+            Effect::ExchangeLifeWithStat { .. } => EffectKind::ExchangeLifeWithStat,
             Effect::SetDayNight { .. } => EffectKind::SetDayNight,
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
