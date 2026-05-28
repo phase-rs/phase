@@ -1530,6 +1530,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::UnattachAll { target, .. }
         | Effect::Fight { target, .. }
         | Effect::CopySpell { target, .. }
+        | Effect::CastCopyOfCard { target, .. }
         | Effect::BecomeCopy { target, .. }
         | Effect::Suspect { target }
         | Effect::Connive { target, .. }
@@ -6634,6 +6635,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     // (including "enter tapped as a copy of")
                     // Parsed as CopySpell without a description string.
                     effective_lower.contains("as a copy of")
+                }
+                Effect::CastCopyOfCard { .. } => {
+                    effective_lower.contains("copy") && effective_lower.contains("cast the copy")
                 }
                 Effect::Untap { .. } => {
                     // "Untap this creature during each other player's untap step" and similar

@@ -31,6 +31,7 @@ pub mod blight;
 pub mod bolster;
 pub mod bounce;
 pub mod cascade;
+pub mod cast_copy_of_card;
 pub mod cast_from_zone;
 pub mod change_targets;
 pub mod change_zone;
@@ -1356,6 +1357,7 @@ pub fn resolve_effect(
         Effect::SeparateIntoPiles { .. } => separate_piles::resolve(state, ability, events),
         Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
+        Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
@@ -1676,6 +1678,9 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::GrantCastingPermission {
+            target: TargetFilter::TrackedSet { .. },
+            ..
+        } | Effect::CastCopyOfCard {
             target: TargetFilter::TrackedSet { .. },
             ..
         } | Effect::PutAtLibraryPosition {
@@ -2194,6 +2199,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::UnattachAll { target, .. }
         | Effect::Transform { target, .. }
         | Effect::CopySpell { target, .. }
+        | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
         | Effect::BecomeCopy { target, .. }
         | Effect::CastFromZone { target, .. }

@@ -5502,6 +5502,16 @@ pub enum Effect {
         #[serde(default = "default_copy_keep_targets")]
         retarget: CopyRetargetPermission,
     },
+    /// CR 707.12: Create a copy of a card/object in its zone and cast that
+    /// copy while the resolving spell or ability continues resolving.
+    CastCopyOfCard {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        /// CR 118.9 + CR 601.2f: Alternative mana cost used to cast the copy.
+        /// Mizzix's Mastery and Cipher use `ManaCost::zero()`.
+        #[serde(default)]
+        cost: ManaCost,
+    },
     /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
     /// Copies copiable characteristics (name, mana cost, color, types, P/T, abilities, keywords)
     /// from the chosen copy source to a newly created token on the battlefield.
@@ -7240,6 +7250,7 @@ impl Effect {
             | Effect::Bounce { target, .. }
             | Effect::SwitchPT { target, .. }
             | Effect::CopySpell { target, .. }
+            | Effect::CastCopyOfCard { target, .. }
             | Effect::BecomeCopy { target, .. }
             | Effect::ChooseCard { target, .. }
             | Effect::PutCounter { target, .. }
@@ -7528,6 +7539,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SeparateIntoPiles { .. } => "SeparateIntoPiles",
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
+        Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::Myriad => "Myriad",
         Effect::BecomeCopy { .. } => "BecomeCopy",
@@ -7707,6 +7719,7 @@ pub enum EffectKind {
     SeparateIntoPiles,
     SwitchPT,
     CopySpell,
+    CastCopyOfCard,
     CopyTokenOf,
     Myriad,
     BecomeCopy,
@@ -7885,6 +7898,7 @@ impl From<&Effect> for EffectKind {
             Effect::SeparateIntoPiles { .. } => EffectKind::SeparateIntoPiles,
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
+            Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::Myriad => EffectKind::Myriad,
             Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,

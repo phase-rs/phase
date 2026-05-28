@@ -10426,6 +10426,40 @@ fn rewrite_filter_parent_to_tracked_set(filter: &mut TargetFilter) {
     }
 }
 
+fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
+    let mut index = 0;
+    while index + 1 < defs.len() {
+        let copies_parent_card = matches!(
+            &*defs[index].effect,
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        );
+        let casts_the_copy_without_paying = matches!(
+            &*defs[index + 1].effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                ..
+            }
+        );
+
+        if copies_parent_card && casts_the_copy_without_paying {
+            *defs[index].effect = Effect::CastCopyOfCard {
+                target: tracked_set_filter(),
+                cost: ManaCost::zero(),
+            };
+            defs[index].optional = false;
+            defs[index].repeat_for = None;
+            defs.remove(index + 1);
+        } else {
+            index += 1;
+        }
+    }
+}
+
 fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
     match effect {
         Effect::Tap { target }
@@ -10441,6 +10475,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
         | Effect::PutCounter { target, .. }
         | Effect::AddCounter { target, .. }
@@ -13812,6 +13847,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // `state.last_created_token_ids` (snapshotted at delayed-trigger
     // creation for the Sacrifice case — CR 603.7c).
     resolve_populated_token_anaphors(&mut defs);
+
+    // CR 707.12: "Copy [a card]. You may cast the copy ..." is not a stack
+    // copy (CR 707.10). It creates a card copy in the source zone, then casts
+    // that copy during resolution. Fold the two parsed imperative clauses into
+    // the dedicated engine primitive before generic chain assembly.
+    fold_cast_copy_of_card_defs(&mut defs);
 
     // CR 706 + CR 705: Consolidate die result table lines into their parent RollDie,
     // and coin flip conditional branches into their parent FlipCoin.
@@ -27407,6 +27448,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn mizzix_mastery_folds_card_copy_cast_to_cr_707_12_effect() {
+        let def = parse_effect_chain(
+            "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it. You may cast the copy without paying its mana cost.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+
+        let cast_copy = def
+            .sub_ability
+            .as_deref()
+            .expect("card-copy cast sub-ability");
+        let Effect::CastCopyOfCard { target, cost } = cast_copy.effect.as_ref() else {
+            panic!("expected CastCopyOfCard, got {:?}", cast_copy.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(cost, &ManaCost::zero());
+        assert!(
+            cast_copy.repeat_for.is_none(),
+            "resolver chooses and casts the tracked-set copies as one CR 707.12 instruction"
+        );
+        assert!(!cast_copy.optional);
+        assert!(cast_copy.sub_ability.is_none());
     }
 
     #[test]
