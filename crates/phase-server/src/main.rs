@@ -1828,6 +1828,10 @@ fn is_joining_current_game(identity: &SocketIdentity, target_game_code: &str) ->
         .game_code
         .as_deref()
         .is_some_and(|active| active == target_game_code)
+        || identity
+            .lobby_host_game
+            .as_deref()
+            .is_some_and(|hosted| hosted == target_game_code)
 }
 
 async fn reject_joining_current_game(
@@ -4385,6 +4389,11 @@ mod handshake_tests {
 
         assert!(is_joining_current_game(&identity, "GAME01"));
         assert!(!is_joining_current_game(&identity, "GAME02"));
+
+        let mut lobby_identity = empty_identity();
+        lobby_identity.lobby_host_game = Some("GAME01".to_string());
+        assert!(is_joining_current_game(&lobby_identity, "GAME01"));
+        assert!(!is_joining_current_game(&lobby_identity, "GAME02"));
     }
 
     #[test]
