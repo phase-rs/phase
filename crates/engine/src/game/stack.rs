@@ -300,7 +300,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             Zone::Library
         } else if casting_variant == CastingVariant::Harmonize {
             // CR 702.180a: If the harmonize cost was paid, exile this card instead of putting it anywhere else.
-            if is_permanent_type(state, entry.id) {
+            if is_permanent_spell(state, entry.id) {
                 Zone::Battlefield
             } else {
                 Zone::Exile
@@ -316,14 +316,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // Flashback only appears on instants/sorceries — unconditional exile is correct.
             Zone::Exile
         } else if casting_variant.replaces_stack_to_graveyard_with_exile()
-            && !is_permanent_type(state, entry.id)
+            && !is_permanent_spell(state, entry.id)
         {
             // CR 614.1a + CR 608.2n: Graveyard-cast permission riders that
             // say "If a spell cast this way would be put into your graveyard,
             // exile it instead" replace the normal non-permanent resolution
             // destination. Permanent spells still resolve to the battlefield.
             Zone::Exile
-        } else if is_permanent_type(state, entry.id) {
+        } else if is_permanent_spell(state, entry.id) {
             // CR 608.3: Permanent spells enter the battlefield.
             Zone::Battlefield
         } else if ability
@@ -1207,27 +1207,6 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
     }
 }
 
-/// CR 110.4: Permanent types that resolve to the battlefield.
-fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {
-    use crate::types::card_type::CoreType;
-
-    let obj = match state.objects.get(&object_id) {
-        Some(o) => o,
-        None => return false,
-    };
-
-    obj.card_types.core_types.iter().any(|ct| {
-        matches!(
-            ct,
-            CoreType::Creature
-                | CoreType::Artifact
-                | CoreType::Enchantment
-                | CoreType::Planeswalker
-                | CoreType::Land
-        )
-    })
-}
-
 /// CR 110.4b: A permanent spell — "an artifact, battle, creature, enchantment,
 /// or planeswalker spell." Lands are excluded because they aren't spells
 /// (they're played, not cast). Used by resolution paths that distinguish
@@ -1442,6 +1421,55 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    /// CR 110.4b + CR 608.3 + CR 310.4b: Battle spells are permanent spells.
+    /// They resolve to the battlefield, not to their owner's graveyard, and
+    /// receive their intrinsic defense counters through the ETB replacement
+    /// pipeline.
+    #[test]
+    fn battle_spell_resolves_to_battlefield_with_defense_counters() {
+        let mut state = setup();
+        let battle_id = create_object(
+            &mut state,
+            CardId(622),
+            PlayerId(0),
+            "Test Siege".to_string(),
+            Zone::Stack,
+        );
+        {
+            let battle = state.objects.get_mut(&battle_id).unwrap();
+            battle.card_types.core_types.push(CoreType::Battle);
+            battle.card_types.subtypes.push("Siege".to_string());
+            battle.defense = Some(4);
+            battle.base_defense = Some(4);
+        }
+
+        state.stack.push_back(StackEntry {
+            id: battle_id,
+            source_id: battle_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(622),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.objects[&battle_id].zone, Zone::Battlefield);
+        assert!(state.battlefield.contains(&battle_id));
+        assert!(!state.players[0].graveyard.contains(&battle_id));
+        assert_eq!(
+            state.objects[&battle_id]
+                .counters
+                .get(&CounterType::Defense)
+                .copied(),
+            Some(4)
+        );
     }
 
     #[test]
