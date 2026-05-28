@@ -144,13 +144,13 @@ fn server_hello_mode_byte_identical() {
     let lb_hello = lb::LobbyServerMessage::ServerHello {
         server_version: "0.1.0".into(),
         build_commit: "abc".into(),
-        protocol_version: 6,
+        protocol_version: 7,
         mode: lb::ServerMode::LobbyOnly,
     };
     let sc_hello = sc::ServerMessage::ServerHello {
         server_version: "0.1.0".into(),
         build_commit: "abc".into(),
-        protocol_version: 6,
+        protocol_version: 7,
         mode: sc::ServerMode::LobbyOnly,
     };
     assert_eq!(

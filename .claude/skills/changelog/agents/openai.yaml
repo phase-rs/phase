@@ -1,0 +1,4 @@
+interface:
+  display_name: "Changelog"
+  short_description: "Generate Discord-ready changelogs"
+  default_prompt: "Use $changelog to generate the latest phase.rs changelog."

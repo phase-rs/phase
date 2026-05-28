@@ -768,6 +768,10 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
             obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
             obj.color = obj.base_color.clone();
+            // Reset the display-identity pointer to its baseline; the Copy layer
+            // re-applies the copied source's `printed_ref` below for objects
+            // under a copy effect, so a temporary copy's art reverts on expiry.
+            obj.printed_ref = obj.base_printed_ref.clone();
             // CR 613.1b: Reset controller to the object's base controller;
             // Layer 2 re-applies continuous control-changing effects.
             obj.controller = obj.base_controller.unwrap_or(obj.owner);
@@ -2003,8 +2007,15 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         };
 
         match &effect.modification {
-            ContinuousModification::CopyValues { values } => {
+            ContinuousModification::CopyValues {
+                values,
+                printed_ref,
+            } => {
                 apply_copiable_values(obj, values);
+                // Display identity follows the copy: override the baseline
+                // restored by the layer reset so the copy renders the source's
+                // art. Reverts automatically when the copy effect expires.
+                obj.printed_ref = printed_ref.clone();
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -2510,6 +2521,7 @@ pub(crate) fn compute_current_copiable_values(
         match &effect.modification {
             ContinuousModification::CopyValues {
                 values: effect_values,
+                ..
             } => {
                 values = (**effect_values).clone();
                 for trigger in state
@@ -7931,6 +7943,7 @@ mod tests {
             TargetFilter::SpecificObject { id: target },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(copy_values),
+                printed_ref: None,
             }],
             None,
         );

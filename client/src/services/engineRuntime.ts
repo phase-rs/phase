@@ -3,6 +3,11 @@ import type {
   TokenCharacteristics,
   TokenImageRef,
 } from "../adapter/types";
+import {
+  buildLocalSearchCard,
+  loadScryfallData,
+  type ScryfallCard,
+} from "./scryfall";
 
 type EngineModule = typeof import("@wasm/engine");
 
@@ -49,10 +54,113 @@ export async function getCardFaceData(cardName: string) {
   return engine.get_card_face_data(cardName);
 }
 
+/** A localized card face from a per-language content-i18n sidecar. Fields are
+ *  optional — absent fields fall back to the engine's English text. Mirrors the
+ *  `LocalizedFace` struct emitted by `oracle-gen --sidecar-dir`. */
+export interface LocalizedFace {
+  name?: string;
+  oracle_text?: string;
+  type_line?: string;
+}
+
+const cardLocalePromises = new Map<string, Promise<Map<string, LocalizedFace>>>();
+
+/**
+ * Lazily fetch the per-locale card-content sidecar (`card-data.<lng>.json`) once,
+ * into a Map keyed by lowercased canonical card name (the same key the engine's
+ * `face_index` uses). English needs no sidecar. A missing sidecar (e.g. 404 for a
+ * locale not yet published) resolves to an empty map so callers fall back to
+ * English per-field — content localization is best-effort display data, never a
+ * hard dependency.
+ */
+export async function ensureCardLocale(lang: string): Promise<Map<string, LocalizedFace>> {
+  if (lang === "en") return new Map();
+  let promise = cardLocalePromises.get(lang);
+  if (!promise) {
+    promise = (async () => {
+      const url = __CARD_DATA_LOCALE_URL_TEMPLATE__.replace("{lng}", lang);
+      const resp = await fetch(url);
+      if (!resp.ok) return new Map<string, LocalizedFace>();
+      const obj = (await resp.json()) as Record<string, LocalizedFace>;
+      return new Map(Object.entries(obj));
+    })().catch(() => new Map<string, LocalizedFace>());
+    cardLocalePromises.set(lang, promise);
+  }
+  return promise;
+}
+
 export async function getCardParseDetails(cardName: string) {
   await ensureCardDatabase();
   const engine = await loadEngineModule();
   return engine.get_card_parse_details(cardName);
+}
+
+/**
+ * A deck-builder card search. Mirrors the engine's `CardSearchQuery`
+ * (`crates/engine/src/database/search.rs`). All fields optional; an empty query
+ * matches nothing — callers gate on "has criteria" first.
+ */
+export interface CardSearchQuery {
+  text?: string;
+  /** WUBRG color letters the card's colors must include (superset match). */
+  colors?: string[];
+  /** A type word (core type, supertype, or subtype). */
+  type?: string;
+  cmcMax?: number;
+  /** Set codes; card must have a printing in at least one. */
+  sets?: string[];
+  /** A legality-format key (e.g. `"modern"`); card must be legal in it. */
+  legalFormat?: string;
+  limit?: number;
+}
+
+/** Engine result shape — rules data only (see `CardSearchResult` in the engine). */
+interface EngineCardSearchResult {
+  name: string;
+  oracle_id: string | null;
+  mana_value: number;
+  color_identity: string[];
+  legalities: Record<string, string>;
+}
+
+interface EngineCardSearchResults {
+  results: EngineCardSearchResult[];
+  total: number;
+}
+
+/**
+ * Search the local card database through the engine. The engine is the single
+ * authority for the rules data search filters on (legality, sets, types, mana
+ * value, colors); the frontend hydrates artwork and type lines from the local
+ * Scryfall image map. No network search ever leaves the device.
+ */
+export async function searchCards(
+  query: CardSearchQuery,
+): Promise<{ cards: ScryfallCard[]; total: number }> {
+  await ensureCardDatabase();
+  // Hydration of artwork/type line needs the image map resolved.
+  await loadScryfallData();
+  const engine = await loadEngineModule();
+  const { results, total } = engine.search_cards_js({
+    text: query.text ?? "",
+    colors: query.colors ?? [],
+    type_line: query.type ?? "",
+    cmc_max: query.cmcMax ?? null,
+    sets: query.sets ?? [],
+    legal_format: query.legalFormat ?? null,
+    limit: query.limit ?? null,
+  }) as EngineCardSearchResults;
+
+  const cards = results.map((result) =>
+    buildLocalSearchCard({
+      oracleId: result.oracle_id ?? undefined,
+      name: result.name,
+      cmc: result.mana_value,
+      colorIdentity: result.color_identity,
+      legalities: result.legalities,
+    }),
+  );
+  return { cards, total };
 }
 
 export async function getCardRulings(cardName: string): Promise<CardRuling[]> {

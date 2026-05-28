@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { GameAction, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -62,19 +64,31 @@ function CascadeChoiceContent({
   sourceMv?: number;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
+  const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[hitCardId]);
 
   if (!obj) return null;
 
   const subtitle =
     promptKind === "Cascade"
-      ? `Cascade exiled ${obj.name} (mana value below ${sourceMv}). Cast it without paying its mana cost, or decline and shuffle all ${missCount + 1} exiled cards to the bottom of your library.`
-      : `Discover exiled ${obj.name}. Cast it without paying its mana cost, or put it into your hand and shuffle the other ${missCount} exiled cards to the bottom of your library.`;
+      ? t("cascadeChoice.subtitleCascade", {
+          name: obj.name,
+          sourceMv,
+          total: missCount + 1,
+        })
+      : t("cascadeChoice.subtitleDiscover", {
+          name: obj.name,
+          missCount,
+        });
 
   return (
     <DialogShell
-      eyebrow={promptKind}
-      title={`Cast ${obj.name}?`}
+      eyebrow={
+        promptKind === "Cascade"
+          ? t("cascadeChoice.cascadeEyebrow")
+          : t("cascadeChoice.discoverEyebrow")
+      }
+      title={t("cascadeChoice.title", { name: obj.name })}
       subtitle={subtitle}
     >
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
@@ -87,8 +101,12 @@ function CascadeChoiceContent({
           }
           className="rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/30"
         >
-          <span className="font-semibold text-white">Cast {obj.name}</span>
-          <span className="ml-2 text-xs text-slate-400">(without paying its mana cost)</span>
+          <span className="font-semibold text-white">
+            {t("cascadeChoice.castNamed", { name: obj.name })}
+          </span>
+          <span className="ml-2 text-xs text-slate-400">
+            {t("cascadeChoice.castSuffix")}
+          </span>
         </button>
         <button
           onClick={() =>
@@ -100,12 +118,14 @@ function CascadeChoiceContent({
           className="rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-amber-400/30"
         >
           <span className="font-semibold text-white">
-            {promptKind === "Discover" ? "Put into hand" : "Decline"}
+            {promptKind === "Discover"
+              ? t("cascadeChoice.putIntoHand")
+              : t("cascadeChoice.decline")}
           </span>
           <span className="ml-2 text-xs text-slate-400">
             {promptKind === "Discover"
-              ? "(put the rest on the bottom)"
-              : "(shuffle all exiled cards to the bottom)"}
+              ? t("cascadeChoice.discoverDeclineSuffix")
+              : t("cascadeChoice.cascadeDeclineSuffix")}
           </span>
         </button>
       </div>

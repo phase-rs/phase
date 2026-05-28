@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 interface SplashScreenProps {
   progress: number;
@@ -8,6 +9,7 @@ interface SplashScreenProps {
 }
 
 export function SplashScreen({ progress, onComplete, label }: SplashScreenProps) {
+  const { t } = useTranslation();
   useEffect(() => {
     if (progress >= 100) {
       const timer = setTimeout(onComplete, 600);
@@ -48,7 +50,7 @@ export function SplashScreen({ progress, onComplete, label }: SplashScreenProps)
           </div>
 
           <p className="mt-3 text-xs text-gray-500">
-            {isReady ? "Ready" : (label ?? "Loading...")}
+            {isReady ? t("splash.ready") : (label ?? t("splash.loading"))}
           </p>
         </motion.div>
       ) : null}

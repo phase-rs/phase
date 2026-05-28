@@ -23,9 +23,9 @@
 //! - `ChangeZone { destination, target, ... }` → `ChangeZoneAll { origin, destination, target }`
 //!   (Winds of Abandon: "Exile target creature you don't control" → exile
 //!   each. The single-target flags `enter_tapped`/`enter_transformed`/
-//!   `under_your_control`/`enters_attacking`/`up_to`/`enter_with_counters`
-//!   are dropped — `ChangeZoneAll` does not carry them and the overload
-//!   corpus exiles to a hidden zone where they have no semantics.)
+//!   `enters_under`/`enters_attacking`/`up_to`/`enter_with_counters` are
+//!   dropped — `ChangeZoneAll` does not carry them and the overload corpus
+//!   exiles to a hidden zone where they have no semantics.)
 //!
 //! Effects with no all-matching counterpart (e.g. `Counter` — Counterflux)
 //! are preserved unchanged; the overloaded cast simply has no useful effect
@@ -105,7 +105,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
         // single-target `ChangeZone` to its mass counterpart so "exile target
         // creature you don't control" becomes "exile each creature you don't
         // control". Single-target-only flags (enter_tapped, enter_transformed,
-        // under_your_control, enters_attacking, up_to, enter_with_counters)
+        // enters_under, enters_attacking, up_to, enter_with_counters)
         // are dropped — `ChangeZoneAll` carries no equivalents and the
         // overload corpus uses this only for hidden-zone exile where these
         // modifiers have no semantics.
@@ -120,7 +120,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             // upstream forces a deliberate decision here.
             owner_library: _, // dropped: ChangeZoneAll always uses target's library scope
             enter_transformed: _, // dropped: hidden-zone exile, no battlefield-side effect
-            under_your_control: _, // dropped: hidden-zone exile, no controller swap
+            enters_under: _,  // dropped: hidden-zone exile, no controller swap (CR 110.2a)
             enter_tapped: _,  // dropped: hidden-zone exile, tap state irrelevant
             enters_attacking: _, // dropped: hidden-zone exile, combat irrelevant
             up_to: _,         // dropped: ChangeZoneAll has no count semantics
@@ -262,7 +262,7 @@ mod tests {
             }),
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,

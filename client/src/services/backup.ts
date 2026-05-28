@@ -17,10 +17,10 @@ import {
   DECK_METADATA_KEY,
   FEED_DECK_ORIGINS_KEY,
   FEED_SUBSCRIPTIONS_KEY,
+  isUserOwnedStorageKey,
+  PREFERENCES_KEY,
   STORAGE_KEY_PREFIX,
 } from "../constants/storage";
-
-const PREFERENCES_KEY = "phase-preferences";
 
 /** Versioned envelope. Future shapes go in a `PhaseBackupV2 | …` union. */
 export interface PhaseBackupV1 {
@@ -148,17 +148,7 @@ export function applyBackup(
     const toRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      if (!key) continue;
-      if (
-        key === PREFERENCES_KEY ||
-        key === DECK_METADATA_KEY ||
-        key === ACTIVE_DECK_KEY ||
-        key === FEED_SUBSCRIPTIONS_KEY ||
-        key === FEED_DECK_ORIGINS_KEY ||
-        key.startsWith(STORAGE_KEY_PREFIX)
-      ) {
-        toRemove.push(key);
-      }
+      if (key && isUserOwnedStorageKey(key)) toRemove.push(key);
     }
     for (const key of toRemove) localStorage.removeItem(key);
   }

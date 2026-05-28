@@ -57,6 +57,7 @@ fn ninja_pump_static() -> StaticDefinition {
             ContinuousModification::AddToughness { value: 1 },
         ],
         condition: None,
+        per_player_condition: None,
         affected_zone: None,
         effect_zone: None,
         active_zones: vec![],
@@ -495,24 +496,19 @@ fn kaito_not_animated_without_loyalty_counters() {
 fn kaito_surveil_and_draw() {
     let (mut runner, kaito_id) = setup_kaito_on_battlefield(Phase::PostCombatMain);
 
-    // Add cards to P0's library for draw/surveil
+    // Add cards to P0's library for draw/surveil. `create_object` already adds
+    // the object to the owner's library zone — a manual `push_back` here would
+    // double-add each card, malforming the library with duplicate ObjectIds.
     for i in 0..5u32 {
         let state = runner.state_mut();
         let card_id = CardId(state.next_object_id);
-        let id = zones::create_object(
+        zones::create_object(
             state,
             card_id,
             P0,
             format!("Library Card {}", i),
             Zone::Library,
         );
-        state
-            .players
-            .iter_mut()
-            .find(|p| p.id == P0)
-            .unwrap()
-            .library
-            .push_back(id);
     }
 
     // Mark opponent (P1) as having lost life this turn
@@ -533,10 +529,22 @@ fn kaito_surveil_and_draw() {
         .hand
         .len();
 
-    // Activate 0 loyalty ability (Surveil 2, then draw for each opponent who lost life)
+    // Activate 0 loyalty ability (Surveil 2, then draw for each opponent who lost life).
+    // Resolve by effect shape instead of hardcoded index; this test runner object
+    // can carry pre-existing abilities from card data.
+    let surveil_ability_index = {
+        let state = runner.state();
+        let kaito = state.objects.get(&kaito_id).unwrap();
+        kaito
+            .abilities
+            .iter()
+            .position(|ability| matches!(*ability.effect, Effect::Surveil { .. }))
+            .expect("Kaito should have a surveil loyalty ability")
+    };
+
     let result = runner.act(GameAction::ActivateAbility {
         source_id: kaito_id,
-        ability_index: 1, // Second ability = surveil+draw
+        ability_index: surveil_ability_index,
     });
     assert!(
         result.is_ok(),
@@ -547,9 +555,11 @@ fn kaito_surveil_and_draw() {
     // Resolve the ability fully
     for _ in 0..30 {
         match &runner.state().waiting_for {
-            WaitingFor::SurveilChoice { .. } => {
-                // Put all cards on top (select none to go to bottom)
-                let _ = runner.act(GameAction::SelectCards { cards: vec![] });
+            WaitingFor::SurveilChoice { cards, .. } => {
+                // CR 701.25a: the payload is the keep-on-top set — pass every
+                // looked-at card to keep them all on top (none milled).
+                let keep = cards.clone();
+                let _ = runner.act(GameAction::SelectCards { cards: keep });
             }
             WaitingFor::Priority { .. } => {
                 let _ = runner.act(GameAction::PassPriority);

@@ -525,7 +525,7 @@ mod tests {
                 target: TargetFilter::TrackedSet {
                     id: crate::types::identifiers::TrackedSetId(0),
                 },
-                under_your_control: false,
+                enters_under: None,
                 enter_transformed: false,
                 enter_tapped: false,
                 owner_library: false,

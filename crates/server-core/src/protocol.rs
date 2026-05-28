@@ -20,7 +20,24 @@ use serde::{Deserialize, Serialize};
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
+
+/// Minimum protocol version the server will accept at the hello handshake.
+/// Clients on `MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION` are admitted to the
+/// lobby; older clients are rejected. The window is "current and previous" by
+/// policy — each bump deprecates exactly one version behind, so a release-vs-
+/// preview deployment can coexist in the same lobby server during the rollout.
+///
+/// Derived from `PROTOCOL_VERSION` so a bump automatically rolls the floor.
+/// Use `saturating_sub` so the constant is well-defined when `PROTOCOL_VERSION`
+/// is 0 (range collapses to `0..=0`, no underflow).
+///
+/// Note: admission to the lobby does not guarantee that every game wire
+/// operation is bidirectionally compatible across versions. Per-game cross-
+/// version filtering is a follow-up; until it lands, browsing succeeds but a
+/// v6 client clicking "join" on a v7-hosted game will fail at the seat-message
+/// boundary with an opaque deserialize error.
+pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 
 /// Git short-hash of the build. Emitted by `build.rs`; falls back to `"dev"`
 /// when git isn't available (containers, source tarballs).
@@ -47,6 +64,8 @@ pub struct AiSeatRequest {
     pub seat_index: u8,
     pub difficulty: AiDifficulty,
     pub deck_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deck: Option<DeckChoice>,
 }
 
 // `LobbyGame` and `DraftLobbyMetadata` are now DEFINED in `lobby-broker`
@@ -948,6 +967,7 @@ mod tests {
             seat_index: 1,
             difficulty: AiDifficulty::Hard,
             deck_name: Some("Mono Red".to_string()),
+            deck: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: AiSeatRequest = serde_json::from_str(&json).unwrap();
@@ -962,6 +982,7 @@ mod tests {
             seat_index: 1,
             difficulty: AiDifficulty::Medium,
             deck_name: None,
+            deck: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("seatIndex").is_some());
@@ -989,6 +1010,7 @@ mod tests {
                 seat_index: 1,
                 difficulty: AiDifficulty::VeryHard,
                 deck_name: None,
+                deck: None,
             }],
             format_config: None,
             room_name: None,
@@ -1003,6 +1025,43 @@ mod tests {
                 assert_eq!(ai_seats.len(), 1);
                 assert_eq!(ai_seats[0].seat_index, 1);
                 assert_eq!(ai_seats[0].difficulty, AiDifficulty::VeryHard);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn seat_mutation_deck_list_choice_roundtrips() {
+        let msg = ClientMessage::SeatMutate {
+            mutation: SeatMutation::SetKind {
+                seat_index: 1,
+                kind: SeatKind::Ai {
+                    difficulty: AiDifficulty::Medium,
+                    deck: DeckChoice::DeckList(Box::new(DeckData {
+                        main_deck: vec!["Forest".to_string(); 60],
+                        sideboard: Vec::new(),
+                        commander: Vec::new(),
+                    })),
+                },
+            },
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::SeatMutate {
+                mutation:
+                    SeatMutation::SetKind {
+                        kind:
+                            SeatKind::Ai {
+                                deck: DeckChoice::DeckList(deck),
+                                ..
+                            },
+                        ..
+                    },
+            } => {
+                assert_eq!(deck.main_deck.len(), 60);
+                assert_eq!(deck.main_deck[0], "Forest");
             }
             _ => panic!("wrong variant"),
         }
@@ -1643,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_6() {
-        assert_eq!(PROTOCOL_VERSION, 6);
+    fn protocol_version_is_7() {
+        assert_eq!(PROTOCOL_VERSION, 7);
     }
 }

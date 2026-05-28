@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/scryfall-fetch.sh"
+
 DATA_DIR="data/scryfall"
 ORACLE_FILE="$DATA_DIR/oracle-cards.json"
 OUTPUT="client/public/scryfall-data.json"
@@ -11,9 +14,7 @@ echo "=== Scryfall Data Generation ==="
 if [ ! -f "$ORACLE_FILE" ]; then
   echo "Downloading Scryfall oracle-cards bulk data..."
   mkdir -p "$DATA_DIR"
-  DOWNLOAD_URI=$(curl -s "https://api.scryfall.com/bulk-data" \
-    | jq -r '.data[] | select(.type == "oracle_cards") | .download_uri')
-  curl -L -o "$ORACLE_FILE" "$DOWNLOAD_URI"
+  scryfall_fetch_bulk oracle_cards "$ORACLE_FILE"
   echo "Downloaded $ORACLE_FILE."
 fi
 

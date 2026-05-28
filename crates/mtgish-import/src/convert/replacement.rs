@@ -692,7 +692,7 @@ pub fn convert_replace_would_put_into_graveyard(
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -910,7 +910,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1561,8 +1561,8 @@ fn build_replacement_exec(
                 target: target.clone(),
             }
         }
-        // CR 614.12 + CR 110.2: "Enters under [opponent / a player]'s
-        // control." `Effect::ChangeZone` carries `under_your_control`,
+        // CR 614.12 + CR 110.2a: "Enters under [opponent / a player]'s
+        // control." `Effect::ChangeZone` carries `enters_under`,
         // but the engine has no slot for "under SOME OTHER player's
         // control" inside the as-enters replacement frame, and the
         // replacement runtime never reads ChangeZone for an ETB

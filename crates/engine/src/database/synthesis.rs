@@ -5,19 +5,20 @@ use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
-    AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, Comparator,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration,
-    Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
-    SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
+    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, GainLifePlayer,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PlayerFilter, PlayerScope, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    RuntimeHandler, SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
-use crate::types::mana::{ManaColor, ManaCost};
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
@@ -149,7 +150,11 @@ impl KeywordTriggerInstaller {
                 "M1M1", "-1/-1", "702.79a",
             )],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            Keyword::Renown(n) => vec![build_renown_trigger(*n)],
+            Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
+            Keyword::Exalted => vec![build_exalted_trigger()],
+            Keyword::Extort => vec![build_extort_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
             Keyword::Soulbond => build_soulbond_triggers(),
             // CR 702.62a + CR 604.1: granted Suspend carries the same two
@@ -177,7 +182,11 @@ impl KeywordTriggerInstaller {
                 is_dies_return_with_counter_trigger(trigger, &CounterType::Minus1Minus1)
             }
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
+            Keyword::Renown(_) => is_renown_trigger(trigger),
+            Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
+            Keyword::Exalted => is_exalted_trigger(trigger),
+            Keyword::Extort => is_extort_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
             Keyword::Soulbond => is_soulbond_trigger(trigger),
             // CR 702.62a + CR 604.1: symmetric removal — `RemoveKeyword` strips
@@ -364,39 +373,72 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
     }
 }
 
-/// CR 702.182a: Synthesize Job select trigger: when this Equipment enters,
-/// create a 1/1 colorless Hero creature token, then attach this Equipment to it.
-pub fn synthesize_job_select(face: &mut CardFace) {
+/// CR 603.6a + CR 205.3 + CR 105.2: Synthesize a "keyword ETB → create
+/// typed token → attach this Equipment" trigger. Shared shape for any
+/// keyword whose CR text follows the template:
+///
+///   "When this Equipment enters, create a <P/T> <color> <subtypes>
+///    creature token, then attach this Equipment to it."
+///
+/// Currently used by Job select (CR 702.182a — 1/1 colorless Hero), Living
+/// weapon (CR 702.92a — 0/0 black Phyrexian Germ), and For Mirrodin!
+/// (CR 702.163a — 2/2 red Rebel). Future keywords with the same shape can
+/// register here without copying the skeleton.
+///
+/// The helper prepends "Creature" to the subtype list internally so callers
+/// only pass the actual subtypes (`["Hero"]`, `["Phyrexian", "Germ"]`). The
+/// `keyword_matcher` closure gates synthesis on the presence of the
+/// originating keyword, and the idempotency guard is scoped to a
+/// ChangesZone trigger landing on the battlefield whose execute effect is
+/// `Effect::Token` with the matching token name — re-running synthesis
+/// never duplicates the trigger.
+#[allow(clippy::too_many_arguments)]
+fn synthesize_etb_token_attach_keyword(
+    face: &mut CardFace,
+    keyword_matcher: impl Fn(&Keyword) -> bool,
+    token_name: &str,
+    power: i32,
+    toughness: i32,
+    subtype_list: &[&str],
+    colors: &[ManaColor],
+    description: &str,
+) {
     use crate::types::ability::PtValue;
 
-    if !face
-        .keywords
-        .iter()
-        .any(|k| matches!(k, Keyword::JobSelect))
-    {
+    if !face.keywords.iter().any(keyword_matcher) {
         return;
     }
 
-    // Idempotency: skip if the Job select ETB Hero token trigger already exists.
+    // Idempotency: skip if the ETB token trigger for this token name already
+    // exists. Re-running the synthesis pipeline must never duplicate the
+    // trigger — otherwise re-loaded card data would fire multiple tokens
+    // per Equipment ETB.
     let already_has_trigger = face.triggers.iter().any(|t| {
         matches!(t.mode, TriggerMode::ChangesZone)
             && t.destination == Some(Zone::Battlefield)
             && matches!(t.valid_card, Some(TargetFilter::SelfRef))
             && matches!(
                 t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::Token { name, .. }) if name == "Hero"
+                Some(Effect::Token { name, .. }) if name == token_name
             )
     });
     if already_has_trigger {
         return;
     }
 
+    // CR 205.3: Token effect's `types` field stores both core types and
+    // subtypes in a single vector. Prepend "Creature" so callers pass only
+    // the actual creature subtypes.
+    let mut types = Vec::with_capacity(subtype_list.len() + 1);
+    types.push("Creature".to_string());
+    types.extend(subtype_list.iter().map(|s| s.to_string()));
+
     let token_effect = Effect::Token {
-        name: "Hero".to_string(),
-        power: PtValue::Fixed(1),
-        toughness: PtValue::Fixed(1),
-        types: vec!["Creature".to_string(), "Hero".to_string()],
-        colors: vec![],
+        name: token_name.to_string(),
+        power: PtValue::Fixed(power),
+        toughness: PtValue::Fixed(toughness),
+        types,
+        colors: colors.to_vec(),
         keywords: vec![],
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
@@ -416,9 +458,10 @@ pub fn synthesize_job_select(face: &mut CardFace) {
         },
     );
 
-    // CR 603.6a: Enters-the-battlefield abilities trigger when a permanent enters
-    // the battlefield. The trigger source must be on the battlefield for the
-    // evaluator to match, so `trigger_zones` must include `Zone::Battlefield`.
+    // CR 603.6a: Enters-the-battlefield abilities trigger when a permanent
+    // enters the battlefield. The trigger source must be on the battlefield
+    // for the evaluator to match, so `trigger_zones` must include
+    // `Zone::Battlefield`.
     face.triggers.push(
         TriggerDefinition::new(TriggerMode::ChangesZone)
             .destination(Zone::Battlefield)
@@ -427,7 +470,72 @@ pub fn synthesize_job_select(face: &mut CardFace) {
             .execute(
                 AbilityDefinition::new(AbilityKind::Spell, token_effect).sub_ability(attach_effect),
             )
-            .description("Job select — create Hero token and attach".to_string()),
+            .description(description.to_string()),
+    );
+}
+
+/// CR 702.182a: Synthesize Job select trigger: when this Equipment enters,
+/// create a 1/1 colorless Hero creature token, then attach this Equipment to it.
+pub fn synthesize_job_select(face: &mut CardFace) {
+    synthesize_etb_token_attach_keyword(
+        face,
+        |k| matches!(k, Keyword::JobSelect),
+        "Hero",
+        1,
+        1,
+        &["Hero"],
+        &[],
+        "Job select — create Hero token and attach",
+    );
+}
+
+/// CR 702.92a: Synthesize Living weapon trigger — when this Equipment enters,
+/// create a 0/0 black Phyrexian Germ creature token, then attach this
+/// Equipment to it. Structurally identical to `synthesize_job_select` (CR
+/// 702.182a) — both delegate to `synthesize_etb_token_attach_keyword`,
+/// differing only in the leaf-level axes (P/T, token name, subtype list,
+/// color, description).
+///
+/// CR 205.3m: "Phyrexian" and "Germ" are creature subtypes.
+/// CR 105.2: Phyrexian Germ tokens are black (single-color).
+///
+/// Issue #974 (Kaldra Compleat — "Living Weapon" doesn't work): the keyword
+/// was parsed into `Keyword::LivingWeapon` and stored on the card face, but
+/// no synthesis pass turned it into the rule-mandated ETB trigger, so the
+/// Equipment entered the battlefield with no companion Germ token and never
+/// auto-attached. Class affects ~15 cards (Batterskull, Flayer Husk,
+/// Mortarpod, Bonehoard, etc.) and Kaldra Compleat directly.
+pub fn synthesize_living_weapon(face: &mut CardFace) {
+    synthesize_etb_token_attach_keyword(
+        face,
+        |k| matches!(k, Keyword::LivingWeapon),
+        "Phyrexian Germ",
+        0,
+        0,
+        &["Phyrexian", "Germ"],
+        &[ManaColor::Black],
+        "Living weapon — create Phyrexian Germ token and attach",
+    );
+}
+
+/// CR 702.163a: Synthesize For Mirrodin! trigger — when this Equipment enters,
+/// create a 2/2 red Rebel creature token, then attach this Equipment to it.
+/// Structurally identical to `synthesize_job_select` and `synthesize_living_weapon` —
+/// all three delegate to `synthesize_etb_token_attach_keyword`, differing only
+/// in the leaf-level axes (P/T, token name, subtype list, color, description).
+///
+/// CR 205.3m: "Rebel" is a creature subtype.
+/// CR 105.2: For Mirrodin! tokens are red (single-color).
+pub fn synthesize_for_mirrodin(face: &mut CardFace) {
+    synthesize_etb_token_attach_keyword(
+        face,
+        |k| matches!(k, Keyword::ForMirrodin),
+        "Rebel",
+        2,
+        2,
+        &["Rebel"],
+        &[ManaColor::Red],
+        "For Mirrodin! — create Rebel token and attach",
     );
 }
 
@@ -719,7 +827,10 @@ pub fn synthesize_buyback(face: &mut CardFace) {
         BuybackCost::Mana(mana_cost) => AbilityCost::Mana { cost: mana_cost },
         BuybackCost::NonMana(ac) => ac,
     };
-    face.additional_cost = Some(AdditionalCost::Optional(cost));
+    face.additional_cost = Some(AdditionalCost::Optional {
+        cost,
+        repeatable: false,
+    });
 }
 
 /// CR 702.166a: Synthesize `additional_cost` from `Keyword::Bargain`.
@@ -730,16 +841,21 @@ pub fn synthesize_bargain(face: &mut CardFace) {
         return;
     }
 
-    face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
-        target: TargetFilter::Or {
-            filters: vec![
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
-                TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Token])),
-            ],
+    face.additional_cost = Some(AdditionalCost::Optional {
+        cost: AbilityCost::Sacrifice {
+            target: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+                    TargetFilter::Typed(
+                        TypedFilter::permanent().properties(vec![FilterProp::Token]),
+                    ),
+                ],
+            },
+            count: 1,
         },
-        count: 1,
-    }));
+        repeatable: false,
+    });
 }
 
 /// Synthesize Gift optional cost and delivery effect.
@@ -767,9 +883,12 @@ pub fn synthesize_gift(face: &mut CardFace) {
     };
 
     // Gift uses a zero-cost optional additional cost — the "cost" is just a decision.
-    face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana {
-        cost: ManaCost::zero(),
-    }));
+    face.additional_cost = Some(AdditionalCost::Optional {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        },
+        repeatable: false,
+    });
 
     // Inject GiftDelivery as a wrapper around the first spell ability.
     // The delivery effect is a no-op when the gift wasn't promised, so the
@@ -1003,7 +1122,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
@@ -1194,10 +1313,13 @@ pub fn synthesize_casualty(face: &mut CardFace) {
                 },
             },
         ]));
-        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
-            target: sacrifice_filter,
-            count: 1,
-        }));
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::Sacrifice {
+                target: sacrifice_filter,
+                count: 1,
+            },
+            repeatable: false,
+        });
     }
 
     // CR 702.153a: "When you cast this spell, if a casualty cost was paid, copy it.
@@ -1289,7 +1411,7 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1408,9 +1530,104 @@ pub fn synthesize_cumulative_upkeep(face: &mut CardFace) {
     });
 }
 
+/// Insert a synthesis-level unsupported sentinel once.
+///
+/// Coverage already treats `Effect::Unimplemented` on any ability as an
+/// unsupported card-data gap. `AbilityKind::Spell` is used deliberately here
+/// because `AbilityDefinition` has no non-runtime sentinel kind; cards with
+/// this marker stay unsupported rather than entering legal play paths.
+fn defer_synthesis(face: &mut CardFace, name: &str, description: String) {
+    let already_deferred = face.abilities.iter().any(|ability| {
+        matches!(
+            &*ability.effect,
+            Effect::Unimplemented {
+                name: existing, ..
+            } if existing == name
+        )
+    });
+    if already_deferred {
+        return;
+    }
+
+    face.abilities.push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Unimplemented {
+            name: name.to_string(),
+            description: Some(description),
+        },
+    ));
+}
+
+fn install_etb_copy_on_additional_cost(
+    face: &mut CardFace,
+    additional_cost: AdditionalCost,
+    payment_source: AdditionalCostPaymentSource,
+    min_count: u32,
+    count: QuantityExpr,
+    additional_modifications: Vec<ContinuousModification>,
+    description: String,
+) {
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(additional_cost);
+    }
+
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.condition,
+                Some(TriggerCondition::AdditionalCostPaid {
+                    source,
+                    min_count: existing_min_count,
+                    ..
+                }) if source == payment_source && existing_min_count == min_count
+            )
+            && t.execute.as_deref().is_some_and(|a| match &*a.effect {
+                Effect::CopyTokenOf {
+                    count: existing_count,
+                    additional_modifications: existing_modifications,
+                    ..
+                } => {
+                    existing_count == &count && existing_modifications == &additional_modifications
+                }
+                _ => false,
+            })
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    let copy_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count,
+            extra_keywords: vec![],
+            additional_modifications,
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::AdditionalCostPaid {
+            source: payment_source,
+            variant: None,
+            kicker_cost: None,
+            min_count,
+        })
+        .execute(copy_effect)
+        .description(description);
+    face.triggers.push(trigger);
+}
+
 /// CR 702.175a: Offspring represents two abilities:
 ///   1. "You may pay an additional [cost] as you cast this spell" — modeled as
-///      `AdditionalCost::Optional(AbilityCost::Mana { cost })`.
+///      `AdditionalCost::Optional { repeatable: false, .. }`.
 ///   2. "When this permanent enters, if its offspring cost was paid, create a
 ///      token that's a copy of it, except it's 1/1." — modeled as an ETB trigger
 ///      with `TriggerCondition::AdditionalCostPaid` and `Effect::CopyTokenOf`
@@ -1426,65 +1643,74 @@ pub fn synthesize_offspring(face: &mut CardFace) {
         return;
     };
 
-    // CR 702.175a ability 1: Optional additional cost.
-    // Only set if no additional_cost was already parsed (e.g., a card with both
-    // kicker and offspring would need the kicker cost to take precedence since
-    // AdditionalCost is a single slot — but no such card exists in print).
-    if face.additional_cost.is_none() {
-        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana {
-            cost: offspring_cost,
-        }));
-    }
+    install_etb_copy_on_additional_cost(
+        face,
+        AdditionalCost::Optional {
+            cost: AbilityCost::Mana {
+                cost: offspring_cost,
+            },
+            repeatable: false,
+        },
+        AdditionalCostPaymentSource::Any,
+        1,
+        QuantityExpr::Fixed { value: 1 },
+        vec![
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+        ],
+        "CR 702.175a: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
+            .to_string(),
+    );
+}
 
-    // CR 702.175a ability 2: ETB trigger creating a 1/1 copy token.
-    // Idempotency: skip if an AdditionalCostPaid + CopyTokenOf ETB trigger already exists.
-    let already_has_trigger = face.triggers.iter().any(|t| {
-        matches!(t.mode, TriggerMode::ChangesZone)
-            && t.destination == Some(Zone::Battlefield)
-            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-            && matches!(
-                t.condition,
-                Some(TriggerCondition::AdditionalCostPaid { .. })
-            )
-            && matches!(
-                t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::CopyTokenOf { .. })
-            )
-    });
-    if already_has_trigger {
+/// CR 702.157a: Squad represents a repeatable optional additional cost and an
+/// ETB trigger that creates one copy token for each time the squad cost was paid.
+pub fn synthesize_squad(face: &mut CardFace) {
+    let squad_costs: Vec<_> = face
+        .keywords
+        .iter()
+        .filter_map(|k| match k {
+            Keyword::Squad(cost) => Some(cost.clone()),
+            _ => None,
+        })
+        .collect();
+    if squad_costs.is_empty() {
         return;
     }
 
-    let copy_effect = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::CopyTokenOf {
-            target: TargetFilter::SelfRef,
-            owner: TargetFilter::Controller,
-            source_filter: None,
-            enters_attacking: false,
-            tapped: false,
-            count: QuantityExpr::Fixed { value: 1 },
-            extra_keywords: vec![],
-            additional_modifications: vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
-            ],
-        },
-    );
-    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
-        .destination(Zone::Battlefield)
-        .valid_card(TargetFilter::SelfRef)
-        .condition(TriggerCondition::AdditionalCostPaid {
-            variant: None,
-            kicker_cost: None,
-            min_count: 1,
-        })
-        .execute(copy_effect)
-        .description(
-            "CR 702.175a: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
+    // CR 702.157b: Multiple Squad instances are paid independently and each
+    // instance's linked trigger counts only its own payments. Do not collapse
+    // them into one repeatable cost; leave coverage unsupported until the
+    // linked-instance model exists.
+    if squad_costs.len() > 1 {
+        defer_synthesis(
+            face,
+            "squad_multiple_instances",
+            "CR 702.157b: multiple Squad instances require per-instance payment tracking"
                 .to_string(),
         );
-    face.triggers.push(trigger);
+        return;
+    }
+
+    let squad_cost = squad_costs[0].clone();
+
+    install_etb_copy_on_additional_cost(
+        face,
+        AdditionalCost::Optional {
+            cost: AbilityCost::Mana {
+                cost: squad_cost,
+            },
+            repeatable: true,
+        },
+        AdditionalCostPaymentSource::NonKicker,
+        0,
+        QuantityExpr::Ref {
+            qty: QuantityRef::AdditionalCostPaymentCount,
+        },
+        vec![],
+        "CR 702.157a: When this permanent enters, create a token that's a copy of it for each time its squad cost was paid."
+            .to_string(),
+    );
 }
 
 /// CR 702.123a: Fabricate N — "When this permanent enters, you may put N
@@ -1627,8 +1853,8 @@ pub fn synthesize_fabricate(face: &mut CardFace) {
 ///     against `state.lki_cache` for the source's pre-death counter map.
 ///   * Execute body: `Effect::ChangeZone` from `Graveyard` → `Battlefield`
 ///     targeting `SelfRef`, with `enter_with_counters = [("P1P1", 1)]`. The
-///     default `under_your_control = false` matches the rule's "under its
-///     owner's control" exactly.
+///     default `enters_under = None` matches the rule's "under its owner's
+///     control" exactly (CR 110.2a).
 ///
 /// Per CR 113.2c ("If an object has multiple instances of the same ability,
 /// each instance functions independently") combined with the absence of a
@@ -1655,6 +1881,15 @@ pub fn synthesize_undying(face: &mut CardFace) {
 /// one synthesized trigger is emitted per keyword on the face.
 pub fn synthesize_persist(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Persist));
+}
+
+/// CR 702.112a: Renown N — combat-damage-to-player trigger with an
+/// intervening-if renowned designation check.
+///
+/// CR 702.112c: Each renown instance triggers independently, so synthesis emits
+/// one trigger per `Keyword::Renown(_)` instance.
+pub fn synthesize_renown(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Renown(_)));
 }
 
 /// CR 702.86a: Annihilator N — "Whenever this creature attacks, defending
@@ -1687,6 +1922,28 @@ pub fn synthesize_persist(face: &mut CardFace) {
 /// possible" plumbing is needed here.
 pub fn synthesize_annihilator(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Annihilator(_)));
+}
+
+/// CR 702.83a: Exalted — an attack trigger that fires whenever a creature you
+/// control attacks alone, giving +1/+1 until end of turn. CR 702.83b: each
+/// instance triggers separately, so one trigger is synthesized per
+/// `Keyword::Exalted` instance.
+pub fn synthesize_exalted(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Exalted));
+}
+
+/// CR 702.101a: Extort — a spell-cast trigger that lets you pay {W/B} to drain
+/// each opponent for 1 life. CR 702.101b: each instance triggers separately,
+/// so one trigger is synthesized per `Keyword::Extort` instance.
+pub fn synthesize_extort(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Extort));
+}
+
+/// CR 702.105a: Dethrone — an attack trigger that fires whenever this creature
+/// attacks the player with the most life or tied for most life, putting a +1/+1
+/// counter on it. CR 702.105b: each instance triggers separately.
+pub fn synthesize_dethrone(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Dethrone));
 }
 
 /// CR 702.100a: Evolve — an ETB trigger that fires whenever another creature you
@@ -1849,11 +2106,11 @@ fn is_annihilator_attack_trigger(t: &TriggerDefinition) -> bool {
 }
 
 /// Idempotency-shape predicate for `synthesize`-installed Evolve triggers.
-/// `TriggerMode::Evolved` is unique to the Evolve keyword, so the mode alone
+/// `TriggerMode::Evolve` is unique to the Evolve keyword, so the mode alone
 /// uniquely identifies a synthesized Evolve trigger — no execute-shape check
 /// is needed (or wanted: it would disambiguate nothing).
 fn is_evolve_trigger(t: &TriggerDefinition) -> bool {
-    matches!(t.mode, TriggerMode::Evolved)
+    matches!(t.mode, TriggerMode::Evolve)
 }
 
 fn is_myriad_attack_trigger(t: &TriggerDefinition) -> bool {
@@ -1863,7 +2120,32 @@ fn is_myriad_attack_trigger(t: &TriggerDefinition) -> bool {
             ability.optional && matches!(ability.effect.as_ref(), Effect::Myriad)
         })
 }
-
+/// Idempotency-shape predicate for `synthesize_dethrone`. True iff `trigger`
+/// is the synthesized Dethrone attack-trigger shape (`TriggerMode::Attacks`
+/// + `valid_card = SelfRef` + execute = PutCounter(P1P1) on SelfRef
+/// + condition = DefendingPlayer life >= AllPlayers max life).
+fn is_dethrone_attack_trigger(t: &TriggerDefinition) -> bool {
+    if !matches!(t.mode, TriggerMode::Attacks)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        || !matches!(
+            t.attack_target_filter,
+            Some(crate::types::triggers::AttackTargetFilter::Player)
+        )
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ) && t.condition.is_some()
+}
 fn is_echo_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::PayEcho)
         && t.phase == Some(Phase::Upkeep)
@@ -2075,6 +2357,202 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
         ))
 }
 
+/// CR 702.83a: Exalted — "Whenever a creature you control attacks alone,
+/// that creature gets +1/+1 until end of turn for each instance of exalted
+/// among permanents you control."
+///
+/// Each instance of Exalted triggers separately (CR 702.83b), so one trigger
+/// is synthesized per `Keyword::Exalted` instance. The +1/+1 stacking is
+/// automatic because each trigger resolves independently.
+fn is_exalted_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Attacks)
+        && matches!(t.condition, Some(TriggerCondition::Not { .. }))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                target: TargetFilter::TriggeringSource,
+                ..
+            })
+        )
+}
+
+fn build_exalted_trigger() -> TriggerDefinition {
+    let pump_effect = Effect::Pump {
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        target: TargetFilter::TriggeringSource,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, pump_effect)
+        .description("CR 702.83a: Exalted — +1/+1 until end of turn".to_string());
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .condition(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::MinCoAttackers { minimum: 1 }),
+        })
+        .execute(execute)
+        .description(
+            "CR 702.83a: Exalted — whenever a creature you control attacks alone, \
+             that creature gets +1/+1 until end of turn."
+                .to_string(),
+        )
+}
+
+/// CR 702.101a: Extort — "Whenever you cast a spell, you may pay {W/B}.
+/// If you do, each opponent loses 1 life and you gain that much life."
+///
+/// Each instance of Extort triggers separately (CR 702.101b), so one trigger
+/// is synthesized per `Keyword::Extort` instance.
+fn is_extort_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_target, Some(TargetFilter::Controller))
+        && t.execute
+            .as_deref()
+            .is_some_and(|a| a.optional && a.cost.is_some())
+}
+
+fn build_extort_trigger() -> TriggerDefinition {
+    // The drain effect: each opponent loses 1 life, you gain that much.
+    // Use player_scope to iterate over opponents for the LoseLife,
+    // then sub_ability for the controller's GainLife.
+    let drain_effect = Effect::LoseLife {
+        amount: QuantityExpr::Fixed { value: 1 },
+        target: None,
+    };
+    let gain_life = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount,
+            },
+            player: GainLifePlayer::Controller,
+        },
+    );
+    let execute = AbilityDefinition::new(AbilityKind::Spell, drain_effect)
+        .player_scope(PlayerFilter::Opponent)
+        .sub_ability(gain_life)
+        .optional()
+        .cost(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::WhiteBlack],
+                generic: 0,
+            },
+        })
+        .description(
+            "CR 702.101a: Extort — pay {W/B}, each opponent loses 1 life, you gain that much life"
+                .to_string(),
+        );
+    TriggerDefinition::new(TriggerMode::SpellCast)
+        .valid_target(TargetFilter::Controller)
+        .execute(execute)
+        .description(
+            "CR 702.101a: Extort — whenever you cast a spell, you may pay {W/B}. \
+             If you do, each opponent loses 1 life and you gain that much life."
+                .to_string(),
+        )
+}
+
+/// CR 702.105a: Dethrone — "Whenever a creature with dethrone attacks the
+/// player with the most life or tied for most life, put a +1/+1 counter on
+/// that creature."
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Dethrone`, so every printed
+/// Dethrone card and every creature granted Dethrone at runtime gets an identical
+/// trigger. CR 702.105b: each instance triggers separately.
+fn build_dethrone_trigger() -> TriggerDefinition {
+    // CR 122.1: put a single +1/+1 counter on the Dethrone creature itself.
+    let put_counter = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("Put a +1/+1 counter on this creature".to_string());
+
+    // CR 702.105a: "attacks the player with the most life or tied for most
+    // life". The defending player's life total must be >= the maximum life
+    // total among all players. This is an intervening-if condition checked
+    // at both detection and resolution per CR 603.4.
+    let condition = TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::DefendingPlayer,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            },
+        },
+    };
+
+    let mut trigger = TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(condition)
+        .execute(put_counter)
+        .description(
+            "CR 702.105a: Dethrone — whenever ~ attacks the player with the most life or tied for most life, put a +1/+1 counter on ~."
+                .to_string(),
+        );
+    // CR 702.105a: Dethrone only triggers when attacking a player, not a
+    // planeswalker or battle.
+    trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
+    trigger
+}
+
+fn is_renown_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::DamageDone)
+        && matches!(t.valid_source, Some(TargetFilter::SelfRef))
+        && matches!(t.valid_target, Some(TargetFilter::Player))
+        && matches!(t.damage_kind, DamageKindFilter::CombatOnly)
+        && matches!(
+            t.condition,
+            Some(TriggerCondition::Not {
+                condition: ref inner,
+            }) if matches!(**inner, TriggerCondition::SourceIsRenowned)
+        )
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Renown { .. })
+        )
+}
+
+/// CR 702.112a: Renown N — "When this creature deals combat damage to a player,
+/// if it isn't renowned, put N +1/+1 counters on it and it becomes renowned."
+///
+/// CR 702.112c: Multiple renown instances trigger separately; the first to
+/// resolve makes the creature renowned, and later instances do nothing via the
+/// same intervening-if condition.
+fn build_renown_trigger(n: u32) -> TriggerDefinition {
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Renown {
+            count: QuantityExpr::Fixed { value: n as i32 },
+        },
+    )
+    .description(format!("Renown {n}"));
+
+    TriggerDefinition::new(TriggerMode::DamageDone)
+        .valid_source(TargetFilter::SelfRef)
+        .valid_target(TargetFilter::Player)
+        .damage_kind(DamageKindFilter::CombatOnly)
+        .condition(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::SourceIsRenowned),
+        })
+        .execute(execute)
+        .description(format!(
+            "CR 702.112a: Renown {n} — when this creature deals combat damage to a player, if it isn't renowned, put {n} +1/+1 counter{} on it and it becomes renowned.",
+            if n == 1 { "" } else { "s" }
+        ))
+}
+
 /// CR 702.100a: Evolve — "Whenever a creature you control enters, if that
 /// creature's power is greater than this creature's power and/or that
 /// creature's toughness is greater than this creature's toughness, put a
@@ -2086,7 +2564,7 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
 /// satisfied for free by `triggers_for` being invoked per keyword instance.
 fn build_evolve_trigger() -> TriggerDefinition {
     // CR 122.1: put a single +1/+1 counter on the Evolve creature itself.
-    let put_counter = AbilityDefinition::new(
+    let mut put_counter = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PutCounter {
             counter_type: CounterType::Plus1Plus1,
@@ -2095,6 +2573,7 @@ fn build_evolve_trigger() -> TriggerDefinition {
         },
     )
     .description("Put a +1/+1 counter on this creature".to_string());
+    put_counter.ability_tag = Some(AbilityTag::Evolve);
 
     // CR 702.100a "and/or": fire if the entering creature's power is greater
     // OR its toughness is greater than this creature's. CR 603.4: this is the
@@ -2135,7 +2614,7 @@ fn build_evolve_trigger() -> TriggerDefinition {
     // `valid_card` selects any creature the trigger controller controls
     // (including the Evolve creature itself — its self-vs-self P/T comparison
     // yields equal values, so the strict-`GT` intervening-if filters it out).
-    TriggerDefinition::new(TriggerMode::Evolved)
+    TriggerDefinition::new(TriggerMode::Evolve)
         .destination(Zone::Battlefield)
         .valid_card(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
@@ -2175,7 +2654,7 @@ fn build_dies_return_with_counter_trigger(
         // CR 702.93a / CR 702.79a: "under its owner's control" — default
         // (false) sends the object to its owner's control. `true` would
         // override to the ability controller's control.
-        under_your_control: false,
+        enters_under: None,
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
@@ -3121,6 +3600,14 @@ pub fn synthesize_all(face: &mut CardFace) {
     // Warp: no synthesis needed — runtime handled by Keyword::Warp directly
     synthesize_mobilize(face);
     synthesize_job_select(face);
+    // CR 702.92a: Living weapon — Equipment ETB trigger creating a 0/0
+    // black Phyrexian Germ creature token, then attaching this Equipment
+    // to it. Same shape as job select; both share the keyword-to-ETB-attach
+    // synthesis pattern.
+    synthesize_living_weapon(face);
+    // CR 702.163a: For Mirrodin! — same ETB-token-attach shape as living weapon
+    // and job select; creates a 2/2 red Rebel creature token.
+    synthesize_for_mirrodin(face);
     synthesize_level_up(face);
     synthesize_cycling(face);
     synthesize_scavenge(face);
@@ -3138,6 +3625,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_cumulative_upkeep(face);
     // CR 702.175a: Offspring — optional additional cost + ETB 1/1 copy trigger.
     synthesize_offspring(face);
+    // CR 702.157a: Squad — repeatable optional additional cost + ETB copy trigger.
+    synthesize_squad(face);
     // CR 702.123a: Fabricate N — ETB trigger with controller-chosen branch
     // between N +1/+1 counters or N 1/1 colorless Servo artifact creature
     // tokens. Modeled via `Effect::ChooseOneOf`.
@@ -3149,11 +3638,26 @@ pub fn synthesize_all(face: &mut CardFace) {
     // -1/-1 counter, gated on having had no -1/-1 counter at death (LKI).
     // Sibling of Undying via shared `synthesize_dies_return_with_counter`.
     synthesize_persist(face);
+    // CR 702.112a: Renown N — combat damage to player trigger with
+    // designation-setting resolution. CR 702.112c: each instance triggers
+    // separately; the resolution-time designation guard suppresses later ones.
+    synthesize_renown(face);
     // CR 702.86a: Annihilator N — attacks trigger that forces the defending
     // player to sacrifice N permanents. CR 702.86b: each instance triggers
     // separately. Defending player resolved per-attacker via
     // `ControllerRef::DefendingPlayer` (CR 508.5 / 508.5a).
     synthesize_annihilator(face);
+    // CR 702.83a: Exalted — attack trigger that gives +1/+1 until end of turn
+    // whenever a creature you control attacks alone. CR 702.83b: each instance
+    // triggers separately.
+    synthesize_exalted(face);
+    // CR 702.101a: Extort — spell-cast trigger that lets you pay {W/B} to drain
+    // each opponent for 1 life. CR 702.101b: each instance triggers separately.
+    synthesize_extort(face);
+    // CR 702.105a: Dethrone — attack trigger that puts a +1/+1 counter on the
+    // creature whenever it attacks the player with the most life or tied for
+    // most life. CR 702.105b: each instance triggers separately.
+    synthesize_dethrone(face);
     // CR 702.100a: Evolve — ETB trigger that puts a +1/+1 counter on the
     // creature whenever another creature you control enters with greater power
     // or toughness. CR 702.100d: each instance triggers separately.
@@ -3275,7 +3779,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -3721,6 +4225,7 @@ mod kicker_synthesis_tests {
                 modal: Some(crate::types::ability::ModalChoice {
                     constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
                         condition: ModalSelectionCondition::AdditionalCostPaid {
+                            source: AdditionalCostPaymentSource::Kicker,
                             variant: None,
                             kicker_cost: Some(ManaCost::Cost {
                                 generic: 1,
@@ -3757,6 +4262,7 @@ mod kicker_synthesis_tests {
         assert!(matches!(
             condition,
             ModalSelectionCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::Kicker,
                 variant: Some(KickerVariant::Second),
                 kicker_cost: None,
                 min_count: 1
@@ -3783,7 +4289,10 @@ mod buyback_synthesis_tests {
         synthesize_buyback(&mut face);
 
         match face.additional_cost.expect("additional_cost set") {
-            AdditionalCost::Optional(AbilityCost::Mana { cost }) => {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Mana { cost },
+                repeatable: false,
+            } => {
                 assert!(matches!(
                     cost,
                     ManaCost::Cost {
@@ -3812,7 +4321,10 @@ mod buyback_synthesis_tests {
         synthesize_buyback(&mut face);
 
         match face.additional_cost.expect("additional_cost set") {
-            AdditionalCost::Optional(cost) => assert_eq!(cost, sac_cost),
+            AdditionalCost::Optional {
+                cost,
+                repeatable: false,
+            } => assert_eq!(cost, sac_cost),
             other => panic!("expected Optional(Sacrifice), got {other:?}"),
         }
     }
@@ -3880,7 +4392,10 @@ mod bargain_synthesis_tests {
         synthesize_bargain(&mut face);
 
         match face.additional_cost.expect("additional_cost set") {
-            AdditionalCost::Optional(AbilityCost::Sacrifice { target, count }) => {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Sacrifice { target, count },
+                repeatable: false,
+            } => {
                 assert_eq!(count, 1);
                 let TargetFilter::Or { filters } = target else {
                     panic!("expected artifact/enchantment/token disjunction, got {target:?}");
@@ -4659,6 +5174,21 @@ mod undying_persist_synthesis_tests {
         face
     }
 
+    fn renown_trigger_count(face: &CardFace, n: i32) -> usize {
+        face.triggers
+            .iter()
+            .filter(|trigger| {
+                is_renown_trigger(trigger)
+                    && matches!(
+                        trigger.execute.as_deref().map(|a| a.effect.as_ref()),
+                        Some(Effect::Renown {
+                            count: QuantityExpr::Fixed { value }
+                        }) if *value == n
+                    )
+            })
+            .count()
+    }
+
     /// CR 702.93a: Undying synthesizes a dies-trigger that returns the
     /// permanent with one +1/+1 counter, gated on the LKI absence of any
     /// +1/+1 counter.
@@ -4694,7 +5224,7 @@ mod undying_persist_synthesis_tests {
             origin,
             destination,
             target,
-            under_your_control,
+            enters_under,
             enter_with_counters,
             ..
         } = &*execute.effect
@@ -4706,7 +5236,7 @@ mod undying_persist_synthesis_tests {
         assert!(matches!(target, TargetFilter::SelfRef));
         // CR 702.93a: "under its owner's control" — default routing (no
         // override) places the object under its owner.
-        assert!(!*under_your_control);
+        assert_eq!(*enters_under, None);
         assert_eq!(enter_with_counters.len(), 1);
         let (ct, qty) = &enter_with_counters[0];
         assert_eq!(ct, &CounterType::Plus1Plus1);
@@ -4745,6 +5275,67 @@ mod undying_persist_synthesis_tests {
         let (ct, qty) = &enter_with_counters[0];
         assert_eq!(ct, &CounterType::Minus1Minus1);
         assert!(matches!(qty, QuantityExpr::Fixed { value: 1 }));
+    }
+
+    #[test]
+    fn synthesize_renown_adds_combat_damage_trigger() {
+        let mut face = face_with_keyword(Keyword::Renown(2));
+        synthesize_renown(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_renown_trigger(t))
+            .expect("renown should synthesize a combat-damage trigger");
+
+        assert_eq!(trigger.mode, TriggerMode::DamageDone);
+        assert_eq!(trigger.valid_source, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+
+        let Some(TriggerCondition::Not { condition }) = &trigger.condition else {
+            panic!("renown condition should be Not(...)");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            TriggerCondition::SourceIsRenowned
+        ));
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::Renown {
+                count: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
+    }
+
+    #[test]
+    fn synthesize_renown_preserves_multiple_instances() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Renown(1));
+        face.keywords.push(Keyword::Renown(2));
+
+        synthesize_renown(&mut face);
+
+        assert_eq!(renown_trigger_count(&face, 1), 1);
+        assert_eq!(renown_trigger_count(&face, 2), 1);
+    }
+
+    #[test]
+    fn synthesize_renown_preserves_duplicate_instances_and_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Renown(2));
+        face.keywords.push(Keyword::Renown(2));
+
+        synthesize_renown(&mut face);
+        synthesize_renown(&mut face);
+
+        assert_eq!(
+            renown_trigger_count(&face, 2),
+            2,
+            "CR 702.112c: duplicate Renown instances each trigger separately"
+        );
     }
 
     /// Repeated synthesis must not duplicate the trigger — the idempotency
@@ -5103,30 +5694,31 @@ mod undying_persist_runtime_tests {
     /// the routing implicitly depends on, instead of poking `obj.controller`
     /// directly.
     ///
-    /// Discrimination mechanism (`under_your_control: false` vs a
-    /// `true`-regression): when the creature dies, `apply_zone_exit_cleanup`
-    /// (`zones.rs`) prunes the `SpecificObject`-bound control effect via
-    /// `prune_affected_object_left_effects` regardless of duration, but does
-    /// NOT reset `obj.controller` — only `reset_for_battlefield_exit` resets
-    /// `base_controller`. So the graveyard object still reads
-    /// `controller = P1`, and the dies-trigger captures
-    /// `ability.controller = P1`. With `under_your_control: false`,
+    /// Discrimination mechanism (`enters_under: None` vs a
+    /// `Some(ControllerRef::You)`-regression): when the creature dies,
+    /// `apply_zone_exit_cleanup` (`zones.rs`) prunes the `SpecificObject`-
+    /// bound control effect via `prune_affected_object_left_effects` regardless
+    /// of duration, but does NOT reset `obj.controller` — only
+    /// `reset_for_battlefield_exit` resets `base_controller`. So the graveyard
+    /// object still reads `controller = P1`, and the dies-trigger captures
+    /// `ability.controller = P1`. With `enters_under: None`,
     /// `ctrl_override = None` → `reset_for_battlefield_entry` sets
     /// `controller`/`base_controller` to the owner → Layer 2 yields P0
-    /// (test passes). With a `true`-regression,
+    /// (test passes). With a `Some(ControllerRef::You)`-regression,
     /// `apply_battlefield_entry_controller_override` writes
     /// `base_controller = Some(P1)`, which Layer 2 preserves → P1 (test fails).
     /// The mutation check (flipping the synthesized Persist trigger's
-    /// `under_your_control` to `true`) was performed during implementation and
-    /// confirmed to make this test fail — proof the assertion discriminates.
+    /// `enters_under` to `Some(ControllerRef::You)`) was performed during
+    /// implementation and confirmed to make this test fail — proof the
+    /// assertion discriminates.
     ///
     /// The post-return lookup uses `state.objects.get(&obj_id)` directly:
     /// Persist's return does not create a new object — `move_to_zone` mutates
     /// the existing `GameObject` in place, keeping the same `ObjectId` across
     /// Battlefield→Graveyard→Battlefield.
     ///
-    /// This pins the `under_your_control: false` field's "send to owner"
-    /// semantics: without it, a control-grab would steal the Persist /
+    /// This pins the `enters_under: None` field's "send to owner" semantics
+    /// (CR 110.2a): without it, a control-grab would steal the Persist /
     /// Undying creature permanently on death.
     #[test]
     fn persist_returns_under_owner_not_controller_after_control_grab() {
@@ -5187,7 +5779,7 @@ mod undying_persist_runtime_tests {
             "persist returns the permanent to the battlefield"
         );
         // CR 702.79a "under its owner's control" — owner wins over the
-        // pre-death controller. `under_your_control: false` on the
+        // pre-death controller. `enters_under: None` on the
         // `Effect::ChangeZone` causes `move_to_zone` not to write any
         // controller override; CR 613.1b then resets controller to owner
         // during the next layers pass.
@@ -5373,6 +5965,327 @@ mod annihilator_synthesis_tests {
                 .count(),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod exalted_synthesis_tests {
+    //! CR 702.83a + CR 702.83b shape tests: the synthesized Exalted trigger
+    //! is an `Attacks` trigger gated on a creature-you-control filter with a
+    //! `Not(MinCoAttackers { minimum: 1 })` condition (= attacks alone) whose
+    //! execute body is `Effect::Pump` targeting `TriggeringSource`.
+    use super::*;
+
+    fn exalted_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Exalted);
+        face
+    }
+
+    #[test]
+    fn synthesize_exalted_adds_attack_trigger() {
+        let mut face = exalted_face();
+        synthesize_exalted(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_exalted_trigger(t))
+            .expect("exalted should add an Attacks trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::Attacks));
+        assert!(matches!(
+            trigger.condition,
+            Some(TriggerCondition::Not { .. })
+        ));
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("execute body must be Effect::Pump");
+        };
+        assert!(matches!(power, PtValue::Fixed(1)));
+        assert!(matches!(toughness, PtValue::Fixed(1)));
+        assert!(matches!(target, TargetFilter::TriggeringSource));
+    }
+
+    #[test]
+    fn synthesize_exalted_is_idempotent() {
+        let mut face = exalted_face();
+        synthesize_exalted(&mut face);
+        synthesize_exalted(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_exalted_trigger(t))
+            .count();
+        assert_eq!(count, 1, "exalted trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_exalted_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_exalted(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.83b: multiple instances trigger separately.
+    #[test]
+    fn synthesize_exalted_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Exalted);
+        face.keywords.push(Keyword::Exalted);
+        synthesize_exalted(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_exalted_trigger(t))
+            .count();
+        assert_eq!(count, 2);
+    }
+}
+
+#[cfg(test)]
+mod extort_synthesis_tests {
+    //! CR 702.101a + CR 702.101b shape tests: the synthesized Extort trigger
+    //! is a `SpellCast` trigger with `valid_target = Controller` whose execute
+    //! body is optional with a mana cost and a `LoseLife` effect scoped to
+    //! opponents. The chained `GainLife` uses `PreviousEffectAmount` because
+    //! CR 702.101a's "that much life" is the total life actually lost by all
+    //! opponents.
+    use super::*;
+    use crate::game::effects::resolve_ability_chain;
+    use crate::types::ability::ResolvedAbility;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+
+    fn extort_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Extort);
+        face
+    }
+
+    #[test]
+    fn synthesize_extort_adds_spell_cast_trigger() {
+        let mut face = extort_face();
+        synthesize_extort(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_extort_trigger(t))
+            .expect("extort should add a SpellCast trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::SpellCast));
+        assert!(matches!(
+            trigger.valid_target,
+            Some(TargetFilter::Controller)
+        ));
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        assert!(execute.optional, "extort must be optional (may pay)");
+        assert!(execute.cost.is_some(), "extort must have a mana cost");
+        assert!(
+            matches!(execute.player_scope, Some(PlayerFilter::Opponent)),
+            "drain must scope to opponents"
+        );
+        assert!(
+            matches!(&*execute.effect, Effect::LoseLife { .. }),
+            "primary effect must be LoseLife"
+        );
+
+        let Some(gain) = execute.sub_ability.as_deref() else {
+            panic!("extort must chain a gain-life rider");
+        };
+        let Effect::GainLife { amount, player } = &*gain.effect else {
+            panic!("extort rider must be GainLife");
+        };
+        assert!(matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount
+            }
+        ));
+        assert!(matches!(player, GainLifePlayer::Controller));
+    }
+
+    #[test]
+    fn synthesize_extort_is_idempotent() {
+        let mut face = extort_face();
+        synthesize_extort(&mut face);
+        synthesize_extort(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_extort_trigger(t))
+            .count();
+        assert_eq!(count, 1, "extort trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_extort_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_extort(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.101b: multiple instances trigger separately.
+    #[test]
+    fn synthesize_extort_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Extort);
+        face.keywords.push(Keyword::Extort);
+        synthesize_extort(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_extort_trigger(t))
+            .count();
+        assert_eq!(count, 2);
+    }
+
+    /// CR 702.101a: "you gain that much life" means the total life actually
+    /// lost by all opponents, not a fixed 1. In a three-player game one Extort
+    /// trigger drains two opponents for 1 each, so the controller gains 2.
+    #[test]
+    fn extort_gain_tracks_total_life_lost_across_opponents() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source_id = ObjectId(100);
+        let mut drain = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        drain.player_scope = Some(PlayerFilter::Opponent);
+        drain.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &drain, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].life, 22);
+        assert_eq!(state.players[1].life, 19);
+        assert_eq!(state.players[2].life, 19);
+    }
+}
+
+#[cfg(test)]
+mod dethrone_tests {
+    //! CR 702.105a: Dethrone synthesis tests. The synthesized trigger must be
+    //! `TriggerMode::Attacks` with `valid_card = SelfRef`, an intervening-if
+    //! condition comparing the defending player's life total against the maximum
+    //! life total among all players, and execute body `Effect::PutCounter` with
+    //! a single +1/+1 counter on `SelfRef`.
+    use super::*;
+
+    fn dethrone_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Dethrone);
+        face
+    }
+
+    /// CR 702.105a: synthesizer emits an `Attacks` trigger with execute body
+    /// `Effect::PutCounter(P1P1)` on SelfRef and a life-total condition.
+    #[test]
+    fn synthesize_dethrone_adds_attack_trigger() {
+        let mut face = dethrone_face();
+        synthesize_dethrone(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_dethrone_attack_trigger(t))
+            .expect("dethrone should add an Attacks trigger");
+
+        assert!(
+            matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
+            "valid_card must be SelfRef so the trigger fires only when this creature attacks"
+        );
+        assert_eq!(
+            trigger.attack_target_filter,
+            Some(crate::types::triggers::AttackTargetFilter::Player),
+            "attack_target_filter must be Player so the trigger fires only when attacking a player"
+        );
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("execute body must be Effect::PutCounter");
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+        assert!(matches!(target, TargetFilter::SelfRef));
+        assert!(
+            trigger.condition.is_some(),
+            "dethrone trigger must have an intervening-if condition"
+        );
+    }
+
+    #[test]
+    fn synthesize_dethrone_is_idempotent() {
+        let mut face = dethrone_face();
+        synthesize_dethrone(&mut face);
+        synthesize_dethrone(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_dethrone_attack_trigger(t))
+            .count();
+        assert_eq!(count, 1, "dethrone trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_dethrone_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_dethrone(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.105b: multiple instances trigger separately.
+    #[test]
+    fn synthesize_dethrone_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Dethrone);
+        face.keywords.push(Keyword::Dethrone);
+        synthesize_dethrone(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_dethrone_attack_trigger(t))
+            .count();
+        assert_eq!(count, 2);
     }
 }
 
@@ -7922,7 +8835,10 @@ mod offspring_synthesis_tests {
 
         // Part 1: additional_cost is Optional(Mana { offspring_cost })
         match face.additional_cost.as_ref().expect("additional_cost set") {
-            AdditionalCost::Optional(AbilityCost::Mana { cost }) => {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Mana { cost },
+                repeatable: false,
+            } => {
                 assert_eq!(*cost, offspring_cost);
             }
             other => panic!("expected Optional(Mana), got {other:?}"),
@@ -8009,6 +8925,119 @@ mod offspring_synthesis_tests {
         assert_eq!(face.additional_cost, Some(existing));
         // Trigger is still synthesized
         assert_eq!(face.triggers.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod squad_synthesis_tests {
+    use super::*;
+    use crate::types::mana::ManaCostShard;
+
+    /// CR 702.157a: Squad synthesizes a repeatable optional additional cost and
+    /// an ETB trigger whose copy count is the number of squad payments.
+    #[test]
+    fn synthesize_squad_sets_repeatable_cost_and_payment_count_copy_trigger() {
+        let squad_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White],
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Squad(squad_cost.clone())],
+            ..CardFace::default()
+        };
+
+        synthesize_squad(&mut face);
+
+        match face.additional_cost.as_ref().expect("additional_cost set") {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Mana { cost },
+                repeatable: true,
+            } => {
+                assert_eq!(cost, &squad_cost);
+            }
+            other => panic!("expected repeatable additional cost, got {other:?}"),
+        }
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+                    && matches!(
+                        t.condition,
+                        Some(TriggerCondition::AdditionalCostPaid { .. })
+                    )
+            })
+            .expect("squad ETB trigger");
+        let effect = &trigger.execute.as_ref().expect("execute body").effect;
+        match &**effect {
+            Effect::CopyTokenOf { target, count, .. } => {
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::AdditionalCostPaymentCount
+                    }
+                ));
+            }
+            other => panic!("expected CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthesize_squad_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Squad(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })],
+            ..CardFace::default()
+        };
+
+        synthesize_squad(&mut face);
+        let first_cost = face.additional_cost.clone();
+        let first_trigger_count = face.triggers.len();
+        synthesize_squad(&mut face);
+
+        assert_eq!(face.additional_cost, first_cost);
+        assert_eq!(face.triggers.len(), first_trigger_count);
+    }
+
+    #[test]
+    fn synthesize_squad_defers_multiple_instances() {
+        let mut face = CardFace {
+            keywords: vec![
+                Keyword::Squad(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![],
+                }),
+                Keyword::Squad(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                }),
+            ],
+            ..CardFace::default()
+        };
+
+        synthesize_squad(&mut face);
+        synthesize_squad(&mut face);
+
+        assert!(face.additional_cost.is_none());
+        assert!(face.triggers.is_empty());
+        assert_eq!(
+            face.abilities
+                .iter()
+                .filter(|ability| {
+                    matches!(
+                        &*ability.effect,
+                        Effect::Unimplemented { name, .. }
+                            if name == "squad_multiple_instances"
+                    )
+                })
+                .count(),
+            1
+        );
     }
 }
 
@@ -9117,6 +10146,7 @@ mod bloodthirst_synthesis_tests {
                 scryfall_id: None,
                 scryfall_oracle_id: None,
             },
+            foreign_data: Vec::new(),
         };
 
         let face = build_oracle_face(&mtgjson, None);
@@ -9893,5 +10923,230 @@ mod devour_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_devour(&mut face);
         assert!(face.replacements.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod living_weapon_synthesis_tests {
+    use super::*;
+    use crate::types::triggers::TriggerMode;
+
+    fn face_with_living_weapon() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::LivingWeapon);
+        face
+    }
+
+    /// CR 702.92a — Issue #974: Living weapon synthesis produces exactly one
+    /// ChangesZone ETB trigger whose execute chain is `Token(Phyrexian Germ,
+    /// 0/0 black) → Attach(SelfRef, LastCreated)`. Mirrors the job-select
+    /// regression shape (both share the keyword-to-ETB-attach synthesis
+    /// pattern), but the token spec is 0/0 black Phyrexian Germ instead of
+    /// 1/1 colorless Hero.
+    #[test]
+    fn synthesize_living_weapon_builds_etb_trigger_with_token_and_attach() {
+        let mut face = face_with_living_weapon();
+        synthesize_living_weapon(&mut face);
+
+        assert_eq!(face.triggers.len(), 1, "exactly one Living weapon trigger");
+        let trigger = &face.triggers[0];
+        assert!(
+            matches!(trigger.mode, TriggerMode::ChangesZone),
+            "trigger should be ChangesZone (ETB)",
+        );
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::SelfRef),
+            "trigger must scope to self-ETB only",
+        );
+
+        // Verify execute chain: Token(Phyrexian Germ 0/0 black) → Attach.
+        let execute = trigger.execute.as_ref().expect("trigger must have execute");
+        match execute.effect.as_ref() {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                ..
+            } => {
+                assert_eq!(name, "Phyrexian Germ");
+                assert!(matches!(power, crate::types::ability::PtValue::Fixed(0)));
+                assert!(matches!(
+                    toughness,
+                    crate::types::ability::PtValue::Fixed(0)
+                ));
+                assert!(types.contains(&"Creature".to_string()));
+                assert!(types.contains(&"Phyrexian".to_string()));
+                assert!(types.contains(&"Germ".to_string()));
+                assert_eq!(
+                    colors,
+                    &vec![crate::types::mana::ManaColor::Black],
+                    "Phyrexian Germ must be black",
+                );
+            }
+            other => panic!("expected Token effect, got {:?}", other),
+        }
+
+        // Verify sub_ability is Attach { attachment: SelfRef, target: LastCreated }.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("Token effect must chain to Attach sub_ability");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::LastCreated,
+                }
+            ),
+            "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
+            sub.effect,
+        );
+    }
+
+    /// Re-running synthesis must not duplicate the ETB trigger — otherwise
+    /// re-loaded card data would fire two Germ tokens per Equipment ETB.
+    #[test]
+    fn synthesize_living_weapon_is_idempotent() {
+        let mut face = face_with_living_weapon();
+        synthesize_living_weapon(&mut face);
+        let count = face.triggers.len();
+        synthesize_living_weapon(&mut face);
+        assert_eq!(face.triggers.len(), count);
+    }
+
+    /// Faces without the Living weapon keyword get no Germ-token trigger.
+    #[test]
+    fn synthesize_living_weapon_skips_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_living_weapon(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 603.6a: ETB triggers fire from the battlefield. The synthesized
+    /// ChangesZone trigger must list `Zone::Battlefield` in `trigger_zones`
+    /// or the runtime evaluator never matches a Living-Weapon Equipment's
+    /// ETB. Mirrors the job-select parity test so the shared
+    /// `synthesize_etb_token_attach_keyword` helper can't accidentally drop
+    /// the battlefield zone in a future refactor without both keyword
+    /// modules failing.
+    #[test]
+    fn synthesize_living_weapon_binds_battlefield_trigger_zone() {
+        let mut face = face_with_living_weapon();
+        synthesize_living_weapon(&mut face);
+        let trigger = &face.triggers[0];
+        assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+    }
+}
+
+#[cfg(test)]
+mod for_mirrodin_synthesis_tests {
+    use super::*;
+    use crate::types::triggers::TriggerMode;
+
+    fn face_with_for_mirrodin() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::ForMirrodin);
+        face
+    }
+
+    /// CR 702.163a: For Mirrodin! synthesis produces exactly one ChangesZone
+    /// ETB trigger whose execute chain is `Token(Rebel, 2/2 red) →
+    /// Attach(SelfRef, LastCreated)`. Shares the keyword-to-ETB-attach
+    /// synthesis pattern with Living weapon and Job select.
+    #[test]
+    fn synthesize_for_mirrodin_builds_etb_trigger_with_token_and_attach() {
+        let mut face = face_with_for_mirrodin();
+        synthesize_for_mirrodin(&mut face);
+
+        assert_eq!(face.triggers.len(), 1, "exactly one For Mirrodin! trigger");
+        let trigger = &face.triggers[0];
+        assert!(
+            matches!(trigger.mode, TriggerMode::ChangesZone),
+            "trigger should be ChangesZone (ETB)",
+        );
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::SelfRef),
+            "trigger must scope to self-ETB only",
+        );
+
+        // Verify execute chain: Token(Rebel, 2/2 red) → Attach.
+        let execute = trigger.execute.as_ref().expect("trigger must have execute");
+        match execute.effect.as_ref() {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                ..
+            } => {
+                assert_eq!(name, "Rebel");
+                assert!(matches!(power, crate::types::ability::PtValue::Fixed(2)));
+                assert!(matches!(
+                    toughness,
+                    crate::types::ability::PtValue::Fixed(2)
+                ));
+                assert!(types.contains(&"Creature".to_string()));
+                assert!(types.contains(&"Rebel".to_string()));
+                assert_eq!(
+                    colors,
+                    &vec![crate::types::mana::ManaColor::Red],
+                    "Rebel must be red (CR 702.163a)",
+                );
+            }
+            other => panic!("expected Token effect, got {:?}", other),
+        }
+
+        // Verify sub_ability is Attach { attachment: SelfRef, target: LastCreated }.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("Token effect must chain to Attach sub_ability");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::LastCreated,
+                }
+            ),
+            "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
+            sub.effect,
+        );
+    }
+
+    /// Re-running synthesis must not duplicate the ETB trigger.
+    #[test]
+    fn synthesize_for_mirrodin_is_idempotent() {
+        let mut face = face_with_for_mirrodin();
+        synthesize_for_mirrodin(&mut face);
+        let count = face.triggers.len();
+        synthesize_for_mirrodin(&mut face);
+        assert_eq!(face.triggers.len(), count);
+    }
+
+    /// Faces without the For Mirrodin! keyword get no Rebel-token trigger.
+    #[test]
+    fn synthesize_for_mirrodin_skips_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_for_mirrodin(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 603.6a: ETB triggers fire from the battlefield. The synthesized
+    /// ChangesZone trigger must list `Zone::Battlefield` in `trigger_zones`.
+    #[test]
+    fn synthesize_for_mirrodin_binds_battlefield_trigger_zone() {
+        let mut face = face_with_for_mirrodin();
+        synthesize_for_mirrodin(&mut face);
+        let trigger = &face.triggers[0];
+        assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
     }
 }

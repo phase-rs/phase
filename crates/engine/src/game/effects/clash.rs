@@ -11,7 +11,7 @@ use crate::types::player::PlayerId;
 /// CR 701.30d: Higher mana value wins.
 ///
 /// Sets `optional_effect_performed` on the ability context so that sub-abilities
-/// gated by `AbilityCondition::IfYouDo` ("if you win the clash") execute only
+/// gated by `AbilityCondition::effect_performed()` ("if you win the clash") execute only
 /// when the controller wins.
 pub fn resolve(
     state: &mut GameState,

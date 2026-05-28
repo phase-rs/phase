@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -15,6 +16,7 @@ interface CombatOverlayProps {
 }
 
 export function CombatOverlay({ mode }: CombatOverlayProps) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const playerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
@@ -171,7 +173,7 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
       {pendingBlocker !== null && (
         <div className="fixed inset-x-0 top-4 z-30 flex justify-center">
           <div className="rounded-lg bg-blue-900/80 px-4 py-2 text-sm font-medium text-blue-200 shadow-lg">
-            Click an attacker to assign blocker
+            {t("combat.clickAttackerToAssignBlocker")}
           </div>
         </div>
       )}

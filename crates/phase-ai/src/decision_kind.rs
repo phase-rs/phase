@@ -27,7 +27,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MultiTargetSelection { .. }
         | WaitingFor::CopyRetarget { .. }
         | WaitingFor::RetargetChoice { .. }
-        | WaitingFor::DistributeAmong { .. } => DecisionKind::SelectTarget,
+        | WaitingFor::DistributeAmong { .. }
+        | WaitingFor::MoveCountersDistribution { .. } => DecisionKind::SelectTarget,
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
         WaitingFor::UntapChoice { .. } => DecisionKind::ActivateAbility,
@@ -60,6 +61,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
+        | WaitingFor::ReturnAsAuraTarget { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::CrewVehicle { .. }
         | WaitingFor::StationTarget { .. }
@@ -148,7 +150,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MadnessCastOffer { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
+        | WaitingFor::ExileForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. }
         | WaitingFor::PayManaAbilityMana { .. }
         | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,
@@ -217,6 +219,7 @@ mod tests {
                     player: PlayerId(0),
                     valid_blocker_ids: vec![],
                     valid_block_targets: std::collections::HashMap::new(),
+                    block_requirements: std::collections::HashMap::new(),
                 },
                 &dummy_action
             ),

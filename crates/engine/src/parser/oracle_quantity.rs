@@ -68,6 +68,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
+    if let Some(qty) = parse_milled_this_way_count(trimmed) {
+        return Some(qty);
+    }
+
     if all_consuming(pair(
         tag::<_, _, OracleError<'_>>("the number of"),
         alt((tag(" counters on ~"), tag(" counters on it"))),
@@ -210,8 +214,11 @@ pub(crate) fn parse_quantity_ref_with_context(
     ))
     .parse(trimmed)
     {
-        let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
-        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
+        let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
+        if remainder.trim().is_empty()
+            && !matches!(filter, TargetFilter::Any)
+            && !is_empty_typed_filter(&filter)
+        {
             return Some(QuantityRef::Aggregate {
                 function: func,
                 property: prop,
@@ -238,7 +245,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::OpponentDealtCombatDamage,
             });
         }
-        let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
+        let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
         // including the empty-shaped form (no `type_filters`, no `controller`, no
         // `properties`) when the input has no recognized type word (e.g.
@@ -247,7 +254,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         // it would silently drain every permanent. Treat the empty shape as
         // "no type-phrase match" and fall through to the next pattern (or
         // surface `Unimplemented`) instead.
-        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
+        if remainder.trim().is_empty()
+            && !matches!(filter, TargetFilter::Any)
+            && !is_empty_typed_filter(&filter)
+        {
             return Some(QuantityRef::ObjectCount { filter });
         }
     }
@@ -270,6 +280,18 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
     None
+}
+
+fn parse_milled_this_way_count(text: &str) -> Option<QuantityRef> {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("the number of "),
+        opt(tag("nonland ")),
+        alt((tag("cards"), tag("card"))),
+        tag(" milled this way"),
+    ))
+    .parse(text)
+    .is_ok()
+    .then_some(QuantityRef::EventContextAmount)
 }
 
 /// CR 109.1: `parse_type_phrase` always returns `TargetFilter::Typed`, even
@@ -458,6 +480,10 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    if let Some(qty) = parse_milled_this_way_count(text) {
+        return Some(QuantityExpr::Ref { qty });
+    }
+
     if let Ok((rest, expr)) = parse_owned_cards_in_zones_quantity(text) {
         if rest.is_empty() {
             return Some(expr);
@@ -623,6 +649,58 @@ fn parse_opponent_dealt_combat_damage_clause(
     .map(|(rest, _)| (rest, ()))
 }
 
+fn anaphoric_power_expr() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Power {
+            scope: ObjectScope::Anaphoric,
+        },
+    }
+}
+
+fn anaphoric_toughness_expr() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Toughness {
+            scope: ObjectScope::Anaphoric,
+        },
+    }
+}
+
+fn parse_anaphoric_power_or_toughness_property(
+    input: &str,
+) -> nom::IResult<&str, ObjectProperty, OracleError<'_>> {
+    alt((
+        value(ObjectProperty::Power, tag("its power")),
+        value(ObjectProperty::Toughness, tag("its toughness")),
+    ))
+    .parse(input)
+}
+
+fn parse_anaphoric_power_toughness_sum(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    let (rest, first) = parse_anaphoric_power_or_toughness_property(input)?;
+    let (rest, _) = tag(" plus ").parse(rest)?;
+    let (rest, second) = parse_anaphoric_power_or_toughness_property(rest)?;
+
+    if matches!(
+        (first, second),
+        (ObjectProperty::Power, ObjectProperty::Toughness)
+            | (ObjectProperty::Toughness, ObjectProperty::Power)
+    ) {
+        Ok((
+            rest,
+            QuantityExpr::Sum {
+                exprs: vec![anaphoric_power_expr(), anaphoric_toughness_expr()],
+            },
+        ))
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            rest,
+            nom::error::ErrorKind::Tag,
+        )))
+    }
+}
+
 /// Parse event-context quantity references from Oracle text fragments.
 /// Returns None for unrecognized patterns (caller falls back to Variable).
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
@@ -712,6 +790,15 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
             }),
             offset: sign * (n as i32),
         });
+    }
+
+    // CR 119.3 + CR 208.1: "its power plus its toughness" / "its toughness
+    // plus its power" — sum of Anaphoric power and toughness refs. Both
+    // operands use Anaphoric scope so the enclosing clause's subject-injection
+    // and the runtime resolver apply identically to the individual "its power"
+    // / "its toughness" single-value forms.
+    if let Ok(("", expr)) = all_consuming(parse_anaphoric_power_toughness_sum).parse(lower) {
+        return Some(expr);
     }
 
     match lower {
@@ -1645,7 +1732,8 @@ fn with_target_player_controller(filter: TargetFilter) -> Option<TargetFilter> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, ControllerRef, FilterProp, TypeFilter, TypedFilter,
+        CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, TypeFilter,
+        TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -2506,6 +2594,38 @@ mod tests {
         );
     }
 
+    /// CR 119.3 + CR 208.1: "its power plus its toughness" / "its toughness plus
+    /// its power" — sum of Anaphoric power + toughness refs. Both orderings are
+    /// accepted; the result is always Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+    /// Class: Phthisis ("lose life equal to its power plus its toughness").
+    #[test]
+    fn parse_event_context_quantity_its_power_plus_toughness() {
+        let expected = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Anaphoric,
+                    },
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Anaphoric,
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            parse_event_context_quantity("its power plus its toughness"),
+            Some(expected.clone()),
+            "power then toughness ordering"
+        );
+        assert_eq!(
+            parse_event_context_quantity("its toughness plus its power"),
+            Some(expected),
+            "toughness then power ordering should yield the same Sum"
+        );
+    }
+
     /// CR 608.2c: bare anaphoric "that spell" inside a triggered ability or
     /// delayed-trigger continuation is an instruction-order referent — it
     /// points at the spell introduced by an earlier instruction in the same
@@ -2908,6 +3028,40 @@ mod tests {
         assert!(
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
+        );
+    }
+
+    #[test]
+    fn for_each_other_creature_you_control_with_exact_base_power() {
+        let qty = parse_for_each_clause("other creature you control with base power 1").unwrap();
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::Another));
+        assert!(typed.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 1 },
+        }));
+    }
+
+    #[test]
+    fn quantity_number_of_nonland_cards_milled_this_way_uses_event_count() {
+        assert_eq!(
+            parse_quantity_ref("the number of nonland cards milled this way"),
+            Some(QuantityRef::EventContextAmount)
+        );
+        assert_eq!(
+            parse_cda_quantity("the number of nonland cards milled this way"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            })
         );
     }
 

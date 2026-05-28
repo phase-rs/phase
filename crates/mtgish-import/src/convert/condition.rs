@@ -7,9 +7,10 @@
 //! strict-fails so the report surfaces it.
 
 use engine::types::ability::{
-    AbilityCondition, AggregateFunction, CardTypeSetSource, Comparator, ControllerRef, CountScope,
-    FilterProp, ParsedCondition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+    AbilityCondition, AdditionalCostPaymentSource, AggregateFunction, CardTypeSetSource,
+    Comparator, ControllerRef, CountScope, FilterProp, ParsedCondition, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterMatch;
@@ -836,16 +837,19 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
         Permanents::WasCast | Permanents::ItWasCast => TriggerCondition::WasCast,
         // CR 702.33d-f + CR 603.4: ETB intervening-if "if it was kicked".
         Permanents::WasKicked => TriggerCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Kicker,
             variant: None,
             kicker_cost: None,
             min_count: 1,
         },
         Permanents::WasKickedWithKicker(cost) => TriggerCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Kicker,
             variant: None,
             kicker_cost: Some(mana::convert(cost)?),
             min_count: 1,
         },
         Permanents::WasKickedTwice => TriggerCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::Kicker,
             variant: None,
             kicker_cost: None,
             min_count: 2,
@@ -3305,6 +3309,7 @@ mod tests {
         assert_eq!(
             converted,
             TriggerCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::Kicker,
                 variant: None,
                 kicker_cost: None,
                 min_count: 1,

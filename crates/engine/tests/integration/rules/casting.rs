@@ -57,7 +57,10 @@ fn optional_cost_paid_sets_flag() {
             target: TargetFilter::Any,
             damage_source: None,
         })
-        .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        .with_additional_cost(AdditionalCost::Optional {
+            cost: AbilityCost::Blight { count: 1 },
+            repeatable: false,
+        })
         .id();
 
     let mut runner = scenario.build();
@@ -144,7 +147,10 @@ fn optional_cost_skipped_clears_flag() {
             target: TargetFilter::Any,
             damage_source: None,
         })
-        .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        .with_additional_cost(AdditionalCost::Optional {
+            cost: AbilityCost::Blight { count: 1 },
+            repeatable: false,
+        })
         .id();
 
     let mut runner = scenario.build();
@@ -210,9 +216,12 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
                 shards: vec![],
                 generic: 4,
             })
-            .with_additional_cost(AdditionalCost::Optional(AbilityCost::PayLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-            }))
+            .with_additional_cost(AdditionalCost::Optional {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                repeatable: false,
+            })
             .with_static_definition(reduce_static)
             .id();
 
@@ -322,7 +331,10 @@ fn cancel_cast_at_optional_cost_choice() {
             target: TargetFilter::Any,
             damage_source: None,
         })
-        .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        .with_additional_cost(AdditionalCost::Optional {
+            cost: AbilityCost::Blight { count: 1 },
+            repeatable: false,
+        })
         .id();
 
     let mut runner = scenario.build();
@@ -1236,7 +1248,10 @@ fn optional_blight_with_no_creatures_skips_prompt() {
             target: TargetFilter::Any,
             damage_source: None,
         })
-        .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        .with_additional_cost(AdditionalCost::Optional {
+            cost: AbilityCost::Blight { count: 1 },
+            repeatable: false,
+        })
         .id();
 
     let mut runner = scenario.build();

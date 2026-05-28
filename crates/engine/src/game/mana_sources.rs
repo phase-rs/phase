@@ -517,13 +517,23 @@ pub fn display_land_mana_pips(
                     ManaPip::CombinationOfColors(color_options.clone()),
                 );
             }
-            // CR 106.1a: Display the chosen color when available; otherwise
-            // surface as a generic "any color" choice across WUBRG so the
-            // frame still renders something meaningful.
-            ManaProduction::ChosenColor { .. } => match obj.chosen_color() {
-                Some(color) => push(&mut pips, ManaPip::Color(color)),
-                None => push(&mut pips, ManaPip::OneOfColors(ManaColor::ALL.to_vec())),
-            },
+            // CR 106.1a: Display the chosen color when available. If the
+            // ability also has a fixed alternative ("{G} or one mana of the
+            // chosen color"), show both available mana choices.
+            ManaProduction::ChosenColor {
+                fixed_alternative, ..
+            } => {
+                if let Some(color) = fixed_alternative {
+                    push(&mut pips, ManaPip::Color(*color));
+                }
+                match obj.chosen_color() {
+                    Some(color) => push(&mut pips, ManaPip::Color(color)),
+                    None if fixed_alternative.is_none() => {
+                        push(&mut pips, ManaPip::OneOfColors(ManaColor::ALL.to_vec()));
+                    }
+                    None => {}
+                }
+            }
             // CR 106.7: Dynamically computed from opponent lands.
             ManaProduction::OpponentLandColors { .. } => {
                 let colors: Vec<ManaColor> = opponent_land_color_options(state, controller)
@@ -714,6 +724,106 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         Some(amount) => amount,
         // CR 305.1: Subtype-only basic lands carry no explicit mana ability;
         // `land_mana_options` synthesizes a single one-mana option for them.
+        None if !activatable_mana_options(state, object_id, controller).is_empty() => 1,
+        None => 0,
+    }
+}
+
+/// CR 117.1d + CR 601.2g: Maximum net mana this permanent could contribute via
+/// **any** mana ability the controller could currently activate, including
+/// non-tap-cost mana abilities (Sacrifice — KCI, Phyrexian Altar, Ashnod's
+/// Altar; Discard — Lion's Eye Diamond; Pay Life; etc.).
+///
+/// Unlike [`max_mana_yield`], this is NOT restricted to abilities that include
+/// `{T}` in their cost. It exists so the castability gate
+/// ([`super::casting::can_feasibly_pay_mana_cost`]) and X-spell maximum
+/// ([`super::casting_costs::max_x_value`]) can answer the question
+/// "could the player feasibly pay this cost by activating mana abilities
+/// **manually** during cost payment?" — not "could auto-tap alone cover this?".
+///
+/// This is a read-only feasibility scan. Auto-payment must continue to use
+/// [`max_mana_yield`] / [`is_active_tap_mana_ability`] because the auto-tap
+/// simulator can't auto-sacrifice or auto-discard.
+//
+// CR 117.1d: A player may activate a mana ability whenever a rule or effect
+// asks for a mana payment (including during the spell's cost-payment step).
+// CR 601.2g: After total cost is determined, the player has a chance to
+// activate mana abilities before paying. Affordability must reflect what the
+// player COULD pay manually, not only what the engine could auto-tap.
+pub(crate) fn feasible_mana_capacity(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> u32 {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return 0;
+    };
+    if obj.zone != Zone::Battlefield || obj.controller != controller {
+        return 0;
+    }
+
+    let explicit_max = obj
+        .abilities
+        .iter()
+        .enumerate()
+        .filter(|(idx, ability)| {
+            // CR 605.1a: Must be an activated mana ability.
+            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
+                return false;
+            }
+            // CR 605.3a + CR 117.1d: The engine-authoritative "is the cost
+            // currently payable?" check covers sacrifice supply
+            // (`find_eligible_sacrifice_targets`), discard-hand availability,
+            // life total, tap eligibility, and summoning sickness via the
+            // shared `is_payable_for_mana_ability` + activation simulation.
+            // We delegate to it rather than re-implementing the cost gate.
+            if !mana_abilities::can_activate_mana_ability_now(
+                state, controller, object_id, *idx, ability,
+            ) {
+                return false;
+            }
+            // CR 604: Static activation restrictions ("only during your
+            // upkeep", etc.) must hold — mirrors `is_active_tap_mana_ability`.
+            activation_condition_satisfied(state, controller, object_id, *idx, ability)
+        })
+        .filter_map(|(_, ability)| match &*ability.effect {
+            Effect::Mana { produced, .. } => {
+                let resolved =
+                    super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+                let gross = super::effects::mana::resolve_mana_types_for_ability(
+                    produced, state, &resolved,
+                )
+                .len() as u32;
+                // CR 605.3b: Net the mana paid to activate. Non-mana cost
+                // components (Sacrifice / Discard / PayLife / Exile) have no
+                // mana sub-cost, so `mana_sub_cost_of` returns `None` and the
+                // net equals the gross (e.g., KCI activation cost is one
+                // sacrificed artifact, no mana — full 2 colorless yield).
+                //
+                // Caveat: collapsing mana sub-cost to a single `mana_value`
+                // assumes the sub-cost is paid from the SAME color domain as
+                // the produced mana (filter-land case: pay {1} or any color,
+                // produce {U/W}). For exotic abilities whose mana sub-cost is
+                // a different color than what they produce — e.g. a
+                // hypothetical `{T}, Pay {U}: Add {2}{R}` — this net of 2 is
+                // pessimistic-but-safe in one direction (we never claim
+                // capacity we can't produce) but over-states feasibility in
+                // the other (the {U} sub-cost has to come from another
+                // source, which this scan doesn't model). Such cards are
+                // vanishingly rare in real Magic; if one is added the
+                // sub-cost color domain should be threaded through here
+                // rather than collapsed to `mana_value`.
+                let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
+                    .map_or(0, |cost| cost.mana_value());
+                Some(gross.saturating_sub(activation_cost))
+            }
+            _ => None,
+        })
+        .max();
+
+    match explicit_max {
+        Some(amount) => amount,
+        // CR 305.1: Subtype-only basic-land fallback (same as `max_mana_yield`).
         None if !activatable_mana_options(state, object_id, controller).is_empty() => 1,
         None => 0,
     }
@@ -1367,7 +1477,9 @@ mod tests {
 
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityDefinition, AbilityKind, ManaContribution, QuantityExpr};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ChosenAttribute, ManaContribution, QuantityExpr,
+    };
     use crate::types::identifiers::CardId;
 
     fn verge_ability(color: ManaColor) -> AbilityDefinition {
@@ -1425,6 +1537,13 @@ mod tests {
     /// `display_land_mana_pips` against it. Used by the parametric pip table
     /// below to verify every variant projects to the expected `Vec<ManaPip>`.
     fn pips_for_production(production: ManaProduction) -> Vec<ManaPip> {
+        pips_for_production_with_chosen_color(production, None)
+    }
+
+    fn pips_for_production_with_chosen_color(
+        production: ManaProduction,
+        chosen_color: Option<ManaColor>,
+    ) -> Vec<ManaPip> {
         let mut state = GameState::new_two_player(42);
         let id = create_object(
             &mut state,
@@ -1435,6 +1554,9 @@ mod tests {
         );
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
+        if let Some(color) = chosen_color {
+            obj.chosen_attributes.push(ChosenAttribute::Color(color));
+        }
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
@@ -1661,6 +1783,24 @@ mod tests {
             fixed_alternative: None,
         });
         assert_eq!(chosen, vec![ManaPip::OneOfColors(ManaColor::ALL.to_vec())]);
+
+        // CR 106.1a: Thriving Grove-style producers display both the fixed
+        // alternative and the source's chosen color.
+        let fixed_or_chosen = pips_for_production_with_chosen_color(
+            ManaProduction::ChosenColor {
+                count: QuantityExpr::Fixed { value: 1 },
+                contribution: ManaContribution::Base,
+                fixed_alternative: Some(ManaColor::Green),
+            },
+            Some(ManaColor::Red),
+        );
+        assert_eq!(
+            fixed_or_chosen,
+            vec![
+                ManaPip::Color(ManaColor::Green),
+                ManaPip::Color(ManaColor::Red)
+            ]
+        );
 
         // CR 605.3b + CR 106.1a: Filter-land combinations (Mystic Gate-style)
         // collapse to the union of all colors across combos.

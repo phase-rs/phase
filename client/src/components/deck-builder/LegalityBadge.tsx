@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type { GameFormat } from "../../adapter/types";
 import { scryfallLegalityKey } from "../../services/scryfall";
 
@@ -13,20 +15,21 @@ const STATUS_STYLES: Record<string, string> = {
   not_legal: "bg-gray-700/60 text-gray-400",
 };
 
-const STATUS_LABELS: Record<string, string> = {
-  legal: "Legal",
-  banned: "Banned",
-  restricted: "Restricted",
-  not_legal: "Not Legal",
+const STATUS_LABEL_KEYS: Record<string, string> = {
+  legal: "legality.legal",
+  banned: "legality.banned",
+  restricted: "legality.restricted",
+  not_legal: "legality.notLegal",
 };
 
 export function LegalityBadge({ legalities, format }: LegalityBadgeProps) {
+  const { t } = useTranslation("deck-builder");
   const legalityKey = scryfallLegalityKey(format);
   if (!legalityKey) return null;
 
   const status = (legalities[legalityKey] ?? "not_legal").toLowerCase();
   const style = STATUS_STYLES[status] ?? STATUS_STYLES.not_legal;
-  const label = STATUS_LABELS[status] ?? "Not Legal";
+  const label = t(STATUS_LABEL_KEYS[status] ?? "legality.notLegal");
 
   return (
     <span

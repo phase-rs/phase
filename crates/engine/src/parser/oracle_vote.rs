@@ -739,6 +739,33 @@ mod tests {
         }
     }
 
+    /// "you and target opponent each create a Treasure token" — the chosen
+    /// opponent must be surfaced as a real player target, not collapsed into a
+    /// single token effect with `owner: Any`.
+    #[test]
+    fn parser_distributes_you_and_target_opponent_each_create_token() {
+        let parsed = parse_effect_chain_with_context(
+            "you and target opponent each create a Treasure token",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        match *parsed.effect {
+            Effect::Token { ref owner, .. } => {
+                assert_eq!(*owner, TargetFilter::OriginalController);
+            }
+            other => panic!("expected Token for first half, got {:?}", other),
+        }
+        let sub = parsed
+            .sub_ability
+            .expect("expected second-half sub_ability");
+        match *sub.effect {
+            Effect::Token { ref owner, .. } => {
+                assert_eq!(*owner, TargetFilter::Player);
+            }
+            other => panic!("expected Token for second half, got {:?}", other),
+        }
+    }
+
     /// Full-line typed-token body (Citizen reward path): "1/1 green and white
     /// Citizen creature token" must round-trip through the body parser and
     /// retain its full type description on both halves.

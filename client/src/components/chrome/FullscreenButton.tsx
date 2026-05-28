@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 function EnterFullscreenIcon({ className }: { className?: string }) {
   return (
@@ -21,6 +22,7 @@ interface FullscreenButtonProps {
 }
 
 export function FullscreenButton({ variant }: FullscreenButtonProps) {
+  const { t } = useTranslation();
   const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
 
   useEffect(() => {
@@ -40,7 +42,7 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
   }, []);
 
   const Icon = isFullscreen ? ExitFullscreenIcon : EnterFullscreenIcon;
-  const label = isFullscreen ? "Exit fullscreen" : "Enter fullscreen";
+  const label = isFullscreen ? t("fullscreen.exit") : t("fullscreen.enter");
 
   if (variant === "game") {
     return (
@@ -58,7 +60,7 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
   return (
     <button
       onClick={toggle}
-      className="flex min-h-11 min-w-11 items-center justify-center rounded-[16px] border border-white/12 bg-black/18 text-white/46 backdrop-blur-sm transition-colors hover:text-white/72"
+      className="flex min-h-9 min-w-9 items-center justify-center rounded-[12px] border border-white/12 bg-black/18 text-white/46 backdrop-blur-sm transition-colors hover:text-white/72"
       aria-label={label}
       title={label}
     >

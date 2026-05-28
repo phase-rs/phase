@@ -21,7 +21,8 @@ use std::sync::{Arc, Mutex};
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, TargetFilter,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -110,7 +111,7 @@ fn make_fetch_ability() -> AbilityDefinition {
             target: TargetFilter::Typed(TypedFilter::land()),
             owner_library: false,
             enter_transformed: false,
-            under_your_control: true,
+            enters_under: Some(ControllerRef::You),
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,

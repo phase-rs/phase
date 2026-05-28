@@ -343,13 +343,34 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                 .collect(),
         }),
         WaitingFor::OutsideGameChoice { choices, count, .. } => {
-            Some(GameAction::ChooseOutsideGameCards {
-                sideboard_indices: choices
-                    .iter()
-                    .flat_map(|choice| (0..choice.entry.count).map(move |_| choice.sideboard_index))
-                    .take(*count)
-                    .collect(),
-            })
+            // CR 400.11 + CR 406.3: Take the first `count` available picks
+            // across the unified sideboard + face-up-exile pool. Sideboard
+            // entries can be picked up to their remaining `count`; face-up
+            // exile entries are unique objects (count fixed at 1) per the
+            // resolver. The selection wire format is one discriminated
+            // `OutsideGameSelection` per pick.
+            use engine::types::actions::OutsideGameSelection;
+            use engine::types::game_state::OutsideGameChoiceSource;
+            let selections: Vec<OutsideGameSelection> = choices
+                .iter()
+                .flat_map(|choice| {
+                    let count = choice.count as usize;
+                    (0..count).map(move |_| match &choice.source {
+                        OutsideGameChoiceSource::Sideboard {
+                            sideboard_index, ..
+                        } => OutsideGameSelection::Sideboard {
+                            sideboard_index: *sideboard_index,
+                        },
+                        OutsideGameChoiceSource::FaceUpExile { object_id } => {
+                            OutsideGameSelection::FaceUpExile {
+                                object_id: *object_id,
+                            }
+                        }
+                    })
+                })
+                .take(*count)
+                .collect();
+            Some(GameAction::ChooseOutsideGameCards { selections })
         }
 
         // Sylvan Library-style choices: topdeck the required cards rather than
@@ -691,11 +712,29 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
-        // Phyrexian payment: pay mana for all shards (safe default).
+        // CR 303.4 + CR 303.4g: Return-as-Aura attach pick — the engine only
+        // installs this state when `legal_targets` is non-empty, so picking
+        // the first candidate is always a legal fallback.
+        WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
+            legal_targets.first().map(|&id| GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(id)),
+            })
+        }
+
+        // Phyrexian payment: preserve each shard's only legal route when there
+        // is no scored candidate to choose from.
         WaitingFor::PhyrexianPayment { shards, .. } => {
             let choices = shards
                 .iter()
-                .map(|_| engine::types::game_state::ShardChoice::PayMana)
+                .map(|shard| match shard.options {
+                    engine::types::game_state::ShardOptions::LifeOnly => {
+                        engine::types::game_state::ShardChoice::PayLife
+                    }
+                    engine::types::game_state::ShardOptions::ManaOrLife
+                    | engine::types::game_state::ShardOptions::ManaOnly => {
+                        engine::types::game_state::ShardChoice::PayMana
+                    }
+                })
                 .collect();
             Some(GameAction::SubmitPhyrexianChoices { choices })
         }
@@ -742,7 +781,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // happen but CancelCast is not valid here. Use empty selection.
         WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
+        | WaitingFor::ExileForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
@@ -784,6 +823,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::SeparatePilesChoice { .. } => Some(GameAction::ChoosePile {
             pile: engine::types::game_state::PileSide::A,
         }),
+        WaitingFor::MoveCountersDistribution { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::ChooseCounterMoveDistribution { .. })),
 
         // Remaining pending-cast states are caught by the has_pending_cast
         // guard above. This arm is structurally unreachable but required
@@ -1201,16 +1243,13 @@ pub(crate) fn deterministic_choice(
             .iter()
             .map(|&id| (id, evaluate_card_value(state, id)))
             .collect();
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let graveyard_count = scored.len().div_ceil(2);
-        let to_graveyard: Vec<_> = scored
-            .iter()
-            .take(graveyard_count)
-            .map(|(id, _)| *id)
-            .collect();
-        return Some(GameAction::SelectCards {
-            cards: to_graveyard,
-        });
+        // CR 701.25a: the action is the ordered keep-on-top set; cards left out
+        // are milled. Keep the higher-value half on top (best drawn first) and
+        // let the worse half fall into the graveyard.
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let keep_count = scored.len() / 2;
+        let top_cards: Vec<_> = scored.iter().take(keep_count).map(|(id, _)| *id).collect();
+        return Some(GameAction::SelectCards { cards: top_cards });
     }
 
     if let WaitingFor::RevealChoice { cards, .. } = &state.waiting_for {
@@ -1298,10 +1337,14 @@ pub(crate) fn deterministic_choice(
             .iter()
             .map(|&id| (id, evaluate_card_value(state, id)))
             .collect();
-        let is_opponent_chooser = state
-            .players
-            .iter()
-            .any(|p| p.id == *player && p.id != state.priority_player);
+        // The search optimizes for `ai_player`, so a choice made by any other
+        // player is an opponent's (they pick the highest-value cards for
+        // themselves; the AI picks the lowest when choosing for itself).
+        // Compare against `ai_player`, not `state.priority_player` — under a
+        // turn-control effect (CR 723, e.g. Mindslaver) the latter is the
+        // controller (the authorized submitter), not the chooser, which would
+        // misclassify the controlled player's choice.
+        let is_opponent_chooser = *player != ai_player;
         if is_opponent_chooser {
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         } else {
@@ -1368,9 +1411,10 @@ pub(crate) fn deterministic_choice(
         };
 
         let pay = match additional_cost {
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Mana { cost: extra_mana },
-            ) => affordable_mana_cost(extra_mana),
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Mana { cost: extra_mana },
+                ..
+            } => affordable_mana_cost(extra_mana),
             // CR 702.33c: a multikicker / kicker re-prompt presents exactly one
             // live cost. When that cost is pure mana, apply the same
             // affordability + over-commit guard as Optional(Mana).
@@ -1387,12 +1431,14 @@ pub(crate) fn deterministic_choice(
                 affordable_mana_cost(extra_mana)
             }
             // Non-mana optional costs: sacrifice → usually worth it for the upgrade
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Sacrifice { .. },
-            ) => false, // Conservative: don't sacrifice unless search says so
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::PayLife { amount },
-            ) => {
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Sacrifice { .. },
+                ..
+            } => false, // Conservative: don't sacrifice unless search says so
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::PayLife { amount },
+                ..
+            } => {
                 // CR 119.4 + CR 903.4: PayLife carries a QuantityExpr; resolve
                 // against the activator/source so dynamic costs (e.g. commander
                 // color identity) are costed correctly. Source = 0 falls back
@@ -1408,7 +1454,7 @@ pub(crate) fn deterministic_choice(
                 let life = state.players[player.0 as usize].life;
                 life > resolved * 3
             }
-            engine::types::ability::AdditionalCost::Optional(_) => true,
+            engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
             engine::types::ability::AdditionalCost::Choice(_, _) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,
@@ -2243,6 +2289,7 @@ mod tests {
                 m.insert(blocker, vec![attacker]);
                 m
             },
+            block_requirements: HashMap::new(),
         };
 
         for difficulty in [

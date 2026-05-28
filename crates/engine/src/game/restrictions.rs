@@ -530,6 +530,7 @@ fn effective_activation_limit(
     };
     let keyword = match tag {
         AbilityTag::Boast => "boast",
+        AbilityTag::Evolve => "evolve",
         AbilityTag::Exhaust => "exhaust",
         AbilityTag::Outlast => "outlast",
     };
@@ -1389,7 +1390,12 @@ pub(crate) fn is_sorcery_speed_window(
 }
 
 fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> bool {
-    state.active_player == state.priority_player
+    // CR 723: compare the active player against the semantic priority *seat*, not
+    // `priority_player` (the authorized submitter). Under turn-control these
+    // diverge, so the raw field would never equal `active_player` during a
+    // controlled turn and wrongly close this window. Behavior is identical
+    // without turn-control, where the seat and submitter are the same player.
+    super::turn_control::priority_seat(state) == state.active_player
         && matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
 }
 
@@ -1463,12 +1469,16 @@ fn you_control_subtype_count(
         .iter()
         .filter(|object_id| {
             state.objects.get(object_id).is_some_and(|obj| {
-                obj.controller == player
-                    && obj
-                        .card_types
-                        .subtypes
-                        .iter()
-                        .any(|candidate| candidate.eq_ignore_ascii_case(subtype))
+                if obj.controller != player {
+                    return false;
+                }
+                if subtype.eq_ignore_ascii_case("commander") {
+                    return obj.is_commander;
+                }
+                obj.card_types
+                    .subtypes
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(subtype))
             })
         })
         .count()
@@ -1821,6 +1831,40 @@ mod tests {
             PlayerId(0),
             ObjectId(1),
             "you control two or more vampires"
+        ));
+    }
+
+    #[test]
+    fn evaluates_you_control_a_commander_condition() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legendary Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            creature,
+            "you control a commander"
+        ));
+
+        state.objects.get_mut(&creature).unwrap().is_commander = true;
+        assert!(parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            creature,
+            "you control a commander"
         ));
     }
 

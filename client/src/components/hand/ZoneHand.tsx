@@ -1,5 +1,6 @@
 import { useMemo, useCallback, useState, useEffect, useRef, type CSSProperties } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
@@ -18,9 +19,9 @@ interface ZoneHandProps {
   zone: "exile" | "graveyard";
 }
 
-const ZONE_LABELS: Record<string, string> = {
-  exile: "Exile",
-  graveyard: "Graveyard",
+const ZONE_LABEL_KEYS: Record<string, string> = {
+  exile: "zone.exile",
+  graveyard: "zone.graveyard",
 };
 
 /** Self-contained card sizing — same values as playerZoneRailStyle but owned by the component */
@@ -36,6 +37,7 @@ const PLACEHOLDER_WIDTH = "calc(clamp(60px, 7vw, 95px) * 1.15)";
 const MAX_STACK_DEPTH = 5;
 
 export function ZoneHand({ zone }: ZoneHandProps) {
+  const { t } = useTranslation("game");
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
@@ -129,6 +131,7 @@ export function ZoneHand({ zone }: ZoneHandProps) {
   }
 
   const stackDepth = Math.min(castableObjects.length - 1, MAX_STACK_DEPTH);
+  const zoneLabel = t(ZONE_LABEL_KEYS[zone]);
 
   return (
     <div className="relative shrink-0" style={ZONE_CARD_STYLE}>
@@ -147,7 +150,7 @@ export function ZoneHand({ zone }: ZoneHandProps) {
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.9 }}
             transition={{ duration: 0.2 }}
-            title={`${ZONE_LABELS[zone]} — ${castableObjects.length} castable`}
+            title={t("zone.castableCount", { zone: zoneLabel, count: castableObjects.length })}
           >
             {/* Shadow stack layers (behind top card) */}
             {Array.from({ length: stackDepth }).map((_, i) => (
@@ -182,7 +185,7 @@ export function ZoneHand({ zone }: ZoneHandProps) {
             {/* Hover expand indicator */}
             <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/0 opacity-0 transition-all group-hover:bg-black/30 group-hover:opacity-100" style={{ width: "var(--card-w)", height: "var(--card-h)" }}>
               <span className="rounded-md bg-purple-800/80 px-2 py-0.5 text-[10px] font-semibold text-purple-100 shadow">
-                View {castableObjects.length}
+                {t("zone.viewCount", { count: castableObjects.length })}
               </span>
             </div>
           </motion.button>
@@ -198,7 +201,7 @@ export function ZoneHand({ zone }: ZoneHandProps) {
           >
             {/* Zone label */}
             <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 z-10 rounded-sm bg-purple-700 px-2 py-px text-[9px] font-bold text-purple-100 shadow">
-              {ZONE_LABELS[zone]}
+              {zoneLabel}
             </div>
 
             {castableObjects.map((obj, i) => (
@@ -206,7 +209,7 @@ export function ZoneHand({ zone }: ZoneHandProps) {
                 key={obj.id}
                 objectId={obj.id}
                 cardName={obj.name}
-                zone={zone}
+                zoneLabel={zoneLabel}
                 index={i}
                 onClick={playCard}
               />
@@ -238,12 +241,13 @@ const EXPANDED_OVERLAP = "calc(var(--card-w) * -0.3)";
 interface ZoneHandCardProps {
   objectId: number;
   cardName: string;
-  zone: "exile" | "graveyard";
+  zoneLabel: string;
   index: number;
   onClick: (objectId: number) => void;
 }
 
-function ZoneHandCard({ objectId, cardName, zone, index, onClick }: ZoneHandCardProps) {
+function ZoneHandCard({ objectId, cardName, zoneLabel, index, onClick }: ZoneHandCardProps) {
+  const { t } = useTranslation("game");
   const { src } = useCardImage(cardName, { size: "normal" });
   const hoverProps = useInspectHoverProps();
 
@@ -253,7 +257,7 @@ function ZoneHandCard({ objectId, cardName, zone, index, onClick }: ZoneHandCard
       onClick={() => onClick(objectId)}
       {...hoverProps(objectId)}
       className="group relative cursor-pointer transition-transform hover:z-10 hover:scale-105"
-      title={`Cast from ${ZONE_LABELS[zone]}: ${cardName}`}
+      title={t("zone.castFromZone", { zone: zoneLabel, name: cardName })}
       style={{
         width: "var(--card-w)",
         height: "var(--card-h)",

@@ -93,21 +93,16 @@ pub fn apply_debug_action(
 
         DebugAction::DrawCards { player_id, count } => {
             validate_player(state, player_id)?;
-            let proposed = ProposedEvent::Draw {
+            // CR 614.6 + CR 614.11 + CR 704.3: route through the single-authority
+            // helper so post-replacement continuations (Jace WinTheGame,
+            // Abundance reveal-until) drain in the same step as the draw.
+            let _ = super::effects::draw::draw_through_replacement(
+                state,
                 player_id,
                 count,
-                applied: HashSet::new(),
-            };
-            match super::replacement::replace_event(state, proposed, events) {
-                super::replacement::ReplacementResult::Execute(event) => {
-                    super::effects::draw::apply_draw_after_replacement(state, event, events);
-                }
-                super::replacement::ReplacementResult::Prevented => {}
-                super::replacement::ReplacementResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        super::replacement::replacement_choice_waiting_for(player, state);
-                }
-            }
+                events,
+                super::effects::draw::apply_draw_after_replacement,
+            );
         }
 
         DebugAction::Mill { player_id, count } => {
@@ -265,15 +260,22 @@ pub fn apply_debug_action(
 
         DebugAction::GrantKeyword { object_id, keyword } => {
             let obj = validate_object_mut(state, object_id)?;
-            if !obj.keywords.contains(&keyword) {
-                obj.keywords.push(keyword);
+            // CR 613.1 + CR 613.1f: keywords are a Layer-6 derived property;
+            // `evaluate_layers` resets `obj.keywords` to `base_keywords` on every
+            // pass, so a debug grant must write the base — the Layer-6 input — or
+            // the very next `layers_dirty` recompute wipes it. Same pattern as
+            // `SetBasePowerToughness` (base P/T) and `SetController` (base controller).
+            if !obj.base_keywords.contains(&keyword) {
+                obj.base_keywords.push(keyword);
             }
             state.layers_dirty = true;
         }
 
         DebugAction::RemoveKeyword { object_id, keyword } => {
             let obj = validate_object_mut(state, object_id)?;
-            obj.keywords.retain(|k| k != &keyword);
+            // CR 613.1 + CR 613.1f: write the base keyword set (the Layer-6 input)
+            // so the removal survives the layer recompute; see GrantKeyword above.
+            obj.base_keywords.retain(|k| k != &keyword);
             state.layers_dirty = true;
         }
 
@@ -816,6 +818,79 @@ mod tests {
             state.objects[&object_id].controller,
             PlayerId(0),
             "control must transfer back and persist across re-evaluation",
+        );
+    }
+
+    /// CR 613.1 + CR 613.1f: `DebugAction::GrantKeyword`/`RemoveKeyword` must
+    /// change a permanent's effective keywords AND survive re-evaluation of the
+    /// layer system. Keywords are a Layer-6 derived property: `evaluate_layers`
+    /// resets `obj.keywords` to `base_keywords` on every pass. Pre-fix the
+    /// handler wrote only the derived field, so the next layer pass dropped the
+    /// grant. The discriminating assertion is that the keyword PERSISTS across a
+    /// second `evaluate_layers`.
+    #[test]
+    fn debug_grant_keyword_survives_layer_reevaluation() {
+        use crate::game::layers::evaluate_layers;
+
+        let mut state = sandbox_state();
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(!state.objects[&object_id]
+            .keywords
+            .contains(&Keyword::Flying));
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::GrantKeyword {
+                object_id,
+                keyword: Keyword::Flying,
+            }),
+        )
+        .expect("debug GrantKeyword should succeed");
+        assert!(
+            state.objects[&object_id]
+                .keywords
+                .contains(&Keyword::Flying),
+            "keyword should be granted immediately",
+        );
+
+        // Discriminating assertion: a second layer pass must NOT drop it.
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&object_id]
+                .keywords
+                .contains(&Keyword::Flying),
+            "granted keyword must persist across layer re-evaluation",
+        );
+        assert!(
+            state.objects[&object_id]
+                .base_keywords
+                .contains(&Keyword::Flying),
+            "base_keywords is the Layer-6 input that makes the grant durable",
+        );
+
+        // Removal must likewise persist across re-evaluation.
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::RemoveKeyword {
+                object_id,
+                keyword: Keyword::Flying,
+            }),
+        )
+        .expect("debug RemoveKeyword should succeed");
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&object_id]
+                .keywords
+                .contains(&Keyword::Flying),
+            "removed keyword must stay removed across layer re-evaluation",
         );
     }
 

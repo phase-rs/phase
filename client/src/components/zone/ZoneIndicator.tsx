@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
@@ -8,12 +10,13 @@ interface ZoneIndicatorProps {
   onClick: () => void;
 }
 
-const ZONE_LABELS: Record<string, string> = {
-  graveyard: "GY",
-  exile: "Exile",
+const ZONE_LABEL_KEYS: Record<string, string> = {
+  graveyard: "zone.graveyardShort",
+  exile: "zone.exile",
 };
 
 export function ZoneIndicator({ zone, playerId, onClick }: ZoneIndicatorProps) {
+  const { t } = useTranslation("game");
   const myId = usePlayerId();
   const canActForWaitingState = useCanActForWaitingState();
   const count = useGameStore((s) => {
@@ -33,7 +36,7 @@ export function ZoneIndicator({ zone, playerId, onClick }: ZoneIndicatorProps) {
         hasSelectableCards ? "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""
       }`}
     >
-      {playerId !== myId ? "Opp " : ""}{ZONE_LABELS[zone]} ({count})
+      {playerId !== myId ? t("zone.indicatorOpponentPrefix") : ""}{t(ZONE_LABEL_KEYS[zone])} ({count})
     </button>
   );
 }

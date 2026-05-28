@@ -30,6 +30,10 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let pending_was_counter_move = state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::MoveCounter { .. }));
     match super::replacement::continue_replacement(state, index, events) {
         super::replacement::ReplacementResult::Execute(event) => {
             let mut zone_change_object_id = None;
@@ -45,11 +49,16 @@ pub(super) fn handle_replacement_choice(
                     enter_transformed,
                     ..
                 } => {
+                    let played_from_zone = state
+                        .objects
+                        .get(&object_id)
+                        .and_then(|obj| obj.played_from_zone);
                     zones::move_to_zone(state, object_id, to, events);
                     // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
                     // defaults. Override only when the replacement pipeline changed them.
                     if to == Zone::Battlefield {
                         if let Some(obj) = state.objects.get_mut(&object_id) {
+                            obj.played_from_zone = played_from_zone;
                             if enter_tapped.resolve(false) {
                                 obj.tapped = true;
                             }
@@ -146,6 +155,15 @@ pub(super) fn handle_replacement_choice(
                         count,
                         events,
                     );
+                }
+                move_counter @ ProposedEvent::MoveCounter { .. } => {
+                    if !effects::counters::apply_move_counter_after_replacement(
+                        state,
+                        move_counter,
+                        events,
+                    ) {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 701.26a: Tap accepted after replacement choice.
                 ProposedEvent::Tap { object_id, .. } => {
@@ -339,6 +357,15 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_counter_moves.is_some()
+            {
+                effects::counters::drain_pending_counter_moves(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_continuation.is_some()
                     || state.pending_change_zone_iteration.is_some())
             {
@@ -378,6 +405,16 @@ pub(super) fn handle_replacement_choice(
             super::replacement::replacement_choice_waiting_for(player, state),
         ),
         super::replacement::ReplacementResult::Prevented => {
+            if pending_was_counter_move {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                effects::counters::drain_pending_counter_moves(state, events);
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    effects::drain_pending_continuation(state, events);
+                }
+                return Ok(state.waiting_for.clone());
+            }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.
             if let Some(ctx) = state.pending_spell_resolution.take() {
@@ -733,6 +770,7 @@ fn apply_pending_spell_resolution(
             obj.cast_timing_permission = Some((permission, state.turn_number));
         }
         obj.kickers_paid.clone_from(&ctx.kickers_paid);
+        obj.additional_cost_payment_count = ctx.additional_cost_payment_count;
         obj.convoked_creatures.clone_from(&ctx.convoked_creatures);
     }
 
@@ -1000,6 +1038,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn zone_change_replacement_choice_preserves_land_play_provenance() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Test Land".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.played_from_zone = Some(Zone::Hand);
+        install_optional_replacement(&mut state, ReplacementEvent::Moved);
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(land, Zone::Hand, Zone::Battlefield, None);
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&land].played_from_zone, Some(Zone::Hand));
+    }
+
     /// CR 615.1: When the player declines (or the replacement pipeline returns
     /// `Prevented`), the proposed event is NOT applied. Guardrail that the
     /// extraction of `apply_damage_after_replacement` did not regress the
@@ -1073,7 +1141,7 @@ mod tests {
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,

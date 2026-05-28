@@ -1,6 +1,7 @@
 import { useMemo, useRef } from "react";
 import { motion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import type { GameAction, GameObject, PlayerId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -51,6 +52,7 @@ export function CommanderCardZone({ playerId }: CommanderCardZoneProps) {
 }
 
 function CommanderCard({ commander }: { commander: GameObject }) {
+  const { t } = useTranslation("game");
   const isCompactHeight = useIsCompactHeight();
   const legalActions = useGameStore((s) => s.legalActions);
   const effectiveCost = useGameStore(
@@ -114,8 +116,12 @@ function CommanderCard({ commander }: { commander: GameObject }) {
       className={`group relative ${canCast ? "cursor-grab" : "cursor-default"}`}
       title={
         canCast
-          ? `Cast ${commander.name}${tax > 0 ? ` (Tax: +${tax})` : ""} — double-click or drag to play`
-          : `Commander: ${commander.name}${tax > 0 ? ` (Tax: +${tax})` : ""}`
+          ? tax > 0
+            ? t("zone.castCommanderTax", { name: commander.name, tax })
+            : t("zone.castCommander", { name: commander.name })
+          : tax > 0
+            ? t("zone.commanderTitleTax", { name: commander.name, tax })
+            : t("zone.commanderTitle", { name: commander.name })
       }
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
     >
@@ -146,7 +152,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
 
       {/* Commander badge */}
       <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 rounded-sm bg-amber-700 px-1.5 py-px text-[8px] font-bold text-amber-100 shadow">
-        Commander
+        {t("zone.commander")}
       </div>
 
       {/* Castable glow ring */}
@@ -157,7 +163,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
       {/* Commander tax badge */}
       {tax > 0 && (
         <div className="absolute -bottom-1 left-1/2 z-10 -translate-x-1/2 rounded-sm bg-amber-900 px-1.5 py-px text-[8px] font-bold text-amber-200 shadow">
-          Tax: +{tax}
+          {t("zone.tax", { tax })}
         </div>
       )}
 

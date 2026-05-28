@@ -1,4 +1,6 @@
 import { useCallback, useState } from "react";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -10,12 +12,16 @@ import { formatCounterType } from "../../viewmodel/cardProps.ts";
 
 type DistributeAmong = Extract<WaitingFor, { type: "DistributeAmong" }>;
 
-function unitLabel(unit: DistributionUnit): string {
-  if (unit.type === "Counters") return `${formatCounterType(unit.data)} counter`;
-  return unit.type === "Damage" ? "damage" : "life";
+function unitLabel(unit: DistributionUnit, t: TFunction<"game">): string {
+  if (unit.type === "Counters")
+    return t("distributeAmong.unitCounter", { counter: formatCounterType(unit.data) });
+  return unit.type === "Damage"
+    ? t("distributeAmong.unitDamage")
+    : t("distributeAmong.unitLife");
 }
 
 export function DistributeAmongModal({ data }: { data: DistributeAmong["data"] }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
 
@@ -45,13 +51,13 @@ export function DistributeAmongModal({ data }: { data: DistributeAmong["data"] }
     dispatch({ type: "DistributeAmong", data: { distribution } });
   }, [dispatch, data.targets, amounts, isValid]);
 
-  const label = unitLabel(data.unit);
+  const label = unitLabel(data.unit, t);
 
   return (
     <ChoiceOverlay
-      title={`Distribute ${data.total} ${label}`}
-      subtitle={`Assign at least 1 ${label} to each target. Remaining: ${remaining}`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} label="Confirm" />}
+      title={t("distributeAmong.title", { total: data.total, unit: label })}
+      subtitle={t("distributeAmong.subtitle", { unit: label, remaining })}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} />}
     >
       <div className="mb-4 space-y-3">
         {data.targets.map((target, i) => (

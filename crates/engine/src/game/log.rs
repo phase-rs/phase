@@ -141,6 +141,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::CounterAdded { .. }
+        | GameEvent::Evolved { .. }
         | GameEvent::CounterRemoved { .. }
         | GameEvent::Transformed { .. }
         | GameEvent::TurnedFaceUp { .. }
@@ -281,6 +282,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => {
             let label = match ability_tag {
                 AbilityTag::Boast => " activates boast: ",
+                AbilityTag::Evolve => " activates evolve: ",
                 AbilityTag::Exhaust => " activates exhaust: ",
                 AbilityTag::Outlast => " activates outlast: ",
             };
@@ -607,6 +609,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *object_id),
         ],
 
+        GameEvent::Evolved { object_id } => {
+            vec![card_seg(state, *object_id), text(" evolved")]
+        }
+
         GameEvent::CounterRemoved {
             object_id,
             counter_type,
@@ -692,14 +698,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(&format!("{kind:?}")),
         ],
 
-        GameEvent::BecomesTarget {
-            object_id,
-            source_id,
-        } => vec![
-            card_seg(state, *object_id),
-            text(" is targeted by "),
-            card_seg(state, *source_id),
-        ],
+        GameEvent::BecomesTarget { target, source_id } => {
+            let mut segments = Vec::new();
+            match target {
+                TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),
+                TargetRef::Player(player_id) => segments.push(player_seg(state, *player_id)),
+            }
+            segments.push(text(" is targeted by "));
+            segments.push(card_seg(state, *source_id));
+            segments
+        }
 
         GameEvent::ReplacementApplied {
             source_id,
