@@ -3920,15 +3920,38 @@ fn apply_action(
             } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
                 // CR 601.2d + CR 603.3d: Triggered abilities divide effects
                 // while being put on the stack. The chosen per-target amounts
-                // are resolution data on the resolved ability.
+                // are resolution data on the resolved ability. The entry is
+                // already on the stack (pushed at distribute-among pause time);
+                // mutate its ability with the distribution and clear
+                // `pending_trigger_entry` so the resolver may now fire it.
+                //
+                // Invariants (panic on violation — no recovery path):
+                // * `pending_trigger_entry` is `Some(_)` (push-first contract).
+                // * Entry id references a `TriggeredAbility` `StackEntry`.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                triggers::push_pending_trigger_to_stack(state, pending_trigger, &mut events);
+                let entry_id = state.pending_trigger_entry.take().expect(
+                    "DistributeAmong completion: pending_trigger_entry must be set under the push-first contract",
+                );
+                let entry = state
+                    .stack
+                    .iter_mut()
+                    .rev()
+                    .find(|entry| entry.id == entry_id)
+                    .expect("DistributeAmong completion: pending_trigger_entry must reference a stack entry");
+                let ability = entry.ability_mut().expect(
+                    "DistributeAmong completion: pending_trigger_entry must reference a TriggeredAbility stack entry",
+                );
+                *ability = pending_trigger.ability.clone();
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
                 // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
                 // behind this distribute-among trigger so each independent
                 // instance reaches the stack (issue #416).
+                debug_assert!(
+                    !triggers::is_pending_trigger_construction_active(state),
+                    "deferred-trigger drain entered with construction still active",
+                );
                 if let Some(waiting_for) =
                     triggers::drain_deferred_trigger_queue(state, &mut events)
                 {
@@ -4167,10 +4190,22 @@ pub(super) fn begin_pending_trigger_target_selection(
             );
             super::triggers::restore_trigger_event_context(state, context_snapshot);
 
-            // CR 700.2b: All modes unavailable (previously chosen OR no legal
-            // targets) — ability cannot be put on the stack. Clear pending
-            // trigger and skip.
+            // CR 700.2b + CR 603.3c: All modes unavailable (previously chosen
+            // OR no legal targets) — ability cannot remain on the stack.
+            // Under the "push first, choose second" contract, the entry may
+            // already have been pushed by `dispatch_pending_trigger_context`;
+            // remove it before clearing the cursor. The new flow filters this
+            // case BEFORE pushing in the modal branch, so this is normally a
+            // dead branch — kept as a defensive cleanup for any
+            // delayed-revalidation paths.
             if unavailable_modes.len() >= modal.mode_count {
+                if let Some(entry_id) = state.pending_trigger_entry.take() {
+                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
+                        state.stack.pop_back();
+                        state.stack_paid_facts.remove(&entry_id);
+                        state.stack_trigger_event_batches.remove(&entry_id);
+                    }
+                }
                 state.pending_trigger = None;
                 return Ok(None);
             }
@@ -4215,6 +4250,24 @@ pub(super) fn begin_pending_trigger_target_selection(
     });
     super::triggers::restore_trigger_event_context(state, context_snapshot);
     let Some((target_slots, selection)) = selection_result? else {
+        // CR 603.3d: No target prompt is required (empty target slots, or
+        // `build_target_slots`/`begin_target_selection_for_ability` reported
+        // no legal completion). Symmetric to the modal `all-modes-unavailable`
+        // branch above: if the "push first" dispatcher already pushed an
+        // in-construction entry for this trigger, pop it before clearing the
+        // cursor. The new flow filters this case BEFORE pushing in the
+        // non-modal branches (Err(_) drops the trigger; Ok(Some(targets))
+        // auto-pushes a complete entry), so this is normally a dead branch —
+        // kept for symmetry with the modal cleanup and for any
+        // delayed-revalidation paths.
+        if let Some(entry_id) = state.pending_trigger_entry.take() {
+            if state.stack.back().map(|e| e.id) == Some(entry_id) {
+                state.stack.pop_back();
+                state.stack_paid_facts.remove(&entry_id);
+                state.stack_trigger_event_batches.remove(&entry_id);
+            }
+        }
+        state.pending_trigger = None;
         return Ok(None);
     };
     Ok(Some(WaitingFor::TriggerTargetSelection {
@@ -11957,7 +12010,10 @@ mod trigger_target_tests {
         )
         .duration(crate::types::ability::Duration::UntilHostLeavesPlay);
 
-        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+        // CR 603.3c + CR 603.3d "Push first": match what production does —
+        // push the trigger entry to the stack and stash both the pending
+        // trigger and the cursor BEFORE entering target selection.
+        let pending = crate::game::triggers::PendingTrigger {
             source_id: trigger_creature,
             controller: PlayerId(0),
             condition: None,
@@ -11971,7 +12027,16 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
-        });
+        };
+        let pending_for_state = pending.clone();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
 
         let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
 
@@ -12033,7 +12098,8 @@ mod trigger_target_tests {
         let legal_target = ObjectId(10);
         let illegal_target = ObjectId(99);
 
-        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+        // CR 603.3c + CR 603.3d "Push first" contract migration.
+        let pending = crate::game::triggers::PendingTrigger {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             condition: None,
@@ -12063,7 +12129,16 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
-        });
+        };
+        let pending_for_state = pending.clone();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -12093,7 +12168,8 @@ mod trigger_target_tests {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
-        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+        // CR 603.3c + CR 603.3d "Push first" contract migration.
+        let pending = crate::game::triggers::PendingTrigger {
             source_id: ObjectId(20),
             controller: PlayerId(0),
             condition: None,
@@ -12134,7 +12210,16 @@ mod trigger_target_tests {
             description: Some("Choose two target players".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
-        });
+        };
+        let pending_for_state = pending.clone();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
             modal: ModalChoice {
@@ -12183,8 +12268,12 @@ mod trigger_target_tests {
             }
             other => panic!("Expected TriggerTargetSelection, got {other:?}"),
         }
-        assert_eq!(state.stack.len(), 0);
+        // CR 603.3c + CR 603.3d "Push first": after mode chosen, the trigger
+        // entry remains on the stack in mid-construction (target prompt
+        // pending). `pending_trigger_entry` still identifies it.
+        assert_eq!(state.stack.len(), 1);
         assert!(state.pending_trigger.is_some());
+        assert!(state.pending_trigger_entry.is_some());
     }
 
     #[test]
@@ -12194,7 +12283,8 @@ mod trigger_target_tests {
         state.priority_player = PlayerId(0);
 
         let source_id = ObjectId(21);
-        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+        // CR 603.3c + CR 603.3d "Push first" contract migration.
+        let pending = crate::game::triggers::PendingTrigger {
             source_id,
             controller: PlayerId(0),
             condition: None,
@@ -12242,7 +12332,16 @@ mod trigger_target_tests {
             description: Some("Whenever you cast your second spell each turn".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
-        });
+        };
+        let pending_for_state = pending.clone();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
             modal: ModalChoice {
@@ -12304,7 +12403,8 @@ mod trigger_target_tests {
     fn triggered_commander_modal_cap_uses_controller_board_state() {
         let mut state = GameState::new_two_player(42);
         let source_id = ObjectId(22);
-        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+        // CR 603.3c + CR 603.3d "Push first" contract migration.
+        let pending = crate::game::triggers::PendingTrigger {
             source_id,
             controller: PlayerId(0),
             condition: None,
@@ -12359,7 +12459,16 @@ mod trigger_target_tests {
             description: Some("Choose one or both with commander".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
-        });
+        };
+        let pending_for_state = pending.clone();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
 
         let waiting = begin_pending_trigger_target_selection(&mut state)
             .unwrap()
@@ -12396,7 +12505,8 @@ mod trigger_target_tests {
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
 
-        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+        // CR 603.3c + CR 603.3d "Push first" contract migration.
+        let pending = crate::game::triggers::PendingTrigger {
             source_id: ObjectId(30),
             controller: PlayerId(0),
             condition: None,
@@ -12429,7 +12539,16 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
-        });
+        };
+        let pending_for_state = pending.clone();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
             target_slots: vec![
@@ -12515,7 +12634,8 @@ mod trigger_target_tests {
             },
         ];
         let target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];
-        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+        // CR 603.3c + CR 603.3d "Push first" contract migration.
+        let pending = crate::game::triggers::PendingTrigger {
             source_id: ObjectId(31),
             controller: PlayerId(0),
             condition: None,
@@ -12548,7 +12668,16 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
-        });
+        };
+        let pending_for_state = pending.clone();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
             target_slots: target_slots.clone(),
@@ -12598,7 +12727,8 @@ mod trigger_target_tests {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
-        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+        // CR 603.3c + CR 603.3d "Push first" contract migration.
+        let pending = crate::game::triggers::PendingTrigger {
             source_id: ObjectId(40),
             controller: PlayerId(0),
             condition: None,
@@ -12641,7 +12771,16 @@ mod trigger_target_tests {
             description: Some("Choose different target players".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
-        });
+        };
+        let pending_for_state = pending.clone();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
             modal: ModalChoice {
@@ -12705,8 +12844,8 @@ mod trigger_target_tests {
         state.modal_modes_chosen_this_turn.insert((source_id, 0));
         state.modal_modes_chosen_this_turn.insert((source_id, 1));
 
-        // Set a pending trigger with this modal.
-        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+        // CR 603.3c + CR 603.3d "Push first" contract migration.
+        let pending = crate::game::triggers::PendingTrigger {
             source_id,
             controller: PlayerId(0),
             condition: None,
@@ -12743,15 +12882,32 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
-        });
+        };
+        let pending_for_state = pending.clone();
+        let stack_before = state.stack.len();
+        let mut setup_events = Vec::new();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+            &mut state,
+            pending,
+            &mut setup_events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
 
         // Call the private function via the engine path.
         let result = begin_pending_trigger_target_selection(&mut state).unwrap();
 
-        // CR 700.2b: All modes exhausted — no AbilityModeChoice produced.
+        // CR 700.2b + CR 603.3c: All modes exhausted — no AbilityModeChoice
+        // produced, defensive cleanup pops the in-construction entry and
+        // clears both `pending_trigger` and `pending_trigger_entry`.
         assert!(result.is_none());
-        // Pending trigger should be cleared.
         assert!(state.pending_trigger.is_none());
+        assert!(state.pending_trigger_entry.is_none());
+        assert_eq!(
+            state.stack.len(),
+            stack_before,
+            "defensive cleanup must pop the in-construction entry",
+        );
     }
 
     #[test]
@@ -16782,6 +16938,12 @@ mod phase_trigger_regression_tests {
         state.priority_player = PlayerId(0);
         state.stack.clear();
         state.pending_trigger = None;
+        // CR 603.3c + CR 603.3d: clear the in-construction cursor too —
+        // symmetric with `pending_trigger`. Without this, a trigger pushed
+        // earlier in the test could leave `pending_trigger_entry` pointing
+        // to a now-cleared `state.stack`, tripping the push-first invariants
+        // on the next trigger.
+        state.pending_trigger_entry = None;
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };

@@ -345,6 +345,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "sin prodder",
     "singe-mind ogre",
     "sister hospitaller",
+    "sly spy",
     "solitude",
     "sorin the mirthless",
     "sorin, grim nemesis",
@@ -459,8 +460,8 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        265,
-        "Expected exactly 265 cards retaining ObjectScope::Anaphoric (the #495 \
+        266,
+        "Expected exactly 266 cards retaining ObjectScope::Anaphoric (the #495 \
          behavior-neutral floor of 156, minus four cards unlocked by #607's \
          target-subject DamageAll source wrapper, plus 89 cards from category 4, \
          plus the UUID-disambiguated Reanimate print key \
@@ -471,13 +472,14 @@ fn anaphoric_scope_set_is_frozen() {
          chain fix, anaphoric on the spell's chosen target creature, plus \
          Phthisis — destroy-target-creature + LoseLife-equal-to-its-P+T, \
          category-3 target-spell anaphora, plus Captain Ripley Vance category-1 \
-         trigger-source anaphora); count moved to {}.",
+         trigger-source anaphora, plus Sly Spy category-4 reveal/move anaphora); \
+         count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        265,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 265 cards."
+        266,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 266 cards."
     );
 }
 

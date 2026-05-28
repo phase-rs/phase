@@ -419,6 +419,14 @@ impl Broker {
         password: Option<String>,
         reservation_token: Option<String>,
     ) -> Vec<Outbound> {
+        if conn
+            .host_game
+            .as_deref()
+            .is_some_and(|owned| owned == game_code)
+        {
+            return vec![error("You are already hosting this game")];
+        }
+
         let guest_commit = conn
             .client_hello
             .as_ref()
@@ -502,6 +510,14 @@ impl Broker {
         let mut out = Vec::new();
         let mut reservation_token = None;
         let mut reservation_expires_at_ms = None;
+
+        if conn
+            .host_game
+            .as_deref()
+            .is_some_and(|owned| owned == game_code)
+        {
+            return vec![error("You are already hosting this game")];
+        }
 
         // --- build-commit + password gates, then snapshot ---
         let guest_commit = conn
@@ -1049,6 +1065,60 @@ mod tests {
         assert!(matches!(
             out.as_slice(),
             [Outbound::ToSelf(LobbyServerMessage::PeerInfo { .. })]
+        ));
+    }
+
+    #[test]
+    fn host_cannot_join_own_game() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        let created = create(&mut host, &mut broker, &env);
+        let code = game_code_of(&created);
+
+        let out = broker.handle(
+            &mut host,
+            LobbyClientMessage::JoinGameWithPassword {
+                game_code: code,
+                deck: test_deck(),
+                display_name: "Host".into(),
+                password: None,
+                reservation_token: None,
+            },
+            &env,
+        );
+
+        assert!(matches!(
+            out.as_slice(),
+            [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
+        ));
+    }
+
+    #[test]
+    fn host_cannot_lookup_own_game() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        let created = create(&mut host, &mut broker, &env);
+        let code = game_code_of(&created);
+
+        let out = broker.handle(
+            &mut host,
+            LobbyClientMessage::LookupJoinTarget {
+                game_code: code,
+                password: None,
+                reserve: false,
+                display_name: Some("Host".into()),
+                release_reservation_token: None,
+            },
+            &env,
+        );
+
+        assert!(matches!(
+            out.as_slice(),
+            [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
         ));
     }
 
