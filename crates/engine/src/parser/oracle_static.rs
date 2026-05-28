@@ -9059,16 +9059,15 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     }
     let lower = ability_text.to_lowercase();
     
-    // Check for comma-separated keywords (like "Cascade, cascade.")
-    if lower.contains(',') {
-        let parts = split_keyword_list(ability_text.trim_end_matches('.'));
-        if parts.len() > 1 && parts.iter().all(|p| super::oracle_keyword::parse_keyword_from_oracle(&p.to_lowercase()).is_some()) {
-            return parts.into_iter().filter_map(|p| {
-                super::oracle_keyword::parse_keyword_from_oracle(&p.to_lowercase())
-                    .map(|keyword| ContinuousModification::AddKeyword { keyword })
-            }).collect();
-        }
+    // Check if the entire ability text is a list of keywords (e.g. "Cascade, cascade.")
+    if let Some(keywords) = super::oracle_keyword::extract_keyword_line(ability_text, &[]) {
+        return keywords
+            .into_iter()
+            .map(|keyword| ContinuousModification::AddKeyword { keyword })
+            .collect();
     }
+    
+
 
     // CR 603.1: Detect trigger prefixes to route to GrantTrigger.
     if nom_tag_lower(&lower, &lower, "when ").is_some()
