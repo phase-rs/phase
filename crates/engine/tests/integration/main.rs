@@ -16,6 +16,7 @@ mod bracket_signals;
 mod braids_arisen_nightmare_decline;
 mod brigid_mana_ability;
 mod chain_of_smog_copy;
+mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
 mod council_of_four_nth_per_turn;
 mod cr_annotations;

@@ -9871,6 +9871,40 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     false
 }
 
+/// CR 205.2: Recognize the enumerated form of a "choose a card type" choice.
+/// Older cards (e.g. Cloud Key) spell out the *complete* list of choosable card
+/// types ("artifact, creature, enchantment, instant, or sorcery") instead of
+/// the modern generic phrasing. A *partial* type list (e.g. "artifact, creature,
+/// or land" — Storage Matrix, Turnabout, A Killer Among Us) is a restricted
+/// modal selection, NOT a card-type chooser, and must remain `Labeled`. So this
+/// matches only when `rest` (after an optional trailing period) is exactly the
+/// canonical card-type set, in any order.
+fn is_card_type_enumeration(rest: &str) -> bool {
+    fn card_type_word(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((
+            tag("artifact"),
+            tag("creature"),
+            tag("enchantment"),
+            tag("instant"),
+            tag("sorcery"),
+        ))
+        .parse(input)
+    }
+    fn separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((tag(", or "), tag(", "), tag(" or "))).parse(input)
+    }
+    let rest = rest.trim_end_matches('.').trim_end();
+    match all_consuming(nom::multi::separated_list1(separator, card_type_word)).parse(rest) {
+        Ok((_, mut items)) => {
+            items.sort_unstable();
+            items.dedup();
+            // The complete canonical card-type set (alphabetical).
+            items == ["artifact", "creature", "enchantment", "instant", "sorcery"]
+        }
+        Err(_) => false,
+    }
+}
+
 /// Match "choose a creature type", "choose a color", "choose odd or even",
 /// "choose a basic land type", "choose a card type" from lowercased Oracle text.
 pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
@@ -9897,6 +9931,14 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     } else if tag::<_, _, E>("a basic land type").parse(rest).is_ok() {
         Some(ChoiceType::BasicLandType)
     } else if tag::<_, _, E>("a card type").parse(rest).is_ok() {
+        Some(ChoiceType::CardType)
+    } else if is_card_type_enumeration(rest) {
+        // CR 205.2: Older "choose a card type" cards (Cloud Key) spell out the
+        // options ("artifact, creature, enchantment, instant, or sorcery")
+        // rather than using the modern generic phrasing. Treat the enumeration
+        // as the same CardType choice so the chosen type persists for downstream
+        // `IsChosenCardType` reads (cost reduction, protection from the chosen
+        // type, etc.).
         Some(ChoiceType::CardType)
     } else if alt((
         tag::<_, _, E>("a card name"),
@@ -39494,5 +39536,39 @@ mod snapshot_tests {
             .is_none(),
             "interceptor must reject inputs whose inner quantity is not the equalization shape"
         );
+    }
+
+    #[test]
+    fn named_choice_recognizes_enumerated_card_types() {
+        // Issue #930 — Cloud Key's older templating enumerates the card-type
+        // options ("choose artifact, creature, enchantment, instant, or
+        // sorcery") instead of the modern "choose a card type". Both must map
+        // to ChoiceType::CardType so the chosen type persists for downstream
+        // IsChosenCardType reads (CR 205.2).
+        assert!(matches!(
+            try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery"),
+            Some(ChoiceType::CardType)
+        ));
+        assert!(matches!(
+            try_parse_named_choice("choose a card type"),
+            Some(ChoiceType::CardType)
+        ));
+        // Trailing period, as it appears in oracle text.
+        assert!(matches!(
+            try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery."),
+            Some(ChoiceType::CardType)
+        ));
+    }
+
+    #[test]
+    fn named_choice_enumeration_does_not_misfire() {
+        // Non-card-type lists and articled / creature-type choices must not be
+        // treated as a card-type enumeration.
+        assert!(!is_card_type_enumeration("one or more creatures"));
+        assert!(!is_card_type_enumeration("a creature"));
+        assert!(!matches!(
+            try_parse_named_choice("choose a creature type"),
+            Some(ChoiceType::CardType)
+        ));
     }
 }
