@@ -1,36 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { detectAndParseDeck, exportDeck, resolveCommander } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
-import {
-  sideboardPolicyForFormat,
-  type SideboardPolicy,
-} from "../../services/engineRuntime";
-import { scryfallLegalityKey } from "../../services/scryfall";
-import type { GameFormat } from "../../adapter/types";
-import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 
 import { MoveList } from "./MoveList";
-
-/**
- * Map the lowercase deck-builder format string (e.g. "standard", "commander")
- * to the engine's `GameFormat` PascalCase identifier. Derived from the
- * engine-authored FORMAT_REGISTRY so adding a format is automatic here.
- */
-function mapToEngineFormat(format: string | undefined): GameFormat | null {
-  if (!format) return null;
-  const lower = format.toLowerCase();
-  const match = FORMAT_REGISTRY.find((m) => m.format.toLowerCase() === lower);
-  return match?.format ?? null;
-}
-
-/**
- * Used only when the deck's format string doesn't resolve to a known
- * GameFormat (e.g. user-imported "casual" labels). Constructed formats are
- * the common case for unfamiliar labels, so Limited(15) is the right default.
- */
-const FALLBACK_CONSTRUCTED_POLICY: SideboardPolicy = { type: "Limited", data: 15 };
+import { mouseHoverPreview } from "./hoverPreview";
+import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckListProps {
   deck: ParsedDeck;
@@ -38,7 +15,6 @@ interface DeckListProps {
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
   onCardHover?: (cardName: string | null) => void;
-  warnings?: string[];
   format?: string;
   compatibility?: DeckCompatibilityResult | null;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
@@ -47,6 +23,16 @@ interface DeckListProps {
    *  parent (DeckBuilder); MoveList/CardEntryRow stay format-agnostic. */
   onSetAsCommander?: (name: string) => void;
   isCommanderEligible?: (name: string) => boolean;
+  /** Touch path for art selection — forwarded to each row's ✦ badge. */
+  onOpenArtPicker?: (name: string) => void;
+  /** Designated commander(s). Rendered as a pinned section above the section
+   *  tabs (mirroring the visual stack's Commander lane) so the commander stays
+   *  visible/removable in list view — on mobile the Info-panel CommanderPanel
+   *  is on a different tab. Empty in non-commander formats, so the section
+   *  self-hides. */
+  commanders?: string[];
+  /** Demotes a commander back into the main deck. Paired with `commanders`. */
+  onRemoveCommander?: (name: string) => void;
 }
 
 
@@ -72,54 +58,22 @@ function totalCards(entries: DeckEntry[]): number {
 }
 
 
-const LEGALITY_STYLES: Record<string, string> = {
-  legal: "bg-emerald-600/70 text-emerald-100",
-  banned: "bg-red-600/70 text-red-100",
-  restricted: "bg-yellow-600/70 text-yellow-100",
-  not_legal: "bg-gray-600/40 text-gray-500",
-};
-
-const FORMAT_BADGE_METADATA = FORMAT_REGISTRY
-  .map((metadata) => {
-    const legalityKey = scryfallLegalityKey(metadata.format);
-    return legalityKey
-      ? {
-          key: legalityKey,
-          label: metadata.short_label,
-          title: metadata.label,
-        }
-      : null;
-  })
-  .filter((entry): entry is { key: string; label: string; title: string } => entry !== null);
-
-function formatLegalityBadges(formatLegality: Record<string, string>) {
-  const knownKeys = new Set(FORMAT_BADGE_METADATA.map((entry) => entry.key));
-  return [
-    ...FORMAT_BADGE_METADATA.filter((entry) => entry.key in formatLegality),
-    ...Object.keys(formatLegality)
-      .filter((key) => !knownKeys.has(key))
-      .sort()
-      .map((key) => ({
-        key,
-        label: key.slice(0, 3).toUpperCase(),
-        title: key,
-      })),
-  ];
-}
-
 export function DeckList({
   deck,
   onRemoveCard,
   onMoveCard,
   onImport,
   onCardHover,
-  warnings = [],
   format,
   compatibility,
   onChooseArt,
   onSetAsCommander,
   isCommanderEligible,
+  onOpenArtPicker,
+  commanders = [],
+  onRemoveCommander,
 }: DeckListProps) {
+  const { t } = useTranslation("deck-builder");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
@@ -133,54 +87,36 @@ export function DeckList({
 
   // CR 100.4a: Ask the engine for the format's sideboard policy rather than
   // hardcoding 15. The engine is the single authority for format rules; the
-  // frontend only renders what the engine tells it.
-  const [sideboardPolicy, setSideboardPolicy] = useState<SideboardPolicy>(
-    FALLBACK_CONSTRUCTED_POLICY,
-  );
-  useEffect(() => {
-    const engineFormat = mapToEngineFormat(format);
-    if (!engineFormat) {
-      setSideboardPolicy(FALLBACK_CONSTRUCTED_POLICY);
-      return;
-    }
-    let cancelled = false;
-    sideboardPolicyForFormat(engineFormat)
-      .then((policy) => {
-        if (!cancelled) setSideboardPolicy(policy);
-      })
-      .catch(() => {
-        if (!cancelled) setSideboardPolicy(FALLBACK_CONSTRUCTED_POLICY);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [format]);
+  // frontend only renders what the engine tells it. Forbidden-sideboard
+  // formats (Commander/Brawl) repurpose the second section as a builder-only
+  // "Maybeboard" staging area — see useSideboardPolicy.
+  const sideboardPolicy = useSideboardPolicy(format);
+  const isMaybeboard = isMaybeboardPolicy(sideboardPolicy);
+  const mainName = t("deckList.mainName");
+  const sectionName = isMaybeboard ? t("deckList.maybeboardName") : t("deckList.sideboardName");
 
-  const { sideboardTitle, sideboardWarning, hideSideboard } = useMemo(() => {
+  const { sideboardTitle, sideboardWarning } = useMemo(() => {
     switch (sideboardPolicy.type) {
       case "Forbidden":
-        return { sideboardTitle: "", sideboardWarning: undefined, hideSideboard: true };
+        return {
+          sideboardTitle: t("deckList.maybeboard", { count: sideTotal }),
+          sideboardWarning: undefined,
+        };
       case "Unlimited":
         return {
-          sideboardTitle: `Sideboard (${sideTotal})`,
+          sideboardTitle: t("deckList.sideboardUnlimited", { count: sideTotal }),
           sideboardWarning: undefined,
-          hideSideboard: false,
         };
       case "Limited": {
         const max = sideboardPolicy.data;
         return {
-          sideboardTitle: `Sideboard (${sideTotal}/${max})`,
+          sideboardTitle: t("deckList.sideboardLimited", { count: sideTotal, max }),
           sideboardWarning:
-            sideTotal > max ? `Sideboard exceeds ${max}-card limit` : undefined,
-          hideSideboard: false,
+            sideTotal > max ? t("deckList.sideboardExceeds", { max }) : undefined,
         };
       }
     }
-  }, [sideboardPolicy, sideTotal]);
-
-  useEffect(() => {
-    if (hideSideboard && viewMode === "sideboard") setViewMode("main");
-  }, [hideSideboard, viewMode]);
+  }, [sideboardPolicy, sideTotal, t]);
 
   const unsupportedMap = useMemo(() => {
     const map = new Map<string, UnsupportedCard>();
@@ -230,23 +166,23 @@ export function DeckList({
     <div className="flex flex-col">
       <div className="mb-2 flex items-center justify-between gap-2 border-b border-white/8 pb-2">
         <div className="min-w-0">
-          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Current List</div>
+          <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{t("deckList.currentList")}</div>
         </div>
         <div className="flex shrink-0 gap-1">
           <button
             onClick={() => setShowPasteModal(true)}
             className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6"
-            title="Import deck from text (MTGA or .dck format)"
+            title={t("deckList.importTitle")}
           >
-            Import
+            {t("deckList.import")}
           </button>
           <button
             onClick={() => setShowExportModal(true)}
             disabled={mainTotal === 0}
             className="rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6 disabled:opacity-40"
-            title="Export deck"
+            title={t("deckList.exportTitle")}
           >
-            Export
+            {t("deckList.export")}
           </button>
           <input
             ref={fileInputRef}
@@ -258,107 +194,92 @@ export function DeckList({
         </div>
       </div>
 
-      {/* Section selector: tab pair for Main / Sideboard. Full-width and
-          prominent so the sideboard view is discoverable even on the
-          narrow 256px right panel. Hidden when the format forbids a
-          sideboard (Commander/Brawl). */}
-      {!hideSideboard ? (
-        <div className="mb-2 grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-black/18 p-1">
-          <button
-            onClick={() => setViewMode("main")}
-            className={
-              viewMode === "main"
-                ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
-                : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
-            }
-          >
-            Main ({mainTotal})
-          </button>
-          <button
-            onClick={() => setViewMode("sideboard")}
-            className={
-              viewMode === "sideboard"
-                ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
-                : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
-            }
-          >
-            Sideboard ({sideTotal})
-          </button>
-        </div>
-      ) : (
-        <h3 className="mb-2 text-sm font-bold text-white">
-          Main Deck ({mainTotal} cards)
-        </h3>
-      )}
-
-      {/* Warnings */}
-      {warnings.length > 0 && (
-        <div className="mb-2 space-y-0.5">
-          {warnings.map((w) => (
+      {/* Commander section: pinned above the tabs (not inside one) so it's
+          visible on whichever tab is active. CR 903.5a — the commander lives in
+          the command zone, not the deck, so it's shown separately and excluded
+          from the main count. Self-hides outside commander formats (commanders
+          is empty). Designation still happens via the ♛ crown on eligible rows;
+          this section only displays + demotes the current commander(s). */}
+      {commanders.length > 0 && (
+        <div className="mb-2 rounded-xl border border-fuchsia-300/25 bg-fuchsia-500/8 p-2">
+          <div className="mb-1 flex items-center gap-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-fuchsia-200/80">
+            <span aria-hidden="true">♛</span>
+            {t("deckList.commanderHeading")}
+          </div>
+          {commanders.map((name) => (
             <div
-              key={w}
-            className="rounded-xl border border-amber-300/18 bg-amber-400/8 px-2 py-1 text-xs text-amber-200"
+              key={name}
+              data-card-name={name.toLowerCase()}
+              className="group flex items-center justify-between py-0.5 text-sm"
             >
-              {w}
+              <span
+                className={`text-fuchsia-50 ${onCardHover ? "cursor-pointer" : ""}`}
+                onClick={() => onCardHover?.(name)}
+                {...mouseHoverPreview(onCardHover, name)}
+              >
+                {name}
+              </span>
+              {onRemoveCommander && (
+                <button
+                  type="button"
+                  onClick={() => onRemoveCommander(name)}
+                  className="ml-2 h-9 w-9 rounded text-red-400 hover:bg-red-900/40 lg:h-7 lg:w-7"
+                  aria-label={t("deckList.removeCommander", { name })}
+                  title={t("deckList.removeCommander", { name })}
+                >
+                  -
+                </button>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      {/* Format legality & coverage */}
-      {compatibility && (compatibility.format_legality || (compatibility.coverage && compatibility.coverage.unsupported_cards.length > 0)) && (
-        <div className="mb-3 space-y-2 border-b border-white/8 pb-3">
-          {compatibility.format_legality && (
-            <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">Format Legality</div>
-              <div className="flex flex-wrap gap-1">
-                {formatLegalityBadges(compatibility.format_legality).map((fmt) => {
-                  const status = compatibility.format_legality?.[fmt.key] ?? "not_legal";
-                  return (
-                    <span
-                      key={fmt.key}
-                      className={`rounded px-1.5 py-0.5 text-[9px] font-semibold leading-tight ${LEGALITY_STYLES[status] ?? LEGALITY_STYLES.not_legal}`}
-                      title={`${fmt.title}: ${status.replace("_", " ")}`}
-                    >
-                      {fmt.label}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {compatibility.coverage && compatibility.coverage.unsupported_cards.length > 0 && (
-            <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">Engine Coverage</div>
-              <div className="flex items-center gap-2">
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-700">
-                  <div
-                    className="h-full rounded-full bg-orange-500"
-                    style={{ width: `${compatibility.coverage.total_unique > 0 ? (compatibility.coverage.supported_unique / compatibility.coverage.total_unique) * 100 : 0}%` }}
-                  />
-                </div>
-                <span
-                  className="shrink-0 text-[10px] text-gray-400"
-                  title={`Unsupported:\n${compatibility.coverage.unsupported_cards.map((c) => `${c.name}: ${c.gaps.join(", ")}`).join("\n")}`}
-                >
-                  {compatibility.coverage.supported_unique}/{compatibility.coverage.total_unique}
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {/* Section selector: tab pair for Main / Sideboard (or Main / Maybeboard
+          in Commander/Brawl). Full-width and prominent so the second section is
+          discoverable even on the narrow 256px right panel — and so cards moved
+          there are always recoverable, rather than vanishing into a hidden
+          section. */}
+      <div className="mb-2 grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-black/18 p-1">
+        <button
+          onClick={() => setViewMode("main")}
+          className={
+            viewMode === "main"
+              ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
+              : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
+          }
+        >
+          {t("deckList.mainTab", { count: mainTotal })}
+        </button>
+        <button
+          onClick={() => setViewMode("sideboard")}
+          className={
+            viewMode === "sideboard"
+              ? "rounded-lg bg-white/14 px-2 py-1 text-xs font-semibold text-white"
+              : "rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/6"
+          }
+        >
+          {isMaybeboard
+            ? t("deckList.maybeboardTab", { count: sideTotal })
+            : t("deckList.sideboardTab", { count: sideTotal })}
+        </button>
+      </div>
 
-      {/* Main and sideboard share this column; the header toggle (mirroring
-          the "Show Browser" pattern) flips between them so the sideboard
-          can't be pushed off-screen by a long main deck. The sideboard
-          toggle itself is hidden for Commander/Brawl (SideboardPolicy::Forbidden). */}
+      {/* Validation warnings now pin as a banner at the Deck-surface level (so
+          they show in both list and stack views); format legality & engine
+          coverage live in StatsPanel. The per-card unsupported `!` flags remain
+          inline via unsupportedMap below. */}
+
+      {/* Main and the second section share this column; the tab toggle flips
+          between them so neither can be pushed off-screen by a long deck. Each
+          row's move button is labelled with its destination (→ Sideboard /
+          → Maybeboard / → Main) so the move target is explicit on touch. */}
       <div>
         {viewMode === "main"
           ? (["Creatures", "Spells", "Lands"] as const).map((group) => (
               <MoveList
                 key={group}
-                title={group}
+                title={t(`deckList.group.${group}`)}
                 entries={mainGroups[group]}
                 section="main"
                 onRemove={onRemoveCard}
@@ -368,9 +289,12 @@ export function DeckList({
                 onChooseArt={onChooseArt}
                 onSetAsCommander={onSetAsCommander}
                 isCommanderEligible={isCommanderEligible}
+                density="comfortable"
+                onOpenArtPicker={onOpenArtPicker}
+                moveTargetLabel={sectionName}
               />
             ))
-          : !hideSideboard && (
+          : (
               <MoveList
                 title={sideboardTitle}
                 entries={deck.sideboard}
@@ -380,9 +304,16 @@ export function DeckList({
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
                 alwaysShow
-                emptyHint="Hover a main-deck card and click → to move it here."
+                emptyHint={
+                  isMaybeboard
+                    ? t("deckList.maybeboardEmptyHint")
+                    : t("deckList.sideboardEmptyHint")
+                }
                 warning={sideboardWarning}
                 onChooseArt={onChooseArt}
+                density="comfortable"
+                onOpenArtPicker={onOpenArtPicker}
+                moveTargetLabel={mainName}
               />
             )}
       </div>
@@ -395,11 +326,11 @@ export function DeckList({
             onClick={() => setShowPasteModal(false)}
           />
           <div className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-2xl backdrop-blur-md">
-            <h3 className="mb-3 text-sm font-bold text-white">Import Deck</h3>
+            <h3 className="mb-3 text-sm font-bold text-white">{t("deckList.importModalTitle")}</h3>
             <textarea
               value={pasteText}
               onChange={(e) => setPasteText(e.target.value)}
-              placeholder="Paste deck list (MTGA or .dck format)..."
+              placeholder={t("deckList.pastePlaceholder")}
               rows={10}
               className="mb-3 w-full rounded-[16px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
               autoFocus
@@ -409,7 +340,7 @@ export function DeckList({
                 onClick={() => fileInputRef.current?.click()}
                 className="rounded-xl border border-white/8 bg-black/18 px-3 py-1.5 text-xs text-gray-300 hover:bg-white/6"
               >
-                From File
+                {t("deckList.fromFile")}
               </button>
               <div className="flex gap-2">
                 <button
@@ -419,14 +350,14 @@ export function DeckList({
                   }}
                   className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
                 >
-                  Cancel
+                  {t("common:actions.cancel")}
                 </button>
                 <button
                   onClick={handlePasteImport}
                   disabled={!pasteText.trim()}
                   className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500 disabled:opacity-40"
                 >
-                  Parse
+                  {t("deckList.parse")}
                 </button>
               </div>
             </div>
@@ -446,7 +377,7 @@ export function DeckList({
           />
           <div className="relative z-10 w-full max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-gray-700">
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white">Export Deck</h3>
+              <h3 className="text-sm font-bold text-white">{t("deckList.exportModalTitle")}</h3>
               <div className="flex rounded bg-gray-800 p-0.5 text-xs">
                 <button
                   onClick={() => { setExportFormat("dck"); setCopied(false); }}
@@ -475,7 +406,7 @@ export function DeckList({
                 onClick={handleSaveToFile}
                 className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
               >
-                Save to File
+                {t("deckList.saveToFile")}
               </button>
               <div className="flex gap-2">
                 <button
@@ -485,13 +416,13 @@ export function DeckList({
                   }}
                   className="rounded bg-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-600"
                 >
-                  Close
+                  {t("common:actions.close")}
                 </button>
                 <button
                   onClick={handleCopyToClipboard}
                   className="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-500"
                 >
-                  {copied ? "Copied!" : "Copy"}
+                  {copied ? t("deckList.copied") : t("deckList.copy")}
                 </button>
               </div>
             </div>

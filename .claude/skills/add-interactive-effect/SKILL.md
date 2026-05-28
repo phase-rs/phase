@@ -216,6 +216,8 @@ When the continuation is created, parent targets propagate down if the sub-abili
   - `CardChoiceModal` → `SearchModal` — filtered card selection from list
   - `NamedChoiceModal` — named choices including `CardName`, `NumberRange`, `Labeled`, and `LandType`
 
+- [ ] **Internationalize all frontend-authored text** (titles, prompts, buttons, labels) via `t()` — `const { t } = useTranslation("game")`, with keys added to `client/src/i18n/locales/en/game.json` first. Card names and Oracle text stay raw (content pipeline). Boundary rule and conventions: `client/src/i18n/README.md`. See `$add-frontend-component` Phase 2.5 for the full checklist.
+
 ### Phase 7 — Multiplayer State Filtering (if hidden info)
 
 - [ ] **`crates/server-core/src/filter.rs` — `filter_state_for_player()`**
@@ -247,7 +249,7 @@ The `NamedChoice` system is a well-contained interactive pattern with low blast 
 | 3 | `crates/engine/src/game/engine.rs` — `ChooseOption` handler | May need custom validation (e.g., NumberRange validates parsed u8 in range) |
 | 4 | `client/src/adapter/types.ts` | Already generic (`choice_type: string`, `options: string[]`) — **no change needed** |
 | 5 | `client/src/components/modal/NamedChoiceModal.tsx` | Add rendering branch only if the existing button grid / card-name search is insufficient |
-| 6 | `client/src/components/modal/NamedChoiceModal.tsx` — `CHOICE_TYPE_LABELS` | Add user-facing label for the new type |
+| 6 | `client/src/components/modal/NamedChoiceModal.tsx` — `CHOICE_TYPE_TITLE_KEYS` | Map the new ChoiceType key → an i18n leaf (e.g. `Keyword: "keyword"`). The title renders via `t(\`namedChoice.title.${leaf}\`)`, so also add `namedChoice.title.<leaf>` to `client/src/i18n/locales/en/game.json`. Never hardcode the label. |
 | 7 | `crates/engine/src/ai_support/candidates.rs` — `NamedChoice` arm | Already generates one action per option — works for any choice type with populated options |
 | 8 | `crates/engine/src/parser/oracle_effect/` | Add parser patterns for the new choice text |
 | 9 | `crates/engine/src/game/effects/choose.rs` — tests | Add test for `compute_options()` with new variant |

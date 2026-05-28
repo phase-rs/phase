@@ -1,6 +1,6 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_until, take_while};
 use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
@@ -177,6 +177,40 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
     parsed
 }
 
+// CR 100.2a / CR 903.5b: Deck-construction overrides like "A deck can have
+// any number of cards named X." (Tempest Hawk, Rat Colony, Relentless Rats,
+// Persistent Petitioners, Shadowborn Apostle, etc.) are deck-construction
+// metadata that override CR 100.2a's four-of limit and the CR 903.5b
+// Commander singleton rule. They have no runtime effect to resolve. The
+// recognizer matches this exact phrase shape to avoid false-positives
+// against legitimate "up to N cards named ..." patterns (e.g. Seven Dwarves).
+fn parse_deck_can_have_any_number_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = tag("a deck can have any number of cards named ").parse(input)?;
+    let (input, subject) = take_while(|c: char| {
+        c.is_alphanumeric() || c == ' ' || c == '\'' || c == ',' || c == '-' || c == '~'
+    })
+    .parse(input)?;
+    if subject.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
+}
+
+/// Recognizer for "A deck can have any number of cards named X." —
+/// deck-construction text consumed silently by the parser so it does not
+/// fall through to `Effect::Unimplemented { name: "static_structure", .. }`.
+pub(crate) fn is_deck_construction_any_number_sentence(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    let parsed = all_consuming(parse_deck_can_have_any_number_sentence)
+        .parse(lower.as_str())
+        .is_ok();
+    parsed
+}
+
 /// Whether Oracle text explicitly permits this card to be a commander.
 pub fn oracle_text_allows_commander(oracle_text: &str, card_name: &str) -> bool {
     let normalized = normalize_card_name_refs(oracle_text, card_name);
@@ -271,7 +305,7 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
 ///   1. CR 122.1: an optional "with [N] [type] counter(s) on it" clause →
 ///      populates `Effect::ChangeZone::enter_with_counters`.
 ///   2. An optional "If you do, [effect]" follow-up sentence → becomes a
-///      `sub_ability` gated by `AbilityCondition::IfYouDo`, so the dependent
+///      `sub_ability` gated by `AbilityCondition::effect_performed()`, so the dependent
 ///      effect only fires when the player accepts the begin-game opt-in.
 ///
 /// Mirrors `try_parse_opening_hand_reveal_delayed_trigger` end-to-end shape and
@@ -322,7 +356,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             origin: Some(Zone::Hand),
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -345,7 +379,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
         if has_unimplemented(&sub) {
             return None;
         }
-        def = def.sub_ability(sub.condition(AbilityCondition::IfYouDo));
+        def = def.sub_ability(sub.condition(AbilityCondition::effect_performed()));
     }
 
     Some(def)
@@ -773,7 +807,10 @@ fn is_spell_resolution_instruction_line(
     let loyalty_snap = ctx.diagnostics.len();
     let is_loyalty = try_parse_loyalty_line(line, ctx).is_some();
     ctx.diagnostics.truncate(loyalty_snap);
-    if is_commander_permission_sentence(line) || is_loyalty {
+    if is_commander_permission_sentence(line)
+        || is_deck_construction_any_number_sentence(line)
+        || is_loyalty
+    {
         return false;
     }
 
@@ -1603,6 +1640,30 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
+        // CR 604.3 + CR 604.3a + CR 105.2c: Some instants/sorceries carry
+        // self color-defining characteristic-defining abilities (e.g.,
+        // "~ is colorless.") that define the source's own color in all zones.
+        // Intercept only this narrow class before spell-effect lowering.
+        //
+        // Intercept only that narrow class so we do not steal ordinary spell
+        // instruction lines that happen to have static-like phrasing.
+        if is_spell {
+            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let is_self_color_cda = defs.len() == 1
+                && defs[0].characteristic_defining
+                && defs[0].affected == Some(TargetFilter::SelfRef)
+                && defs[0].modifications.len() == 1
+                && matches!(
+                    defs[0].modifications[0],
+                    ContinuousModification::SetColor { .. }
+                );
+            if is_self_color_cda {
+                result.statics.extend(defs);
+                i += 1;
+                continue;
+            }
+        }
+
         if lower == "start your engines!" || lower == "start your engines" {
             result.extracted_keywords.push(Keyword::StartYourEngines);
             i += 1;
@@ -1627,6 +1688,11 @@ pub(crate) fn parse_oracle_ir(
         }
 
         if is_commander_permission_sentence(&line) {
+            i += 1;
+            continue;
+        }
+
+        if is_deck_construction_any_number_sentence(&line) {
             i += 1;
             continue;
         }
@@ -3984,7 +4050,7 @@ mod tests {
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::replacements::ReplacementEvent;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -4026,6 +4092,64 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn ghostfire_has_self_color_cda_and_spell_damage() {
+        let r = parse(
+            "Ghostfire is colorless.\nGhostfire deals 3 damage to any target.",
+            "Ghostfire",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert_eq!(r.statics.len(), 1, "expected one self color CDA static");
+        let static_def = &r.statics[0];
+        assert!(static_def.characteristic_defining);
+        assert_eq!(static_def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            static_def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+        assert_eq!(
+            static_def.active_zones,
+            vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ]
+        );
+
+        assert_eq!(r.abilities.len(), 1, "expected one spell ability");
+        assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+        assert!(matches!(*r.abilities[0].effect, Effect::DealDamage { .. }));
+    }
+
+    #[test]
+    fn mindlock_orb_routes_to_static_search_prohibition() {
+        let r = parse(
+            "Players can't search libraries.",
+            "Mindlock Orb",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(
+            r.abilities.is_empty(),
+            "Mindlock Orb should not emit spell abilities"
+        );
+        assert_eq!(r.statics.len(), 1, "expected one static search prohibition");
+        assert_eq!(
+            r.statics[0].mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::AllPlayers,
+            }
+        );
     }
 
     /// CR 115.1 + CR 701.9b: "random target X" — the parser stamps
@@ -4870,6 +4994,88 @@ mod tests {
         assert!(r.replacements.is_empty());
     }
 
+    // CR 100.2a / CR 903.5b: "A deck can have any number of cards named X."
+    // is deck-construction metadata, not an in-game ability. The recognizer
+    // must accept the raw card name, the engine's normalized self-reference
+    // "~", and reject "up to N" patterns (Seven Dwarves).
+    #[test]
+    fn deck_construction_any_number_sentence_positive_cases() {
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Tempest Hawk."
+        ));
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Relentless Rats."
+        ));
+        // After normalize_self_refs_for_static rewrites the card name to "~".
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named ~."
+        ));
+        // Trailing period is optional.
+        assert!(is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named Tempest Hawk"
+        ));
+    }
+
+    #[test]
+    fn deck_construction_any_number_sentence_negative_cases() {
+        // Wrong determiner — must be "A deck", not "Your deck".
+        assert!(!is_deck_construction_any_number_sentence(
+            "Your deck can have any number of cards named X."
+        ));
+        // "Up to seven" is a different deck-construction pattern (Seven Dwarves).
+        // It must NOT be silently consumed by this recognizer.
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have up to seven cards named Seven Dwarves."
+        ));
+        // Unrelated static lines must not match.
+        assert!(!is_deck_construction_any_number_sentence(
+            "Creatures you control get +1/+1."
+        ));
+        // Empty subject after the "named " prefix.
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named ."
+        ));
+        assert!(!is_deck_construction_any_number_sentence(
+            "A deck can have any number of cards named"
+        ));
+    }
+
+    #[test]
+    fn tempest_hawk_oracle_text_produces_no_unimplemented_static() {
+        // Full Oracle text fixture for Tempest Hawk — the bug surface from
+        // GitHub issue #1074. Before the fix, the "A deck can have any number
+        // of cards named Tempest Hawk." line fell through to
+        // Effect::Unimplemented { name: "static_structure", .. }. After the
+        // fix, it must be silently consumed.
+        let r = parse(
+            "Flying\n\
+             Whenever this creature deals combat damage to a player, you may search your library for a card named Tempest Hawk, reveal it, put it into your hand, then shuffle.\n\
+             A deck can have any number of cards named Tempest Hawk.",
+            "Tempest Hawk",
+            &[Keyword::Flying],
+            &["Creature"],
+            &["Bird"],
+        );
+
+        // No ability should be Unimplemented with name "static_structure".
+        let static_unimplemented: Vec<&AbilityDefinition> = r
+            .abilities
+            .iter()
+            .filter(|a| {
+                matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name == "static_structure"
+                )
+            })
+            .collect();
+        assert!(
+            static_unimplemented.is_empty(),
+            "deck-construction line must be silently consumed, but produced \
+             {} static_structure Unimplemented entries: {:#?}",
+            static_unimplemented.len(),
+            static_unimplemented
+        );
+    }
     #[test]
     fn oracle_text_allows_commander_uses_commander_permission_parser() {
         assert!(oracle_text_allows_commander(
@@ -5268,7 +5474,7 @@ mod tests {
             .sub_ability
             .as_deref()
             .expect("'If you do, exile a card from your hand' must create a sub-ability");
-        assert_eq!(sub.condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(sub.condition, Some(AbilityCondition::effect_performed()));
         assert!(
             !has_unimplemented(sub),
             "exile-from-hand sub-ability must not be Unimplemented: {:?}",
@@ -6213,6 +6419,155 @@ mod tests {
         }
     }
 
+    /// CR 205.3i + CR 614.1a + CR 605.1a: All three Urza lands share a single
+    /// parsed shape — an activated mana ability (`{T}: Add {C}.` per CR 605.1a)
+    /// plus a conditional `Add {C}{C}{C} instead` sub-ability whose "instead"
+    /// makes it a replacement effect (CR 614.1a) gated on the player
+    /// controlling the OTHER two Urza land subtypes (from the CR 205.3i land
+    /// type list: Mine, Power-Plant, Tower). The
+    /// critical assertion is the cross-naming of the `And` branches: a
+    /// regression that emits `[Mine, Mine]` instead of `[Mine, Power-Plant]`
+    /// would let Urza's Tower count itself as one of the required lands and
+    /// silently change the rules. Each row in the table below pins the exact
+    /// pair of subtypes the parsed condition must reference.
+    #[test]
+    fn urzas_lands_share_delta_shape() {
+        // (card name, oracle text, expected subtypes on the And conditions in
+        // the order the parser emits them)
+        let cases: [(&str, &str, [&str; 2], &[&str]); 3] = [
+            (
+                "Urza's Tower",
+                "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
+                ["Mine", "Power-Plant"],
+                &["Urza's", "Tower"],
+            ),
+            (
+                "Urza's Power Plant",
+                "{T}: Add {C}. If you control an Urza's Mine and an Urza's Tower, add {C}{C}{C} instead.",
+                ["Mine", "Tower"],
+                &["Urza's", "Power-Plant"],
+            ),
+            (
+                "Urza's Mine",
+                "{T}: Add {C}. If you control an Urza's Power-Plant and an Urza's Tower, add {C}{C}{C} instead.",
+                ["Power-Plant", "Tower"],
+                &["Urza's", "Mine"],
+            ),
+        ];
+
+        for (name, text, expected_subs, subtypes) in cases {
+            let r = parse(text, name, &[], &["Land"], subtypes);
+            assert_eq!(r.abilities.len(), 1, "{name}: expected one ability");
+            let ability = &r.abilities[0];
+
+            match ability.effect.as_ref() {
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { count },
+                    ..
+                } => assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 1 },
+                    "{name}: base mana must be exactly one colorless"
+                ),
+                other => panic!("{name}: expected base colorless mana, got {other:?}"),
+            }
+
+            let sub = ability
+                .sub_ability
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: expected conditional delta sub-ability"));
+
+            match sub.effect.as_ref() {
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { count },
+                    ..
+                } => assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 2 },
+                    "{name}: delta must be +2 colorless (total 3 minus base 1)"
+                ),
+                other => panic!("{name}: expected colorless mana delta, got {other:?}"),
+            }
+
+            let conditions = match sub
+                .condition
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: expected sub-ability condition"))
+            {
+                AbilityCondition::And { conditions } => conditions,
+                other => panic!("{name}: expected And condition, got {other:?}"),
+            };
+            assert_eq!(
+                conditions.len(),
+                2,
+                "{name}: And must have exactly two ControllerControlsMatching branches"
+            );
+
+            let extracted: Vec<&str> = conditions
+                .iter()
+                .map(|c| match c {
+                    AbilityCondition::ControllerControlsMatching {
+                        filter: TargetFilter::Typed(typed),
+                    } => typed
+                        .get_subtype()
+                        .unwrap_or_else(|| panic!("{name}: filter must carry a subtype")),
+                    other => panic!(
+                        "{name}: expected ControllerControlsMatching with Typed filter, got {other:?}"
+                    ),
+                })
+                .collect();
+
+            assert_eq!(
+                extracted,
+                expected_subs.to_vec(),
+                "{name}: And branches must reference the OTHER two Urza land subtypes — \
+                 a regression here lets the land count itself as one of the required pieces"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_ugin_labyrinth_exiled_card_mana_as_delta() {
+        let r = parse(
+            "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n{T}: Add {C}. If a card is exiled with Ugin's Labyrinth, add {C}{C} instead.",
+            "Ugin's Labyrinth",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        match ability.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected base colorless mana, got {other:?}"),
+        }
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional delta");
+        match sub.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected colorless mana delta, got {other:?}"),
+        }
+        match sub.condition.as_ref().expect("expected condition") {
+            AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected exiled-with-source condition, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_compound_activate_only_constraints() {
         let r = parse(
@@ -6849,6 +7204,7 @@ mod tests {
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -6877,6 +7233,7 @@ mod tests {
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Any,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -8043,6 +8400,74 @@ mod tests {
             }
         ));
         assert_eq!(def.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
+    }
+
+    // ── Phthisis: destroy + lose life equal to power plus toughness ──────
+
+    /// CR 119.3 + CR 208.1: Phthisis — "Destroy target creature. Its controller
+    /// loses life equal to its power plus its toughness." The second clause is a
+    /// chained LoseLife whose amount is Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+    /// The destroy effect sets `effect_context_object` to the destroyed creature's
+    /// LKI, supplying the Anaphoric referent at runtime.
+    #[test]
+    fn phthisis_destroy_then_lose_life_power_plus_toughness() {
+        let oracle = "Destroy target creature. Its controller loses life equal to its power plus its toughness.";
+        let def = parse_effect_chain(oracle, AbilityKind::Spell);
+        // The root effect is Destroy.
+        assert!(
+            matches!(&*def.effect, Effect::Destroy { .. }),
+            "root effect should be Destroy, got {:?}",
+            def.effect,
+        );
+        // The chained sub-ability must be LoseLife.
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("Phthisis must have a chained sub_ability for the life loss");
+        assert!(
+            matches!(&*sub.effect, Effect::LoseLife { .. }),
+            "sub_ability effect should be LoseLife, got {:?}",
+            sub.effect,
+        );
+        // The life-loss amount must be Sum([Power(Anaphoric), Toughness(Anaphoric)]).
+        let Effect::LoseLife { amount, .. } = &*sub.effect else {
+            panic!("expected LoseLife");
+        };
+        match amount {
+            QuantityExpr::Sum { exprs } => {
+                assert_eq!(exprs.len(), 2, "Sum must have exactly two operands");
+                assert!(
+                    matches!(
+                        exprs[0],
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Anaphoric
+                            }
+                        }
+                    ),
+                    "first operand must be Power(Anaphoric), got {:?}",
+                    exprs[0]
+                );
+                assert!(
+                    matches!(
+                        exprs[1],
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Toughness {
+                                scope: ObjectScope::Anaphoric
+                            }
+                        }
+                    ),
+                    "second operand must be Toughness(Anaphoric), got {:?}",
+                    exprs[1]
+                );
+            }
+            other => panic!("amount must be Sum, got {other:?}"),
+        }
+        // No Unimplemented anywhere in the chain.
+        assert!(
+            !matches!(&*sub.effect, Effect::Unimplemented { .. }),
+            "LoseLife sub-effect must not be Unimplemented"
+        );
     }
 
     // ── Coverage batch: gold tokens ──────────────────────────────────
@@ -10334,7 +10759,10 @@ mod tests {
             .iter()
             .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
         assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(r.statics[0].active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            r.statics[0].active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
         assert!(
             r.parse_warnings
                 .iter()
@@ -10513,6 +10941,51 @@ mod tests {
             "third clause should be DealDamage, got {:?}",
             sub2.effect
         );
+    }
+
+    #[test]
+    fn roiling_vortex_parses_trigger_lines_and_opponent_life_lock_activation() {
+        use crate::types::statics::StaticMode;
+
+        let r = parse(
+            "At the beginning of each player's upkeep, this enchantment deals 1 damage to them.\nWhenever a player casts a spell, if no mana was spent to cast that spell, this enchantment deals 5 damage to that player.\n{R}: Your opponents can't gain life this turn.",
+            "Roiling Vortex",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+
+        assert_eq!(r.triggers.len(), 2, "expected both printed trigger lines");
+        assert_eq!(r.abilities.len(), 1, "expected one activated ability");
+
+        let ab = &r.abilities[0];
+        assert_eq!(ab.kind, AbilityKind::Activated);
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*ab.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", ab.effect);
+        };
+
+        assert_eq!(*target, None);
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn)
+        );
+        assert!(static_abilities
+            .iter()
+            .any(|s| s.mode == StaticMode::CantGainLife));
+        assert!(static_abilities.iter().any(|s| {
+            matches!(
+                s.affected,
+                Some(TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                }))
+            )
+        }));
     }
 
     // CR 104.2b + CR 104.3b + CR 119.7 + CR 119.8 + CR 611.2b:
@@ -11327,9 +11800,10 @@ mod tests {
 
         assert_eq!(
             result.additional_cost,
-            Some(AdditionalCost::Optional(AbilityCost::CollectEvidence {
-                amount: 8,
-            }))
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::CollectEvidence { amount: 8 },
+                repeatable: false,
+            })
         );
         assert_eq!(result.abilities.len(), 1);
         let ability = &result.abilities[0];

@@ -637,6 +637,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GainControl { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }
@@ -736,6 +737,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
@@ -749,6 +751,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::CreateDamageReplacement { .. }
+        // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
+        // ContinuousModifications, never conjured card names.
+        | Effect::ReturnAsAura { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }

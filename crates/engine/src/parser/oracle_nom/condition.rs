@@ -118,6 +118,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_quantity_quantity_comparison,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
+        parse_card_exiled_with_source_condition,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
@@ -2459,10 +2460,42 @@ fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             },
             alt((tag("~ is suspended"), tag("this card is suspended"))),
         ),
+        // CR 104.2b + CR 104.3c: "your library has no cards in it" / "your
+        // library is empty" — the empty-library antecedent shared by the
+        // alternate-win-on-draw class (Laboratory Maniac, Jace, Wielder of
+        // Mysteries: "If you would draw a card while your library has no cards
+        // in it, you win the game instead"). Maps to a controller library
+        // count of zero so the gate composes through `parse_inner_condition`
+        // for replacement antecedents, trigger intervening-ifs, and statics.
+        parse_library_empty_condition,
         // CR 113.6b: Generic "<source> is <zone> [or <zone>]" form.
         parse_source_in_zone_condition,
     ))
     .parse(input)
+}
+
+/// CR 401.1: Count of cards in the controller's library, compared against zero.
+///
+/// Recognizes "your library has no cards in it" and "your library is empty"
+/// (the empty-library win antecedent). The library count is expressed with the
+/// existing `ZoneCardCount` building block (zone = Library, no type filter,
+/// controller scope) rather than a bespoke leaf, so the resolver path is shared
+/// with every other zone-count condition.
+fn parse_library_empty_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("your library ").parse(input)?;
+    let (rest, _) = alt((tag("has no cards in it"), tag("is empty"))).parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_comparison(
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Library,
+                card_types: Vec::new(),
+                scope: CountScope::Controller,
+            },
+            Comparator::EQ,
+            0,
+        ),
+    ))
 }
 
 fn parse_day_night_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -4135,6 +4168,21 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
     ))
 }
 
+fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("a card is "), tag("one or more cards are "))).parse(input)?;
+    let (rest, _) = tag("exiled with ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("~"),
+        tag("it"),
+        tag("this artifact"),
+        tag("this creature"),
+        tag("this land"),
+        tag("this permanent"),
+    ))
+    .parse(rest)?;
+    Ok((rest, make_quantity_ge(QuantityRef::CardsExiledBySource, 1)))
+}
+
 /// Parse "there is a/an X card and a/an Y card in your <zone>" as two
 /// independent zone-count predicates sharing the same zone/scope suffix.
 fn parse_there_exists_compound_zone_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -5578,6 +5626,35 @@ mod tests {
     }
 
     #[test]
+    fn test_control_count_ge_creature_subtype() {
+        let (rest, c) = parse_inner_condition("you control four or more wizards").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(typed),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            } => {
+                assert!(
+                    typed
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Wizard".to_string())),
+                    "expected Wizard subtype filter, got {:?}",
+                    typed.type_filters
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected ObjectCount Wizard GE 4, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_graveyard_count_ge() {
         let (rest, c) =
             parse_inner_condition("you have five or more cards in your graveyard").unwrap();
@@ -5880,6 +5957,23 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 2 },
             } => {}
             other => panic!("expected CardsExiledBySource GE 2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_a_card_is_exiled_with_source() {
+        let (rest, c) = parse_inner_condition("a card is exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected CardsExiledBySource GE 1, got {other:?}"),
         }
     }
 

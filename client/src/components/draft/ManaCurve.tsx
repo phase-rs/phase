@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useDraftStore } from "../../stores/draftStore";
 
@@ -18,6 +19,7 @@ const MAX_BAR_HEIGHT = 100;
 const EMPTY_POOL: never[] = [];
 
 export function ManaCurve({ cards }: ManaCurveProps) {
+  const { t } = useTranslation("draft");
   const pool = useDraftStore((s) => s.view?.pool) ?? EMPTY_POOL;
 
   const counts = useMemo(() => {
@@ -46,7 +48,7 @@ export function ManaCurve({ cards }: ManaCurveProps) {
   return (
     <div className="flex flex-col gap-1">
       <div className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-        Mana Curve
+        {t("manaCurve.title")}
       </div>
       <div className="flex items-end gap-1.5" style={{ height: MAX_BAR_HEIGHT + 24 }}>
         {counts.map(({ label, count }) => (

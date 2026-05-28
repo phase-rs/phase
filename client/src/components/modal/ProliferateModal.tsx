@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { TargetRef, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
-import { targetKey, targetLabel } from "./targetRef.ts";
+import { filterTargetsByController, targetKey, targetLabel } from "./targetRef.ts";
 
 type ProliferateChoice = Extract<WaitingFor, { type: "ProliferateChoice" }>;
 type ChooseObjectsSelection = Extract<
@@ -27,17 +30,10 @@ type ProliferateModalData =
   | ProliferateChoice["data"]
   | ChooseObjectsSelection["data"];
 
-const VARIANT_COPY = {
-  proliferate: {
-    title: "Proliferate",
-    subtitle:
-      "Choose any number of permanents and players with counters. Each chosen target gets one more counter of each kind already there.",
-  },
-  chooseObjects: {
-    title: "Choose Permanents",
-    subtitle:
-      "Choose any number of permanents. You pay a cost for each one chosen.",
-  },
+/** Maps the variant prop to its i18n leaf pair under `proliferate.*`. */
+const VARIANT_KEYS = {
+  proliferate: { title: "proliferateTitle", subtitle: "proliferateSubtitle" },
+  chooseObjects: { title: "chooseObjectsTitle", subtitle: "chooseObjectsSubtitle" },
 } as const;
 
 export function ProliferateModal({
@@ -45,10 +41,13 @@ export function ProliferateModal({
   variant = "proliferate",
 }: {
   data: ProliferateModalData;
-  variant?: keyof typeof VARIANT_COPY;
+  variant?: keyof typeof VARIANT_KEYS;
 }) {
+  const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const playerId = usePlayerId();
+  const hoverProps = useInspectHoverProps();
 
   const [selected, setSelected] = useState<TargetRef[]>(data.eligible);
 
@@ -73,10 +72,35 @@ export function ProliferateModal({
 
   return (
     <ChoiceOverlay
-      title={VARIANT_COPY[variant].title}
-      subtitle={VARIANT_COPY[variant].subtitle}
-      footer={<ConfirmButton onClick={handleConfirm} label="Confirm" />}
+      title={t(`proliferate.${VARIANT_KEYS[variant].title}`)}
+      subtitle={t(`proliferate.${VARIANT_KEYS[variant].subtitle}`)}
+      footer={<ConfirmButton onClick={handleConfirm} label={t("proliferate.confirm")} />}
     >
+      {data.eligible.length > 1 && (
+        <div className="mb-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setSelected(data.eligible)}
+            className={gameButtonClass({ tone: "neutral", size: "xs" })}
+          >
+            {t("proliferate.selectAll")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelected([])}
+            className={gameButtonClass({ tone: "neutral", size: "xs" })}
+          >
+            {t("proliferate.selectNone")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelected(filterTargetsByController(data.eligible, objects, playerId))}
+            className={gameButtonClass({ tone: "neutral", size: "xs" })}
+          >
+            {t("proliferate.selectMine")}
+          </button>
+        </div>
+      )}
       <div className="mb-4 space-y-2">
         {data.eligible.map((target) => {
           const key = targetKey(target);
@@ -86,6 +110,7 @@ export function ProliferateModal({
               key={key}
               type="button"
               aria-pressed={isSelected}
+              {...("Object" in target ? hoverProps(target.Object) : undefined)}
               onClick={() => handleToggle(target)}
               className={
                 gameButtonClass({

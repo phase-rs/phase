@@ -722,6 +722,7 @@ mod tests {
             main_deck: vec![],
             sideboard: vec![],
             commander: vec![],
+            bracket_tier: Default::default(),
         }
     }
 
@@ -731,7 +732,7 @@ mod tests {
             LobbyClientMessage::ClientHello {
                 client_version: "0.1.0".into(),
                 build_commit: "abc".into(),
-                protocol_version: 6,
+                protocol_version: 7,
             },
             env,
         );

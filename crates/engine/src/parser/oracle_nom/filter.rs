@@ -102,6 +102,7 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::FaceDown, tag("face down")),
         value(FilterProp::Unblocked, tag("unblocked")),
         value(FilterProp::Suspected, tag("suspected")),
+        value(FilterProp::Renowned, tag("renowned")),
         value(FilterProp::EnchantedBy, tag("enchanted")),
         value(FilterProp::EquippedBy, tag("equipped")),
         parse_color_property,
@@ -209,7 +210,12 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
 /// - postfix: `N or less` / `N or greater` (literal or X thresholds).
 fn parse_pt_comparison_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExpr)> {
     let input = input.trim_start();
-    alt((parse_pt_infix_tail, parse_pt_postfix_tail)).parse(input)
+    alt((
+        parse_pt_infix_tail,
+        parse_pt_postfix_tail,
+        parse_pt_exact_tail,
+    ))
+    .parse(input)
 }
 
 /// Infix form: "less than [or equal to] <qty>" / "greater than [or equal to] <qty>".
@@ -261,6 +267,13 @@ fn parse_pt_postfix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityE
         map(tag("or greater"), move |_| (Comparator::GE, value.clone())),
     ))
     .parse(rest)
+}
+
+/// Exact form: "<qty>".
+fn parse_pt_exact_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExpr)> {
+    let input = input.trim_start();
+    let (rest, value) = parse_quantity_expr_number(input)?;
+    Ok((rest, (Comparator::EQ, value)))
 }
 
 /// Parse "a +1/+1 counter" / "a -1/-1 counter" from a "with" clause.
@@ -400,6 +413,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_property_filter_renowned() {
+        let (rest, p) = parse_property_filter("renowned creature").unwrap();
+        assert_eq!(p, FilterProp::Renowned);
+        assert_eq!(rest, " creature");
+    }
+
+    #[test]
     fn test_parse_property_filter_failure() {
         assert!(parse_property_filter("flying").is_err());
     }
@@ -476,6 +496,21 @@ mod tests {
                         value: QuantityExpr::Fixed { value: 1 },
                     },
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_exact_base_power() {
+        let (rest, p) = parse_with_property("with base power 1").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Base,
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Fixed { value: 1 },
             }
         );
     }

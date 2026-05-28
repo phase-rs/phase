@@ -260,14 +260,19 @@ impl GameSession {
             MatchConfig::default()
         };
         // Preserve sandbox seeding through rematch — the format flag is
-        // immutable, so debug capability survives the new game.
+        // immutable, so debug capability survives the new game. Every seat
+        // is permitted by default (see initial create site for rationale);
+        // explicit revocations from the previous game are dropped at rematch
+        // since the new game is a fresh debug context.
         if self.state.format_config.allow_debug_actions {
             self.state.debug_mode = true;
-            self.state.debug_permitted.insert(PlayerId(0));
+            for i in 0..player_count {
+                self.state.debug_permitted.insert(PlayerId(i));
+            }
         }
     }
 
-    pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta) {
+    pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta, db: &CardDatabase) {
         let old_player_count = self.player_count;
         let new_player_count = new_state.seats.len() as u8;
 
@@ -351,8 +356,37 @@ impl GameSession {
             }
         }
 
-        for &(seat_idx, _, ref deck) in &delta.new_ai {
-            self.decks[seat_idx as usize] = Some(deck.clone());
+        // SeatDelta carries name-only `PlayerDeckList` (see DeckResolver docs);
+        // server-core's `self.decks` stores the fully-resolved `PlayerDeckPayload`
+        // because `start_game` and the broadcast paths consume that shape.
+        // Resolve at the boundary using the live `CardDatabase`. `resolve_deck`
+        // takes a `DeckData` which has the same shape as `PlayerDeckList`.
+        for (seat_idx, _, ref deck) in &delta.new_ai {
+            let deck_data = crate::starter_decks::DeckData {
+                main_deck: deck.main_deck.clone(),
+                sideboard: deck.sideboard.clone(),
+                commander: deck.commander.clone(),
+                bracket_tier: deck.bracket_tier,
+            };
+            // The resolver (`ServerDeckResolver::resolve` in phase-server)
+            // has already validated these names against the same `db`, so
+            // this should never error in practice. The `Err` arm exists as
+            // defense-in-depth — if it does fire, log loudly: `start_game`
+            // below would otherwise substitute an empty deck and silently
+            // eliminate the player on their first draw step (CR 704.5b).
+            self.decks[*seat_idx as usize] = match crate::resolve_deck(db, &deck_data) {
+                Ok(payload) => Some(payload),
+                Err(err) => {
+                    warn!(
+                        seat = *seat_idx,
+                        error = %err,
+                        "AI deck failed re-resolution at apply_seat_delta despite \
+                         passing the resolver gate; seat will start with an empty \
+                         library — investigate the resolver/DB mismatch",
+                    );
+                    None
+                }
+            };
         }
         for &seat_idx in &delta.removed_ai {
             if seat_idx as usize >= self.decks.len() {
@@ -621,11 +655,15 @@ impl SessionManager {
         // Sandbox capability: the engine-level `debug_mode` gate must agree
         // with the transport-level `allow_debug_actions` flag, otherwise a
         // sandbox-permitted action would pass the server gate only to be
-        // rejected inside `apply`. The host (PlayerId(0)) is seeded as the
-        // sole holder of debug permission; they grant/revoke for others.
+        // rejected inside `apply`. Every seat is permitted by default — a
+        // sandbox is a shared playground, not an admin console. The host's
+        // grant/revoke flow remains (for the rare "kick this seat out of
+        // debug" case) but is no longer the gate for normal sandbox use.
         if state.format_config.allow_debug_actions {
             state.debug_mode = true;
-            state.debug_permitted.insert(PlayerId(0));
+            for i in 0..player_count {
+                state.debug_permitted.insert(PlayerId(i));
+            }
         }
 
         let session = GameSession {
@@ -1006,8 +1044,20 @@ impl SessionManager {
         // Mana abilities skip the legal_actions pre-check — they are excluded from
         // legal_actions() for auto-pass purposes but validated by apply() directly.
         // SetAutoPass also skips (always legal when you have priority).
-        let skip_legality =
-            action.is_mana_ability() || matches!(action, GameAction::SetAutoPass { .. });
+        // Scry/surveil keep-on-top selections (CR 701.22a / CR 701.25a) also skip:
+        // their legal set is every duplicate-free subset in any order, which cannot
+        // be enumerated as candidate actions — apply() validates the submitted
+        // selection structurally instead (see handle_resolution_choice). The
+        // engine owns this classification via accepts_freeform_card_selection.
+        let skip_legality = action.is_mana_ability()
+            || matches!(action, GameAction::SetAutoPass { .. })
+            || (matches!(action, GameAction::SelectCards { .. })
+                && session.state.waiting_for.accepts_freeform_card_selection())
+            || (matches!(action, GameAction::ChooseCounterMoveDistribution { .. })
+                && session
+                    .state
+                    .waiting_for
+                    .accepts_freeform_counter_move_distribution());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
             if !legal_actions.contains(&action) {
@@ -1492,14 +1542,17 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_game_seeds_host_in_debug_permitted() {
+    fn sandbox_game_seeds_all_seats_in_debug_permitted() {
+        // Sandbox is a shared playground: every seat is permitted by default
+        // so any participant can drive debug tools without an admin gate.
         let mut mgr = SessionManager::new();
         let (code, _token) = create_sandbox_game(&mut mgr);
         let session = mgr.sessions.get(&code).unwrap();
         assert!(session.state.format_config.allow_debug_actions);
         assert!(session.state.debug_mode);
         assert!(session.state.debug_permitted.contains(&PlayerId(0)));
-        assert_eq!(session.state.debug_permitted.len(), 1);
+        assert!(session.state.debug_permitted.contains(&PlayerId(1)));
+        assert_eq!(session.state.debug_permitted.len(), 2);
     }
 
     #[test]
@@ -1571,12 +1624,25 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_rejects_debug_from_non_host_without_permission() {
+    fn sandbox_rejects_debug_from_revoked_seat() {
+        // Default is "all seats permitted" — a guest is only rejected after
+        // an explicit revoke. This exercises the revoke escape hatch.
         let mut mgr = SessionManager::new();
-        let (code, _host_token) = create_sandbox_game(&mut mgr);
+        let (code, host_token) = create_sandbox_game(&mut mgr);
         let (guest_token, _state) = mgr
             .join_game_with_name(&code, make_deck(), "Guest".to_string())
             .expect("guest joins");
+
+        // Host revokes the guest's default permission.
+        let revoke = mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(1),
+            },
+        );
+        assert!(revoke.is_ok(), "revoke must succeed: {:?}", revoke.err());
+
         let result = mgr.handle_action(
             &code,
             &guest_token,
@@ -1749,5 +1815,153 @@ mod tests {
         // No session state should have been mutated — game_started stays false.
         assert_eq!(session.game_started, game_started_before);
         assert!(!session.game_started);
+    }
+
+    /// CR 701.22a / CR 701.25a: a reordered (and partial-2+) scry keep-on-top
+    /// selection is a legal freeform selection that `select_cards_variants` does
+    /// not enumerate. Before the freeform-skip change it was rejected as
+    /// "Illegal action"; now the server must bypass the candidate gate for these
+    /// states and let `apply()` validate the selection structurally.
+    #[test]
+    fn reordered_scry_selection_is_accepted_not_rejected_as_illegal() {
+        use engine::game::zones::create_object;
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        // Make the scry the responsibility of the NON-active player so that
+        // `authorized_submitter_for_player` is the identity (no turn-decision
+        // re-routing) and authorization is unambiguous.
+        let scry_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if scry_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        // Give the scrying player a known library and put them in a ScryChoice
+        // over its top three cards.
+        let mut top_three = Vec::new();
+        for i in 0..3 {
+            let id = create_object(
+                &mut session.state,
+                CardId(1000 + i),
+                scry_player,
+                format!("Scry Card {i}"),
+                Zone::Library,
+            );
+            top_three.push(id);
+        }
+        let (a, b, c): (ObjectId, ObjectId, ObjectId) = (top_three[0], top_three[1], top_three[2]);
+        session.state.waiting_for = WaitingFor::ScryChoice {
+            player: scry_player,
+            cards: top_three.clone(),
+        };
+        // ScryChoice carries no PendingContinuation here; the resolution handler
+        // tolerates a None continuation (finishes back to priority), so the
+        // action's acceptance through the gate is what this test asserts.
+
+        // Reordered, partial-2 keep: [c, a] (drop b to the bottom). This is NOT
+        // an enumerated candidate, so it would be rejected by the legality gate.
+        let token = token.to_string();
+        let result =
+            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![c, a] });
+        assert!(
+            result.is_ok(),
+            "reordered scry selection should be accepted, got: {result:?}"
+        );
+
+        // The selection was applied: c then a rest on top.
+        let session = mgr.sessions.get(&code).unwrap();
+        let player_idx = scry_player.0 as usize;
+        let library: Vec<ObjectId> = session.state.players[player_idx]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(&library[..2], &[c, a]);
+        assert!(!library[2..].contains(&b) || library.last() == Some(&b));
+    }
+
+    /// A Dig reorder-mode selection (keep all, library-destined, reordered) is a
+    /// non-canonical permutation that the candidate enumerator does not list, so
+    /// pre-fix the server rejected it as "Illegal action". The server must now
+    /// bypass the gate for DigChoice and let `apply()` validate it structurally.
+    #[test]
+    fn reordered_dig_selection_is_accepted_not_rejected_as_illegal() {
+        use engine::game::zones::create_object;
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let dig_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if dig_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        let mut top_three = Vec::new();
+        for i in 0..3 {
+            let id = create_object(
+                &mut session.state,
+                CardId(2000 + i),
+                dig_player,
+                format!("Dig Card {i}"),
+                Zone::Library,
+            );
+            top_three.push(id);
+        }
+        let (a, b, c): (ObjectId, ObjectId, ObjectId) = (top_three[0], top_three[1], top_three[2]);
+        // Reorder mode: keep all three, library-destined — order matters.
+        session.state.waiting_for = WaitingFor::DigChoice {
+            player: dig_player,
+            library_owner: dig_player,
+            cards: top_three.clone(),
+            keep_count: 3,
+            up_to: false,
+            selectable_cards: top_three.clone(),
+            kept_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Library),
+            source_id: None,
+        };
+
+        // Non-canonical permutation [c, a, b] — not an enumerated candidate.
+        let token = token.to_string();
+        let result = mgr.handle_action(
+            &code,
+            &token,
+            GameAction::SelectCards {
+                cards: vec![c, a, b],
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "reordered dig selection should be accepted, got: {result:?}"
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        let library: Vec<ObjectId> = session.state.players[dig_player.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(&library[..3], &[c, a, b]);
     }
 }

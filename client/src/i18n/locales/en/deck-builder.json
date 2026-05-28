@@ -1,0 +1,225 @@
+{
+  "search": {
+    "title": "Search",
+    "subtitle": "Add cards to the current list.",
+    "reset": "Reset",
+    "textPlaceholder": "Search cards...",
+    "allTypes": "All types",
+    "cmcMax": "CMC max:",
+    "sets": "Sets",
+    "addSetPlaceholder": "Add set code...",
+    "addSet": "Add",
+    "removeSet": "Remove {{name}}",
+    "emptyHint": "Add a filter to start browsing",
+    "searching": "Searching...",
+    "searchFailed": "Search failed",
+    "results_one": "{{count}} result",
+    "results_other": "{{count}} results",
+    "browseFormat": {
+      "all": "All cards"
+    }
+  },
+  "filters": {
+    "title": "Filters",
+    "close": "Close filters",
+    "done": "Done",
+    "search": "Search"
+  },
+  "deck": {
+    "backToDeck": "Back to deck",
+    "listView": "List view",
+    "stackView": "Stack view"
+  },
+  "tabs": {
+    "ariaLabel": "Deck builder surface",
+    "deck": "Deck",
+    "info": "Info"
+  },
+  "toolbar": {
+    "menu": "Menu",
+    "deckBuilder": "Deck Builder",
+    "untitledDeck": "Untitled Deck",
+    "deckName": "Deck name",
+    "format": "Format",
+    "bracket": "Bracket",
+    "saved": "Saved ✓",
+    "clone": "Clone",
+    "cloneTitle": "Save a copy under a new name",
+    "loadDeck": "Load deck...",
+    "nameToSave": "Name the deck to save it"
+  },
+  "unsaved": {
+    "title": "Unsaved changes",
+    "dismiss": "Dismiss dialog",
+    "bodyLeaving": "You have unsaved changes to this deck. Save them before leaving?",
+    "bodyLoading": "You have unsaved changes to this deck. Save them before loading another deck?",
+    "discard": "Discard",
+    "saveAndContinue": "Save & continue"
+  },
+  "card": {
+    "moveToSideboard": "Move one {{name}} to sideboard",
+    "moveToMain": "Move one {{name}} to main deck",
+    "moveToTarget": "Move one {{name}} to {{target}}",
+    "removeOne": "Remove one {{name}}",
+    "makeCommander": "Make {{name}} the commander",
+    "makeCommanderTitle": "Make this my commander",
+    "chooseArtFor": "Choose art for {{name}}",
+    "alternateArtTap": "Alternate art available — tap to choose",
+    "alternateArtRightClick": "Alternate art available — right-click to choose",
+    "unsupportedExpand_one": "{{count}} unsupported mechanic; expand details",
+    "unsupportedExpand_other": "{{count}} unsupported mechanics; expand details",
+    "unsupportedTitle_one": "{{count}} unsupported mechanic — click to expand",
+    "unsupportedTitle_other": "{{count}} unsupported mechanics — click to expand"
+  },
+  "grid": {
+    "allFormats": "All",
+    "addCard": "Add {{name}}",
+    "notLegal": "{{name}} - Not {{format}} legal",
+    "notFormat": "Not {{format}}"
+  },
+  "deckList": {
+    "currentList": "Current List",
+    "import": "Import",
+    "importTitle": "Import deck from text (MTGA or .dck format)",
+    "export": "Export",
+    "exportTitle": "Export deck",
+    "mainTab": "Main ({{count}})",
+    "sideboardTab": "Sideboard ({{count}})",
+    "maybeboardTab": "Maybeboard ({{count}})",
+    "mainName": "Main",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
+    "mainDeckHeading_one": "Main Deck ({{count}} card)",
+    "mainDeckHeading_other": "Main Deck ({{count}} cards)",
+    "sideboardUnlimited": "Sideboard ({{count}})",
+    "sideboardLimited": "Sideboard ({{count}}/{{max}})",
+    "maybeboard": "Maybeboard ({{count}})",
+    "sideboardExceeds": "Sideboard exceeds {{max}}-card limit",
+    "sideboardEmptyHint": "Tap → Sideboard on a deck card to move it here.",
+    "maybeboardEmptyHint": "Cards you're considering. Tap → Maybeboard on a deck card to park one here.",
+    "group": {
+      "Creatures": "Creatures",
+      "Spells": "Spells",
+      "Lands": "Lands"
+    },
+    "importModalTitle": "Import Deck",
+    "pastePlaceholder": "Paste deck list (MTGA or .dck format)...",
+    "fromFile": "From File",
+    "parse": "Parse",
+    "exportModalTitle": "Export Deck",
+    "saveToFile": "Save to File",
+    "copied": "Copied!",
+    "copy": "Copy",
+    "commanderHeading": "Commander",
+    "removeCommander": "Remove {{name}} as commander"
+  },
+  "moveList": {
+    "empty": "Empty"
+  },
+  "stack": {
+    "deckView": "Deck View",
+    "visualDeckStack": "Visual Deck Stack",
+    "mainBadge": "Main {{count}}",
+    "sideboardBadge": "Sideboard {{count}}",
+    "maybeboardBadge": "Maybeboard {{count}}",
+    "mainName": "Main",
+    "sideboardName": "Sideboard",
+    "maybeboardName": "Maybeboard",
+    "emptyHint": "Added cards will appear here as a staggered stack.",
+    "commanderBadge": "Commander",
+    "commanderLane": "Commander",
+    "mainDeckLane": "Main Deck",
+    "noCommander": "No commander selected.",
+    "mainEmpty": "Main deck cards will appear here.",
+    "cardCount_one": "{{count}} card",
+    "cardCount_other": "{{count}} cards",
+    "mainSideBadge": "{{main}} main + {{side}} side",
+    "mainMaybeBadge": "{{main}} main + {{side}} maybe",
+    "groupCards_one": "{{count}} card",
+    "groupCards_other": "{{count}} cards",
+    "group": {
+      "Creatures": "Creatures",
+      "Spells": "Spells",
+      "Lands": "Lands"
+    },
+    "sideboardGroup": "Sideboard",
+    "maybeboardGroup": "Maybeboard",
+    "addOne": "Add one {{name}}",
+    "copyLimit": "{{name}} is at the copy limit",
+    "removeOne": "Remove one {{name}}",
+    "removeCommander": "Remove {{name}} as commander"
+  },
+  "printingPicker": {
+    "title": "Choose Art",
+    "noPrintings": "No alternate printings available for this card.",
+    "filterPlaceholder": "Filter by set or collector number…",
+    "filterAriaLabel": "Filter printings",
+    "count_one": "{{count}} printing",
+    "count_other": "{{count}} printings",
+    "countMatching_one": "{{count}} printing matching “{{query}}”",
+    "countMatching_other": "{{count}} printings matching “{{query}}”",
+    "useDefault": "Use Default",
+    "noMatches": "No printings match your filter.",
+    "noImage": "No image",
+    "showMore_one": "Show more ({{count}} remaining)",
+    "showMore_other": "Show more ({{count}} remaining)"
+  },
+  "stats": {
+    "formatLegality": "Format Legality",
+    "engineCoverage": "Engine Coverage",
+    "unsupportedTitle": "Unsupported:\n{{list}}"
+  },
+  "commanderPanel": {
+    "heading": "Commander",
+    "noCommander": "No commander selected",
+    "remove": "Remove",
+    "identity": "Identity:",
+    "setAsCommander": "Set as commander:",
+    "cardCount": "{{count}}/{{expected}} cards",
+    "singletonViolations": "Singleton violations: {{cards}}",
+    "colorViolations": "Color identity violations: {{cards}}"
+  },
+  "manaCurve": {
+    "title": "Mana Curve",
+    "colors": "Colors"
+  },
+  "legality": {
+    "legal": "Legal",
+    "banned": "Banned",
+    "restricted": "Restricted",
+    "notLegal": "Not Legal"
+  },
+  "contextMenu": {
+    "chooseArt": "Choose Art…",
+    "noAlternates": "No alternate printings",
+    "clearOverride": "Clear Art Override"
+  },
+  "bracket": {
+    "unavailable": "Bracket estimation isn't available in this build.",
+    "addCommander": "Add a commander to see your bracket estimate.",
+    "estimated": "Estimated: B{{tier}} {{label}}",
+    "manual": "Manual: B{{tier}} {{label}}",
+    "mismatch": " ⚠ mismatch",
+    "hideBreakdown": "Hide breakdown",
+    "showBreakdown": "Show breakdown",
+    "hideBreakdownButton": "▲ Hide breakdown",
+    "showBreakdownButton": "▼ Show breakdown",
+    "forced": "(forced B{{tier}})",
+    "dataVersion": "Data: {{version}}",
+    "aboutBrackets": "About brackets ↗",
+    "estimatedChip": "Estimated: B{{tier}}",
+    "estimatedChipFull": "Estimated bracket: B{{tier}} {{label}}"
+  },
+  "bracketPicker": {
+    "ariaLabel": "Deck bracket",
+    "unrated": "Unrated"
+  },
+  "warnings": {
+    "commanderCount": "Deck has {{count}} cards (need exactly {{expected}})",
+    "singleton": "{{name}}: multiple copies (singleton format)",
+    "colorIdentity": "{{name}}: outside commander color identity",
+    "minimumCount": "Deck has {{count}} cards (minimum 60)",
+    "maxCopies": "{{name}}: {{count}} copies (max 4)",
+    "companionInMain": "{{name}} is your companion but is also in the main deck — this violates its deckbuilding condition. Remove it from the main deck to use it as a companion."
+  }
+}

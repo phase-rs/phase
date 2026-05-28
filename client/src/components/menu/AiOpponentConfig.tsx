@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
-import { AI_DIFFICULTIES, getAiDifficultyLabel, type AIDifficulty } from "../../constants/ai";
+import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { filterByBracket, useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { anyAiOpponentIsCedh, applyCedhCascade, CEDH_BRACKET, CEDH_DIFFICULTY } from "../../services/cedhLock";
@@ -54,29 +55,13 @@ function archetypeAccent(a: DeckArchetype | null): string {
   }
 }
 
-/** Ordinal suffix for a 1-based seat index. Used in multi-AI headers
- *  ("Opponent 1", "Opponent 2") to give each row a stable identity. */
-function opponentLabel(index: number): string {
-  return `Opponent ${index + 1}`;
-}
-
-function sourceLabel(candidate: AiDeckCandidate): string {
-  switch (candidate.source.type) {
-    case "saved":
-      return candidate.source.feedId ? "Feed" : "User";
-    case "feed":
-      return candidate.source.feedId;
-    case "precon":
-      return "Precon";
-  }
-}
-
 export function AiOpponentConfig({
   selectedFormat,
   selectedMatchType,
   opponentCount = 1,
   onCandidateCountChange,
 }: Props) {
+  const { t } = useTranslation("menu");
   const aiSeats = usePreferencesStore((s) => s.aiSeats);
   const setAiSeatDifficulty = usePreferencesStore((s) => s.setAiSeatDifficulty);
   const setAiSeatDeckId = usePreferencesStore((s) => s.setAiSeatDeckId);
@@ -196,9 +181,9 @@ export function AiOpponentConfig({
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-indigo-200">
-          {isMulti ? `AI Opponents (${opponentCount})` : "AI Opponent"}
+          {isMulti ? t("aiOpponent.headingMulti", { count: opponentCount }) : t("aiOpponent.heading")}
         </span>
-        {loading && <span className="text-[10px] text-slate-500">Analyzing decks…</span>}
+        {loading && <span className="text-[10px] text-slate-500">{t("aiOpponent.analyzingDecks")}</span>}
       </div>
 
       {cedhCascadeNotice && (
@@ -230,23 +215,23 @@ export function AiOpponentConfig({
 
       {!loading && candidates.length === 0 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-          No legal AI decks are available for this format.
+          {t("aiOpponent.noLegalDecks")}
         </div>
       )}
 
       {error && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-          AI deck catalog unavailable: {error}
+          {t("aiOpponent.catalogUnavailable", { error })}
         </div>
       )}
 
       {/* Global pool filters — apply to every seat set to Random. */}
       <div className="mt-1 flex flex-col gap-3 rounded-lg border border-white/5 bg-black/20 px-3 py-2.5">
         <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-          Random Pool Filters
+          {t("aiOpponent.randomPoolFilters")}
         </div>
         <label className="flex flex-col gap-1">
-          <span className="text-xs text-slate-400">Archetype</span>
+          <span className="text-xs text-slate-400">{t("aiOpponent.archetype")}</span>
           <select
             value={archetypeFilter}
             onChange={(e) => setArchetypeFilter(e.target.value as AiArchetypeFilter)}
@@ -264,7 +249,7 @@ export function AiOpponentConfig({
 
         <label className="flex flex-col gap-1">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-slate-400">Card Coverage</span>
+            <span className="text-xs text-slate-400">{t("aiOpponent.cardCoverage")}</span>
             <span className="text-sm font-medium text-white">{coverageFloor}%</span>
           </div>
           <input
@@ -277,16 +262,16 @@ export function AiOpponentConfig({
             className="w-full"
           />
           <span className="text-[10px] text-slate-500">
-            Exclude decks below this engine-support threshold
+            {t("aiOpponent.coverageThresholdHint")}
           </span>
         </label>
 
         {selectedFormat === "Commander" && (
           <div className="flex flex-col gap-1">
-            <span className="text-xs text-slate-400">Bracket</span>
+            <span className="text-xs text-slate-400">{t("aiOpponent.bracket")}</span>
             <BracketFilter selected={bracketFilter} onChange={setBracketFilter} />
             <span className="text-[10px] text-slate-500">
-              Random AI picks from these brackets. Untagged decks are excluded when filtering.
+              {t("aiOpponent.bracketHint")}
             </span>
           </div>
         )}
@@ -318,6 +303,7 @@ function AiSeatPanel({
   onDeckChange,
   onDifficultyChange,
 }: AiSeatPanelProps) {
+  const { t } = useTranslation("menu");
   const isRandom = seat.deckId === AI_DECK_RANDOM;
   // When the user has pinned a deck, expose the full list so they can switch
   // to another pinned deck; otherwise scope to the filtered Random pool so
@@ -326,20 +312,33 @@ function AiSeatPanel({
   const selectionValid = isRandom || deckOptions.some((d) => d.id === seat.deckId);
   const effectiveSelection: AiDeckSelection = selectionValid ? seat.deckId : AI_DECK_RANDOM;
 
+  const sourceLabel = (candidate: AiDeckCandidate): string => {
+    switch (candidate.source.type) {
+      case "saved":
+        return candidate.source.feedId ? t("aiOpponent.source.feed") : t("aiOpponent.source.user");
+      case "feed":
+        return candidate.source.feedId;
+      case "precon":
+        return t("aiOpponent.source.precon");
+    }
+  };
+
   const selectedCandidate = candidates.find((d) => d.id === seat.deckId);
-  const summaryDeck = isRandom ? `Random (${filteredDecks.length})` : (selectedCandidate?.name ?? "Random");
-  const summaryDifficulty = getAiDifficultyLabel(seat.difficulty);
+  const summaryDeck = isRandom
+    ? t("aiOpponent.deckRandomCount", { count: filteredDecks.length })
+    : (selectedCandidate?.name ?? t("aiOpponent.deckRandom"));
+  const summaryDifficulty = t(`aiDifficulty.levels.${seat.difficulty}`);
 
   const body = (
     <div className="flex flex-col gap-2.5 px-3 pb-3 pt-1">
       <label className="flex flex-col gap-1">
-        <span className="text-xs text-slate-400">Deck</span>
+        <span className="text-xs text-slate-400">{t("aiOpponent.deck")}</span>
         <select
           value={effectiveSelection}
           onChange={(e) => onDeckChange(e.target.value as AiDeckSelection)}
           className="rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white"
         >
-          <option value={AI_DECK_RANDOM}>Random ({filteredDecks.length})</option>
+          <option value={AI_DECK_RANDOM}>{t("aiOpponent.deckRandomCount", { count: filteredDecks.length })}</option>
           {deckOptions.map((d) => {
             const suffix = [sourceLabel(d), d.archetype, d.coveragePct != null ? `${d.coveragePct}%` : null]
               .filter(Boolean)
@@ -355,7 +354,7 @@ function AiSeatPanel({
       </label>
 
       <label className="flex flex-col gap-1">
-        <span className="text-xs text-slate-400">Difficulty</span>
+        <span className="text-xs text-slate-400">{t("aiOpponent.difficulty")}</span>
         <div className="relative">
           <select
             value={seat.difficulty}
@@ -364,7 +363,7 @@ function AiSeatPanel({
           >
             {AI_DIFFICULTIES.map((item) => (
               <option key={item.id} value={item.id}>
-                {item.label}
+                {t(`aiDifficulty.levels.${item.id}`)}
               </option>
             ))}
           </select>
@@ -394,7 +393,7 @@ function AiSeatPanel({
         className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-white/4"
       >
         <div className="flex min-w-0 flex-col">
-          <span className="text-xs font-semibold text-slate-200">{opponentLabel(index)}</span>
+          <span className="text-xs font-semibold text-slate-200">{t("aiOpponent.opponentLabel", { number: index + 1 })}</span>
           <span className="truncate text-[11px] text-slate-400">
             {summaryDeck} · {summaryDifficulty}
           </span>

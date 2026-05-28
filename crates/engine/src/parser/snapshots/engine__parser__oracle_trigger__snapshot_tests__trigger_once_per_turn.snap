@@ -32,7 +32,7 @@ expression: def
     "type_filters": [
       "Creature"
     ],
-    "controller": null,
+    "controller": "You",
     "properties": []
   },
   "origin": null,

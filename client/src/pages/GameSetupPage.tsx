@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
@@ -23,9 +24,9 @@ import { BRACKET_LABEL } from "../types/bracket";
 import { anyAiOpponentIsCedh, isDeckCedhLegal } from "../services/cedhLock";
 import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
+import { useCardDataStore } from "../stores/cardDataStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
-import { disposeCompatibilityWorker } from "../services/deckCompatibility";
 
 // --- Format trigger styling ---
 //
@@ -46,10 +47,19 @@ const GROUP_DOT_TONE: Record<FormatGroup, string> = {
 // --- Component ---
 
 export function GameSetupPage() {
+  const { t } = useTranslation("game");
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
   useAudioContext("menu");
+
+  // Warm the shared card DB on mount so deck compat checks below are instant.
+  // Idempotent — a no-op if the menu already warmed; closes the deep-link hole
+  // when navigating straight to /setup.
+  const cardStatus = useCardDataStore((s) => s.status);
+  useEffect(() => {
+    void useCardDataStore.getState().warm();
+  }, []);
 
   // Format picker modal -- opened by the hero chip below the title. Mobile
   // gets a full-screen sheet via <ModalPanelShell>; desktop centers it.
@@ -61,7 +71,11 @@ export function GameSetupPage() {
   const [playerCount, setPlayerCount] = useState(2);
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
-  const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
+  // We only ever read the active deck's compat (see `selectedCompat` below),
+  // so MyDecks pushes up just that one entry instead of the entire map. Holding
+  // the full map here previously caused a re-render every time *any* deck's
+  // compat scanner result arrived — ~10/sec storm on the deck-select screen.
+  const [selectedCompat, setSelectedCompat] = useState<DeckCompatibilityResult | null>(null);
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
   const [legalAiDeckCount, setLegalAiDeckCount] = useState<number | null>(null);
   const [setupError, setSetupError] = useState<string | null>(() => {
@@ -88,8 +102,8 @@ export function GameSetupPage() {
       return;
     }
 
-    // Restore last-used format, or default to Standard
-    const fmt = lastFormat && FORMAT_DEFAULTS[lastFormat] ? lastFormat : "Standard";
+    // Restore last-used format, or default to Commander
+    const fmt = lastFormat && FORMAT_DEFAULTS[lastFormat] ? lastFormat : "Commander";
     const defaults = FORMAT_DEFAULTS[fmt];
     setSelectedFormat(fmt);
     setFormatConfig(defaults);
@@ -111,18 +125,27 @@ export function GameSetupPage() {
     setSetupError(null);
   }
 
-  const handleSelectDeck = (name: string) => {
+  // useCallback so the prop identity passed to MyDecks/SavedDeckTile2 stays
+  // stable across this component's re-renders. Without it, every commit here
+  // creates fresh closures, which React 19's profiler explicitly flags on
+  // SavedDeckTile2 as `onTileClick`/`onEditDeck` "Referentially unequal
+  // function closure" — causing all visible deck tiles to re-render on every
+  // parent commit.
+  const handleSelectDeck = useCallback((name: string) => {
     setActiveDeckName(name);
     localStorage.setItem(ACTIVE_DECK_KEY, name);
-  };
+  }, []);
 
-  const handleEditDeck = (name: string) => {
-    const returnTo = `${location.pathname}${location.search}`;
-    const formatParam = selectedFormat ? `&format=${selectedFormat.toLowerCase()}` : "";
-    navigate(
-      `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
-    );
-  };
+  const handleEditDeck = useCallback(
+    (name: string) => {
+      const returnTo = `${location.pathname}${location.search}`;
+      const formatParam = selectedFormat ? `&format=${selectedFormat.toLowerCase()}` : "";
+      navigate(
+        `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
+      );
+    },
+    [location.pathname, location.search, navigate, selectedFormat],
+  );
 
   const handleStartAI = () => {
     if (!activeDeckName || !formatConfig) return;
@@ -145,23 +168,22 @@ export function GameSetupPage() {
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
     saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
     useGameStore.setState({ gameId });
-    // Release the setup-page compatibility worker's full card-DB WASM instance
-    // before the game engine allocates its own — otherwise both are resident at
-    // game init, the peak that traps as "memory access out of bounds" on
-    // low-memory devices. Lazily recreated on the next compatibility check.
-    disposeCompatibilityWorker();
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
     navigate(
       `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
     );
   };
 
-  // Sidebar deck preview
-  const selectedCompat = activeDeckName ? compatibilities[activeDeckName] : undefined;
+  // Sidebar deck preview. `selectedCompat` is now state pushed up from MyDecks
+  // (active-deck-only) rather than derived from a full compatibilities map.
   const noDeckSelected = !activeDeckName;
   const deckBlockedForSelectedFormat = selectedCompat?.selected_format_compatible === false;
   const noLegalAiDecks = legalAiDeckCount === 0;
-  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks;
+  // Block start only while the card DB is actively loading — not on `error`/`idle`,
+  // since initializeGame awaits ensureCardDb itself and an errored warm must not
+  // trap the user on this screen.
+  const cardDataLoading = cardStatus === "loading";
+  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
 
   // cEDH warning: shown when the human deck is not bracket 5 but any AI is cEDH.
   const aiSeats = usePreferencesStore((s) => s.aiSeats);
@@ -191,8 +213,8 @@ export function GameSetupPage() {
       <div className="menu-scene__haze" />
 
       <MenuShell
-        eyebrow="Match Setup"
-        title="Start a match."
+        eyebrow={t("gameSetup.eyebrow")}
+        title={t("gameSetup.title")}
         layout="stacked"
         aside={(() => {
           const meta = selectedFormat ? formatMetadata(selectedFormat) : null;
@@ -206,13 +228,13 @@ export function GameSetupPage() {
                 aria-expanded={formatPickerOpen}
                 aria-label={
                   meta
-                    ? `Format: ${meta.label} (${meta.group}). Tap to change.`
-                    : "Choose match format"
+                    ? t("gameSetup.formatChip.ariaLabel", { label: meta.label, group: meta.group })
+                    : t("gameSetup.formatChip.ariaLabelEmpty")
                 }
                 className="group flex min-h-[48px] items-center gap-3 rounded-[16px] bg-black/18 px-4 py-2.5 ring-1 ring-white/10 transition-colors hover:ring-white/20"
               >
                 <span className="text-[0.62rem] font-medium uppercase tracking-[0.22em] text-slate-500">
-                  Format
+                  {t("gameSetup.formatChip.kicker")}
                 </span>
                 <span className="flex items-center gap-2">
                   <span
@@ -220,7 +242,7 @@ export function GameSetupPage() {
                     aria-hidden="true"
                   />
                   <span className="text-base font-medium text-white">
-                    {meta?.label ?? "Choose format"}
+                    {meta?.label ?? t("gameSetup.formatChip.choosePlaceholder")}
                   </span>
                 </span>
                 <svg
@@ -251,7 +273,7 @@ export function GameSetupPage() {
             onEditDeck={handleEditDeck}
             activeDeckName={activeDeckName}
             bare
-            onCompatibilityUpdate={setCompatibilities}
+            onActiveDeckCompatChange={setSelectedCompat}
           />
 
           {/* Sidebar */}
@@ -267,9 +289,23 @@ export function GameSetupPage() {
                       <div className="h-full w-full animate-pulse bg-gray-800" />
                     )}
                   </div>
-                  <h3 className="mt-3 truncate text-base font-semibold text-white">
-                    {activeDeckName}
-                  </h3>
+                  <div className="mt-3 flex items-center gap-2">
+                    <h3 className="min-w-0 flex-1 truncate text-base font-semibold text-white">
+                      {activeDeckName}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => handleEditDeck(activeDeckName)}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-black/30 text-gray-300 transition-colors hover:bg-indigo-600 hover:text-white"
+                      title={t("gameSetup.deckPreview.editDeck", { name: activeDeckName })}
+                      aria-label={t("gameSetup.deckPreview.editDeck", { name: activeDeckName })}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+                        <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 2.474L6.226 11.16a2.25 2.25 0 0 1-.892.547l-2.115.705a.5.5 0 0 1-.632-.632l.705-2.115a2.25 2.25 0 0 1 .547-.892l7.174-7.346Z" />
+                        <path d="M3.75 13.5a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5Z" />
+                      </svg>
+                    </button>
+                  </div>
                   <div className="mt-1 flex items-center gap-2">
                     <div className="flex gap-1">
                       {colors.map((c) => (
@@ -282,7 +318,7 @@ export function GameSetupPage() {
                         <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
                       )}
                     </div>
-                    <span className="text-xs text-gray-300">{deckCardCount} cards</span>
+                    <span className="text-xs text-gray-300">{t("gameSetup.deckPreview.cardCount", { count: deckCardCount })}</span>
                   </div>
                   {selectedCompat && (
                     <div className="mt-2 flex flex-wrap gap-1">
@@ -292,9 +328,13 @@ export function GameSetupPage() {
                       {selectedCompat.unknown_cards.length > 0 && (
                         <span
                           className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
-                          title={`Unknown cards:\n${selectedCompat.unknown_cards.join("\n")}`}
+                          title={t("gameSetup.deckPreview.unknownCardsTitle", {
+                            cards: selectedCompat.unknown_cards.join("\n"),
+                          })}
                         >
-                          Unknown {selectedCompat.unknown_cards.length}
+                          {t("gameSetup.deckPreview.unknownBadge", {
+                            count: selectedCompat.unknown_cards.length,
+                          })}
                         </span>
                       )}
                     </div>
@@ -302,7 +342,7 @@ export function GameSetupPage() {
                   {deckBlockedForSelectedFormat && (
                     <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                       {selectedCompat.selected_format_reasons[0]
-                        ?? `Deck is not legal in ${selectedFormat}.`}
+                        ?? t("gameSetup.deckNotLegal", { format: selectedFormat })}
                     </div>
                   )}
 
@@ -324,7 +364,7 @@ export function GameSetupPage() {
                   <svg aria-hidden="true" viewBox="0 0 24 24" className="h-10 w-10 fill-current text-slate-600">
                     <path d="M7 3h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm1 3v9h7V6H8Zm-2 15h11v-2H6v2Z" />
                   </svg>
-                  <p className="mt-2 text-sm text-slate-500">Select a deck</p>
+                  <p className="mt-2 text-sm text-slate-500">{t("gameSetup.selectDeckPrompt")}</p>
                 </div>
               )}
 
@@ -335,7 +375,7 @@ export function GameSetupPage() {
               {formatConfig && (
                 <div className="flex flex-col gap-3">
                   <label className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400">Starting Life</span>
+                    <span className="text-xs text-slate-400">{t("gameSetup.config.startingLife")}</span>
                     <input
                       type="number"
                       value={formatConfig.starting_life}
@@ -349,7 +389,7 @@ export function GameSetupPage() {
                   {!formatConfig.team_based && formatConfig.max_players > 2 && (
                     <label className="flex flex-col gap-1">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-400">Players</span>
+                        <span className="text-xs text-slate-400">{t("gameSetup.config.players")}</span>
                         <span className="text-sm font-medium text-white">{playerCount}</span>
                       </div>
                       <input
@@ -398,7 +438,7 @@ export function GameSetupPage() {
                   </div>
 
                   <label className="flex flex-col gap-1">
-                    <span className="text-xs text-slate-400">Who Goes First</span>
+                    <span className="text-xs text-slate-400">{t("gameSetup.config.whoGoesFirst")}</span>
                     <div className="flex overflow-hidden rounded-lg border border-gray-700">
                       {(["random", "play", "draw"] as const).map((opt) => (
                         <button
@@ -411,7 +451,7 @@ export function GameSetupPage() {
                               : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
                           }`}
                         >
-                          {opt}
+                          {t(`gameSetup.config.firstPlayer.${opt}`)}
                         </button>
                       ))}
                     </div>
@@ -419,8 +459,9 @@ export function GameSetupPage() {
 
                   {formatConfig.commander_damage_threshold != null && (
                     <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                      Commander: 100-card singleton, commander damage at{" "}
-                      {formatConfig.commander_damage_threshold}
+                      {t("gameSetup.commanderNote", {
+                        threshold: formatConfig.commander_damage_threshold,
+                      })}
                     </div>
                   )}
                 </div>
@@ -445,7 +486,9 @@ export function GameSetupPage() {
 
               {noLegalAiDecks && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                  Add or import a deck legal in {formatConfig?.format ?? "this format"} for the AI to use.
+                  {formatConfig?.format
+                    ? t("gameSetup.noLegalAiDecks.withFormat", { format: formatConfig.format })
+                    : t("gameSetup.noLegalAiDecks.generic")}
                 </div>
               )}
 
@@ -460,10 +503,12 @@ export function GameSetupPage() {
                   tone: "emerald",
                   size: "lg",
                   disabled: cannotStartAi,
-                  className: "w-full",
+                  className: "w-full whitespace-nowrap px-6",
                 })}
               >
-                Start Match{playerCount > 2 ? ` (${playerCount - 1} opp.)` : ""}
+                {playerCount > 2
+                  ? t("gameSetup.startMatchWithOpponents", { count: playerCount - 1 })
+                  : t("gameSetup.startMatch")}
               </button>
             </MenuPanel>
           </div>
@@ -472,9 +517,9 @@ export function GameSetupPage() {
 
       {formatPickerOpen && (
         <ModalPanelShell
-          eyebrow="Match Setup"
-          title="Choose a format"
-          subtitle="Pick the rules everyone at the table will play by."
+          eyebrow={t("gameSetup.eyebrow")}
+          title={t("gameSetup.formatPicker.title")}
+          subtitle={t("gameSetup.formatPicker.subtitle")}
           onClose={() => setFormatPickerOpen(false)}
           maxWidthClassName="max-w-3xl"
           bodyClassName="overflow-y-auto px-2 py-4 lg:px-6 lg:py-6"

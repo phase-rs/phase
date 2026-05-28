@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import type {
   ManaRestriction,
   ManaSpellGrant,
@@ -32,19 +34,18 @@ type ManaRestrictionTag =
   | "OnlyForXCosts"
   | "ConvokePayment";
 
-// Human-readable tooltip text per restriction variant. Exhaustive `Record` —
-// adding a `ManaRestriction` variant without a tooltip here is a type error.
-const RESTRICTION_LABELS: Record<ManaRestrictionTag, string> = {
-  OnlyForSpellType: "Spend only to cast spells of a specific type",
-  OnlyForCreatureType: "Spend only to cast a creature spell of the chosen type",
-  OnlyForTypeSpellsOrAbilities:
-    "Spend only on spells or abilities of a specific type",
-  OnlyForSpellWithKeywordKind: "Spend only to cast spells with a specific keyword",
-  OnlyForSpellWithKeywordKindFromZone:
-    "Spend only to cast keyword spells from a graveyard",
-  OnlyForActivation: "Spend only to activate abilities",
-  OnlyForXCosts: "Spend only on costs that include {X}",
-  ConvokePayment: "Convoke payment",
+// i18n key (under the `manaPool` group) per restriction variant. Exhaustive
+// `Record` — adding a `ManaRestriction` variant without a tooltip key here is a
+// type error.
+const RESTRICTION_LABEL_KEYS: Record<ManaRestrictionTag, string> = {
+  OnlyForSpellType: "manaPool.onlyForSpellType",
+  OnlyForCreatureType: "manaPool.onlyForCreatureType",
+  OnlyForTypeSpellsOrAbilities: "manaPool.onlyForTypeSpellsOrAbilities",
+  OnlyForSpellWithKeywordKind: "manaPool.onlyForSpellWithKeywordKind",
+  OnlyForSpellWithKeywordKindFromZone: "manaPool.onlyForSpellWithKeywordKindFromZone",
+  OnlyForActivation: "manaPool.onlyForActivation",
+  OnlyForXCosts: "manaPool.onlyForXCosts",
+  ConvokePayment: "manaPool.convokePayment",
 };
 
 function restrictionTag(restriction: ManaRestriction): ManaRestrictionTag {
@@ -79,6 +80,7 @@ interface ManaPoolSummaryProps {
 }
 
 export function ManaPoolSummary({ playerId }: ManaPoolSummaryProps) {
+  const { t } = useTranslation("game");
   const manaUnits = useGameStore(
     (s) => s.gameState?.players[playerId]?.mana_pool.mana ?? EMPTY_MANA,
   );
@@ -122,9 +124,9 @@ export function ManaPoolSummary({ playerId }: ManaPoolSummaryProps) {
         const special =
           group.restrictions.length > 0 || group.grants.length > 0;
         const tooltipParts = group.restrictions.map(
-          (r) => RESTRICTION_LABELS[restrictionTag(r)],
+          (r) => t(RESTRICTION_LABEL_KEYS[restrictionTag(r)]),
         );
-        if (group.grants.length > 0) tooltipParts.push("Grants a property to the spell");
+        if (group.grants.length > 0) tooltipParts.push(t("manaPool.grantsProperty"));
         const title = special ? tooltipParts.join("; ") : undefined;
         return (
           <span

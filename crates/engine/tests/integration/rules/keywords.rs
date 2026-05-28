@@ -1,6 +1,107 @@
 #![allow(unused_imports)]
 use super::*;
 
+fn plus_one_counters(runner: &GameRunner, id: ObjectId) -> Option<u32> {
+    runner
+        .state()
+        .objects
+        .get(&id)?
+        .counters
+        .get(&engine::types::counter::CounterType::Plus1Plus1)
+        .copied()
+}
+
+fn add_renown_creature(scenario: &mut GameScenario, name: &str, n: u32) -> ObjectId {
+    let oracle = format!("Renown {n}");
+    let mut builder = scenario.add_creature(P0, name, 2, 2);
+    builder.from_oracle_text_with_keywords(&["Renown"], &oracle);
+    builder.id()
+}
+
+/// CR 702.112a: Renown N triggers on combat damage to a player, puts N +1/+1
+/// counters on the creature, and gives it the renowned designation.
+#[test]
+fn renown_combat_damage_adds_counters_and_designation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_id = add_renown_creature(&mut scenario, "Valeron Bear", 2);
+    let mut runner = scenario.build();
+
+    run_combat(&mut runner, vec![attacker_id], vec![]);
+    runner.advance_until_stack_empty();
+
+    let attacker = runner
+        .state()
+        .objects
+        .get(&attacker_id)
+        .expect("attacker remains on battlefield");
+    assert!(attacker.is_renowned);
+    assert_eq!(plus_one_counters(&runner, attacker_id), Some(2));
+    assert_eq!(runner.life(P1), 18, "combat damage still resolves normally");
+}
+
+/// CR 702.112a / CR 603.4: the intervening-if condition suppresses Renown
+/// once the creature is already renowned.
+#[test]
+fn already_renowned_creature_does_not_renown_again() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_id = add_renown_creature(&mut scenario, "Veteran Renown Bear", 2);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&attacker_id)
+        .unwrap()
+        .is_renowned = true;
+
+    run_combat(&mut runner, vec![attacker_id], vec![]);
+    runner.advance_until_stack_empty();
+
+    let attacker = runner
+        .state()
+        .objects
+        .get(&attacker_id)
+        .expect("attacker remains on battlefield");
+    assert!(attacker.is_renowned);
+    assert_eq!(plus_one_counters(&runner, attacker_id), None);
+    assert_eq!(runner.life(P1), 18, "combat damage still resolves normally");
+}
+
+/// CR 702.112b + CR 603.2: effects that trigger when a creature becomes
+/// renowned must see the Renown resolution event.
+#[test]
+fn become_renowned_observer_triggers_from_renown_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_id = add_renown_creature(&mut scenario, "Observed Renown Bear", 1);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Valeron Wardens",
+        1,
+        3,
+        "Whenever a creature you control becomes renowned, draw a card.",
+    );
+    scenario.add_card_to_library_top(P0, "Drawn Card");
+    let mut runner = scenario.build();
+
+    run_combat(&mut runner, vec![attacker_id], vec![]);
+    runner.advance_until_stack_empty();
+
+    let p0 = &runner.state().players[P0.0 as usize];
+    assert_eq!(plus_one_counters(&runner, attacker_id), Some(1));
+    assert_eq!(
+        p0.hand.len(),
+        1,
+        "observer trigger should draw exactly one card"
+    );
+    let drawn_id = p0.hand[0];
+    assert_eq!(
+        runner.state().objects.get(&drawn_id).unwrap().name,
+        "Drawn Card"
+    );
+}
+
 /// CR 702.2c + CR 702.19b: Deathtouch + trample assigns lethal (1) to each blocker, tramples rest
 #[test]
 fn deathtouch_trample_assigns_one_to_blocker_tramples_rest() {

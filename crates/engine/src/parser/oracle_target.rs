@@ -7,9 +7,10 @@ use nom::multi::many0;
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, Comparator, ControllerRef, FilterProp, ObjectProperty,
-    ObjectScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter,
-    TargetSelectionMode, TypeFilter, TypedFilter,
+    AggregateFunction, AttachmentKind, CombatRelation, CombatRelationSubject, Comparator,
+    ControllerRef, FilterProp, ObjectProperty, ObjectScope, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -104,6 +105,10 @@ pub(crate) fn parse_word_bounded<'a>(
             nom::error::ErrorKind::Fail,
         ))),
     }
+}
+
+fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    parse_word_bounded(input, "cards").or_else(|_| parse_word_bounded(input, "card"))
 }
 
 /// Parse an event-context possessive reference from Oracle text.
@@ -768,13 +773,13 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         let has_type_card =
             if let Ok((after_type, _)) = nom_target::parse_type_filter_word(type_start) {
                 let after_type = after_type.trim_start();
-                after_type.starts_with("card") || after_type.is_empty()
+                parse_card_or_cards_word(after_type).is_ok() || after_type.is_empty()
             } else {
                 false
             };
 
         // Also check bare "card"/"cards" (e.g., "the enchanted card")
-        let is_bare_card = type_start.starts_with("card");
+        let is_bare_card = parse_card_or_cards_word(type_start).is_ok();
 
         if has_type_card || is_bare_card {
             // Find end of "card"/"cards"
@@ -785,14 +790,9 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             } else {
                 type_start
             };
-            let rest_after_card =
-                if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("cards").parse(card_start) {
-                    r
-                } else if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("card").parse(card_start) {
-                    r
-                } else {
-                    card_start
-                };
+            let rest_after_card = parse_card_or_cards_word(card_start)
+                .map(|(r, _)| r)
+                .unwrap_or(card_start);
             let consumed = lower.len() - rest_after_card.len();
             return (TargetFilter::ParentTarget, &text[consumed..]);
         }
@@ -1287,6 +1287,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 702.112b: "renowned" is a permanent designation used as an adjective
+    // in filters like "renowned creature you control".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(&lower[pos..]) {
+        if starts_with_type_phrase_lead(rest) {
+            properties.push(FilterProp::Renowned);
+            pos += lower[pos..].len() - rest.len();
+        }
+    }
+
     // CR 700.6: "historic" adjective prefix. An object is historic if it has
     // the legendary supertype, the artifact card type, or the Saga subtype.
     // Emits FilterProp::Historic (a first-class typed predicate — see
@@ -1556,6 +1565,11 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    if let Some((prop, consumed)) = parse_combat_relation_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // CR 205.3a: Comma-separated type lists ("artifacts, creatures, and lands") are
     // syntactic sugar for set-union, same as "and" between two types.
     let rest_lower = lower[pos..].trim_start();
@@ -1597,6 +1611,26 @@ pub fn parse_type_phrase_with_ctx<'a>(
     pos +=
         parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller, ctx);
 
+    // Grammar normalization: strip the distributive-"each" linker between a
+    // collective type word and a per-object property suffix —
+    // "creatures, each with power 1 or less" /
+    // "creatures, each with base power or toughness 1 or less" (Angelic
+    // Aberration class; #967). Consuming the entire `, [space]each ` token
+    // normalizes the remaining input to the bare suffix form ("with …") so
+    // that all downstream suffix parsers (power/toughness via CR 208,
+    // mana-value via CR 202.3, counters via CR 122.1, keywords via CR 702)
+    // receive the same input regardless of whether the Oracle text used the
+    // distributive linker or the comma-less phrasing.
+    if let Ok((rem, _)) = (
+        tag::<_, _, OracleError<'_>>(","),
+        opt(tag::<_, _, OracleError<'_>>(" ")),
+        tag::<_, _, OracleError<'_>>("each "),
+    )
+        .parse(&lower[pos..])
+    {
+        pos += lower[pos..].len() - rem.len();
+    }
+
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..], ctx) {
         properties.push(prop);
@@ -1604,7 +1638,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     }
 
     // Check "with power N or less/greater" suffix
-    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..]) {
+    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
         properties.push(prop);
         pos += consumed;
     }
@@ -1987,6 +2021,12 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             return true;
         }
     }
+    // CR 702.112b: "renowned <type>" adjective phrase leads a type phrase.
+    if let Ok((after_renowned, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(text) {
+        if starts_with_type_phrase_lead(after_renowned) {
+            return true;
+        }
+    }
     // CR 700.6: "historic <type>" adjective phrase leads a type phrase
     // (e.g., "historic permanents you control"). Consume the adjective and
     // verify a type word follows so the comma/and-list recursion can continue
@@ -2137,6 +2177,8 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
         prop,
         // CR 700.4 + CR 700.9: "modified [type]" adjective prefix.
         FilterProp::Modified
+            // CR 702.112b: "renowned [type]" adjective prefix.
+            | FilterProp::Renowned
             // CR 700.6: "historic [type]" adjective prefix.
             | FilterProp::Historic
             // CR 303.4 + CR 301.5: "enchanted [type]" / "equipped [type]".
@@ -2337,6 +2379,22 @@ fn parse_token_suffix(text: &str) -> Option<usize> {
     None
 }
 
+fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>(" blocking or blocked by target "),
+        tag("creature"),
+    )
+        .parse(text)
+        .ok()?;
+    Some((
+        FilterProp::CombatRelation {
+            relation: CombatRelation::BlockingOrBlockedBy,
+            subject: CombatRelationSubject::ParentTarget,
+        },
+        text.len() - rest.len(),
+    ))
+}
+
 /// Parse a color adjective prefix: "white ", "blue ", "black ", "red ", "green ".
 /// Returns (FilterProp::HasColor, bytes consumed including trailing space).
 ///
@@ -2429,7 +2487,7 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
 /// into the byte-offset return contract this call site expects. Used by Arnyn
 /// Deathbloom Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail,
 /// etc.
-fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
+fn parse_power_suffix(text: &str, ctx: &mut ParseContext) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
 
     // CR 509.1b: "with greater power" — relative to the source object. This is
@@ -2437,6 +2495,12 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     // P/T-comparison combinator, so it is handled here.
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("with greater power").parse(trimmed) {
         return Some((FilterProp::PowerGTSource, text.len() - after.len()));
+    }
+
+    if let Some((prop @ FilterProp::PtComparison { .. }, consumed)) =
+        parse_superlative_property_suffix(text, ctx)
+    {
+        return Some((prop, consumed));
     }
 
     // Delegate the full P/T-comparison grammar to the canonical combinator. It
@@ -2447,22 +2511,76 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     Some((prop, text.len() - rest.len()))
 }
 
-/// CR 202.3 + CR 608.2h: Postnominal superlative mana-value qualifier —
-/// "with the greatest|highest mana value among <type-set> <controller> control(s)".
-/// Encoded as `FilterProp::Cmc { EQ, QuantityRef::Aggregate { Max, ManaValue,
-/// <eligible set> } }`, mirroring the library-search path in
+fn superlative_property_filter_prop(
+    function: AggregateFunction,
+    property: ObjectProperty,
+    filter: TargetFilter,
+) -> FilterProp {
+    let value = QuantityExpr::Ref {
+        qty: QuantityRef::Aggregate {
+            function,
+            property,
+            filter,
+        },
+    };
+    match property {
+        ObjectProperty::ManaValue => FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value,
+        },
+        ObjectProperty::Power => FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value,
+        },
+        ObjectProperty::Toughness => FilterProp::PtComparison {
+            stat: PtStat::Toughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value,
+        },
+    }
+}
+
+/// Postnominal superlative qualifier —
+/// "with the greatest|highest <power|toughness|mana value> among <type-set> <controller> control(s)".
+/// Encoded as a dynamic equality comparison against `QuantityRef::Aggregate`,
+/// mirroring the library-search path in
 /// `oracle_effect/search.rs::parse_highest_mana_value_library_suffix`.
 /// The eligible set after "among " is parsed by the authoritative
 /// `parse_type_phrase_with_ctx` combinator (type list + controller suffix).
 /// Returns (FilterProp, bytes consumed from the original text).
-fn parse_superlative_mana_value_suffix(
+fn parse_superlative_property_suffix(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("with the greatest mana value among "),
-        tag::<_, _, OracleError<'_>>("with the highest mana value among "),
+    let (rest, (function, property)) = alt((
+        value(
+            (AggregateFunction::Max, ObjectProperty::Power),
+            tag::<_, _, OracleError<'_>>("with the greatest power among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Power),
+            tag("with the highest power among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Toughness),
+            tag("with the greatest toughness among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Toughness),
+            tag("with the highest toughness among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::ManaValue),
+            tag("with the greatest mana value among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::ManaValue),
+            tag("with the highest mana value among "),
+        ),
     ))
     .parse(trimmed)
     .ok()?;
@@ -2470,16 +2588,7 @@ fn parse_superlative_mana_value_suffix(
     // authoritative type-phrase combinator — it parses the multi-type
     // or/and list, any leading article, and the trailing controller suffix.
     let (eligible, after) = parse_type_phrase_with_ctx(rest, ctx);
-    let prop = FilterProp::Cmc {
-        comparator: Comparator::EQ,
-        value: QuantityExpr::Ref {
-            qty: QuantityRef::Aggregate {
-                function: AggregateFunction::Max,
-                property: ObjectProperty::ManaValue,
-                filter: eligible,
-            },
-        },
-    };
+    let prop = superlative_property_filter_prop(function, property, eligible);
     Some((prop, text.len() - after.len()))
 }
 
@@ -2495,7 +2604,7 @@ pub(crate) fn parse_mana_value_suffix(
     let trimmed = text.trim_start();
     // CR 202.3: try the more specific superlative head ("with the
     // greatest/highest mana value among ...") before the comparator forms.
-    if let Some((prop, consumed)) = parse_superlative_mana_value_suffix(text, ctx) {
+    if let Some((prop, consumed)) = parse_superlative_property_suffix(text, ctx) {
         return Some((prop, consumed));
     }
     if let Some((prop, after)) = parse_relative_mana_value_suffix(trimmed) {
@@ -3631,6 +3740,23 @@ fn parse_color_relative_clause_suffix(
             return None;
         };
 
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("one or more colors").parse(after_intro) {
+        let next_char_is_boundary = rest
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if next_char_is_boundary {
+            let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+            return Some((
+                vec![FilterProp::ColorCount {
+                    comparator: Comparator::GE,
+                    count: 1,
+                }],
+                consumed,
+            ));
+        }
+    }
+
     let (rest, colors) = parse_color_disjunction(after_intro).ok()?;
     let next_char_is_boundary = rest
         .chars()
@@ -4013,35 +4139,38 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
     };
 
     // Optional type word before "card"/"cards": "creature card", "instant card", etc.
-    let after_type = if let Ok((rest, _)) = nom_target::parse_type_filter_word(after_number) {
-        let trimmed = rest.trim_start();
-        // Only consume if followed by "card"/"cards" (not standalone)
-        if trimmed.starts_with("card") {
-            trimmed
+    // CR 109.2a: "creature card" and similar descriptions restrict which
+    // cards qualify in the stated zone, so preserve the type word instead of
+    // only consuming it.
+    let (after_type, type_filter) =
+        if let Ok((rest, tf)) = nom_target::parse_type_filter_word(after_number) {
+            let trimmed = rest.trim_start();
+            // Only consume if followed by "card"/"cards" (not standalone)
+            if parse_card_or_cards_word(trimmed).is_ok() {
+                let captured = if matches!(tf, TypeFilter::Card) {
+                    None
+                } else {
+                    Some(tf)
+                };
+                (trimmed, captured)
+            } else {
+                (after_number, None)
+            }
         } else {
-            after_number
-        }
-    } else {
-        after_number
-    };
+            (after_number, None)
+        };
 
     // Required "card"/"cards" — may be followed by " of [zone]" or be standalone
-    let (after_card, card_is_terminal) =
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(after_type) {
-            let trimmed = rest.trim_start();
-            (
-                rest,
-                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
-            )
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(after_type) {
-            let trimmed = rest.trim_start();
-            (
-                rest,
-                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
-            )
-        } else {
-            return None;
-        };
+    let (after_card, card_is_terminal) = if let Ok((rest, _)) = parse_card_or_cards_word(after_type)
+    {
+        let trimmed = rest.trim_start();
+        (
+            rest,
+            trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
+        )
+    } else {
+        return None;
+    };
 
     // Standalone "the top [N] cards" — default to your library
     if card_is_terminal {
@@ -4049,10 +4178,10 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
         return Some((
             TargetFilter::Typed(TypedFilter {
                 controller: Some(ControllerRef::You),
+                type_filters: type_filter.into_iter().collect(),
                 properties: vec![FilterProp::InZone {
                     zone: Zone::Library,
                 }],
-                ..Default::default()
             }),
             &text[consumed..],
         ));
@@ -4104,7 +4233,8 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
             return None;
         };
 
-    // Required zone word
+    // Required zone word.
+    let type_filters_vec: Vec<TypeFilter> = type_filter.into_iter().collect();
     for &(zone_word, zone_plural, ref zone) in zone_words {
         for word in [zone_word, zone_plural] {
             if let Ok((zone_rest, _)) = tag::<_, _, OracleError<'_>>(word).parse(after_possessive) {
@@ -4112,8 +4242,8 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
                 return Some((
                     TargetFilter::Typed(TypedFilter {
                         controller,
+                        type_filters: type_filters_vec.clone(),
                         properties: vec![FilterProp::InZone { zone: *zone }],
-                        ..Default::default()
                     }),
                     &text[consumed..],
                 ));
@@ -4403,6 +4533,21 @@ mod tests {
     fn target_creature() {
         let (f, _) = parse_target("target creature");
         assert_eq!(f, TargetFilter::Typed(TypedFilter::creature()));
+    }
+
+    #[test]
+    fn creatures_blocking_or_blocked_by_target_creature() {
+        let (filter, rest) = parse_target("creatures blocking or blocked by target creature");
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockingOrBlockedBy,
+                    subject: CombatRelationSubject::ParentTarget,
+                }
+            ]))
+        );
     }
 
     #[test]
@@ -5109,6 +5254,49 @@ mod tests {
     }
 
     #[test]
+    fn distributive_each_linker_preserves_mana_value_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with mana value 2 or less");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }]))
+        );
+    }
+
+    #[test]
+    fn distributive_each_linker_preserves_counter_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with ice counters on them");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic("ice".to_string())),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }])
+            )
+        );
+    }
+
+    #[test]
+    fn distributive_each_linker_preserves_keyword_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }
+            ]))
+        );
+    }
+
+    #[test]
     fn colorless_adjective_does_not_distribute_across_or() {
         let (f, rest) = parse_type_phrase("artifact or colorless creature");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -5593,10 +5781,30 @@ mod tests {
     }
 
     #[test]
+    fn creature_you_control_with_exact_base_power() {
+        let (f, rest) = parse_type_phrase("creature you control with base power 1");
+        assert_eq!(rest, "");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Fixed { value: 1 }
+                    }])
+            )
+        );
+    }
+
+    #[test]
     fn creature_with_power_x_or_less() {
         // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
         // `Variable("X")` marker so it can resolve against `chosen_x` at effect time.
-        let (prop, _) = parse_power_suffix("with power x or less").expect("parses");
+        let (prop, _) = parse_power_suffix("with power x or less", &mut ParseContext::default())
+            .expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -5614,7 +5822,8 @@ mod tests {
 
     #[test]
     fn creature_with_power_x_or_greater() {
-        let (prop, _) = parse_power_suffix("with power x or greater").expect("parses");
+        let (prop, _) = parse_power_suffix("with power x or greater", &mut ParseContext::default())
+            .expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -5721,6 +5930,91 @@ mod tests {
                 zone: Zone::Graveyard
             }]))
         );
+    }
+
+    /// Issue #586: Mistmoon Griffin needs "top creature card of your graveyard"
+    /// to keep the creature filter, not become any card in the graveyard.
+    #[test]
+    fn target_top_creature_card_of_your_graveyard_keeps_type_filter() {
+        let (f, rest) = parse_target("the top creature card of your graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_instant_card_of_target_opponents_library_keeps_type_filter() {
+        let (f, rest) = parse_target("the top instant card of target opponent's library");
+        // The targeted player is resolved at runtime, not encoded here.
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Library
+                }
+            ]))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_card_no_type_word_has_empty_type_filters() {
+        // No type word before "card" means no type filter is captured.
+        let (f, rest) = parse_target("the top card of your library");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Library
+                }],
+                ..Default::default()
+            })
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_creature_cards_plural_keeps_type_filter() {
+        // Plural "cards" must thread the same filter as the singular path.
+        let (f, rest) = parse_target("the top three creature cards of your library");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Library
+                    }])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_subtype_card_of_zone_captures_subtype() {
+        // Subtype words should be preserved as filters too.
+        let (f, rest) = parse_target("the top spirit card of your graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Spirit".to_string())
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }])
+            )
+        );
+        assert_eq!(rest.trim(), "");
     }
 
     #[test]
@@ -6809,6 +7103,21 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::Modified])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn renowned_adjective_creates_filter_prop() {
+        // CR 702.112b: "renowned creature" is a designation adjective.
+        let (f, rest) = parse_type_phrase("renowned creature you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Renowned])
             )
         );
         assert_eq!(rest.trim(), "");
@@ -8068,6 +8377,24 @@ mod tests {
     }
 
     #[test]
+    fn permanents_that_are_one_or_more_colors_full_target() {
+        let (filter, rest) = parse_target("all permanents that are one or more colors");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(
+            tf.properties.contains(&FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 1,
+            }),
+            "must require colored permanents, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
     fn target_spell_or_permanent_thats_red_or_green_distributes_color_to_both_legs() {
         let (filter, rest) = parse_target("target spell or permanent that's red or green");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -9079,6 +9406,43 @@ mod tests {
             }
             other => panic!("expected Or eligible set, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn superlative_power_suffix_emits_aggregate_pt_comparison() {
+        let mut ctx = ParseContext::default();
+        let input = "with the greatest power among creatures they control";
+        let (prop, consumed) =
+            parse_power_suffix(input, &mut ctx).expect("superlative suffix should parse");
+        assert_eq!(consumed, input.len(), "should consume the whole suffix");
+        let FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } = prop
+        else {
+            panic!("expected FilterProp::PtComparison, got {prop:?}");
+        };
+        assert_eq!(stat, PtStat::Power);
+        assert_eq!(scope, PtValueScope::Current);
+        assert_eq!(comparator, Comparator::EQ);
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } = value
+        else {
+            panic!("expected QuantityRef::Aggregate, got {value:?}");
+        };
+        assert_eq!(function, AggregateFunction::Max);
+        assert_eq!(property, ObjectProperty::Power);
+        let tf = typed_leg(&filter).expect("eligible set should be Typed");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(has_type(tf, TypeFilter::Creature));
     }
 
     /// Issue #463: Soul Shatter's full target phrase must carry the superlative

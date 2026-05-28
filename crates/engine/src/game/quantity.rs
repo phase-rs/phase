@@ -499,6 +499,26 @@ pub fn resolve_quantity_with_targets(
     }
 }
 
+/// CR 608.2c: Resolve a condition quantity from the printed ability controller's
+/// perspective while preserving target/chosen-X and scoped-player bindings.
+///
+/// Player-scoped effect resolution temporarily rebinds `ability.controller` to
+/// the player being affected. Conditional clauses such as "if creatures you
+/// control have total toughness 40 or greater" still refer to the source's
+/// controller, not that temporary recipient.
+pub(crate) fn resolve_quantity_for_ability_condition(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> i32 {
+    let Some(original_controller) = ability.original_controller else {
+        return resolve_quantity_with_targets(state, expr, ability);
+    };
+    let mut condition_ability = ability.clone();
+    condition_ability.controller = original_controller;
+    resolve_quantity_with_targets(state, expr, &condition_ability)
+}
+
 /// Resolve a QuantityExpr with ability targets/chosen-X plus a per-object
 /// recipient binding for `FilterProp::AttachedToRecipient`.
 pub(crate) fn resolve_quantity_with_targets_and_recipient(
@@ -683,7 +703,7 @@ fn resolve_ref(
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller
     // override used by `resolve_quantity_scoped`. CR 107.2 governs the fallback
-    // path when no ability is in scope (X → 0).
+    // path when no ability is in scope (X -> 0).
     //
     // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
     // `FilterContext::recipient_id` so recipient-relative filter properties
@@ -697,6 +717,20 @@ fn resolve_ref(
     match qty {
         // CR 402: hand size for the scoped player(s).
         QuantityRef::HandSize { player: scope } => {
+            // CR 608.2e (§8): a cross-player `AllPlayers` hand extremum is the
+            // discard-clause equalization minimum — freeze it against the
+            // clause's pre-clause board if a snapshot was captured. Single-
+            // player scopes (Controller/ScopedPlayer/Target/...) re-resolve
+            // live; only the aggregated form is snapshot.
+            if matches!(scope, PlayerScope::AllPlayers { .. }) {
+                if let Some(v) = state
+                    .clause_minimum_snapshot
+                    .as_ref()
+                    .and_then(|s| s.get(qty))
+                {
+                    return v;
+                }
+            }
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
                 usize_to_i32_saturating(p.hand.len())
             })
@@ -931,6 +965,51 @@ fn resolve_ref(
                 AggregateFunction::Sum => values.sum(),
             }
         }
+        // CR 107.1 + CR 700.1: min/max across players of the count of
+        // battlefield objects matching `filter` each player controls.
+        QuantityRef::ControlledByEachPlayer { filter, aggregate } => {
+            // CR 608.2e (§8): prefer the clause-local snapshot if this clause
+            // captured one — that freezes the extremum against the board as it
+            // stood when the clause began, so an earlier APNAP player's
+            // sacrifices do not shrink a later player's minimum.
+            if let Some(v) = state
+                .clause_minimum_snapshot
+                .as_ref()
+                .and_then(|s| s.get(qty))
+            {
+                return v;
+            }
+            // Battlefield-scoped: this variant carries no zone axis.
+            let zone_ids = crate::game::targeting::zone_object_ids(
+                state,
+                crate::types::zones::Zone::Battlefield,
+            );
+            aggregate_over_players(state.players.iter(), *aggregate, |p| {
+                // CR 109.5: evaluate `filter` as if `p` were "you" — count
+                // battlefield objects `p` controls matching the filter. The
+                // explicit `obj.controller == p.id` gate enforces the "they
+                // control" semantics even when `filter` itself carries no
+                // controller clause (Balance's Arm A parses a bare "lands"
+                // type phrase); the rebound `FilterContext` additionally makes
+                // any `controller: You` clause inside `filter` read `p`.
+                let pctx = match ability {
+                    Some(a) => FilterContext::from_ability_with_controller(a, p.id),
+                    None => FilterContext::from_source_with_controller(source_id, p.id),
+                };
+                usize_to_i32_saturating(
+                    zone_ids
+                        .iter()
+                        .filter(|&&id| {
+                            state
+                                .objects
+                                .get(&id)
+                                .is_some_and(|obj| obj.controller == p.id)
+                                && matches_target_filter(state, id, filter, &pctx)
+                        })
+                        .count(),
+                )
+            })
+        }
         QuantityRef::CountersOnObjects {
             counter_type,
             filter,
@@ -1143,15 +1222,33 @@ fn resolve_ref(
         QuantityRef::ExiledFromHandThisResolution => {
             u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
         }
-        // CR 608.2c: Numeric value from the triggering event.
-        // Falls back to the preceding effect's count or amount for sub_ability
-        // continuations where current_trigger_event has no amount (e.g.,
-        // "discard up to N, then draw that many"; "dealt excess damage this
-        // way, add that much {R}").
+        // CR 603.2c: Numeric value carried by the triggering event,
+        // resolution-precedence ordered:
+        //
+        //   1. `current_trigger_match_count` — the filtered subject count of a
+        //      batched trigger ("one or more <FILTER> <verb>"), set by
+        //      `stack::resolve_top` for the resolution. This is the canonical
+        //      "that many" for Ur-Dragon-style batched triggers; without it
+        //      the `extract_amount_from_event` cascade below falls through to
+        //      0 on `AttackersDeclared` and similar batched events.
+        //   2. `extract_amount_from_event(current_trigger_event)` — scalar
+        //      events with an inherent amount (damage dealt, life changed,
+        //      cards drawn, counters added/removed, die rolls).
+        //   3. `last_effect_counts_by_player` — APNAP per-player counts from
+        //      the preceding effect in the same resolution.
+        //   4. `last_effect_count` / `last_effect_amount` — sub_ability
+        //      continuation fallbacks (e.g. "discard up to N, then draw that
+        //      many"; "dealt excess damage this way, add that much {R}").
+        //   5. `0` — undefined.
         QuantityRef::EventContextAmount => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_amount_from_event)
+            .current_trigger_match_count
+            .map(u32_to_i32_saturating)
+            .or_else(|| {
+                state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_amount_from_event)
+            })
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -1586,6 +1683,11 @@ fn resolve_ref(
             .objects
             .get(&ctx.self_object())
             .map(|obj| usize_to_i32_saturating(obj.kickers_paid.len()))
+            .unwrap_or(0),
+        QuantityRef::AdditionalCostPaymentCount => state
+            .objects
+            .get(&ctx.self_object())
+            .map(|obj| u32_to_i32_saturating(obj.additional_cost_payment_count))
             .unwrap_or(0),
         QuantityRef::ConvokedCreatureCount => state
             .objects
@@ -6211,6 +6313,60 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
+    /// CR 603.2c: When the batched-trigger subject count is set,
+    /// `EventContextAmount` reads it ahead of any event-extracted amount
+    /// (issue #707).
+    #[test]
+    fn resolve_event_context_amount_uses_trigger_match_count_when_set() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(3);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
+    }
+
+    /// CR 603.2c: With no match-count set, `EventContextAmount` falls through
+    /// to `extract_amount_from_event` as before — the new precedence rule
+    /// must not regress existing scalar-event resolution.
+    #[test]
+    fn resolve_event_context_amount_falls_through_when_match_count_none() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = None;
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 5,
+            is_combat: false,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 5);
+    }
+
+    /// CR 603.2c: When both the batched match-count and an event-extracted
+    /// amount are present, the match-count wins — the trigger is "one or
+    /// more <FILTER> <verb>" and the "that many" semantics belong to the
+    /// filtered subject count, not the event's intrinsic amount.
+    #[test]
+    fn resolve_event_context_amount_match_count_takes_precedence_over_event() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(7);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 7);
+    }
+
     #[test]
     fn resolve_event_context_source_power_live_object() {
         let mut state = GameState::new_two_player(42);
@@ -7193,5 +7349,149 @@ mod tests {
             !runner.state().battlefield.contains(&victim),
             "the sacrificed creature must have left the battlefield"
         );
+    }
+
+    /// Create `n` battlefield lands controlled by `owner`.
+    fn add_lands(state: &mut GameState, owner: PlayerId, n: usize) {
+        for i in 0..n {
+            let id = create_object(
+                state,
+                CardId(9000 + i as u64),
+                owner,
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+    }
+
+    fn lands_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))
+    }
+
+    #[test]
+    fn controlled_by_each_player_min_picks_the_fewest() {
+        // CR 107.1: P0 has 3 lands, P1 has 1 → Min resolves to 1.
+        let mut state = GameState::new_two_player(42);
+        add_lands(&mut state, PlayerId(0), 3);
+        add_lands(&mut state, PlayerId(1), 1);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Min,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 1);
+    }
+
+    #[test]
+    fn controlled_by_each_player_max_picks_the_most() {
+        // P0 has 3 lands, P1 has 1 → Max resolves to 3.
+        let mut state = GameState::new_two_player(42);
+        add_lands(&mut state, PlayerId(0), 3);
+        add_lands(&mut state, PlayerId(1), 1);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Max,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 3);
+    }
+
+    #[test]
+    fn controlled_by_each_player_min_zero_when_a_player_has_none() {
+        // A player controlling no matching objects drives Min to 0.
+        let mut state = GameState::new_two_player(42);
+        add_lands(&mut state, PlayerId(0), 4);
+        // P1 has no lands.
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Min,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 0);
+    }
+
+    #[test]
+    fn controlled_by_each_player_min_across_three_players() {
+        // CR 102.1: the aggregate spans every player — P0=5, P1=2, P2=4 → Min 2.
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+        add_lands(&mut state, PlayerId(0), 5);
+        add_lands(&mut state, PlayerId(1), 2);
+        add_lands(&mut state, PlayerId(2), 4);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Min,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 2);
+    }
+
+    #[test]
+    fn controlled_by_each_player_prefers_clause_snapshot() {
+        // CR 608.2e: when a clause-local snapshot is present, the resolver
+        // returns the frozen value rather than the live board count — proving
+        // the snapshot mechanism overrides live evaluation.
+        let mut state = GameState::new_two_player(42);
+        add_lands(&mut state, PlayerId(0), 3);
+        add_lands(&mut state, PlayerId(1), 1);
+        let qref = QuantityRef::ControlledByEachPlayer {
+            filter: lands_filter(),
+            aggregate: AggregateFunction::Min,
+        };
+        // Live board would yield 1; freeze a different value into the snapshot.
+        let mut snap = crate::types::game_state::ClauseMinimumSnapshot::default();
+        snap.insert(qref.clone(), 7);
+        state.clause_minimum_snapshot = Some(snap);
+        let qty = QuantityExpr::Ref { qty: qref };
+        assert_eq!(
+            resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)),
+            7,
+            "snapshot value must override the live board count"
+        );
+    }
+
+    #[test]
+    fn hand_size_all_players_min_prefers_clause_snapshot() {
+        // CR 608.2e: the discard clause's `HandSize { AllPlayers { Min } }`
+        // also honors the clause snapshot. Live hands differ from the frozen
+        // value; the frozen value must win.
+        let mut state = GameState::new_two_player(42);
+        let qref = QuantityRef::HandSize {
+            player: PlayerScope::AllPlayers {
+                aggregate: AggregateFunction::Min,
+                exclude: None,
+            },
+        };
+        let mut snap = crate::types::game_state::ClauseMinimumSnapshot::default();
+        snap.insert(qref.clone(), 5);
+        state.clause_minimum_snapshot = Some(snap);
+        let qty = QuantityExpr::Ref { qty: qref };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 5);
+    }
+
+    #[test]
+    fn hand_size_all_players_min_live_when_no_snapshot() {
+        // Without a snapshot, `HandSize { AllPlayers { Min } }` resolves live —
+        // the empty starting hands of a fresh two-player game give Min 0.
+        let state = GameState::new_two_player(42);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 0);
     }
 }

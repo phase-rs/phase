@@ -29,10 +29,11 @@ use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::draft_session::DraftSessionManager;
 use server_core::lobby::RegisterGameRequest;
 use server_core::protocol::{
-    build_commit, ClientMessage, ServerMessage, ServerMode, PROTOCOL_VERSION,
+    build_commit, ClientMessage, ServerMessage, ServerMode, MIN_SUPPORTED_PROTOCOL,
+    PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
-use server_core::session::SessionManager;
+use server_core::session::{ActionResult, GameSession, SessionManager};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -65,6 +66,96 @@ type SharedDraftSpectators = Arc<
         >,
     >,
 >;
+
+fn build_game_started_message(
+    session: &GameSession,
+    player: PlayerId,
+    player_token: Option<String>,
+) -> ServerMessage {
+    let (legal_actions, spell_costs_all, by_object_all) = engine_legal_actions_full(&session.state);
+    let auto_pass = engine_auto_pass(&session.state, &legal_actions);
+    let is_actor = server_core::is_acting(&session.state, player);
+    let filtered = server_core::filter_state_for_player(&session.state, player);
+    let opponent_name = engine::game::players::opponents(&session.state, player)
+        .first()
+        .and_then(|opp| {
+            let name = &session.display_names[opp.0 as usize];
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.clone())
+            }
+        });
+    let derived = derive_views(&filtered);
+
+    ServerMessage::GameStarted {
+        state: filtered,
+        your_player: player,
+        opponent_name,
+        player_names: session.display_names.clone(),
+        legal_actions: if is_actor { legal_actions } else { Vec::new() },
+        auto_pass_recommended: if is_actor { auto_pass } else { false },
+        spell_costs: if is_actor {
+            spell_costs_all
+        } else {
+            HashMap::new()
+        },
+        legal_actions_by_object: if is_actor {
+            by_object_all
+        } else {
+            HashMap::new()
+        },
+        derived,
+        player_token,
+    }
+}
+
+fn build_game_started_messages(session: &GameSession) -> Vec<(PlayerId, ServerMessage)> {
+    (0..session.player_count)
+        .map(PlayerId)
+        .filter(|player| !session.ai_seats.contains(player))
+        .map(|player| (player, build_game_started_message(session, player, None)))
+        .collect()
+}
+
+fn build_state_update_message(result: &ActionResult, player: PlayerId) -> ServerMessage {
+    let (
+        raw_state,
+        events,
+        legal_actions,
+        log_entries,
+        auto_pass,
+        spell_costs,
+        legal_actions_by_object,
+    ) = result;
+    let is_actor = raw_state.waiting_for.acting_players().contains(&player);
+    let filtered = server_core::filter_state_for_player(raw_state, player);
+    let derived = derive_views(&filtered);
+
+    ServerMessage::StateUpdate {
+        state: filtered,
+        events: events.clone(),
+        legal_actions: if is_actor {
+            legal_actions.clone()
+        } else {
+            Vec::new()
+        },
+        auto_pass_recommended: if is_actor { *auto_pass } else { false },
+        eliminated_players: Vec::new(),
+        log_entries: log_entries.clone(),
+        spell_costs: if is_actor {
+            spell_costs.clone()
+        } else {
+            HashMap::new()
+        },
+        legal_actions_by_object: if is_actor {
+            legal_actions_by_object.clone()
+        } else {
+            HashMap::new()
+        },
+        derived,
+    }
+}
 
 /// Server's advertised role, selected at startup via `--lobby-only`. Copied
 /// into every handler so the dispatch path can gate disabled messages in
@@ -227,7 +318,7 @@ enum HelloGateOutcome {
 fn classify_hello_gate(
     hello_received: bool,
     msg: &ClientMessage,
-    server_protocol: u32,
+    server_protocol_range: std::ops::RangeInclusive<u32>,
 ) -> HelloGateOutcome {
     match (hello_received, msg) {
         (
@@ -238,10 +329,13 @@ fn classify_hello_gate(
                 protocol_version,
             },
         ) => {
-            if *protocol_version != server_protocol {
+            // Accept any client in the supported range. The `server` field on
+            // RejectProtocol surfaces the *current* protocol version so the
+            // error message tells the client what to upgrade (or downgrade) to.
+            if !server_protocol_range.contains(protocol_version) {
                 HelloGateOutcome::RejectProtocol {
                     client: *protocol_version,
-                    server: server_protocol,
+                    server: *server_protocol_range.end(),
                 }
             } else {
                 HelloGateOutcome::Accept(ClientHelloInfo {
@@ -1627,13 +1721,28 @@ impl DeckResolver for ServerDeckResolver<'_> {
     fn resolve(
         &self,
         choice: &DeckChoice,
-    ) -> Result<engine::game::deck_loading::PlayerDeckPayload, String> {
+    ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
         let deck = match choice {
             DeckChoice::Random => server_core::starter_decks::random_starter_deck(),
             DeckChoice::Named(name) => server_core::starter_decks::find_starter_deck(name)
                 .ok_or_else(|| format!("Starter deck not found: {name}"))?,
+            DeckChoice::DeckList(deck) => deck.as_ref().clone(),
         };
-        server_core::resolve_deck(self.db, &deck)
+        // The reducer stays at the name-only layer (see `DeckResolver` docs),
+        // but we MUST still validate the names against the card database here
+        // — otherwise a deck containing unresolvable names propagates through
+        // `apply_seat_delta` as `None`, and `start_game` silently substitutes
+        // an empty `PlayerDeckPayload` (see `Session::start_game`). The result
+        // is CR 704.5b losing every player on their first draw step with no
+        // user-visible error. Validating here causes the reducer to return
+        // `Err`, which phase-server then surfaces to the client.
+        server_core::resolve_deck(self.db, &deck)?;
+        Ok(engine::game::deck_loading::PlayerDeckList {
+            main_deck: deck.main_deck,
+            sideboard: deck.sideboard,
+            commander: deck.commander,
+            bracket_tier: deck.bracket_tier,
+        })
     }
 }
 
@@ -1643,71 +1752,15 @@ async fn broadcast_game_started(
     game_db: &SharedGameDb,
     game_code: &str,
 ) {
-    let (player_messages, ai_results, player_count) = {
+    let player_messages = {
         let mut mgr = state.lock().await;
         let Some(session) = mgr.sessions.get_mut(game_code) else {
             return;
         };
 
-        let (legal_actions, spell_costs_all, by_object_all) =
-            engine_legal_actions_full(&session.state);
-        let auto_pass = engine_auto_pass(&session.state, &legal_actions);
-        // CR 103.5: For simultaneous mulligan, every pending player is an
-        // "actor" who must receive their own legal-actions payload.
-        let actors = server_core::acting_players(&session.state);
-        let player_names = session.display_names.clone();
-
-        let player_messages = (0..session.player_count)
-            .filter(|pid| !session.ai_seats.contains(&PlayerId(*pid)))
-            .map(|pid| {
-                let player = PlayerId(pid);
-                let filtered = server_core::filter_state_for_player(&session.state, player);
-                let opponent_name = engine::game::players::opponents(&session.state, player)
-                    .first()
-                    .and_then(|opp| {
-                        let name = &session.display_names[opp.0 as usize];
-                        if name.is_empty() {
-                            None
-                        } else {
-                            Some(name.clone())
-                        }
-                    });
-                let is_actor = actors.contains(&player);
-                let derived = derive_views(&filtered);
-                (
-                    player,
-                    ServerMessage::GameStarted {
-                        state: filtered,
-                        your_player: player,
-                        opponent_name,
-                        player_names: player_names.clone(),
-                        legal_actions: if is_actor {
-                            legal_actions.clone()
-                        } else {
-                            Vec::new()
-                        },
-                        auto_pass_recommended: if is_actor { auto_pass } else { false },
-                        spell_costs: if is_actor {
-                            spell_costs_all.clone()
-                        } else {
-                            HashMap::new()
-                        },
-                        legal_actions_by_object: if is_actor {
-                            by_object_all.clone()
-                        } else {
-                            HashMap::new()
-                        },
-                        derived,
-                        player_token: None,
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let ai_results = session.run_ai();
-        let player_count = session.player_count;
+        session.run_ai();
         persist_session_async(game_db, game_code, session);
-        (player_messages, ai_results, player_count)
+        build_game_started_messages(session)
     };
 
     {
@@ -1716,58 +1769,6 @@ async fn broadcast_game_started(
             for (pid, msg) in &player_messages {
                 if let Some(sender) = players.get(pid) {
                     let _ = sender.send(msg.clone());
-                }
-            }
-        }
-    }
-
-    for result in ai_results {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let (
-            raw_state,
-            events,
-            legal_actions,
-            log_entries,
-            auto_pass,
-            spell_costs,
-            legal_actions_by_object,
-        ) = result;
-        // CR 103.5: For simultaneous-decision states, every pending player is
-        // an actor — use the set rather than a single representative.
-        let actors = raw_state.waiting_for.acting_players();
-        let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
-            .map(PlayerId)
-            .map(|pid| (pid, server_core::filter_state_for_player(&raw_state, pid)))
-            .collect();
-
-        let conns = connections.lock().await;
-        if let Some(players) = conns.get(game_code) {
-            for (pid, pstate) in &filtered_states {
-                if let Some(sender) = players.get(pid) {
-                    let is_actor = actors.contains(pid);
-                    let _ = sender.send(ServerMessage::StateUpdate {
-                        state: pstate.clone(),
-                        events: events.clone(),
-                        legal_actions: if is_actor {
-                            legal_actions.clone()
-                        } else {
-                            Vec::new()
-                        },
-                        auto_pass_recommended: if is_actor { auto_pass } else { false },
-                        eliminated_players: Vec::new(),
-                        log_entries: log_entries.clone(),
-                        spell_costs: if is_actor {
-                            spell_costs.clone()
-                        } else {
-                            HashMap::new()
-                        },
-                        legal_actions_by_object: if is_actor {
-                            legal_actions_by_object.clone()
-                        } else {
-                            HashMap::new()
-                        },
-                        derived: derive_views(pstate),
-                    });
                 }
             }
         }
@@ -1829,7 +1830,7 @@ async fn handle_client_message(
     match classify_hello_gate(
         identity.client_hello.is_some(),
         &client_msg,
-        PROTOCOL_VERSION,
+        MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
     ) {
         HelloGateOutcome::Accept(info) => {
             info!(
@@ -1846,9 +1847,18 @@ async fn handle_client_message(
                 server_protocol = server,
                 "protocol version mismatch at ClientHello"
             );
+            // Branch on which side is older so the user-facing remedy points at
+            // the right party. "Please update" is wrong when the *server* is
+            // the older one (post-bump preview server rolled back, or operator
+            // running a stale build behind a freshly-deployed client).
+            let remedy = if client < server {
+                "Please update your client."
+            } else {
+                "This server is older than your client; wait for the rollout to complete."
+            };
             let msg = ServerMessage::Error {
                 message: format!(
-                    "Protocol version mismatch (client={client} server={server}). Please update."
+                    "Protocol version mismatch (client={client} server={server}). {remedy}"
                 ),
             };
             if let Ok(json) = serde_json::to_string(&msg) {
@@ -1958,12 +1968,23 @@ async fn handle_client_message(
 
             let mut mgr = state.lock().await;
             match mgr.join_game(&game_code, resolved) {
-                Ok((player_token, filtered_state)) => {
+                Ok((player_token, _filtered_state)) => {
                     mgr.set_card_names(&game_code, db.card_names());
-                    let session = mgr.sessions.get(&game_code).unwrap();
+                    let session = mgr.sessions.get_mut(&game_code).unwrap();
                     let joiner = session.player_for_token(&player_token).unwrap();
+                    let started_messages = if session.is_full() {
+                        session.run_ai();
+                        persist_session_async(game_db, &game_code, session);
+                        Some((
+                            build_game_started_message(session, joiner, Some(player_token.clone())),
+                            build_game_started_messages(session),
+                        ))
+                    } else {
+                        None
+                    };
                     info!(game = %game_code, player = ?joiner, "player joined");
                     identity.set_session(game_code.clone(), joiner, player_token.clone());
+                    drop(mgr);
 
                     let mut conns = connections.lock().await;
                     conns
@@ -1972,78 +1993,19 @@ async fn handle_client_message(
                         .insert(joiner, tx.clone());
 
                     // Only send GameStarted when the game is full (all seats claimed)
-                    if session.is_full() {
-                        let (legal_actions, spell_costs_all, by_object_all) =
-                            engine_legal_actions_full(&session.state);
-                        let auto_pass = engine_auto_pass(&session.state, &legal_actions);
-                        // CR 103.5: simultaneous mulligan — use actor set.
-                        let actors = server_core::acting_players(&session.state);
-                        let player_names = session.display_names.clone();
-
-                        // Send GameStarted to the joiner
-                        let is_joiner_actor = actors.contains(&joiner);
-                        let joiner_legals = if is_joiner_actor {
-                            legal_actions.clone()
-                        } else {
-                            vec![]
-                        };
-                        let derived_joiner = derive_views(&filtered_state);
-                        let msg = ServerMessage::GameStarted {
-                            state: filtered_state,
-                            your_player: joiner,
-                            opponent_name: None,
-                            player_names: player_names.clone(),
-                            legal_actions: joiner_legals,
-                            auto_pass_recommended: if is_joiner_actor { auto_pass } else { false },
-                            spell_costs: if is_joiner_actor {
-                                spell_costs_all.clone()
-                            } else {
-                                HashMap::new()
-                            },
-                            legal_actions_by_object: if is_joiner_actor {
-                                by_object_all.clone()
-                            } else {
-                                HashMap::new()
-                            },
-                            derived: derived_joiner,
-                            player_token: Some(player_token.clone()),
-                        };
+                    if let Some((msg, other_messages)) = started_messages {
                         if let Ok(json) = serde_json::to_string(&msg) {
                             let _ = socket.send(Message::text(json)).await;
                         }
 
                         // Send GameStarted to all other connected players
-                        for (&pid, sender) in conns.get(&game_code).unwrap().iter() {
-                            if pid != joiner {
-                                let p_state =
-                                    server_core::filter_state_for_player(&session.state, pid);
-                                let is_actor = actors.contains(&pid);
-                                let p_legals = if is_actor {
-                                    legal_actions.clone()
-                                } else {
-                                    vec![]
-                                };
-                                let derived_p = derive_views(&p_state);
-                                let _ = sender.send(ServerMessage::GameStarted {
-                                    state: p_state,
-                                    your_player: pid,
-                                    opponent_name: None,
-                                    player_names: player_names.clone(),
-                                    legal_actions: p_legals,
-                                    auto_pass_recommended: if is_actor { auto_pass } else { false },
-                                    spell_costs: if is_actor {
-                                        spell_costs_all.clone()
-                                    } else {
-                                        HashMap::new()
-                                    },
-                                    legal_actions_by_object: if is_actor {
-                                        by_object_all.clone()
-                                    } else {
-                                        HashMap::new()
-                                    },
-                                    derived: derived_p,
-                                    player_token: None,
-                                });
+                        if let Some(players) = conns.get(&game_code) {
+                            for (pid, msg) in other_messages {
+                                if pid != joiner {
+                                    if let Some(sender) = players.get(&pid) {
+                                        let _ = sender.send(msg);
+                                    }
+                                }
                             }
                         }
                     }
@@ -2297,7 +2259,7 @@ async fn handle_client_message(
                 InGame {
                     player: PlayerId,
                     game_started_msg: Box<ServerMessage>,
-                    ai_results: Vec<server_core::session::ActionResult>,
+                    ai_result: Option<Box<ActionResult>>,
                 },
                 Err(String),
             }
@@ -2334,57 +2296,20 @@ async fn handle_client_message(
                 } else {
                     // In-game reconnect: game is full and started
                     match mgr.handle_reconnect(&game_code, &player_token) {
-                        Ok(filtered_state) => {
+                        Ok(_filtered_state) => {
                             let session = mgr.sessions.get_mut(&game_code).unwrap();
                             let player = session.player_for_token(&player_token).unwrap();
-                            let player_names = session.display_names.clone();
-
-                            let opponent_name =
-                                engine::game::players::opponents(&session.state, player)
-                                    .first()
-                                    .and_then(|&opp| {
-                                        let name = &session.display_names[opp.0 as usize];
-                                        if name.is_empty() {
-                                            None
-                                        } else {
-                                            Some(name.clone())
-                                        }
-                                    });
-
-                            let (legal_actions_all, spell_costs_all, by_object_all) =
-                                engine_legal_actions_full(&session.state);
-                            let auto_pass = engine_auto_pass(&session.state, &legal_actions_all);
-                            // CR 103.5: simultaneous-decision states require actor-set check.
-                            let is_actor = server_core::is_acting(&session.state, player);
-                            let player_legals = if is_actor { legal_actions_all } else { vec![] };
-
-                            let derived_reconnect = derive_views(&filtered_state);
-                            let game_started_msg = ServerMessage::GameStarted {
-                                state: filtered_state,
-                                your_player: player,
-                                opponent_name,
-                                player_names,
-                                legal_actions: player_legals,
-                                auto_pass_recommended: if is_actor { auto_pass } else { false },
-                                spell_costs: if is_actor {
-                                    spell_costs_all
-                                } else {
-                                    HashMap::new()
-                                },
-                                legal_actions_by_object: if is_actor {
-                                    by_object_all
-                                } else {
-                                    HashMap::new()
-                                },
-                                derived: derived_reconnect,
-                                player_token: None,
-                            };
-
                             let ai_results = session.run_ai();
+                            let ai_result = ai_results.last().cloned().map(Box::new);
+                            if ai_result.is_some() {
+                                persist_session_async(game_db, &game_code, session);
+                            }
+                            let game_started_msg =
+                                build_game_started_message(session, player, None);
                             ReconnectOutcome::InGame {
                                 player,
                                 game_started_msg: Box::new(game_started_msg),
-                                ai_results,
+                                ai_result,
                             }
                         }
                         Err(e) => ReconnectOutcome::Err(e),
@@ -2422,7 +2347,7 @@ async fn handle_client_message(
                 ReconnectOutcome::InGame {
                     player,
                     game_started_msg,
-                    ai_results,
+                    ai_result,
                 } => {
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
                     identity.set_session(game_code.clone(), player, player_token);
@@ -2451,42 +2376,15 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
 
-                    // Broadcast AI follow-up results with delays (filter outside lock)
-                    for result in ai_results {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let (
-                            raw_state,
-                            events,
-                            legal_actions,
-                            log_entries,
-                            auto_pass,
-                            spell_costs,
-                            legal_actions_by_object,
-                        ) = result;
-                        // CR 103.5: actor-set membership for simultaneous mulligan.
-                        let is_actor = raw_state.waiting_for.acting_players().contains(&player);
-                        let filtered = server_core::filter_state_for_player(&raw_state, player);
-                        let player_legals = if is_actor { legal_actions } else { vec![] };
-                        let derived = derive_views(&filtered);
-                        let _ = tx.send(ServerMessage::StateUpdate {
-                            state: filtered,
-                            events,
-                            legal_actions: player_legals,
-                            auto_pass_recommended: if is_actor { auto_pass } else { false },
-                            eliminated_players: vec![],
-                            log_entries,
-                            spell_costs: if is_actor {
-                                spell_costs
-                            } else {
-                                HashMap::new()
-                            },
-                            legal_actions_by_object: if is_actor {
-                                legal_actions_by_object
-                            } else {
-                                HashMap::new()
-                            },
-                            derived,
-                        });
+                    if let Some(result) = ai_result {
+                        let conns = connections.lock().await;
+                        if let Some(game_conns) = conns.get(&game_code) {
+                            for (&pid, sender) in game_conns.iter() {
+                                if pid != player {
+                                    let _ = sender.send(build_state_update_message(&result, pid));
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2634,16 +2532,25 @@ async fn handle_client_message(
                 if seat.seat_index == 0 || seat.seat_index >= pc {
                     continue;
                 }
-                let ai_deck_data = match &seat.deck_name {
-                    Some(name) if name.eq_ignore_ascii_case("random") => {
-                        server_core::starter_decks::random_starter_deck()
-                    }
-                    Some(name) => server_core::starter_decks::find_starter_deck(name)
-                        .unwrap_or_else(|| {
+                let ai_deck_data = match &seat.deck {
+                    Some(DeckChoice::DeckList(deck)) => deck.as_ref().clone(),
+                    Some(DeckChoice::Named(name)) => {
+                        server_core::starter_decks::find_starter_deck(name).unwrap_or_else(|| {
                             warn!(deck = %name, "unknown AI deck name, using random");
                             server_core::starter_decks::random_starter_deck()
-                        }),
-                    None => server_core::starter_decks::random_starter_deck(),
+                        })
+                    }
+                    Some(DeckChoice::Random) | None => match &seat.deck_name {
+                        Some(name) if name.eq_ignore_ascii_case("random") => {
+                            server_core::starter_decks::random_starter_deck()
+                        }
+                        Some(name) => server_core::starter_decks::find_starter_deck(name)
+                            .unwrap_or_else(|| {
+                                warn!(deck = %name, "unknown AI deck name, using random");
+                                server_core::starter_decks::random_starter_deck()
+                            }),
+                        None => server_core::starter_decks::random_starter_deck(),
+                    },
                 };
                 if let Some(ref fc) = format_config {
                     if let Err(reasons) = validate_name_deck_for_format(
@@ -2680,7 +2587,7 @@ async fn handle_client_message(
 
             if !ai_requests.is_empty() && ai_requests.len() as u8 == pc - 1 {
                 // --- AI game path: create, start, and run initial AI actions ---
-                let (game_code, player_token, game_started_msg, ai_results) = {
+                let (game_code, player_token, game_started_msg) = {
                     let mut mgr = state.lock().await;
                     let (game_code, player_token) = mgr.create_game_with_ai(
                         resolved,
@@ -2694,44 +2601,13 @@ async fn handle_client_message(
                     );
 
                     let session = mgr.sessions.get_mut(&game_code).unwrap();
-                    let (legal_actions, spell_costs_all, by_object_all) =
-                        engine_legal_actions_full(&session.state);
-                    let auto_pass = engine_auto_pass(&session.state, &legal_actions);
-                    // CR 103.5: actor-set membership for simultaneous mulligan.
-                    let is_actor = server_core::is_acting(&session.state, PlayerId(0));
-                    let player_names = session.display_names.clone();
-                    let host_legals = if is_actor { legal_actions } else { vec![] };
-                    let host_state =
-                        server_core::filter_state_for_player(&session.state, PlayerId(0));
-
-                    let derived_host = derive_views(&host_state);
-                    let game_started_msg = ServerMessage::GameStarted {
-                        state: host_state,
-                        your_player: PlayerId(0),
-                        opponent_name: Some(session.display_names[1].clone()),
-                        player_names,
-                        legal_actions: host_legals,
-                        auto_pass_recommended: if is_actor { auto_pass } else { false },
-                        spell_costs: if is_actor {
-                            spell_costs_all
-                        } else {
-                            HashMap::new()
-                        },
-                        legal_actions_by_object: if is_actor {
-                            by_object_all
-                        } else {
-                            HashMap::new()
-                        },
-                        derived: derived_host,
-                        player_token: None,
-                    };
-
-                    let ai_results = session.run_ai();
+                    session.run_ai();
+                    let game_started_msg = build_game_started_message(session, PlayerId(0), None);
 
                     // Persist the AI game session
                     persist_session_async(game_db, &game_code, session);
 
-                    (game_code, player_token, game_started_msg, ai_results)
+                    (game_code, player_token, game_started_msg)
                 }; // lock dropped
 
                 identity.set_session(game_code.clone(), PlayerId(0), player_token.clone());
@@ -2754,50 +2630,6 @@ async fn handle_client_message(
                 }
                 if let Ok(json) = serde_json::to_string(&game_started_msg) {
                     let _ = socket.send(Message::text(json)).await;
-                }
-
-                // Broadcast initial AI actions (e.g. mulligan decisions) with delays
-                // Filter outside the lock for each AI result
-                for result in ai_results {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    let (
-                        raw_state,
-                        events,
-                        legal_actions,
-                        log_entries,
-                        auto_pass,
-                        spell_costs,
-                        legal_actions_by_object,
-                    ) = result;
-                    // CR 103.5: actor-set membership.
-                    let is_actor = raw_state
-                        .waiting_for
-                        .acting_players()
-                        .contains(&PlayerId(0));
-                    let filtered = server_core::filter_state_for_player(&raw_state, PlayerId(0));
-                    {
-                        let player_legals = if is_actor { legal_actions } else { vec![] };
-                        let derived = derive_views(&filtered);
-                        let _ = tx.send(ServerMessage::StateUpdate {
-                            state: filtered,
-                            events,
-                            legal_actions: player_legals,
-                            auto_pass_recommended: if is_actor { auto_pass } else { false },
-                            eliminated_players: vec![],
-                            log_entries,
-                            spell_costs: if is_actor {
-                                spell_costs
-                            } else {
-                                HashMap::new()
-                            },
-                            legal_actions_by_object: if is_actor {
-                                legal_actions_by_object
-                            } else {
-                                HashMap::new()
-                            },
-                            derived,
-                        });
-                    }
                 }
 
                 info!(game = %game_code, host = %display_name, "AI game started");
@@ -3660,7 +3492,7 @@ async fn handle_client_message(
                     })
                     .collect::<Vec<_>>();
 
-                session.apply_seat_delta(seat_state, &delta);
+                session.apply_seat_delta(seat_state, &delta, db.as_ref());
                 let mut started = delta.now_started
                     || (session.is_full() && session.start_when_full && session.is_pregame());
                 // Collect a bracket-violation message to broadcast after releasing the state lock.
@@ -3978,6 +3810,19 @@ async fn handle_client_message(
             };
 
             debug!(draft = %draft_code, action = ?action, "DraftAction");
+
+            if matches!(
+                action,
+                draft_core::types::DraftAction::GeneratePairings { .. }
+            ) {
+                let msg = ServerMessage::DraftActionRejected {
+                    reason: "Server-hosted draft match play is not available yet".to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
 
             // Check if this is a StartDraft action (triggers timer)
             let is_start = matches!(action, draft_core::types::DraftAction::StartDraft);
@@ -4323,7 +4168,7 @@ mod handshake_tests {
                 build_commit: "abc1234".into(),
                 protocol_version: PROTOCOL_VERSION,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(
             outcome,
@@ -4331,6 +4176,49 @@ mod handshake_tests {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
             })
+        );
+    }
+
+    #[test]
+    fn accepts_min_supported_protocol_below_current() {
+        // Range hello gate: a client one version behind (e.g., release after
+        // the server has rolled forward to preview) must still be admitted to
+        // the lobby. Cross-version game interop is gated separately at join
+        // boundaries (per-game protocol-version filtering, follow-up work).
+        // `MIN_SUPPORTED_PROTOCOL < PROTOCOL_VERSION` is true by construction
+        // (MIN derives from PROTOCOL_VERSION.saturating_sub(1)) whenever
+        // PROTOCOL_VERSION > 0; no runtime assert needed.
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.10".into(),
+                build_commit: "old1234".into(),
+                protocol_version: MIN_SUPPORTED_PROTOCOL,
+            },
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        );
+        assert!(matches!(outcome, HelloGateOutcome::Accept(_)));
+    }
+
+    #[test]
+    fn rejects_client_hello_below_min_supported() {
+        // Two versions behind is outside the supported window; reject.
+        let too_old = MIN_SUPPORTED_PROTOCOL.saturating_sub(1);
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "0.1.0".into(),
+                build_commit: "ancient1".into(),
+                protocol_version: too_old,
+            },
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        );
+        assert_eq!(
+            outcome,
+            HelloGateOutcome::RejectProtocol {
+                client: too_old,
+                server: PROTOCOL_VERSION,
+            }
         );
     }
 
@@ -4343,7 +4231,7 @@ mod handshake_tests {
                 build_commit: "abc1234".into(),
                 protocol_version: 0,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(
             outcome,
@@ -4363,7 +4251,7 @@ mod handshake_tests {
                 build_commit: "def5678".into(),
                 protocol_version: PROTOCOL_VERSION + 1,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert!(matches!(outcome, HelloGateOutcome::RejectProtocol { .. }));
     }
@@ -4375,24 +4263,28 @@ mod handshake_tests {
             &ClientMessage::Action {
                 action: GameAction::PassPriority,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
 
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::CreateGame { deck: empty_deck() },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
 
-        let outcome = classify_hello_gate(false, &ClientMessage::SubscribeLobby, PROTOCOL_VERSION);
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::SubscribeLobby,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
 
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::Ping { timestamp: 1 },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::RejectHandshakeRequired);
     }
@@ -4406,7 +4298,7 @@ mod handshake_tests {
                 build_commit: "abc1234".into(),
                 protocol_version: PROTOCOL_VERSION,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::IgnoreRedundantHello);
     }
@@ -4418,7 +4310,7 @@ mod handshake_tests {
             &ClientMessage::Action {
                 action: GameAction::PassPriority,
             },
-            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert_eq!(outcome, HelloGateOutcome::PassThrough);
     }

@@ -66,7 +66,26 @@ vi.mock("../../providers/GameProvider", () => ({
     capturedOnNoDeck = onNoDeck;
     return <>{children}</>;
   },
+}));
+
+// useGameDispatch moved out of GameProvider into its own hook module; mock it
+// at the real location.
+vi.mock("../../hooks/useGameDispatch.ts", () => ({
   useGameDispatch: () => vi.fn(),
+}));
+
+// game/dispatch.ts runs a module-level `captureSnapshot()` (dispatch.ts:44)
+// that touches `document` at import. GamePage's subtree reaches it via
+// ActionButton, and collection evaluates that import before the happy-dom
+// environment is ready — so mock the whole module (matching the convention in
+// ActionButton.test.tsx). All exports are stubbed since this test exercises
+// the bracket-violation modal, not action dispatch.
+vi.mock("../../game/dispatch.ts", () => ({
+  dispatchAction: vi.fn(),
+  dispatchResolveAll: vi.fn(),
+  processRemoteUpdate: vi.fn(),
+  restoreGameState: vi.fn(),
+  currentSnapshot: new Map(),
 }));
 
 vi.mock("../../stores/gameStore", () => ({
@@ -93,8 +112,17 @@ vi.mock("../../stores/gameStore", () => ({
   loadCheckpoints: vi.fn(() => Promise.resolve([])),
 }));
 
+// `FORMAT_DEFAULTS` is consumed at module top-level by multiplayerDraftStore
+// (and indexed by GamePage). This test mocks the whole store to avoid its
+// heavy zustand wiring, so the mock must still expose FORMAT_DEFAULTS. The
+// factory stays SYNCHRONOUS: an async factory reorders module evaluation so
+// the real dispatch.ts top-level `captureSnapshot()` runs before the happy-dom
+// environment is ready (`document is not defined`). A Proxy returning an empty
+// config for any format key satisfies every access this test reaches without
+// importing the real module.
 vi.mock("../../stores/multiplayerStore", () => ({
   useMultiplayerStore: mockUseMultiplayerStore,
+  FORMAT_DEFAULTS: new Proxy({}, { get: () => ({}) }),
 }));
 
 vi.mock("../../hooks/usePlayerId", () => ({

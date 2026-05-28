@@ -44,7 +44,7 @@ vi.mock("../../hooks/useBracketEstimate", () => ({
 }));
 
 vi.mock("../../adapter/wasm-adapter", () => ({
-  getSharedAdapter: () => ({}),
+  getSharedAdapter: () => ({ warmCardDatabase: () => Promise.resolve() }),
 }));
 
 vi.mock("../../audio/useAudioContext", () => ({

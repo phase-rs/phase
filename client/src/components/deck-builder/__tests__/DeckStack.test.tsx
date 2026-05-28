@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { DeckStack } from "../DeckStack";
 import type { ScryfallCard } from "../../../services/scryfall";
@@ -82,6 +82,7 @@ describe("DeckStack", () => {
         }
         onAddCard={vi.fn()}
         onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
       />,
     );
@@ -132,6 +133,7 @@ describe("DeckStack", () => {
         }
         onAddCard={vi.fn()}
         onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
       />,
     );
@@ -157,5 +159,35 @@ describe("DeckStack", () => {
     expectDocumentOrder(angelTile, banishingTile);
     expectDocumentOrder(banishingTile, leylineTile);
     expectDocumentOrder(banishingTile, plainsTile);
+  });
+
+  it("moves a second-section card back to the main deck via its move button", () => {
+    // The recovery path for the Commander 'maybeboard trap': a card parked in
+    // the second section must be returnable to the main deck from the stack.
+    const onMoveCard = vi.fn();
+    render(
+      <DeckStack
+        deck={{
+          main: [{ name: "Sol Ring", count: 1 }],
+          sideboard: [{ name: "Arcane Signet", count: 1 }],
+        }}
+        commanders={[]}
+        cardDataCache={
+          new Map([
+            ["Sol Ring", makeCard("Sol Ring", "Artifact", 1)],
+            ["Arcane Signet", makeCard("Arcane Signet", "Artifact", 2)],
+          ])
+        }
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={onMoveCard}
+        onRemoveCommander={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /move one arcane signet to main/i }),
+    );
+    expect(onMoveCard).toHaveBeenCalledWith("Arcane Signet", "sideboard");
   });
 });

@@ -17,7 +17,9 @@
 //!
 //! - **Statics / triggers**: gated to the battlefield by the caller's choice
 //!   of iteration (`battlefield_active_*`). Command-zone emblems pass the
-//!   phased-out/command-zone gate for per-object iteration.
+//!   phased-out/command-zone gate for per-object iteration, and non-emblem
+//!   command-zone objects may contribute definitions that explicitly opt in
+//!   via `active_zones` / `trigger_zones`.
 //! - **Replacements**: NOT battlefield-scoped. Zone-of-function is a
 //!   per-replacement property on `ReplacementDefinition`, so
 //!   `active_replacements` scans every object and only applies the
@@ -48,12 +50,11 @@ use crate::types::zones::Zone;
 /// CR 702.26b + CR 114.4: Shared "does this object function at all?" gate.
 ///
 /// CR 702.26b: Phased-out permanents' abilities don't function.
-/// CR 114.4: In the command zone, only emblems' abilities function — UNLESS
-/// the individual static/trigger declares via `active_zones` that it functions
-/// from the command zone per CR 113.6b (Eminence: "as long as ~ is in the
-/// command zone or on the battlefield"). The per-definition `active_zones`
-/// override is enforced by `static_functions_on_object`; this helper only
-/// captures the object-level default.
+/// CR 114.4: In the command zone, only emblems' abilities function by default.
+/// Non-emblem command-zone objects can still contribute individual definitions
+/// that explicitly opt in per CR 113.6b. The per-definition `active_zones` /
+/// `trigger_zones` overrides are enforced by the static/trigger iterators; this
+/// helper only captures the object-level default.
 fn object_functions(obj: &GameObject) -> bool {
     if obj.is_phased_out() {
         return false;
@@ -72,6 +73,14 @@ fn object_functions(obj: &GameObject) -> bool {
 /// helper only encodes the zone/opt-in part of the gate.
 pub fn static_opts_in_to_command_zone(def: &StaticDefinition) -> bool {
     def.active_zones.contains(&Zone::Command)
+}
+
+/// CR 113.6b + CR 114.4: True when a trigger on a command-zone object opts in
+/// to function from the command zone via its `trigger_zones` list. Eminence
+/// triggered abilities use this path after the parser derives `Zone::Command`
+/// from their intervening-if source-zone condition.
+pub fn trigger_opts_in_to_command_zone(def: &TriggerDefinition) -> bool {
+    def.trigger_zones.contains(&Zone::Command)
 }
 
 /// Iterate `StaticDefinition`s on `obj` that are currently functioning, with
@@ -218,10 +227,22 @@ pub fn active_trigger_definitions<'a>(
     _state: &'a GameState,
     obj: &'a GameObject,
 ) -> Box<dyn Iterator<Item = (usize, &'a TriggerDefinition)> + 'a> {
-    if !object_functions(obj) {
+    if obj.is_phased_out() {
         return Box::new(std::iter::empty());
     }
-    Box::new(obj.trigger_definitions.iter_all().enumerate())
+    let zone = obj.zone;
+    let is_emblem = obj.is_emblem;
+    Box::new(
+        obj.trigger_definitions
+            .iter_all()
+            .enumerate()
+            .filter(move |(_, def)| {
+                if zone == Zone::Command && !is_emblem {
+                    return trigger_opts_in_to_command_zone(def);
+                }
+                true
+            }),
+    )
 }
 
 /// Whole-battlefield iteration of `(index, source_obj, trigger_def)`
@@ -377,6 +398,25 @@ mod tests {
         obj.static_definitions = vec![battlefield_only, eminence_optin].into();
         // Only the opt-in static survives the command-zone gate per CR 113.6b.
         assert_eq!(active_static_definitions(&state, &obj).count(), 1);
+    }
+
+    /// CR 113.6b: A trigger on a non-emblem command-zone object functions when
+    /// it lists `Zone::Command` in `trigger_zones`. This is the trigger-side
+    /// counterpart to Eminence statics' `active_zones` opt-in.
+    #[test]
+    fn command_zone_non_emblem_yields_only_trigger_zone_opt_in_triggers() {
+        let state = new_state();
+        let mut obj = make_obj(1, Zone::Command);
+        obj.is_emblem = false;
+        let battlefield_only = TriggerDefinition::new(TriggerMode::ChangesZone);
+        let eminence_optin =
+            TriggerDefinition::new(TriggerMode::SpellCast).trigger_zones(vec![Zone::Command]);
+        obj.trigger_definitions = vec![battlefield_only, eminence_optin].into();
+
+        let triggers: Vec<_> = active_trigger_definitions(&state, &obj).collect();
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].0, 1);
+        assert!(triggers[0].1.trigger_zones.contains(&Zone::Command));
     }
 
     /// Symmetric coverage for the cost-mod / "without condition filtering"

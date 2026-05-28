@@ -34,6 +34,25 @@ describe("CardEntryRow", () => {
     expect(onMove).toHaveBeenCalledWith("Lightning Bolt", "sideboard");
   });
 
+  it("renders a labelled move button naming the destination when moveTargetLabel is given", () => {
+    const onMove = vi.fn();
+    render(
+      <CardEntryRow
+        entry={entry}
+        section="main"
+        onMove={onMove}
+        onRemove={vi.fn()}
+        moveTargetLabel="Maybeboard"
+      />,
+    );
+    // The destination is on the visible label (not just the tooltip) so it's
+    // legible on touch where the title/aria tooltip never appears.
+    const button = screen.getByRole("button", { name: /move one lightning bolt to maybeboard/i });
+    expect(button).toHaveTextContent("Maybeboard");
+    fireEvent.click(button);
+    expect(onMove).toHaveBeenCalledWith("Lightning Bolt", "main");
+  });
+
   it("fires onRemove with (name, section) when the remove button is clicked", () => {
     const onRemove = vi.fn();
     render(

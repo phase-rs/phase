@@ -377,10 +377,9 @@ export interface AdditionalCostOption {
 /**
  * Build the title + pay/decline options for the OptionalCostChoice modal.
  *
- * `timesKicked` is the engine-provided count of kicks already paid for this
- * spell (`WaitingFor::OptionalCostChoice::times_kicked`). It only affects the
- * `Kicker` branch: at `0` this is the first prompt; at `> 0` it is a
- * repeatable multikicker re-prompt and the copy reflects the running count.
+ * `timesKicked` is the engine-provided count of repeatable payments already
+ * paid for this spell (`WaitingFor::OptionalCostChoice::times_kicked`). It
+ * affects multikicker and repeatable optional additional-cost prompts.
  * The decline copy never says "skip"/"cancel" — declining the kicker
  * *completes* the cast (CR 601.2h), it does not abort it.
  */
@@ -389,14 +388,46 @@ export function additionalCostChoices(
   timesKicked = 0,
 ): { title: string; options: AdditionalCostOption[] } {
   switch (cost.type) {
-    case "Optional":
+    case "Optional": {
+      const label = formatAbilityCost(cost.data.cost);
+      if (cost.data.repeatable) {
+        if (timesKicked > 0) {
+          return {
+            title: `Additional cost — paid ${timesKicked}×. Pay ${label} again?`,
+            options: [
+              { id: "pay", label: `Pay ${label} again` },
+              {
+                id: "decline",
+                label: `Done — finish casting (paid ${timesKicked}×)`,
+                description: "Stop paying this additional cost and pay the total cost.",
+              },
+            ],
+          };
+        }
+        return {
+          title: `Pay additional cost: ${label}?`,
+          options: [
+            {
+              id: "pay",
+              label: `Pay ${label}`,
+              description: "You'll be asked again so you can pay it multiple times.",
+            },
+            {
+              id: "decline",
+              label: "Cast without paying",
+              description: "Finish casting now with 0 payments.",
+            },
+          ],
+        };
+      }
       return {
-        title: `Pay additional cost: ${formatAbilityCost(cost.data)}?`,
+        title: `Pay additional cost: ${label}?`,
         options: [
-          { id: "pay", label: `Pay ${formatAbilityCost(cost.data)}` },
+          { id: "pay", label: `Pay ${label}` },
           { id: "decline", label: "Skip" },
         ],
       };
+    }
     case "Kicker": {
       const first = cost.data.costs[0];
       const label = first ? formatAbilityCost(first) : "kicker";

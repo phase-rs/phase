@@ -159,6 +159,23 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 702.3b: CanAttackWithDefender — allows creatures with defender to attack.
     // Runtime enforcement is in combat.rs::validate_attack().
     registry.insert(StaticMode::CanAttackWithDefender, handle_rule_mod);
+    // CR 509.1b + CR 609.4 + CR 702.14c: IgnoreLandwalkForBlocking — global
+    // rule-modification static observed inside is_landwalk_unblockable.
+    // Registered per discriminant shape (the `None` instance plus the five
+    // basic-subtype instances) to mirror the data-carrying static precedent
+    // (e.g., ExtraBlockers { count: None } row).
+    registry.insert(
+        StaticMode::IgnoreLandwalkForBlocking { qualifier: None },
+        handle_rule_mod,
+    );
+    for q in ["Plains", "Island", "Swamp", "Mountain", "Forest"] {
+        registry.insert(
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some(q.to_string()),
+            },
+            handle_rule_mod,
+        );
+    }
     // CR 602.5a: CanActivateAbilitiesAsThoughHaste — bypasses the summoning-sickness
     // gate on a creature's {T}/{Q} activated abilities (Tyvar, Jubilant Brawler).
     // Runtime enforcement is in restrictions.rs::summoning_sick_for_tap_ability().
@@ -186,6 +203,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantCastFrom, handle_rule_mod);
     // Note: CantCastDuring is a data-carrying variant — runtime enforcement will be in
     // casting.rs. Coverage support is via is_data_carrying_static().
+    // Note: CantActivateDuring is a data-carrying variant — runtime enforcement is in
+    // casting.rs::is_blocked_by_cant_activate_during(). Coverage support is via
+    // is_data_carrying_static(). Like CantBeActivated, parameterized — no registry entry.
     // Note: PerTurnCastLimit is a data-carrying variant — runtime enforcement is in
     // casting.rs::is_blocked_by_per_turn_cast_limit(). Coverage support is via is_data_carrying_static().
 
@@ -522,6 +542,30 @@ pub fn check_static_ability(
 
         if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
             continue;
+        }
+
+        // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated
+        // against the affected object's controller (the player whose creature/spell
+        // is restricted), distinct from the source-relative `condition` gate above.
+        // Used by "each opponent who [did X] this turn can't [Y]" prohibitions
+        // (Angelic Arbiter's attack clause).
+        if let Some(ref cond) = def.per_player_condition {
+            let affected_player = context
+                .target_id
+                .and_then(|id| state.objects.get(&id))
+                .map(|o| o.controller)
+                .or(context.player_id);
+            match affected_player {
+                Some(p) => {
+                    if !crate::game::restrictions::evaluate_condition(state, p, obj.id, cond) {
+                        continue;
+                    }
+                }
+                // No affected player in context -> cannot evaluate a per-player
+                // gate; fail closed (skip this static) so an under-specified query
+                // never over-applies the prohibition.
+                None => continue,
+            }
         }
 
         return true;

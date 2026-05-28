@@ -65,6 +65,12 @@ impl FromStr for ProhibitionScope {
 }
 
 /// CR 101.2: When the casting prohibition applies.
+///
+/// The "pronoun-binding" axis is encoded by the choice of `NotDuringYourTurn`
+/// vs `NotDuringAffectedPlayersTurn`. CR 109.5 binds the "you/your" pronoun to
+/// the static's source controller, while the distributive "their own" reading
+/// (from CR 102.1 plus the template structure of "[every player] can [action]
+/// only during their own [time]") binds the predicate per-affected caster.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CastingProhibitionCondition {
     /// "during your turn" — prohibition active on controller's turn.
@@ -75,6 +81,24 @@ pub enum CastingProhibitionCondition {
     /// — prohibition active when it is NOT the controller's turn.
     /// E.g., Fires of Invention: "You can cast spells only during your turn."
     NotDuringYourTurn,
+    /// CR 102.1 + CR 117.1a + CR 604.1: "only during their own turn(s)" —
+    /// distributive per-affected-player binding. The prohibition is active
+    /// whenever it is NOT the *affected* player's turn.
+    ///
+    /// Contrasts with `NotDuringYourTurn` which binds to the static's source
+    /// controller (CR 109.5 — "your turn" on Fires of Invention).
+    ///
+    /// **Why a separate variant, not a re-use of `NotDuringYourTurn`:**
+    /// `NotDuringYourTurn` says "blocked when it is NOT the source-controller's
+    /// turn" (CR 109.5). For Dosan ("Players can cast spells only during their
+    /// own turns.") the binding is per-affected-caster, not per-source: when
+    /// Alice has Dosan on the battlefield and Bob has priority on Alice's turn,
+    /// Bob is blocked because it's not *Bob's* turn — Alice's possessive doesn't
+    /// reach. The CompRules don't carve out a specific pronoun-binding rule for
+    /// "their" the way CR 109.5 governs "you/your"; the distributive reading
+    /// follows from CR 102.1 (active player definition) + the template structure
+    /// of "[every player] can [action] only during their own [time]".
+    NotDuringAffectedPlayersTurn,
     /// CR 117.1: "only any time they could cast a sorcery" — prohibition active when it is
     /// not sorcery speed (main phase + active player's turn + empty stack).
     /// E.g., Teferi, Time Raveler: "Each opponent can cast spells only any time they could
@@ -88,6 +112,9 @@ impl fmt::Display for CastingProhibitionCondition {
             CastingProhibitionCondition::DuringYourTurn => write!(f, "your_turn"),
             CastingProhibitionCondition::DuringCombat => write!(f, "combat"),
             CastingProhibitionCondition::NotDuringYourTurn => write!(f, "not_your_turn"),
+            CastingProhibitionCondition::NotDuringAffectedPlayersTurn => {
+                write!(f, "not_their_own_turn")
+            }
             CastingProhibitionCondition::NotSorcerySpeed => write!(f, "not_sorcery_speed"),
         }
     }
@@ -101,6 +128,7 @@ impl FromStr for CastingProhibitionCondition {
             "your_turn" => Ok(CastingProhibitionCondition::DuringYourTurn),
             "combat" => Ok(CastingProhibitionCondition::DuringCombat),
             "not_your_turn" => Ok(CastingProhibitionCondition::NotDuringYourTurn),
+            "not_their_own_turn" => Ok(CastingProhibitionCondition::NotDuringAffectedPlayersTurn),
             "not_sorcery_speed" => Ok(CastingProhibitionCondition::NotSorcerySpeed),
             other => Err(format!("unknown CastingProhibitionCondition: {other}")),
         }
@@ -612,6 +640,35 @@ pub enum StaticMode {
         who: ProhibitionScope,
         when: CastingProhibitionCondition,
     },
+    /// CR 602.5 + CR 117.1b: Continuous activation prohibition — prevents the
+    /// scoped player(s) from activating activated abilities during the specified
+    /// turn condition.
+    ///
+    /// E.g., City of Solitude: "Players can cast spells and activate abilities
+    /// only during their own turns." (Activation half — the cast half is emitted
+    /// as a sibling `CantCastDuring`.)
+    ///
+    /// Distinct from `CantBeActivated`:
+    /// - `CantBeActivated` narrows by **permanent** (which permanent's abilities
+    ///   are blocked) and has no time axis.
+    /// - `CantActivateDuring` narrows by **time** (which turn condition the
+    ///   prohibition is active under) and has no permanent narrowing — every
+    ///   activated ability is blocked when the timing predicate matches.
+    ///
+    /// `exemption: ActivationExemption` carries CR 605.1a's "unless they're mana
+    /// abilities" exemption. City of Solitude per its 2009-10-01 ruling
+    /// ("This stops players from activating mana abilities") emits
+    /// `ActivationExemption::None`. Field is present for structural parallelism
+    /// with `CantBeActivated` and `GameRestriction::ProhibitActivity::ActivateAbilities`.
+    ///
+    /// CR 605.3a permits mana ability activation at priority generally, but
+    /// per-card prohibitions override that general permission per CR 101.1.
+    CantActivateDuring {
+        who: ProhibitionScope,
+        when: CastingProhibitionCondition,
+        #[serde(default)]
+        exemption: ActivationExemption,
+    },
     /// CR 101.2 + CR 604.1: Per-turn casting limit — static ability generating a
     /// continuous "can't" effect that restricts how many spells a player may cast.
     /// E.g., Rule of Law: "Each player can't cast more than one spell each turn."
@@ -793,6 +850,25 @@ pub enum StaticMode {
     /// CR 702.3b: Allows creatures with defender to attack despite having the keyword.
     /// "can attack as though it didn't have defender" overrides the defender restriction.
     CanAttackWithDefender,
+    /// CR 509.1b + CR 609.4 + CR 702.14c: Globally cancel the landwalk blocking
+    /// restriction for the named qualifier. The attacker still has the keyword
+    /// (CR 609.4: "as though" is scoped to the stated effect); only its
+    /// blocking-restriction consequence is suppressed. Per CR 702.14d, qualifiers
+    /// cancel independently: a swampwalk canceller leaves a co-present islandwalk
+    /// intact.
+    ///
+    /// INVARIANT: `qualifier` MUST match `Keyword::Landwalk`'s canonical capitalized
+    /// form (e.g. "Swamp", "Island", "Plains", "Mountain", "Forest"). `None` reserved
+    /// for a hypothetical "all landwalk" global canceller; no printed card currently
+    /// requires this, but the option preserves room for that class.
+    ///
+    /// Class: the Portal/Legends "creatures with Xwalk can be blocked as though
+    /// they didn't have Xwalk" cycle (Ur-Drago and four siblings — one per basic
+    /// land subtype). Global rule modification (`affected: None`); enforced inside
+    /// `is_landwalk_unblockable` rather than as a layer-6 ability removal.
+    IgnoreLandwalkForBlocking {
+        qualifier: Option<String>,
+    },
     /// CR 602.5a: Bypasses the summoning-sickness gate on a creature's `{T}`/`{Q}`
     /// activated abilities — "You may activate abilities of creatures you control as
     /// though those creatures had haste." This is NOT `AddKeyword(Haste)`: only the
@@ -856,6 +932,7 @@ impl Hash for StaticMode {
                 filter.hash(state);
                 action.hash(state);
             }
+            StaticMode::IgnoreLandwalkForBlocking { qualifier } => qualifier.hash(state),
             StaticMode::Other(s) => s.hash(state),
             StaticMode::GraveyardCastPermission {
                 frequency,
@@ -891,6 +968,7 @@ impl Hash for StaticMode {
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::CastWithKeyword { .. }
             | StaticMode::CantBeActivated { .. }
+            | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
@@ -991,6 +1069,12 @@ impl fmt::Display for StaticMode {
             StaticMode::CantCastDuring { who, when } => {
                 write!(f, "CantCastDuring({who},{when})")
             }
+            // CR 602.5 + CR 117.1b: Diagnostic-only Display; `exemption` is data-carrying
+            // and omitted (mirrors `CantBeActivated`'s Display which also drops
+            // `source_filter` + `exemption`).
+            StaticMode::CantActivateDuring { who, when, .. } => {
+                write!(f, "CantActivateDuring({who},{when})")
+            }
             StaticMode::PerTurnCastLimit { who, max, .. } => {
                 write!(f, "PerTurnCastLimit({who},{max})")
             }
@@ -1075,6 +1159,12 @@ impl fmt::Display for StaticMode {
                 write!(f, "StepEndUnspentMana({filter:?},{action})")
             }
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
+            // CR 509.1b + CR 609.4 + CR 702.14c: Display follows the existing
+            // parenthesized-payload pattern. `None` = all-landwalk canceller.
+            StaticMode::IgnoreLandwalkForBlocking { qualifier } => match qualifier {
+                None => write!(f, "IgnoreLandwalkForBlocking"),
+                Some(q) => write!(f, "IgnoreLandwalkForBlocking({q})"),
+            },
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 write!(f, "CanActivateAbilitiesAsThoughHaste")
             }
@@ -1309,6 +1399,10 @@ impl FromStr for StaticMode {
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
+            // CR 509.1b + CR 609.4 + CR 702.14c: bare form = all-landwalk canceller.
+            "IgnoreLandwalkForBlocking" => {
+                StaticMode::IgnoreLandwalkForBlocking { qualifier: None }
+            }
             "CanActivateAbilitiesAsThoughHaste" => StaticMode::CanActivateAbilitiesAsThoughHaste,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UntapsDuringEachOtherPlayersUntapStep" => {
@@ -1377,6 +1471,26 @@ impl FromStr for StaticMode {
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
+                    .strip_prefix("CantActivateDuring(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 602.5 + CR 117.1b: Round-trip preserves the (who, when) axes;
+                    // `exemption` is data-carrying and defaults to `None` (mirrors the
+                    // `CantBeActivated` round-trip above — diagnostic-only).
+                    if let Some((who_str, when_str)) = inner.split_once(',') {
+                        if let (Ok(who), Ok(when)) = (
+                            ProhibitionScope::from_str(who_str),
+                            CastingProhibitionCondition::from_str(when_str),
+                        ) {
+                            return Ok(StaticMode::CantActivateDuring {
+                                who,
+                                when,
+                                exemption: ActivationExemption::None,
+                            });
+                        }
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
                     .strip_prefix("PerTurnCastLimit(")
                     .and_then(|s| s.strip_suffix(')'))
                 {
@@ -1436,6 +1550,15 @@ impl FromStr for StaticMode {
                 {
                     let keyword = Keyword::from_str(inner).unwrap();
                     StaticMode::CastWithKeyword { keyword }
+                } else if let Some(inner) = other
+                    .strip_prefix("IgnoreLandwalkForBlocking(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 509.1b + CR 609.4 + CR 702.14c: parameterized form carries
+                    // the canonical capitalized land subtype (e.g. "Swamp").
+                    StaticMode::IgnoreLandwalkForBlocking {
+                        qualifier: Some(inner.to_string()),
+                    }
                 } else if let Some(inner) = other
                     .strip_prefix("SkipStep(")
                     .and_then(|s| s.strip_suffix(')'))
@@ -1764,6 +1887,35 @@ mod tests {
                 exemption: ActivationExemption::None,
             }
         );
+    }
+
+    #[test]
+    fn ignore_landwalk_for_blocking_display_fromstr_roundtrip() {
+        // CR 509.1b + CR 609.4 + CR 702.14c: round-trip the `None` (all-landwalk)
+        // form and each of the five basic-land qualifier forms.
+        let cases = [
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: None },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Plains".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Island".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Swamp".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Mountain".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Forest".to_string()),
+            },
+        ];
+        for case in cases {
+            let s = case.to_string();
+            let parsed = StaticMode::from_str(&s).unwrap();
+            assert_eq!(parsed, case, "round-trip failed for {s}");
+        }
     }
 
     #[test]

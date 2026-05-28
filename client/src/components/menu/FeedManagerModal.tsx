@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "./buttonStyles";
 import { FEED_REGISTRY } from "../../data/feedRegistry";
@@ -19,6 +20,7 @@ interface FeedManagerModalProps {
 }
 
 export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
+  const { t } = useTranslation("menu");
   const [subs, setSubs] = useState<FeedSubscription[]>(() => listSubscriptions());
   const [customUrl, setCustomUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -102,13 +104,13 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="shrink-0 flex items-center justify-between gap-3 px-6 pb-4 pt-6">
-              <h2 className="text-lg font-semibold text-white">Manage Feeds</h2>
+              <h2 className="text-lg font-semibold text-white">{t("feedManager.title")}</h2>
               <button
                 onClick={handleRefreshAll}
                 disabled={loading === "all" || subs.length === 0}
                 className="rounded px-3 py-1 text-xs text-slate-300 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white disabled:opacity-40"
               >
-                {loading === "all" ? "Refreshing…" : "Refresh all"}
+                {loading === "all" ? t("feedManager.refreshing") : t("feedManager.refreshAll")}
               </button>
             </div>
 
@@ -147,7 +149,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                       )}
                       {sub && (
                         <p className="mt-0.5 text-[10px] text-slate-600">
-                          Last refreshed: {new Date(sub.lastRefreshedAt).toLocaleDateString()}
+                          {t("feedManager.lastRefreshed", { date: new Date(sub.lastRefreshedAt).toLocaleDateString() })}
                           {sub.error && <span className="ml-2 text-red-400">{sub.error}</span>}
                         </p>
                       )}
@@ -159,7 +161,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                           disabled={isLoading}
                           className="rounded px-2 py-1 text-xs text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white disabled:opacity-40"
                         >
-                          {isLoading ? "…" : "Refresh"}
+                          {isLoading ? "…" : t("feedManager.refresh")}
                         </button>
                       )}
                       <button
@@ -171,7 +173,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                             : "text-emerald-300 ring-1 ring-emerald-500/30 hover:bg-emerald-500/10"
                         }`}
                       >
-                        {isSubscribed ? "Unsubscribe" : "Subscribe"}
+                        {isSubscribed ? t("feedManager.unsubscribe") : t("feedManager.subscribe")}
                       </button>
                     </div>
                   </div>
@@ -196,13 +198,13 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                         disabled={loading === sub.sourceId}
                         className="rounded px-2 py-1 text-xs text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white disabled:opacity-40"
                       >
-                        {loading === sub.sourceId ? "…" : "Refresh"}
+                        {loading === sub.sourceId ? "…" : t("feedManager.refresh")}
                       </button>
                       <button
                         onClick={() => handleUnsubscribe(sub.sourceId)}
                         className="rounded px-3 py-1 text-xs font-medium text-red-300 ring-1 ring-red-500/30 transition-colors hover:bg-red-500/10"
                       >
-                        Unsubscribe
+                        {t("feedManager.unsubscribe")}
                       </button>
                     </div>
                   </div>
@@ -210,7 +212,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
             </div>
 
             <div className="mt-4 border-t border-white/10 pt-4">
-              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Add Custom Feed</h3>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">{t("feedManager.addCustomFeed")}</h3>
               <div className="flex gap-2">
                 <input
                   type="url"
@@ -225,7 +227,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                   disabled={!customUrl.trim() || loading === "custom"}
                   className={menuButtonClass({ tone: "indigo", size: "sm", disabled: !customUrl.trim() || loading === "custom" })}
                 >
-                  {loading === "custom" ? "…" : "Add"}
+                  {loading === "custom" ? "…" : t("feedManager.add")}
                 </button>
               </div>
             </div>
@@ -237,7 +239,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                 onClick={onClose}
                 className={menuButtonClass({ tone: "neutral", size: "sm" })}
               >
-                Done
+                {t("feedManager.done")}
               </button>
             </div>
           </motion.div>
