@@ -1,9 +1,11 @@
 //! Combo reachability assessment over a `GameState`. The structural detector
 //! walks `ComboLine::pieces`, matches them against the AI player's zones,
-//! computes mana shortfall, and resolves the line's `action_sequence` into
-//! concrete `GameAction` values by binding each `ComboStep` predicate to the
-//! matching object on the AI's battlefield/hand.
+//! checks affordability via the engine's color-accurate auto-tap primitive,
+//! and resolves the line's `action_sequence` into concrete `GameAction` values
+//! by binding each `ComboStep` predicate to the matching object on the AI's
+//! battlefield/hand.
 
+use engine::game::casting::can_pay_cost_after_auto_tap;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -20,7 +22,9 @@ pub trait ComboDetector: Send + Sync {
 /// - `state.players[ai.0 as usize].hand` / `.graveyard` / `.library` for
 ///   off-battlefield pieces.
 /// - `state.battlefield` filtered by `controller == ai` for on-board pieces.
-/// - `crate::zone_eval::available_mana(state, ai)` for mana shortfall.
+/// - Affordability is delegated to the engine's color-accurate primitive
+///   `engine::game::casting::can_pay_cost_after_auto_tap`, which simulates
+///   mana-ability activation (auto-tap) on a clone of the state.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StructuralComboDetector;
 
@@ -34,23 +38,30 @@ impl ComboDetector for StructuralComboDetector {
         }
 
         if missing.is_empty() {
-            // All pieces present. Check mana.
-            let available = crate::zone_eval::available_mana(state, ai);
-            let required = mana_cost_total(&line.mana_cost);
-            // Saturate on unsigned ints: an i32 `saturating_sub` floors at
-            // i32::MIN, so `2 - 3 = -1` would cast to `u8` as 255 and make the
-            // policy think an affordable combo is unreachable. `required` is
-            // always >= 0 (mana cost), so the u32 cast is lossless.
-            let shortfall = (required as u32).saturating_sub(available);
-            // Resolve each ComboStep against state to produce concrete
-            // GameAction values. Targets are intentionally left empty —
-            // ComboLinePolicy fires as a prior-boost *before* target
-            // selection, and the engine's subsequent target-prompt flow
-            // handles target choice independently.
-            let required_actions = resolve_action_sequence(&line.action_sequence, state, ai);
-            ComboReachability::ReachableThisTurn {
-                missing_mana: shortfall as u8,
-                required_actions,
+            // All pieces present. Check affordability.
+            // CR 601.2g + CR 601.2h: a line is castable this turn only if the AI can pay
+            // the cost-bearing piece's mana cost after activating mana abilities (auto-tap).
+            // Delegates to the engine's color-accurate affordability primitive, which also
+            // enforces summoning sickness (CR 302.6).
+            let affordable = match &line.mana_cost {
+                ManaCost::NoCost | ManaCost::SelfManaCost => true,
+                ManaCost::Cost { .. } => cost_bearing_source(line, state, ai).is_some_and(|src| {
+                    can_pay_cost_after_auto_tap(state, ai, src, &line.mana_cost)
+                }),
+            };
+            if affordable {
+                // Resolve each ComboStep against state to produce concrete
+                // GameAction values. Targets are intentionally left empty —
+                // ComboLinePolicy fires as a prior-boost *before* target
+                // selection, and the engine's subsequent target-prompt flow
+                // handles target choice independently.
+                let required_actions = resolve_action_sequence(&line.action_sequence, state, ai);
+                ComboReachability::ReachableThisTurn {
+                    missing_mana: 0,
+                    required_actions,
+                }
+            } else {
+                ComboReachability::NotReachable
             }
         } else if missing
             .iter()
@@ -168,12 +179,17 @@ fn find_hand_object(state: &GameState, ai: PlayerId, pred: &CardPredicate) -> Op
         .find(|&id| matches_in_zone(pred, state, id))
 }
 
-/// The MVP collapses colored + generic into a single integer cost; refine
-/// when real combo lines need color-aware matching.
-fn mana_cost_total(cost: &ManaCost) -> i32 {
-    match cost {
-        ManaCost::Cost { shards, generic } => (shards.len() as i32) + (*generic as i32),
-        ManaCost::NoCost | ManaCost::SelfManaCost => 0,
+/// Locates the object that bears the line's mana cost — the source the engine's
+/// affordability primitive prioritizes (and deprioritizes from tapping for its
+/// own cost). Matches the line's first `ComboStep`: an `Activate` step bears the
+/// cost on its battlefield source; a `Cast` step bears it on the hand object.
+fn cost_bearing_source(line: &ComboLine, state: &GameState, ai: PlayerId) -> Option<ObjectId> {
+    match line.action_sequence.first() {
+        Some(ComboStep::Activate { predicate, .. }) => {
+            find_battlefield_object(state, ai, predicate)
+        }
+        Some(ComboStep::Cast { predicate }) => find_hand_object(state, ai, predicate),
+        None => None,
     }
 }
 
@@ -220,7 +236,7 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut state = empty_state();
-        // Two untapped Lands → available_mana == 2.
+        // Two untapped Forests → GG, which pays the generic {2}.
         for i in 0..2 {
             let land_id = create_object(
                 &mut state,
@@ -229,13 +245,9 @@ mod tests {
                 "Forest".to_string(),
                 Zone::Battlefield,
             );
-            state
-                .objects
-                .get_mut(&land_id)
-                .unwrap()
-                .card_types
-                .core_types
-                .push(CoreType::Land);
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
         }
         let src_id = create_object(
             &mut state,

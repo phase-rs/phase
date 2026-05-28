@@ -334,22 +334,20 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut state = GameState::new_two_player(0);
-        // Four lands → available_mana == 4 ({1}{U}{U}{B}).
-        for i in 0..4 {
+        // Four lands producing UUU+B → pays {1}{U}{U}{B} (two U pips + B pip +
+        // the third U covers the generic {1}).
+        let subtypes = ["Island", "Island", "Island", "Swamp"];
+        for (i, subtype) in subtypes.iter().enumerate() {
             let land_id = create_object(
                 &mut state,
-                CardId(10 + i),
+                CardId(10 + i as u64),
                 PlayerId(0),
-                "Island".to_string(),
+                subtype.to_string(),
                 Zone::Battlefield,
             );
-            state
-                .objects
-                .get_mut(&land_id)
-                .unwrap()
-                .card_types
-                .core_types
-                .push(CoreType::Land);
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push(subtype.to_string());
         }
         create_object(
             &mut state,
@@ -382,5 +380,70 @@ mod tests {
             }
             other => panic!("expected ReachableThisTurn, got {other:?}"),
         }
+    }
+
+    /// Discriminating regression: both Thoracle pieces are in hand and the AI
+    /// controls four untapped lands — but they produce only W and G, never the
+    /// U/U/B that {1}{U}{U}{B} requires. With the color-accurate affordability
+    /// primitive the line collapses to NotReachable and is filtered out.
+    ///
+    /// This MUST fail on pre-fix code: the old count-based check saw 4 mana
+    /// sources >= 4 pips and reported `missing_mana: 0` → ReachableThisTurn.
+    /// It passes only after delegating to `can_pay_cost_after_auto_tap`.
+    #[test]
+    fn thoracle_line_not_reachable_with_wrong_color_mana() {
+        use engine::game::zones::create_object;
+        use engine::types::card_type::CoreType;
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(0);
+        // Four untapped lands, WRONG colors only: W, W, G, G — no U, no B.
+        let subtypes = ["Plains", "Plains", "Forest", "Forest"];
+        for (i, subtype) in subtypes.iter().enumerate() {
+            let land_id = create_object(
+                &mut state,
+                CardId(10 + i as u64),
+                PlayerId(0),
+                subtype.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push(subtype.to_string());
+        }
+        create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Thassa's Oracle".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Demonic Consultation".to_string(),
+            Zone::Hand,
+        );
+
+        let reg = ComboRegistry::default();
+        let reachable = reg.reachable_lines(&state, PlayerId(0));
+        // The Thoracle line (ComboLineId(1)) must not appear as reachable this
+        // turn — under the collapse semantics it is NotReachable and filtered.
+        let thoracle = reachable.iter().find(|(id, _)| *id == ComboLineId(1));
+        assert!(
+            !matches!(
+                thoracle,
+                Some((
+                    _,
+                    ComboReachability::ReachableThisTurn {
+                        missing_mana: 0,
+                        ..
+                    }
+                ))
+            ),
+            "Thoracle line must not be reachable-this-turn with wrong-color mana, got {thoracle:?}"
+        );
     }
 }

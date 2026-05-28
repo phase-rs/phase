@@ -47,11 +47,7 @@ impl TacticalPolicy for ComboLinePolicy {
     }
 
     fn decision_kinds(&self) -> &'static [DecisionKind] {
-        &[
-            DecisionKind::CastSpell,
-            DecisionKind::ActivateAbility,
-            DecisionKind::SelectTarget,
-        ]
+        &[DecisionKind::CastSpell, DecisionKind::ActivateAbility]
     }
 
     fn activation(
@@ -70,7 +66,7 @@ impl TacticalPolicy for ComboLinePolicy {
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
         // TODO(cedh-perf): cache reachable_lines() by (quick_state_hash(state), ai_player)
-        // — verdict() runs per candidate, and CastSpell/ActivateAbility/SelectTarget
+        // — verdict() runs per candidate, and CastSpell/ActivateAbility
         // can each carry many candidates. The registry currently holds 3 lines,
         // each O(pieces) zone scans; the per-candidate cost is still small but
         // grows with the line count, so a (state, ai)-keyed cache shared across
@@ -238,7 +234,8 @@ mod tests {
     }
 
     /// Places Heliod, Sun-Crowned + Walking Ballista on PlayerId(0)'s
-    /// battlefield with two untapped Forests, so the Heliod/Ballista line is
+    /// battlefield with two untapped Plains (so Heliod's {1}{W} is payable in
+    /// the color-aware reachability check), making the Heliod/Ballista line
     /// `ReachableThisTurn { missing_mana: 0, .. }`.
     fn heliod_ballista_state() -> (
         GameState,
@@ -251,7 +248,7 @@ mod tests {
         use engine::types::zones::Zone;
 
         let mut state = make_state();
-        // Two untapped lands → available_mana == 2, satisfying {1}{W}.
+        // Two untapped Plains → WW, satisfying {1}{W}.
         for i in 0..2 {
             let land_id = create_object(
                 &mut state,
@@ -262,6 +259,7 @@ mod tests {
             );
             let obj = state.objects.get_mut(&land_id).unwrap();
             obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Plains".to_string());
         }
         let heliod_id = create_object(
             &mut state,

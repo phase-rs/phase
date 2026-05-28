@@ -76,9 +76,6 @@ pub enum ComboReachability {
     ReachableNextTurn {
         missing_pieces: Vec<ComboPiece>,
     },
-    ReachableSoon {
-        turns_estimated: u8,
-    },
 }
 
 #[cfg(test)]
