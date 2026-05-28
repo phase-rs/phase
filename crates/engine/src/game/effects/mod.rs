@@ -2329,6 +2329,22 @@ fn previous_effect_amount_from_events(
                 _ => None,
             })
             .sum(),
+        // CR 706.2 + CR 608.2c: A die roll's *actual* result (natural + modifier,
+        // clamped at 0) is the numeric value a follow-up `PreviousEffectAmount`
+        // condition reads. Unlike damage/life amounts, the relevant amount is
+        // always defined — even a clamped-to-zero result is a valid
+        // sub-ability gate (Deck of Many Things' "if the result is 0 or less,
+        // discard your hand"). We short-circuit on the first DieRolled event
+        // (the one this RollDie effect emitted; any nested rolls happen inside
+        // a deeper chain that clears `last_effect_amount` on entry, but their
+        // events still appear later in the slice and must be ignored here so
+        // the OUTER RollDie's actual is what the OUTER sub_ability sees).
+        Effect::RollDie { .. } => {
+            return events.iter().find_map(|event| match event {
+                GameEvent::DieRolled { result, .. } => Some(*result as i32),
+                _ => None,
+            });
+        }
         _ => 0,
     };
 

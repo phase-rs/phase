@@ -362,4 +362,201 @@ mod tests {
             }
         }
     }
+
+    /// CR 706.2 + CR 608.2c: After a RollDie resolves, the actual result is
+    /// stamped into `state.last_effect_amount` so a follow-up sub-ability with
+    /// `AbilityCondition::PreviousEffectAmount` can gate on it. This is the
+    /// channel that powers "If the result is 0 or less, discard your hand"
+    /// (Deck of Many Things) and analogous result-conditional riders.
+    #[test]
+    fn roll_die_stamps_last_effect_amount_for_chain() {
+        use crate::types::ability::{AbilityCondition, Comparator};
+        let mut state = GameState::new_two_player(7);
+        // No modifier: actual result == natural ∈ 1..=20, always > 0.
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result as i32),
+                _ => None,
+            })
+            .expect("DieRolled event must be present");
+        assert_eq!(
+            state.last_effect_amount,
+            Some(result),
+            "last_effect_amount must mirror the actual rolled result so PreviousEffectAmount conditions can read it"
+        );
+        // And the AbilityCondition resolver consumes that channel correctly.
+        let cond = AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        let dummy = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "probe".into(),
+                description: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            crate::game::effects::evaluate_condition(&cond, &state, &dummy),
+            "result {result} ≥ 1, so the PreviousEffectAmount(GE, 1) condition must hold"
+        );
+    }
+
+    /// CR 706.2 (Deck of Many Things, end-to-end): "Roll a d20 and subtract
+    /// the number of cards in your hand. If the result is 0 or less, discard
+    /// your hand." With 25 cards in hand the modifier dominates any d20 →
+    /// actual clamps to 0, so the conditional Discard sub-ability MUST fire.
+    #[test]
+    fn roll_die_conditional_subability_fires_when_result_le_zero() {
+        use crate::types::ability::{
+            AbilityCondition, Comparator, DieRollModifier, PlayerScope, QuantityRef, TargetFilter,
+        };
+        let mut state = GameState::new_two_player(42);
+        // Seed 25 real hand objects so the modifier (-25) overpowers any
+        // d20 natural roll and the Discard has cards to actually move.
+        for i in 0..25 {
+            crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(2000 + i as u64),
+                PlayerId(0),
+                format!("Card {i}"),
+                crate::types::zones::Zone::Hand,
+            );
+        }
+        let hand_before = state.players[0].hand.len();
+        // Conditional Discard guarded by "result ≤ 0".
+        let discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        });
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![],
+                modifier: Some(DieRollModifier::Subtract {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                }),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(discard);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        // Roll clamped to 0; condition LE 0 holds; controller discards hand.
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "result ≤ 0 should fire the guarded Discard, emptying the hand from {hand_before}"
+        );
+    }
+
+    /// CR 706.2 (Deck of Many Things, end-to-end): "Roll a d20 and subtract
+    /// the number of cards in your hand. If the result is 0 or less, discard
+    /// your hand." With zero cards in hand the modifier is 0 → natural roll
+    /// (≥ 1) wins → result ≥ 1, so the conditional Discard MUST NOT fire.
+    #[test]
+    fn roll_die_conditional_subability_skipped_when_result_positive() {
+        use crate::types::ability::{
+            AbilityCondition, AggregateFunction, Comparator, DieRollModifier, PlayerScope,
+            QuantityRef, TargetFilter,
+        };
+        let mut state = GameState::new_two_player(7);
+        // Seed two real hand objects; with 0 cards we'd test nothing — we want
+        // visible objects that would have been discarded had the gate broken.
+        for i in 0..2 {
+            crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(3000 + i as u64),
+                PlayerId(0),
+                format!("Card {i}"),
+                crate::types::zones::Zone::Hand,
+            );
+        }
+        // Modifier reads opponent's hand size (which is 0) so the result
+        // equals the natural d20 ≥ 1.
+        let discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        });
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![],
+                modifier: Some(DieRollModifier::Subtract {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Sum,
+                            },
+                        },
+                    },
+                }),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(discard);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        // Result ≥ 1, so the LE 0 gate fails and the Discard is skipped.
+        assert_eq!(
+            state.players[0].hand.len(),
+            2,
+            "result ≥ 1 must not fire the guarded Discard"
+        );
+    }
 }
