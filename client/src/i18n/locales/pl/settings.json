@@ -9,8 +9,7 @@
     "combat": "Tempo",
     "audio": "Dźwięk",
     "multiplayer": "Tryb wieloosobowy",
-    "data": "Dane",
-    "experimental": "Eksperymentalne"
+    "data": "Dane"
   },
   "gameplay": {
     "title": "Rozgrywka",
@@ -84,13 +83,6 @@
     "displayName": "Nazwa wyświetlana",
     "displayNamePlaceholder": "Wprowadź swoją nazwę",
     "serverSelectionNote": "Wybór serwera został przeniesiony do poczekalni — otwórz Tryb wieloosobowy i użyj plakietki serwera (lub „Wybierz serwer” w trybie P2P), aby zmieniać regiony, skonfigurować własną instancję lub przetestować połączenie."
-  },
-  "experimental": {
-    "title": "Eksperymentalne",
-    "description": "Te funkcje są wciąż w fazie rozwoju. Mogą być niekompletne, zawierać błędy lub zmieniać się bez ostrzeżenia. Włącz je, aby wypróbować nowości wcześniej.",
-    "draftExperiments": "Eksperymenty draftowe",
-    "enableDraftFeatures": "Włącz eksperymentalne funkcje draftu",
-    "draftFeaturesDescription": "Odblokowuje Cube Draft i Pod Draft. Szybki draft przeciwko AI jest zawsze dostępny."
   },
   "sync": {
     "title": "Synchronizacja w chmurze",

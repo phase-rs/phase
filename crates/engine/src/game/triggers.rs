@@ -5698,6 +5698,62 @@ pub mod tests {
     }
 
     #[test]
+    fn zone_change_object_condition_checks_entering_token_identity() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Gruff Triplets".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&entering).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = false;
+        }
+
+        let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter: TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::NonToken]),
+            ),
+        };
+        let event = zone_changed_event(
+            entering,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+
+        state.objects.get_mut(&entering).unwrap().is_token = true;
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+    }
+
+    #[test]
     fn zone_change_object_condition_checks_dead_object_snapshot() {
         let mut state = setup();
         let source = create_object(

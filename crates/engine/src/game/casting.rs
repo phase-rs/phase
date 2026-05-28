@@ -1642,11 +1642,17 @@ fn casting_variant_candidates(
             .casting_permissions
             .iter()
             .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. }));
+        // CR 702.62a: Suspend candidate selection. Runtime-granted Suspend
+        // (CR 604.1, e.g. Jhoira of the Ghitu / The Tenth Doctor) lives in
+        // the effective off-zone keyword set, not `obj.keywords`, so query
+        // through the off-zone-aware helper to match Flashback/Retrace/
+        // Aftermath/Escape recognition in this file.
         if has_alt_cost
-            && obj
-                .keywords
-                .iter()
-                .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }))
+            && super::keywords::object_has_effective_keyword_kind(
+                state,
+                object_id,
+                KeywordKind::Suspend,
+            )
         {
             candidates.push(CastingVariant::Suspend);
         }
@@ -1940,12 +1946,16 @@ fn prepare_spell_cast_with_variant_override_inner(
     // cast is the suspend "play it without paying its mana cost" path. Mirrors
     // Warp/Flashback's keyword-presence detection and avoids coupling
     // `Effect::CastFromZone` to a cast-variant override field.
+    // CR 702.62a: Suspend cast detection. Reads the effective off-zone keyword
+    // set so Suspend granted at runtime by Jhoira of the Ghitu / The Tenth Doctor
+    // (CR 604.1) is recognized alongside printed Suspend.
     let is_suspend_cast = obj.zone == Zone::Exile
         && alt_cost_from_exile.is_some()
-        && obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }));
+        && super::keywords::object_has_effective_keyword_kind(
+            state,
+            object_id,
+            KeywordKind::Suspend,
+        );
 
     // CR 702.170d: Plot free-cast detection — when casting an exile-zone card
     // with a `CastingPermission::Plotted { turn_plotted }` (on a later turn
@@ -12181,6 +12191,294 @@ mod tests {
             Some(3),
             "the persisting granted Suspend must let the upkeep trigger \
              tick the time counter 4 → 3 (issue #501 follow-up, Root Cause A)"
+        );
+    }
+
+    /// Issue #863 — cast-variant tag discriminator. Mirrors the
+    /// `granted_suspend_upkeep_trigger_ticks_counter_in_exile` setup (exiled
+    /// sorcery + permanent-duration granted Suspend), then resolves the
+    /// last-counter `CastFromZone` payload directly (the synthesized trigger's
+    /// body per `build_suspend_last_counter_cast_trigger`). This installs the
+    /// `ExileWithAltCost` permission. Finally, asks the casting pipeline what
+    /// variant the spell would be cast under — the granted (off-zone) Suspend
+    /// keyword must be visible to `casting_variant_candidates` /
+    /// `prepare_spell_cast_with_variant_override_inner` so the variant
+    /// resolves to `CastingVariant::Suspend`, not `CastingVariant::Normal`.
+    ///
+    /// Reverted-fix discriminator: with both predicates reading `obj.keywords`
+    /// instead of `object_has_effective_keyword_kind`, the granted Suspend is
+    /// invisible (printed-Suspend only populates `obj.keywords` for
+    /// battlefield/hand zones via `evaluate_layers`), the variant misroutes
+    /// to `CastingVariant::Normal`, and the assertion below fails.
+    // CR 702.62a: Suspend granted at runtime (CR 604.1) must produce the Suspend cast variant tag.
+    #[test]
+    fn jhoira_granted_suspend_last_counter_cast_tags_suspend_variant() {
+        use crate::types::ability::{
+            CardPlayMode, ContinuousModification, Duration, Effect, ResolvedAbility, TargetRef,
+        };
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup_game_at_main_phase();
+
+        // An exiled sorcery owned by PlayerId(0). The last upkeep tick has
+        // already happened conceptually — only one time counter remains, and
+        // it is the one the `CounterRemoved` trigger will key off of when the
+        // last-counter cast resolves.
+        let suspended = create_object(
+            &mut state,
+            CardId(5001),
+            PlayerId(0),
+            "Suspended Sorcery".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::generic(3);
+        }
+        // Battlefield grant source carrying the permanent-duration granted
+        // Suspend continuous effect (mirrors a Jhoira-style "it gains
+        // suspend" effect with Duration::Permanent).
+        let grant_source = create_object(
+            &mut state,
+            CardId(5002),
+            PlayerId(0),
+            "Suspend Granter".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            grant_source,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: suspended },
+            vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 0,
+                    },
+                },
+            }],
+            None,
+        );
+
+        // Sanity: the granted keyword is effective on the off-zone card.
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                suspended,
+                crate::types::keywords::KeywordKind::Suspend,
+            ),
+            "the exiled card must have the permanent granted Suspend"
+        );
+
+        // Resolve the synthesized last-counter trigger's `CastFromZone` body
+        // directly. This is the exact effect the suspend last-counter trigger
+        // synthesis (`build_suspend_last_counter_cast_trigger`) executes when
+        // the final time counter is removed (CR 702.62a). Resolving it
+        // installs `CastingPermission::ExileWithAltCost { cost: zero, .. }`
+        // on the exiled card via `cast_from_zone::resolve`.
+        let cast_trigger_ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![TargetRef::Object(suspended)],
+            suspended,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &cast_trigger_ability,
+            &mut events,
+            0,
+        )
+        .expect("CastFromZone must install ExileWithAltCost on the suspended card");
+
+        assert!(
+            state.objects[&suspended]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(
+                    p,
+                    CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()
+                )),
+            "CastFromZone must grant a zero-cost ExileWithAltCost permission \
+             on the exiled card (CR 702.62a synthesized trigger body)"
+        );
+
+        // The discriminator: ask the casting pipeline what variant would be
+        // selected. With the fix the granted off-zone Suspend keyword feeds
+        // both `casting_variant_candidates` and
+        // `prepare_spell_cast_with_variant_override_inner` through
+        // `object_has_effective_keyword_kind`, so the variant is Suspend.
+        let prepared =
+            prepare_spell_cast_with_variant_override(&state, PlayerId(0), suspended, None)
+                .expect("prepare_spell_cast must succeed with granted Suspend + ExileWithAltCost");
+        assert_eq!(
+            prepared.casting_variant,
+            CastingVariant::Suspend,
+            "granted Suspend (CR 604.1) must produce CastingVariant::Suspend, \
+             not Normal — the off-zone effective keyword set must be consulted"
+        );
+    }
+
+    /// Issue #863 — behavioral discriminator for CR 702.62a's creature-haste
+    /// branch. Same setup as the cast-variant test, but the exiled card is a
+    /// Creature. After installing `ExileWithAltCost` and casting the spell
+    /// through the real pipeline, the resolving permanent must gain Haste via
+    /// the transient continuous effect that `stack::resolve_top` installs on
+    /// the Suspend-cast resolution branch.
+    ///
+    /// Reverted-fix discriminator: with both predicates reading `obj.keywords`,
+    /// the cast misroutes to `CastingVariant::Normal`, the
+    /// `casting_variant == CastingVariant::Suspend` branch in `stack::resolve_top`
+    /// is never entered, no haste TCE is installed, and the assertion below
+    /// fails.
+    // CR 702.62a: "If you cast a creature spell this way, it gains haste until
+    // you lose control of the spell or the permanent it becomes." This must
+    // apply to granted-Suspend casts (CR 604.1) too.
+    #[test]
+    fn jhoira_granted_suspend_creature_cast_gains_haste() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{
+            CardPlayMode, ContinuousModification, Duration, Effect, ResolvedAbility, TargetRef,
+        };
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup_game_at_main_phase();
+
+        // An exiled creature owned by PlayerId(0).
+        let suspended = create_object(
+            &mut state,
+            CardId(6001),
+            PlayerId(0),
+            "Suspended Creature".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::generic(4);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.base_power = obj.power;
+            obj.base_toughness = obj.toughness;
+        }
+        let grant_source = create_object(
+            &mut state,
+            CardId(6002),
+            PlayerId(0),
+            "Suspend Granter".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            grant_source,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: suspended },
+            vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 0,
+                    },
+                },
+            }],
+            None,
+        );
+
+        // Resolve the synthesized last-counter trigger body to install
+        // `ExileWithAltCost { cost: zero, .. }` on the exiled creature.
+        let cast_trigger_ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![TargetRef::Object(suspended)],
+            suspended,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &cast_trigger_ability,
+            &mut events,
+            0,
+        )
+        .expect("CastFromZone must install ExileWithAltCost on the suspended card");
+
+        // Cast the spell through the real pipeline. The casting pipeline must
+        // pick `CastingVariant::Suspend` (the discriminator covered by the
+        // cast-variant test above), the spell goes to the stack at zero cost,
+        // and resolution enters `stack::resolve_top`'s Suspend branch which
+        // tags `cast_variant_paid` and installs the haste TCE for creatures.
+        let card_id = state.objects[&suspended].card_id;
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: suspended,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .expect("granted-Suspend creature must cast at zero cost through the real pipeline");
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Suspend cast must place the spell on the stack"
+        );
+
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&suspended].zone,
+            Zone::Battlefield,
+            "the resolving Suspend creature must enter the battlefield"
+        );
+
+        // CR 613.1: Re-evaluate continuous effects so the haste TCE installed
+        // by `stack::resolve_top`'s Suspend branch lands in `obj.keywords` for
+        // the battlefield-zone `effective_keyword` query below.
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // The behavioral assertion: the resolving creature must have Haste
+        // (CR 702.62a's "until you lose control of the spell or the permanent
+        // it becomes" branch). Effective off-zone / battlefield keyword query
+        // covers the layer-6 grant installed by `stack::resolve_top`.
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                suspended,
+                crate::types::keywords::KeywordKind::Haste,
+            ),
+            "Suspend-cast creature must gain Haste while its caster still \
+             controls it (CR 702.62a)"
+        );
+
+        // Audit trail: the cast variant tag must be Suspend.
+        assert!(
+            matches!(
+                state.objects[&suspended].cast_variant_paid,
+                Some((CastVariantPaid::Suspend, _))
+            ),
+            "Suspend-cast creature must carry cast_variant_paid = Suspend \
+             (audit trail for CR 702.62a)"
         );
     }
 

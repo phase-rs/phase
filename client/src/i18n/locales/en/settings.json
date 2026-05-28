@@ -9,8 +9,7 @@
     "combat": "Pacing",
     "audio": "Audio",
     "multiplayer": "Multiplayer",
-    "data": "Data",
-    "experimental": "Experimental"
+    "data": "Data"
   },
   "gameplay": {
     "title": "Gameplay",
@@ -84,13 +83,6 @@
     "displayName": "Display Name",
     "displayNamePlaceholder": "Enter your name",
     "serverSelectionNote": "Server selection moved to the lobby — open Multiplayer and use the server chip (or \"Pick server\" in P2P mode) to switch regions, configure a self-hosted instance, or test connectivity."
-  },
-  "experimental": {
-    "title": "Experimental",
-    "description": "These features are still in development. They may be incomplete, buggy, or change without notice. Enable them to try things out early.",
-    "draftExperiments": "Draft Experiments",
-    "enableDraftFeatures": "Enable experimental draft features",
-    "draftFeaturesDescription": "Unlocks Cube Draft and Pod Draft. Quick Draft vs AI is always available."
   },
   "sync": {
     "title": "Cloud Sync",
