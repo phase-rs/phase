@@ -269,7 +269,11 @@
     "loadingPool": "Set-Pool-Daten werden geladen...",
     "roomCode": "Raumcode",
     "roomCodePlaceholder": "Raumcode eingeben...",
-    "joinPod": "Pod beitreten"
+    "joinPod": "Pod beitreten",
+    "tabs": {
+      "set": "Edition",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Turnierpaarungen",

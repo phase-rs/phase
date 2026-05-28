@@ -269,7 +269,11 @@
     "loadingPool": "Wczytywanie danych puli dodatku...",
     "roomCode": "Kod pokoju",
     "roomCodePlaceholder": "Wpisz kod pokoju...",
-    "joinPod": "Dołącz do grupy"
+    "joinPod": "Dołącz do grupy",
+    "tabs": {
+      "set": "Dodatek",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Pary turniejowe",

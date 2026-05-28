@@ -269,7 +269,11 @@
     "loadingPool": "Carregando dados do pool da coleção...",
     "roomCode": "Código da Sala",
     "roomCodePlaceholder": "Insira o código da sala...",
-    "joinPod": "Entrar no Pod"
+    "joinPod": "Entrar no Pod",
+    "tabs": {
+      "set": "Coleção",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Confrontos do Torneio",

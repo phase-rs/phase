@@ -269,7 +269,11 @@
     "loadingPool": "Caricamento dati del pool del set...",
     "roomCode": "Codice stanza",
     "roomCodePlaceholder": "Inserisci codice stanza...",
-    "joinPod": "Unisciti al pod"
+    "joinPod": "Unisciti al pod",
+    "tabs": {
+      "set": "Espansione",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Accoppiamenti torneo",

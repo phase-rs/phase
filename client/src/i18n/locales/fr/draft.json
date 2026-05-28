@@ -269,7 +269,11 @@
     "loadingPool": "Chargement des données du pool d'extension...",
     "roomCode": "Code de la salle",
     "roomCodePlaceholder": "Saisissez le code de la salle...",
-    "joinPod": "Rejoindre le pod"
+    "joinPod": "Rejoindre le pod",
+    "tabs": {
+      "set": "Extension",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Appariements du tournoi",

@@ -176,7 +176,13 @@ export class DraftPodHostAdapter {
       this._roomCode = hostResult.roomCode;
       this.emit({ type: "roomCreated", roomCode: hostResult.roomCode });
 
-      // 2. Register with lobby broker if provided
+      // 2. Register with lobby broker if provided.
+      //
+      // Note: no in-tree caller currently builds a brokerRequest for draft
+      // pods. When a future caller does, it should populate
+      // `draftMetadata.cubeName` from `config.poolInput.data.cube_name` for
+      // Cube pods and leave it `undefined` for Set pods. The lobby protocol
+      // schema is already forward-ready (see DraftLobbyMetadata, #1253).
       if (config.broker && config.brokerRequest) {
         try {
           await config.broker.registerHost({
