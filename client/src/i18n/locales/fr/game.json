@@ -1374,5 +1374,9 @@
     "PostCombatMain": "Phase principale 2",
     "End": "Étape de fin",
     "Cleanup": "Nettoyage"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

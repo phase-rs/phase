@@ -3,8 +3,9 @@ use nom::bytes::complete::tag;
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ActivationRestriction, Effect, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    AbilityDefinition, AbilityKind, ActivationRestriction, Effect, ReplacementCondition,
+    ReplacementDefinition, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition,
 };
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -191,9 +192,16 @@ pub(crate) fn parse_class_oracle_text(
 
             // Replacement patterns
             if is_replacement_pattern(&lower) {
-                if let Some(rep_def) = parse_replacement_line(line, card_name) {
-                    // Note: replacement definitions don't have a condition field;
-                    // they fire at all levels once added. This matches CR 716.2a.
+                if let Some(mut rep_def) = parse_replacement_line(line, card_name) {
+                    // CR 716.2a: Gate Level > 1 replacement effects on the
+                    // source Class being at that level. Mirrors the static
+                    // wrapping above (line 184). Without this, level-3
+                    // replacements (Innkeeper's Talent "put twice that many
+                    // of each of those kinds of counters") would fire as
+                    // soon as the Class enters at level 1.
+                    if section.level > 1 {
+                        rep_def = wrap_replacement_with_class_level(rep_def, section.level);
+                    }
                     result.replacements.push(rep_def);
                     continue;
                 }
@@ -325,6 +333,24 @@ fn wrap_static_with_class_level(mut static_def: StaticDefinition, level: u8) -> 
         None => level_cond,
     });
     static_def
+}
+
+/// CR 716.2a: Gate a Class-level replacement on the source Class being at
+/// `level` or higher. If the replacement already carries a condition, compose
+/// both predicates so neither the printed restriction nor the Class level gate
+/// is lost.
+fn wrap_replacement_with_class_level(
+    mut rep_def: ReplacementDefinition,
+    level: u8,
+) -> ReplacementDefinition {
+    let level_cond = ReplacementCondition::ClassLevelGE { level };
+    rep_def.condition = Some(match rep_def.condition.take() {
+        Some(existing) => ReplacementCondition::And {
+            conditions: vec![level_cond, existing],
+        },
+        None => level_cond,
+    });
+    rep_def
 }
 
 #[cfg(test)]

@@ -1287,6 +1287,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 702.112b: "renowned" is a permanent designation used as an adjective
+    // in filters like "renowned creature you control".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(&lower[pos..]) {
+        if starts_with_type_phrase_lead(rest) {
+            properties.push(FilterProp::Renowned);
+            pos += lower[pos..].len() - rest.len();
+        }
+    }
+
     // CR 700.6: "historic" adjective prefix. An object is historic if it has
     // the legendary supertype, the artifact card type, or the Saga subtype.
     // Emits FilterProp::Historic (a first-class typed predicate — see
@@ -2012,6 +2021,12 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             return true;
         }
     }
+    // CR 702.112b: "renowned <type>" adjective phrase leads a type phrase.
+    if let Ok((after_renowned, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(text) {
+        if starts_with_type_phrase_lead(after_renowned) {
+            return true;
+        }
+    }
     // CR 700.6: "historic <type>" adjective phrase leads a type phrase
     // (e.g., "historic permanents you control"). Consume the adjective and
     // verify a type word follows so the comma/and-list recursion can continue
@@ -2162,6 +2177,8 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
         prop,
         // CR 700.4 + CR 700.9: "modified [type]" adjective prefix.
         FilterProp::Modified
+            // CR 702.112b: "renowned [type]" adjective prefix.
+            | FilterProp::Renowned
             // CR 700.6: "historic [type]" adjective prefix.
             | FilterProp::Historic
             // CR 303.4 + CR 301.5: "enchanted [type]" / "equipped [type]".
@@ -7086,6 +7103,21 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::Modified])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn renowned_adjective_creates_filter_prop() {
+        // CR 702.112b: "renowned creature" is a designation adjective.
+        let (f, rest) = parse_type_phrase("renowned creature you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Renowned])
             )
         );
         assert_eq!(rest.trim(), "");

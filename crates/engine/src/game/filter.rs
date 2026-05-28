@@ -1647,6 +1647,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
+        | FilterProp::Renowned
         // CR 700.9: Modified requires on-battlefield attachments/counters,
         // unavailable from a stack-snapshot record.
         | FilterProp::Modified
@@ -2288,6 +2289,8 @@ fn matches_filter_prop(
         ),
         // CR 701.60b: Match creatures with the suspected designation.
         FilterProp::Suspected => obj.is_suspected,
+        // CR 702.112b: Match permanents with the renowned designation.
+        FilterProp::Renowned => obj.is_renowned,
         // CR 700.9: A permanent is modified if it has one or more counters on
         // it (CR 122), is equipped (CR 301.5), or is enchanted by an Aura
         // controlled by its controller (CR 303.4).
@@ -2687,6 +2690,7 @@ fn zone_change_record_matches_property(
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
+        | FilterProp::Renowned
         // CR 700.9: Modified is a live-battlefield predicate (counters +
         // attachments) — a zone-change snapshot cannot represent it.
         | FilterProp::Modified

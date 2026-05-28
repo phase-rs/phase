@@ -7,11 +7,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
     AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
-    CounterTriggerFilter, Duration, Effect, FilterProp, GainLifePlayer, KickerVariant,
-    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-    NinjutsuVariant, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
-    SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, GainLifePlayer,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PlayerFilter, PlayerScope, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    RuntimeHandler, SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
@@ -150,6 +150,7 @@ impl KeywordTriggerInstaller {
                 "M1M1", "-1/-1", "702.79a",
             )],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            Keyword::Renown(n) => vec![build_renown_trigger(*n)],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
@@ -181,6 +182,7 @@ impl KeywordTriggerInstaller {
                 is_dies_return_with_counter_trigger(trigger, &CounterType::Minus1Minus1)
             }
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
+            Keyword::Renown(_) => is_renown_trigger(trigger),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
@@ -1881,6 +1883,15 @@ pub fn synthesize_persist(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Persist));
 }
 
+/// CR 702.112a: Renown N — combat-damage-to-player trigger with an
+/// intervening-if renowned designation check.
+///
+/// CR 702.112c: Each renown instance triggers independently, so synthesis emits
+/// one trigger per `Keyword::Renown(_)` instance.
+pub fn synthesize_renown(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Renown(_)));
+}
+
 /// CR 702.86a: Annihilator N — "Whenever this creature attacks, defending
 /// player sacrifices N permanents."
 ///
@@ -2494,6 +2505,52 @@ fn build_dethrone_trigger() -> TriggerDefinition {
     // planeswalker or battle.
     trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
     trigger
+}
+
+fn is_renown_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::DamageDone)
+        && matches!(t.valid_source, Some(TargetFilter::SelfRef))
+        && matches!(t.valid_target, Some(TargetFilter::Player))
+        && matches!(t.damage_kind, DamageKindFilter::CombatOnly)
+        && matches!(
+            t.condition,
+            Some(TriggerCondition::Not {
+                condition: ref inner,
+            }) if matches!(**inner, TriggerCondition::SourceIsRenowned)
+        )
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Renown { .. })
+        )
+}
+
+/// CR 702.112a: Renown N — "When this creature deals combat damage to a player,
+/// if it isn't renowned, put N +1/+1 counters on it and it becomes renowned."
+///
+/// CR 702.112c: Multiple renown instances trigger separately; the first to
+/// resolve makes the creature renowned, and later instances do nothing via the
+/// same intervening-if condition.
+fn build_renown_trigger(n: u32) -> TriggerDefinition {
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Renown {
+            count: QuantityExpr::Fixed { value: n as i32 },
+        },
+    )
+    .description(format!("Renown {n}"));
+
+    TriggerDefinition::new(TriggerMode::DamageDone)
+        .valid_source(TargetFilter::SelfRef)
+        .valid_target(TargetFilter::Player)
+        .damage_kind(DamageKindFilter::CombatOnly)
+        .condition(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::SourceIsRenowned),
+        })
+        .execute(execute)
+        .description(format!(
+            "CR 702.112a: Renown {n} — when this creature deals combat damage to a player, if it isn't renowned, put {n} +1/+1 counter{} on it and it becomes renowned.",
+            if n == 1 { "" } else { "s" }
+        ))
 }
 
 /// CR 702.100a: Evolve — "Whenever a creature you control enters, if that
@@ -3581,6 +3638,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // -1/-1 counter, gated on having had no -1/-1 counter at death (LKI).
     // Sibling of Undying via shared `synthesize_dies_return_with_counter`.
     synthesize_persist(face);
+    // CR 702.112a: Renown N — combat damage to player trigger with
+    // designation-setting resolution. CR 702.112c: each instance triggers
+    // separately; the resolution-time designation guard suppresses later ones.
+    synthesize_renown(face);
     // CR 702.86a: Annihilator N — attacks trigger that forces the defending
     // player to sacrifice N permanents. CR 702.86b: each instance triggers
     // separately. Defending player resolved per-attacker via
@@ -5113,6 +5174,21 @@ mod undying_persist_synthesis_tests {
         face
     }
 
+    fn renown_trigger_count(face: &CardFace, n: i32) -> usize {
+        face.triggers
+            .iter()
+            .filter(|trigger| {
+                is_renown_trigger(trigger)
+                    && matches!(
+                        trigger.execute.as_deref().map(|a| a.effect.as_ref()),
+                        Some(Effect::Renown {
+                            count: QuantityExpr::Fixed { value }
+                        }) if *value == n
+                    )
+            })
+            .count()
+    }
+
     /// CR 702.93a: Undying synthesizes a dies-trigger that returns the
     /// permanent with one +1/+1 counter, gated on the LKI absence of any
     /// +1/+1 counter.
@@ -5199,6 +5275,67 @@ mod undying_persist_synthesis_tests {
         let (ct, qty) = &enter_with_counters[0];
         assert_eq!(ct, &CounterType::Minus1Minus1);
         assert!(matches!(qty, QuantityExpr::Fixed { value: 1 }));
+    }
+
+    #[test]
+    fn synthesize_renown_adds_combat_damage_trigger() {
+        let mut face = face_with_keyword(Keyword::Renown(2));
+        synthesize_renown(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_renown_trigger(t))
+            .expect("renown should synthesize a combat-damage trigger");
+
+        assert_eq!(trigger.mode, TriggerMode::DamageDone);
+        assert_eq!(trigger.valid_source, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+
+        let Some(TriggerCondition::Not { condition }) = &trigger.condition else {
+            panic!("renown condition should be Not(...)");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            TriggerCondition::SourceIsRenowned
+        ));
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::Renown {
+                count: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
+    }
+
+    #[test]
+    fn synthesize_renown_preserves_multiple_instances() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Renown(1));
+        face.keywords.push(Keyword::Renown(2));
+
+        synthesize_renown(&mut face);
+
+        assert_eq!(renown_trigger_count(&face, 1), 1);
+        assert_eq!(renown_trigger_count(&face, 2), 1);
+    }
+
+    #[test]
+    fn synthesize_renown_preserves_duplicate_instances_and_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Renown(2));
+        face.keywords.push(Keyword::Renown(2));
+
+        synthesize_renown(&mut face);
+        synthesize_renown(&mut face);
+
+        assert_eq!(
+            renown_trigger_count(&face, 2),
+            2,
+            "CR 702.112c: duplicate Renown instances each trigger separately"
+        );
     }
 
     /// Repeated synthesis must not duplicate the trigger — the idempotency

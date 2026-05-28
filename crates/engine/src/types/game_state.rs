@@ -759,6 +759,30 @@ pub struct PendingChooseOneOf {
     pub remaining_players: Vec<PlayerId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterMoveChoice {
+    pub destination_id: ObjectId,
+    pub counter_type: CounterType,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCounterMove {
+    pub actor: PlayerId,
+    pub source_id: ObjectId,
+    pub destination_id: ObjectId,
+    pub counter_type: CounterType,
+    pub remove_count: u32,
+    pub add_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCounterMoveQueue {
+    pub remaining: Vec<PendingCounterMove>,
+    pub effect_kind: EffectKind,
+    pub source_id: ObjectId,
+}
+
 /// CR 603.7: A delayed triggered ability created during resolution of a spell or ability.
 /// Fires once at the specified condition, then is removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2717,6 +2741,17 @@ pub enum WaitingFor {
         targets: Vec<TargetRef>,
         unit: DistributionUnit,
     },
+    /// CR 122.5 + CR 608.2d: "Move any number of counters ... onto [set]"
+    /// chooses destinations and counts as the ability resolves.
+    MoveCountersDistribution {
+        player: PlayerId,
+        source_id: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counter_type: Option<CounterType>,
+        available: Vec<(CounterType, u32)>,
+        destinations: Vec<ObjectId>,
+        pending_effect: Box<ResolvedAbility>,
+    },
     /// CR 107.1c + CR 107.14: "Pay any amount of {E}" — mid-resolution prompt.
     /// Player picks any integer between `min` and `max` inclusive; the chosen
     /// amount is deducted from the relevant resource pool and stamped into
@@ -2973,6 +3008,7 @@ impl WaitingFor {
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
             | WaitingFor::DistributeAmong { player, .. }
+            | WaitingFor::MoveCountersDistribution { player, .. }
             | WaitingFor::PayAmountChoice { player, .. }
             | WaitingFor::RetargetChoice { player, .. }
             | WaitingFor::WardDiscardChoice { player, .. }
@@ -3103,6 +3139,10 @@ impl WaitingFor {
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
         )
+    }
+
+    pub fn accepts_freeform_counter_move_distribution(&self) -> bool {
+        matches!(self, WaitingFor::MoveCountersDistribution { .. })
     }
 }
 
@@ -4134,6 +4174,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_choose_one_of: Option<PendingChooseOneOf>,
 
+    /// CR 122.5: Pending atomic counter moves selected during a resolution-time
+    /// distribution prompt. Drained before normal pending continuations so
+    /// replacement choices inside a move resume the remaining selected moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_counter_moves: Option<PendingCounterMoveQueue>,
+
     /// Pending optional effect ability chain, awaiting player accept/decline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
@@ -4702,6 +4748,7 @@ impl GameState {
             pending_change_zone_iteration: None,
             pending_repeat_until: None,
             pending_choose_one_of: None,
+            pending_counter_moves: None,
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
             pending_optional_trigger_match_count: None,
@@ -4982,6 +5029,7 @@ impl PartialEq for GameState {
             && self.pending_change_zone_iteration == other.pending_change_zone_iteration
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
+            && self.pending_counter_moves == other.pending_counter_moves
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
             && self.resolving_begin_game_abilities == other.resolving_begin_game_abilities

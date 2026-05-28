@@ -6419,6 +6419,113 @@ mod tests {
         }
     }
 
+    /// CR 205.3i + CR 614.1a + CR 605.1a: All three Urza lands share a single
+    /// parsed shape — an activated mana ability (`{T}: Add {C}.` per CR 605.1a)
+    /// plus a conditional `Add {C}{C}{C} instead` sub-ability whose "instead"
+    /// makes it a replacement effect (CR 614.1a) gated on the player
+    /// controlling the OTHER two Urza land subtypes (from the CR 205.3i land
+    /// type list: Mine, Power-Plant, Tower). The
+    /// critical assertion is the cross-naming of the `And` branches: a
+    /// regression that emits `[Mine, Mine]` instead of `[Mine, Power-Plant]`
+    /// would let Urza's Tower count itself as one of the required lands and
+    /// silently change the rules. Each row in the table below pins the exact
+    /// pair of subtypes the parsed condition must reference.
+    #[test]
+    fn urzas_lands_share_delta_shape() {
+        // (card name, oracle text, expected subtypes on the And conditions in
+        // the order the parser emits them)
+        let cases: [(&str, &str, [&str; 2], &[&str]); 3] = [
+            (
+                "Urza's Tower",
+                "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
+                ["Mine", "Power-Plant"],
+                &["Urza's", "Tower"],
+            ),
+            (
+                "Urza's Power Plant",
+                "{T}: Add {C}. If you control an Urza's Mine and an Urza's Tower, add {C}{C}{C} instead.",
+                ["Mine", "Tower"],
+                &["Urza's", "Power-Plant"],
+            ),
+            (
+                "Urza's Mine",
+                "{T}: Add {C}. If you control an Urza's Power-Plant and an Urza's Tower, add {C}{C}{C} instead.",
+                ["Power-Plant", "Tower"],
+                &["Urza's", "Mine"],
+            ),
+        ];
+
+        for (name, text, expected_subs, subtypes) in cases {
+            let r = parse(text, name, &[], &["Land"], subtypes);
+            assert_eq!(r.abilities.len(), 1, "{name}: expected one ability");
+            let ability = &r.abilities[0];
+
+            match ability.effect.as_ref() {
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { count },
+                    ..
+                } => assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 1 },
+                    "{name}: base mana must be exactly one colorless"
+                ),
+                other => panic!("{name}: expected base colorless mana, got {other:?}"),
+            }
+
+            let sub = ability
+                .sub_ability
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: expected conditional delta sub-ability"));
+
+            match sub.effect.as_ref() {
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { count },
+                    ..
+                } => assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 2 },
+                    "{name}: delta must be +2 colorless (total 3 minus base 1)"
+                ),
+                other => panic!("{name}: expected colorless mana delta, got {other:?}"),
+            }
+
+            let conditions = match sub
+                .condition
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: expected sub-ability condition"))
+            {
+                AbilityCondition::And { conditions } => conditions,
+                other => panic!("{name}: expected And condition, got {other:?}"),
+            };
+            assert_eq!(
+                conditions.len(),
+                2,
+                "{name}: And must have exactly two ControllerControlsMatching branches"
+            );
+
+            let extracted: Vec<&str> = conditions
+                .iter()
+                .map(|c| match c {
+                    AbilityCondition::ControllerControlsMatching {
+                        filter: TargetFilter::Typed(typed),
+                    } => typed
+                        .get_subtype()
+                        .unwrap_or_else(|| panic!("{name}: filter must carry a subtype")),
+                    other => panic!(
+                        "{name}: expected ControllerControlsMatching with Typed filter, got {other:?}"
+                    ),
+                })
+                .collect();
+
+            assert_eq!(
+                extracted,
+                expected_subs.to_vec(),
+                "{name}: And branches must reference the OTHER two Urza land subtypes — \
+                 a regression here lets the land count itself as one of the required pieces"
+            );
+        }
+    }
+
     #[test]
     fn parses_ugin_labyrinth_exiled_card_mana_as_delta() {
         let r = parse(

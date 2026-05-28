@@ -27,7 +27,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MultiTargetSelection { .. }
         | WaitingFor::CopyRetarget { .. }
         | WaitingFor::RetargetChoice { .. }
-        | WaitingFor::DistributeAmong { .. } => DecisionKind::SelectTarget,
+        | WaitingFor::DistributeAmong { .. }
+        | WaitingFor::MoveCountersDistribution { .. } => DecisionKind::SelectTarget,
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
         WaitingFor::UntapChoice { .. } => DecisionKind::ActivateAbility,

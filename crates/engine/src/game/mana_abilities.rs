@@ -3014,6 +3014,11 @@ mod tests {
         );
     }
 
+    /// CR 614.1a positive case: the `Add {C}{C}{C} instead` sub-ability is a
+    /// replacement effect (the word "instead" per CR 614.1a). When its `And`
+    /// condition is satisfied (all three Urza lands controlled), the delta
+    /// replaces the base `Add {C}` production and the pool ends with three
+    /// colorless mana.
     #[test]
     fn resolve_mana_ability_conditional_urza_delta() {
         let mut state = GameState::new_two_player(42);
@@ -3097,6 +3102,96 @@ mod tests {
         assert_eq!(
             state.players[0].mana_pool.count_color(ManaType::Colorless),
             3
+        );
+    }
+
+    /// CR 614.1a negative case: when the sub-ability's "instead" replacement
+    /// (CR 614.1a) cannot fire because its condition is false (here, Urza's
+    /// Power-Plant is missing), only the base `Add {C}` resolves and the
+    /// `And { Mine, Power-Plant }` delta does not apply — the pool ends with
+    /// one colorless, not three. Mirrors
+    /// `resolve_mana_ability_conditional_urza_delta` but omits Power-Plant.
+    #[test]
+    fn resolve_mana_ability_urza_delta_skips_when_companion_land_missing() {
+        let mut state = GameState::new_two_player(42);
+        let tower = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Urza's Tower".to_string(),
+            Zone::Battlefield,
+        );
+        let mine = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Urza's Mine".to_string(),
+            Zone::Battlefield,
+        );
+        // Note: no Urza's Power Plant — the `And` condition cannot be
+        // satisfied, so the sub-ability must not fire.
+        for (id, subtype) in [(tower, "Tower"), (mine, "Mine")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Urza's".to_string());
+            obj.card_types.subtypes.push(subtype.to_string());
+        }
+
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+        .sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 2 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .condition(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::ControllerControlsMatching {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::land()
+                                .subtype("Mine".to_string())
+                                .controller(ControllerRef::You),
+                        ),
+                    },
+                    AbilityCondition::ControllerControlsMatching {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::land()
+                                .subtype("Power-Plant".to_string())
+                                .controller(ControllerRef::You),
+                        ),
+                    },
+                ],
+            }),
+        );
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, tower, PlayerId(0), &ability, &mut events, None).unwrap();
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1,
+            "with Power-Plant absent the And condition is false and only the base \
+             Add {{C}} fires; pool = {:?}",
+            state.players[0].mana_pool.mana,
         );
     }
 

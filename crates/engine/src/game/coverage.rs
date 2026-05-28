@@ -550,6 +550,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("non-{}", format!("{value}").to_lowercase()));
             }
             FilterProp::Suspected => parts.push("suspected".into()),
+            FilterProp::Renowned => parts.push("renowned".into()),
             // CR 700.9
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
@@ -1976,6 +1977,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             counter_type,
             count,
             mode,
+            selection: _,
             target,
         } => {
             d.push(("source".into(), fmt_target(source)));
@@ -2133,6 +2135,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::Monstrosity { count } => {
+            d.push(("counters".into(), fmt_quantity(count)));
+        }
+        Effect::Renown { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
         }
         Effect::Adapt { count } => {
@@ -9032,6 +9037,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: Some(QuantityExpr::Fixed { value: 1 }),
                     mode: CounterTransferMode::Move,
+                    selection: crate::types::ability::CounterMoveSelection::StackTarget,
                     target: TargetFilter::Any,
                 },
             )

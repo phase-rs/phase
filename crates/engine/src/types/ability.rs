@@ -810,6 +810,14 @@ pub enum CounterTransferMode {
     Put,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CounterMoveSelection {
+    #[default]
+    StackTarget,
+    StackTargetAnyNumber,
+    ResolutionDistributionAnyNumber,
+}
+
 /// CR 701.6 + CR 608.2c: A follow-up instruction carried by `Effect::Counter`
 /// that acts on the *source permanent* of an ability countered by the effect.
 ///
@@ -2063,6 +2071,8 @@ pub enum FilterProp {
     },
     /// CR 701.60b: Matches suspected creatures.
     Suspected,
+    /// CR 702.112b: Matches permanents with the renowned designation.
+    Renowned,
     /// CR 510.1c: Matches creatures whose toughness is greater than their power.
     ToughnessGTPower,
     /// Disjunctive composite: the object matches if ANY inner prop matches.
@@ -5612,6 +5622,8 @@ pub enum Effect {
         /// Whether to remove counters from the source or only put matching counters.
         #[serde(default = "default_counter_transfer_mode")]
         mode: CounterTransferMode,
+        #[serde(default)]
+        selection: CounterMoveSelection,
         /// Where counters go.
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -6553,6 +6565,12 @@ pub enum Effect {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
     },
+    /// CR 702.112a: Renown N — if not renowned, put N +1/+1 counters on this
+    /// permanent and it becomes renowned.
+    Renown {
+        /// Number of +1/+1 counters to place.
+        count: QuantityExpr,
+    },
     /// CR 701.39a: Bolster N — choose creature you control with least toughness,
     /// put N +1/+1 counters on it.
     Bolster {
@@ -7411,6 +7429,7 @@ impl Effect {
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
             | Effect::Monstrosity { .. }
+            | Effect::Renown { .. }
             | Effect::Bolster { .. }
             | Effect::Adapt { .. }
             | Effect::Learn
@@ -7595,6 +7614,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Incubate { .. } => "Incubate",
         Effect::Amass { .. } => "Amass",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
         Effect::Adapt { .. } => "Adapt",
         Effect::Manifest { .. } => "Manifest",
@@ -7771,6 +7791,7 @@ pub enum EffectKind {
     Incubate,
     Amass,
     Monstrosity,
+    Renown,
     Bolster,
     Adapt,
     Manifest,
@@ -7952,6 +7973,7 @@ impl From<&Effect> for EffectKind {
             Effect::Incubate { .. } => EffectKind::Incubate,
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
             Effect::Adapt { .. } => EffectKind::Adapt,
             Effect::Manifest { .. } => EffectKind::Manifest,
@@ -9582,6 +9604,11 @@ pub enum TriggerCondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ReplacementCondition {
+    /// CR 614.1d: A replacement may carry multiple independent restrictions.
+    /// Every child condition must match for the replacement to apply.
+    And {
+        conditions: Vec<ReplacementCondition>,
+    },
     /// "unless you control a [subtype] or a [subtype]"
     /// Replacement is suppressed if the controller controls any permanent with a listed subtype.
     /// Used for check lands (Clifftop Retreat, Drowned Catacomb, etc.).
@@ -9734,6 +9761,12 @@ pub enum ReplacementCondition {
         minimum: u32,
         filter: TargetFilter,
     },
+    /// CR 716.2a: Replacement effect granted by a Class enchantment level —
+    /// applies only while the source Class is at `level` or higher. Parallels
+    /// `StaticCondition::ClassLevelGE`. Innkeeper's Talent level 3 (the
+    /// "twice that many of each of those kinds of counters" doubling
+    /// replacement) is the canonical case.
+    ClassLevelGE { level: u8 },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring

@@ -30,6 +30,10 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let pending_was_counter_move = state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::MoveCounter { .. }));
     match super::replacement::continue_replacement(state, index, events) {
         super::replacement::ReplacementResult::Execute(event) => {
             let mut zone_change_object_id = None;
@@ -151,6 +155,15 @@ pub(super) fn handle_replacement_choice(
                         count,
                         events,
                     );
+                }
+                move_counter @ ProposedEvent::MoveCounter { .. } => {
+                    if !effects::counters::apply_move_counter_after_replacement(
+                        state,
+                        move_counter,
+                        events,
+                    ) {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 701.26a: Tap accepted after replacement choice.
                 ProposedEvent::Tap { object_id, .. } => {
@@ -344,6 +357,15 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_counter_moves.is_some()
+            {
+                effects::counters::drain_pending_counter_moves(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_continuation.is_some()
                     || state.pending_change_zone_iteration.is_some())
             {
@@ -383,6 +405,16 @@ pub(super) fn handle_replacement_choice(
             super::replacement::replacement_choice_waiting_for(player, state),
         ),
         super::replacement::ReplacementResult::Prevented => {
+            if pending_was_counter_move {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                effects::counters::drain_pending_counter_moves(state, events);
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    effects::drain_pending_continuation(state, events);
+                }
+                return Ok(state.waiting_for.clone());
+            }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.
             if let Some(ctx) = state.pending_spell_resolution.take() {

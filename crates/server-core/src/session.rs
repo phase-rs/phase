@@ -1039,7 +1039,12 @@ impl SessionManager {
         let skip_legality = action.is_mana_ability()
             || matches!(action, GameAction::SetAutoPass { .. })
             || (matches!(action, GameAction::SelectCards { .. })
-                && session.state.waiting_for.accepts_freeform_card_selection());
+                && session.state.waiting_for.accepts_freeform_card_selection())
+            || (matches!(action, GameAction::ChooseCounterMoveDistribution { .. })
+                && session
+                    .state
+                    .waiting_for
+                    .accepts_freeform_counter_move_distribution());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
             if !legal_actions.contains(&action) {

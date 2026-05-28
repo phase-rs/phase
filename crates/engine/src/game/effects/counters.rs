@@ -3,17 +3,20 @@ use std::collections::HashSet;
 use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityTag, CounterTransferMode, Effect, EffectError, EffectKind, ResolvedAbility,
-    TargetChoiceTiming, TargetFilter, TargetRef,
+    AbilityTag, CounterMoveSelection, CounterTransferMode, Effect, EffectError, EffectKind,
+    ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CounterAddedRecord, GameState};
+use crate::types::game_state::{
+    CounterAddedRecord, CounterMoveChoice, GameState, PendingCounterMove, PendingCounterMoveQueue,
+    WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterMoveStage, ProposedEvent};
 
 /// CR 306.5c + CR 310.4c: After mutating the counter map, re-derive the
 /// `obj.loyalty` / `obj.defense` field so the counter count and the cached
@@ -289,6 +292,180 @@ pub fn remove_counter_with_replacement(
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
+        }
+    }
+}
+
+pub(crate) fn apply_counter_move_commit(
+    state: &mut GameState,
+    counter_move: PendingCounterMove,
+    events: &mut Vec<GameEvent>,
+) {
+    if !counter_move_commit_is_valid(state, &counter_move) {
+        return;
+    }
+    apply_counter_removal(
+        state,
+        counter_move.source_id,
+        counter_move.counter_type.clone(),
+        counter_move.remove_count,
+        events,
+    );
+    apply_counter_addition(
+        state,
+        counter_move.actor,
+        counter_move.destination_id,
+        counter_move.counter_type,
+        counter_move.add_count,
+        events,
+    );
+}
+
+fn counter_move_commit_is_valid(state: &GameState, counter_move: &PendingCounterMove) -> bool {
+    counter_move.remove_count > 0
+        && counter_move.add_count > 0
+        && counter_move.source_id != counter_move.destination_id
+        && state.objects.contains_key(&counter_move.source_id)
+        && state.objects.contains_key(&counter_move.destination_id)
+        && counter_count(state, counter_move.source_id, &counter_move.counter_type)
+            >= counter_move.remove_count
+}
+
+pub(crate) fn apply_move_counter_after_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let ProposedEvent::MoveCounter {
+        actor,
+        source_id,
+        destination_id,
+        counter_type,
+        remove_count,
+        add_count,
+        stage,
+        applied: _,
+    } = event
+    else {
+        return true;
+    };
+
+    let counter_move = PendingCounterMove {
+        actor,
+        source_id,
+        destination_id,
+        counter_type,
+        remove_count,
+        add_count,
+    };
+
+    match stage {
+        CounterMoveStage::Remove => {
+            if !counter_move_commit_is_valid(state, &counter_move) {
+                return true;
+            }
+            let proposed = ProposedEvent::MoveCounter {
+                actor: counter_move.actor,
+                source_id: counter_move.source_id,
+                destination_id: counter_move.destination_id,
+                counter_type: counter_move.counter_type,
+                remove_count: counter_move.remove_count,
+                add_count: counter_move.add_count,
+                stage: CounterMoveStage::Add,
+                applied: HashSet::new(),
+            };
+            match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(event) => {
+                    apply_move_counter_after_replacement(state, event, events)
+                }
+                ReplacementResult::Prevented => true,
+                ReplacementResult::NeedsChoice(player) => {
+                    state.waiting_for =
+                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    false
+                }
+            }
+        }
+        CounterMoveStage::Add => {
+            apply_counter_move_commit(state, counter_move, events);
+            true
+        }
+    }
+}
+
+pub(crate) fn move_counter_with_replacement(
+    state: &mut GameState,
+    actor: PlayerId,
+    source_id: ObjectId,
+    destination_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    move_counter_with_replacement_entry(
+        state,
+        PendingCounterMove {
+            actor,
+            source_id,
+            destination_id,
+            counter_type,
+            remove_count: count,
+            add_count: count,
+        },
+        events,
+    )
+}
+
+fn move_counter_with_replacement_entry(
+    state: &mut GameState,
+    counter_move: PendingCounterMove,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if counter_move.remove_count == 0
+        || counter_move.add_count == 0
+        || counter_move.source_id == counter_move.destination_id
+    {
+        return true;
+    }
+    if !counter_move_commit_is_valid(state, &counter_move) {
+        return true;
+    }
+    let proposed = ProposedEvent::MoveCounter {
+        actor: counter_move.actor,
+        source_id: counter_move.source_id,
+        destination_id: counter_move.destination_id,
+        counter_type: counter_move.counter_type,
+        remove_count: counter_move.remove_count,
+        add_count: counter_move.add_count,
+        stage: CounterMoveStage::Remove,
+        applied: HashSet::new(),
+    };
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            apply_move_counter_after_replacement(state, event, events)
+        }
+        ReplacementResult::Prevented => true,
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            false
+        }
+    }
+}
+
+pub(crate) fn drain_pending_counter_moves(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    while let Some(mut queue) = state.pending_counter_moves.take() {
+        let Some(next) = queue.remaining.first().cloned() else {
+            events.push(GameEvent::EffectResolved {
+                kind: queue.effect_kind,
+                source_id: queue.source_id,
+            });
+            continue;
+        };
+        queue.remaining.remove(0);
+        state.pending_counter_moves = Some(queue);
+        if !move_counter_with_replacement_entry(state, next, events) {
+            return;
         }
     }
 }
@@ -629,18 +806,59 @@ pub fn resolve_move(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (source_filter, counter_type_filter, count, mode, target_filter) = match &ability.effect {
-        Effect::MoveCounters {
-            source,
-            counter_type,
-            count,
-            mode,
-            target,
-        } => (source, counter_type.as_ref(), count.as_ref(), *mode, target),
-        _ => return Ok(()),
-    };
+    let (source_filter, counter_type_filter, count, mode, selection, target_filter) =
+        match &ability.effect {
+            Effect::MoveCounters {
+                source,
+                counter_type,
+                count,
+                mode,
+                selection,
+                target,
+            } => (
+                source,
+                counter_type.as_ref(),
+                count.as_ref(),
+                *mode,
+                *selection,
+                target,
+            ),
+            _ => return Ok(()),
+        };
 
     let source_ids = resolve_counter_transfer_sources(state, ability, source_filter);
+    if mode == CounterTransferMode::Move {
+        match selection {
+            CounterMoveSelection::StackTargetAnyNumber => {
+                let dest_ids = resolve_counter_transfer_destinations(
+                    state,
+                    ability,
+                    source_filter,
+                    target_filter,
+                );
+                return resolve_stack_target_move_distribution(
+                    state,
+                    ability,
+                    source_ids,
+                    dest_ids,
+                    counter_type_filter,
+                    events,
+                );
+            }
+            CounterMoveSelection::ResolutionDistributionAnyNumber => {
+                return resolve_move_distribution(
+                    state,
+                    ability,
+                    source_ids,
+                    counter_type_filter,
+                    target_filter,
+                    events,
+                );
+            }
+            CounterMoveSelection::StackTarget => {}
+        }
+    }
+
     let dest_ids =
         resolve_counter_transfer_destinations(state, ability, source_filter, target_filter);
 
@@ -680,20 +898,21 @@ pub fn resolve_move(
                 if count == 0 {
                     continue;
                 }
-                let transferred = if mode == CounterTransferMode::Move {
-                    let before = counter_count(state, source_id, ct);
-                    remove_counter_with_replacement(state, source_id, ct.clone(), count, events);
-                    if matches!(
-                        state.waiting_for,
-                        crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+                if mode == CounterTransferMode::Move {
+                    if !move_counter_with_replacement(
+                        state,
+                        ability.controller,
+                        source_id,
+                        dest_id,
+                        ct.clone(),
+                        count,
+                        events,
                     ) {
                         return Ok(());
                     }
-                    before.saturating_sub(counter_count(state, source_id, ct))
-                } else {
-                    count
-                };
-                if transferred == 0 {
+                    if let Some(limit) = remaining.as_mut() {
+                        *limit = limit.saturating_sub(count);
+                    }
                     continue;
                 }
                 add_counter_with_replacement(
@@ -701,11 +920,11 @@ pub fn resolve_move(
                     ability.controller,
                     dest_id,
                     ct.clone(),
-                    transferred,
+                    count,
                     events,
                 );
                 if let Some(limit) = remaining.as_mut() {
-                    *limit = limit.saturating_sub(transferred);
+                    *limit = limit.saturating_sub(count);
                 }
             }
         }
@@ -716,6 +935,183 @@ pub fn resolve_move(
         source_id: ability.source_id,
     });
 
+    Ok(())
+}
+
+fn resolve_move_distribution(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    source_ids: Vec<ObjectId>,
+    counter_type_filter: Option<&CounterType>,
+    target_filter: &TargetFilter,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let Some(source_id) = source_ids.first().copied() else {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    };
+
+    let available = counter_transfer_source_counters(
+        state,
+        source_id,
+        CounterTransferMode::Move,
+        counter_type_filter,
+    );
+    let destinations =
+        resolution_counter_move_destinations(state, ability, target_filter, source_id);
+
+    if available.is_empty() || destinations.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    state.waiting_for = WaitingFor::MoveCountersDistribution {
+        player: ability.controller,
+        source_id,
+        counter_type: counter_type_filter.cloned(),
+        available,
+        destinations,
+        pending_effect: Box::new(ability.clone()),
+    };
+    Ok(())
+}
+
+fn resolve_stack_target_move_distribution(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    source_ids: Vec<ObjectId>,
+    dest_ids: Vec<ObjectId>,
+    counter_type_filter: Option<&CounterType>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let Some(source_id) = source_ids.first().copied() else {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    };
+    let destinations: Vec<ObjectId> = dest_ids
+        .into_iter()
+        .filter(|dest_id| *dest_id != source_id)
+        .take(1)
+        .collect();
+    let available = counter_transfer_source_counters(
+        state,
+        source_id,
+        CounterTransferMode::Move,
+        counter_type_filter,
+    );
+
+    if available.is_empty() || destinations.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    state.waiting_for = WaitingFor::MoveCountersDistribution {
+        player: ability.controller,
+        source_id,
+        counter_type: counter_type_filter.cloned(),
+        available,
+        destinations,
+        pending_effect: Box::new(ability.clone()),
+    };
+    Ok(())
+}
+
+fn resolution_counter_move_destinations(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    let effective_filter = crate::game::effects::resolved_object_filter(ability, target_filter);
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    state
+        .battlefield_phased_in_ids()
+        .into_iter()
+        .filter(|id| *id != source_id)
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
+        })
+        .collect()
+}
+
+pub(crate) fn validate_and_queue_counter_move_distribution(
+    state: &mut GameState,
+    selections: &[CounterMoveChoice],
+    source_id: ObjectId,
+    available: &[(CounterType, u32)],
+    destinations: &[ObjectId],
+    pending_effect: &ResolvedAbility,
+) -> Result<(), EffectError> {
+    let mut seen_choices = HashSet::new();
+    let mut requested_by_type: Vec<(CounterType, u32)> = Vec::new();
+    let mut moves = Vec::new();
+
+    for selection in selections {
+        if selection.count == 0 {
+            return Err(EffectError::InvalidParam(
+                "counter move selections must have positive counts".to_string(),
+            ));
+        }
+        if !destinations.contains(&selection.destination_id) {
+            return Err(EffectError::InvalidParam(
+                "counter move destination is not legal".to_string(),
+            ));
+        }
+        if !seen_choices.insert((selection.destination_id, selection.counter_type.clone())) {
+            return Err(EffectError::InvalidParam(
+                "counter move destination and counter type pairs must be unique".to_string(),
+            ));
+        }
+
+        if let Some((_, total)) = requested_by_type
+            .iter_mut()
+            .find(|(ct, _)| *ct == selection.counter_type)
+        {
+            *total = total.saturating_add(selection.count);
+        } else {
+            requested_by_type.push((selection.counter_type.clone(), selection.count));
+        }
+
+        moves.push(PendingCounterMove {
+            actor: pending_effect.controller,
+            source_id,
+            destination_id: selection.destination_id,
+            counter_type: selection.counter_type.clone(),
+            remove_count: selection.count,
+            add_count: selection.count,
+        });
+    }
+
+    for (counter_type, requested) in requested_by_type {
+        let available_count = available
+            .iter()
+            .find(|(ct, _)| *ct == counter_type)
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        if requested > available_count {
+            return Err(EffectError::InvalidParam(
+                "counter move request exceeds available counters".to_string(),
+            ));
+        }
+    }
+
+    state.pending_counter_moves = Some(PendingCounterMoveQueue {
+        remaining: moves,
+        effect_kind: EffectKind::from(&pending_effect.effect),
+        source_id: pending_effect.source_id,
+    });
     Ok(())
 }
 
@@ -1452,6 +1848,7 @@ mod tests {
                 counter_type: None,
                 count: None,
                 mode: CounterTransferMode::Put,
+                selection: CounterMoveSelection::StackTarget,
                 target: TargetFilter::Any,
             },
             vec![TargetRef::Object(dest_id)],
@@ -1509,6 +1906,7 @@ mod tests {
                 counter_type: Some(CounterType::Plus1Plus1),
                 count: Some(QuantityExpr::Fixed { value: 1 }),
                 mode: CounterTransferMode::Move,
+                selection: CounterMoveSelection::StackTarget,
                 target: TargetFilter::Any,
             },
             vec![TargetRef::Object(dest_id)],
@@ -1542,6 +1940,145 @@ mod tests {
                 counter_type: CounterType::Plus1Plus1,
                 count: 1,
             } if *object_id == source_id
+        )));
+    }
+
+    #[test]
+    fn atomic_move_counter_add_stage_doubler_removes_one_and_adds_two() {
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter);
+        repl.valid_card = Some(TargetFilter::SelfRef);
+        repl.quantity_modification = Some(QuantityModification::Double);
+        state
+            .objects
+            .get_mut(&dest_id)
+            .unwrap()
+            .replacement_definitions
+            .push(repl);
+
+        let mut events = Vec::new();
+        assert!(move_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            source_id,
+            dest_id,
+            CounterType::Plus1Plus1,
+            1,
+            &mut events,
+        ));
+
+        assert_eq!(
+            state.objects[&source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            state.objects[&dest_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CounterRemoved {
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            } if *object_id == source_id
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CounterAdded {
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+                count: 2,
+            } if *object_id == dest_id
+        )));
+    }
+
+    #[test]
+    fn atomic_move_counter_add_stage_prevention_cancels_whole_move() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        install_no_counters_replacement(&mut state, dest_id);
+
+        let mut events = Vec::new();
+        assert!(move_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            source_id,
+            dest_id,
+            CounterType::Plus1Plus1,
+            1,
+            &mut events,
+        ));
+
+        assert_eq!(
+            state.objects[&source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1
+        );
+        assert_eq!(
+            state.objects[&dest_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::CounterRemoved { .. } | GameEvent::CounterAdded { .. }
         )));
     }
 
@@ -1582,6 +2119,7 @@ mod tests {
                 counter_type: Some(CounterType::Plus1Plus1),
                 count: Some(QuantityExpr::Fixed { value: 1 }),
                 mode: CounterTransferMode::Move,
+                selection: CounterMoveSelection::StackTarget,
                 target: TargetFilter::Any,
             },
             vec![
@@ -1664,6 +2202,7 @@ mod tests {
                 counter_type: None,
                 count: Some(QuantityExpr::Fixed { value: 1 }),
                 mode: CounterTransferMode::Move,
+                selection: CounterMoveSelection::StackTarget,
                 target: TargetFilter::Any,
             },
             vec![],
@@ -1699,6 +2238,138 @@ mod tests {
                 .unwrap_or(0),
             2
         );
+    }
+
+    #[test]
+    fn stack_target_any_number_prompts_for_selected_destination_amount() {
+        let mut state = GameState::new_two_player(42);
+        let ability_source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        let counter_source_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&counter_source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 3);
+        state
+            .objects
+            .get_mut(&counter_source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Loyalty, 2);
+
+        let ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::Any,
+                counter_type: None,
+                count: None,
+                mode: CounterTransferMode::Move,
+                selection: CounterMoveSelection::StackTargetAnyNumber,
+                target: TargetFilter::Any,
+            },
+            vec![
+                TargetRef::Object(counter_source_id),
+                TargetRef::Object(dest_id),
+            ],
+            ability_source_id,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_move(&mut state, &ability, &mut events).unwrap();
+
+        let WaitingFor::MoveCountersDistribution {
+            source_id,
+            available,
+            destinations,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "expected MoveCountersDistribution, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*source_id, counter_source_id);
+        assert_eq!(destinations, &vec![dest_id]);
+        assert!(available.contains(&(CounterType::Plus1Plus1, 3)));
+        assert!(available.contains(&(CounterType::Loyalty, 2)));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn distribution_allows_same_destination_for_different_counter_types() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::SelfRef,
+                counter_type: None,
+                count: None,
+                mode: CounterTransferMode::Move,
+                selection: CounterMoveSelection::ResolutionDistributionAnyNumber,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        validate_and_queue_counter_move_distribution(
+            &mut state,
+            &[
+                CounterMoveChoice {
+                    destination_id: dest_id,
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 1,
+                },
+                CounterMoveChoice {
+                    destination_id: dest_id,
+                    counter_type: CounterType::Loyalty,
+                    count: 1,
+                },
+            ],
+            source_id,
+            &[(CounterType::Plus1Plus1, 1), (CounterType::Loyalty, 1)],
+            &[dest_id],
+            &ability,
+        )
+        .unwrap();
+
+        let queued = state.pending_counter_moves.as_ref().unwrap();
+        assert_eq!(queued.remaining.len(), 2);
     }
 
     /// CR 306.5c: Adding a Loyalty counter through the resolver must keep

@@ -104,6 +104,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::FullyUnlock => match_fully_unlock,
         TriggerMode::TakesInitiative => match_takes_initiative,
         TriggerMode::Exploited => match_exploited,
+        TriggerMode::BecomeRenowned => match_become_renowned,
         TriggerMode::BecomeMonstrous => match_become_monstrous,
         TriggerMode::ManaExpend => match_mana_expend,
         TriggerMode::EntersOrAttacks => match_enters_or_attacks,
@@ -151,7 +152,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Copied
         | TriggerMode::ConjureAll
         | TriggerMode::Vote
-        | TriggerMode::BecomeRenowned
         | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
@@ -338,6 +338,8 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // CR 701.37b: "When ~ becomes monstrous" — self-trigger on Monstrosity resolution.
     r.insert(TriggerMode::BecomeMonstrous, match_become_monstrous);
+    // CR 702.112b: "When ~ becomes renowned" — self-trigger on Renown resolution.
+    r.insert(TriggerMode::BecomeRenowned, match_become_renowned);
 
     // CR 700.14: Expend trigger — cumulative mana spent on spells
     r.insert(TriggerMode::ManaExpend, match_mana_expend);
@@ -384,7 +386,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
         TriggerMode::Vote,
-        TriggerMode::BecomeRenowned,
         TriggerMode::Abandoned,
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
@@ -2207,6 +2208,31 @@ pub(super) fn match_exploited(
         event,
         GameEvent::CreatureExploited { exploiter, .. } if *exploiter == source_id
     )
+}
+
+/// CR 702.112b: "When [subject] becomes renowned" — fires when Renown
+/// resolution gives a permanent the renowned designation.
+pub(super) fn match_become_renowned(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::EffectResolved {
+        kind: EffectKind::Renown,
+        source_id: renowned_id,
+    } = event
+    else {
+        return false;
+    };
+
+    if let Some(filter) = &trigger.valid_source {
+        return target_filter_matches_object(state, *renowned_id, filter, source_id);
+    }
+    if let Some(filter) = &trigger.valid_card {
+        return target_filter_matches_object(state, *renowned_id, filter, source_id);
+    }
+    *renowned_id == source_id
 }
 
 /// CR 701.37b: "When ~ becomes monstrous" — self-trigger only.
@@ -7972,6 +7998,102 @@ mod tests {
         };
         assert!(!match_explored(
             &opponent_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+    }
+
+    #[test]
+    fn become_renowned_trigger_matches_filtered_controlled_creature() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(343),
+            PlayerId(0),
+            "Valeron Wardens".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, source_id);
+        let controlled = create_object(
+            &mut state,
+            CardId(344),
+            PlayerId(0),
+            "Renown Ally".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, controlled);
+        let opponent = create_object(
+            &mut state,
+            CardId(345),
+            PlayerId(1),
+            "Opponent Renown Creature".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, opponent);
+        let trigger = parse_trigger_line(
+            "Whenever a creature you control becomes renowned, draw a card.",
+            "Valeron Wardens",
+        );
+
+        let controlled_event = GameEvent::EffectResolved {
+            kind: EffectKind::Renown,
+            source_id: controlled,
+        };
+        assert!(match_become_renowned(
+            &controlled_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+
+        let opponent_event = GameEvent::EffectResolved {
+            kind: EffectKind::Renown,
+            source_id: opponent,
+        };
+        assert!(!match_become_renowned(
+            &opponent_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+    }
+
+    #[test]
+    fn become_renowned_trigger_defaults_to_self_when_unfiltered() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(346),
+            PlayerId(0),
+            "Self Renown Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, source_id);
+        let other = create_object(
+            &mut state,
+            CardId(347),
+            PlayerId(0),
+            "Other Renown Creature".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, other);
+        let trigger = make_trigger(TriggerMode::BecomeRenowned);
+
+        assert!(match_become_renowned(
+            &GameEvent::EffectResolved {
+                kind: EffectKind::Renown,
+                source_id,
+            },
+            &trigger,
+            source_id,
+            &state
+        ));
+        assert!(!match_become_renowned(
+            &GameEvent::EffectResolved {
+                kind: EffectKind::Renown,
+                source_id: other,
+            },
             &trigger,
             source_id,
             &state

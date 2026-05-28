@@ -737,6 +737,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn

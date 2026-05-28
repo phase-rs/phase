@@ -499,6 +499,26 @@ pub fn resolve_quantity_with_targets(
     }
 }
 
+/// CR 608.2c: Resolve a condition quantity from the printed ability controller's
+/// perspective while preserving target/chosen-X and scoped-player bindings.
+///
+/// Player-scoped effect resolution temporarily rebinds `ability.controller` to
+/// the player being affected. Conditional clauses such as "if creatures you
+/// control have total toughness 40 or greater" still refer to the source's
+/// controller, not that temporary recipient.
+pub(crate) fn resolve_quantity_for_ability_condition(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> i32 {
+    let Some(original_controller) = ability.original_controller else {
+        return resolve_quantity_with_targets(state, expr, ability);
+    };
+    let mut condition_ability = ability.clone();
+    condition_ability.controller = original_controller;
+    resolve_quantity_with_targets(state, expr, &condition_ability)
+}
+
 /// Resolve a QuantityExpr with ability targets/chosen-X plus a per-object
 /// recipient binding for `FilterProp::AttachedToRecipient`.
 pub(crate) fn resolve_quantity_with_targets_and_recipient(
@@ -683,7 +703,7 @@ fn resolve_ref(
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller
     // override used by `resolve_quantity_scoped`. CR 107.2 governs the fallback
-    // path when no ability is in scope (X → 0).
+    // path when no ability is in scope (X -> 0).
     //
     // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
     // `FilterContext::recipient_id` so recipient-relative filter properties

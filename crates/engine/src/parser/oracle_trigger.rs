@@ -5229,6 +5229,7 @@ fn try_parse_event(
         BecomesUntapped,
         TurnFaceUp,
         BecomesMonstrous,
+        BecomesRenowned,
         Mutates,
         ExploitsCreature,
         Exploits,
@@ -5306,6 +5307,11 @@ fn try_parse_event(
             value(
                 SimpleEvent::BecomesMonstrous,
                 (tag("becomes"), space1, tag("monstrous")),
+            ),
+            // CR 702.112b: "When [subject] becomes renowned" trigger event.
+            value(
+                SimpleEvent::BecomesRenowned,
+                (tag("becomes"), space1, tag("renowned")),
             ),
             value(SimpleEvent::Mutates, tag("mutates")),
             // CR 702.110b: "exploits a creature" — exploit trigger
@@ -5395,6 +5401,10 @@ fn try_parse_event(
             }
             SimpleEvent::BecomesMonstrous => {
                 def.mode = TriggerMode::BecomeMonstrous;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesRenowned => {
+                def.mode = TriggerMode::BecomeRenowned;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Mutates => {
@@ -5834,6 +5844,14 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     ))
     .parse(rest)?;
 
+    // CR 702.112b: "renowned creature you control deals..." uses the renowned
+    // designation as an adjective on the damage source.
+    let (rest, renowned) = opt(value(
+        FilterProp::Renowned,
+        tag::<_, _, OracleError<'_>>("renowned "),
+    ))
+    .parse(rest)?;
+
     // Optional color qualifier ("red source you control"). `parse_color` is the
     // shared color-word combinator and has no internal word boundary; the
     // mandatory `tag(" ")` after it is structural — without it `parse_color`
@@ -5890,6 +5908,9 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     }
     let mut props = Vec::new();
     if let Some(p) = another {
+        props.push(p);
+    }
+    if let Some(p) = renowned {
         props.push(p);
     }
     if let Some(col) = color {
@@ -10187,6 +10208,33 @@ mod tests {
             def.valid_source,
             Some(TargetFilter::Typed(TypedFilter::creature()))
         );
+    }
+
+    #[test]
+    fn renowned_creature_damage_subject_keeps_designation_filter() {
+        let def = parse_trigger_line(
+            "Whenever a renowned creature you control deals combat damage to a player, double the number of +1/+1 counters on it.",
+            "Aragorn, Hornburg Hero",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Renowned])
+            ))
+        );
+        let exec = def.execute.as_deref().expect("execute should be set");
+        assert!(matches!(
+            exec.effect.as_ref(),
+            Effect::MultiplyCounter {
+                target: TargetFilter::TriggeringSource,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -15628,6 +15676,21 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::BecomeMonstrous);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_becomes_renowned_mode_with_subject_filter() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control becomes renowned, draw a card.",
+            "Valeron Wardens",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeRenowned);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You)
+            ))
+        );
     }
 
     #[test]

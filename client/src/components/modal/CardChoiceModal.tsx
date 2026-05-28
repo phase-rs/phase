@@ -30,6 +30,7 @@ import {
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
 import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
+import { MoveCountersDistributionModal } from "./MoveCountersDistributionModal.tsx";
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
@@ -311,6 +312,9 @@ export function CardChoiceModal() {
     case "DistributeAmong":
       if (!canActForWaitingState) return null;
       return <DistributeAmongModal data={waitingFor.data} />;
+    case "MoveCountersDistribution":
+      if (!canActForWaitingState) return null;
+      return <MoveCountersDistributionModal data={waitingFor.data} />;
     case "RetargetChoice":
       if (!canActForWaitingState) return null;
       // CR 115.7: Single-target retargets are picked directly on the board via

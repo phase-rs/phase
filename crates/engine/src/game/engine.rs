@@ -3944,6 +3944,35 @@ fn apply_action(
                 state.waiting_for.clone()
             }
         }
+        (
+            WaitingFor::MoveCountersDistribution {
+                player,
+                source_id,
+                available,
+                destinations,
+                pending_effect,
+                ..
+            },
+            GameAction::ChooseCounterMoveDistribution { selections },
+        ) => {
+            let p = *player;
+            effects::counters::validate_and_queue_counter_move_distribution(
+                state,
+                &selections,
+                *source_id,
+                available,
+                destinations,
+                pending_effect,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            effects::counters::drain_pending_counter_moves(state, &mut events);
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                effects::drain_pending_continuation(state, &mut events);
+            }
+            state.waiting_for.clone()
+        }
         // CR 115.7: Retarget a spell or ability on the stack via the dialog
         // path — the multi-target (`All`-scope) UI submits every new target at
         // once.
@@ -6117,6 +6146,411 @@ mod tests {
             Zone::Graveyard,
             "Chalice trigger should counter the matching spell"
         );
+    }
+
+    /// CR 107.3m + CR 614.1c + CR 704.5f: Walking Ballista is the canonical
+    /// 0/0 X-cost creature with "enters with X +1/+1 counters." Casting with
+    /// X=4 must (a) stamp `cost_x_paid = Some(4)` during `finalize_cast`,
+    /// (b) let the ETB replacement read it via `QuantityRef::CostXPaid`,
+    /// (c) put 4 +1/+1 counters on the entering Ballista BEFORE SBAs run,
+    /// (d) leave a live 4/4 on the battlefield (counters set P/T to 4/4
+    /// before the 0/0 SBA would otherwise put it in the graveyard).
+    #[test]
+    fn walking_ballista_enters_with_x_counters_and_survives_zero_zero_sba() {
+        let mut state = setup_game_at_main_phase();
+        let ballista = create_object(
+            &mut state,
+            CardId(9130),
+            PlayerId(0),
+            "Walking Ballista".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&ballista).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Construct".to_string());
+            obj.power = Some(0);
+            obj.toughness = Some(0);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            };
+        }
+        apply_oracle_to_object(
+            &mut state,
+            ballista,
+            "Walking Ballista",
+            "Walking Ballista enters with X +1/+1 counters on it.\n{4}: Put a +1/+1 counter on this creature.\nRemove a +1/+1 counter from this creature: It deals 1 damage to any target.",
+        );
+        // Pay 2X = 8 colorless mana for X = 4.
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..8 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: ballista,
+                card_id: CardId(9130),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 4 }).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        // CR 614.1c: counters land before CR 704.5f checks 0 toughness, so
+        // the Ballista must be alive on the battlefield, not in the graveyard.
+        assert_eq!(
+            state.objects[&ballista].zone,
+            Zone::Battlefield,
+            "Walking Ballista must enter and survive — counters land before 0/0 SBA (CR 614.1c + CR 704.5f). \
+             Got zone {:?}, cost_x_paid={:?}, counters={:?}",
+            state.objects[&ballista].zone,
+            state.objects[&ballista].cost_x_paid,
+            state.objects[&ballista].counters,
+        );
+        assert_eq!(
+            state.objects[&ballista]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            4,
+            "Walking Ballista must enter with X=4 +1/+1 counters"
+        );
+    }
+
+    /// CR 107.3m + CR 614.1c: Production-path variant of the Walking Ballista
+    /// test. Loads the card face from the live `client/public/card-data.json`
+    /// export and hydrates the object via `create_object_from_card_face`
+    /// (the same path used by deck loading at game start). The earlier
+    /// test exercises `apply_oracle_to_object` (re-parses oracle text at test
+    /// time); this one exercises the same JSON hydration path the running
+    /// game uses, so any divergence between "parsed at test time" and
+    /// "loaded from card-data.json" shows up as a test failure here.
+    #[test]
+    fn walking_ballista_db_load_path_enters_with_x_counters() {
+        use crate::database::CardDatabase;
+        use crate::game::deck_loading::create_object_from_card_face;
+        use std::path::Path;
+
+        let path = Path::new("../../client/public/card-data.json");
+        if !path.exists() {
+            // Card-data export missing in this build context (e.g. fresh
+            // clone before `gen-card-data.sh` runs). Skip rather than fail.
+            eprintln!("skipping: {} missing", path.display());
+            return;
+        }
+        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let face = db
+            .get_face_by_name("Walking Ballista")
+            .expect("Walking Ballista must be in the export")
+            .clone();
+
+        let mut state = setup_game_at_main_phase();
+        let ballista = create_object_from_card_face(&mut state, &face, PlayerId(0));
+        // Move the just-loaded object from Library to Hand so we can cast.
+        state.objects.get_mut(&ballista).unwrap().zone = Zone::Hand;
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == PlayerId(0)) {
+            player.library.retain(|id| *id != ballista);
+            player.hand.push_back(ballista);
+        }
+
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..8 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        let card_id = state.objects[&ballista].card_id;
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: ballista,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 4 }).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert_eq!(
+            state.objects[&ballista].zone,
+            Zone::Battlefield,
+            "DB-loaded Walking Ballista with X=4 must survive 0/0 SBA. \
+             cost_x_paid={:?}, counters={:?}, replacements={:?}",
+            state.objects[&ballista].cost_x_paid,
+            state.objects[&ballista].counters,
+            state.objects[&ballista]
+                .replacement_definitions
+                .0
+                .iter()
+                .map(|r| (r.event.to_string(), r.description.clone()))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            state.objects[&ballista]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            4,
+            "Walking Ballista must enter with X=4 +1/+1 counters (DB-load path)"
+        );
+    }
+
+    /// CR 603.6c + CR 614.1c: Cathars' Crusade triggers on any creature you
+    /// control entering. Its `PutCounterAll` effect must distribute one
+    /// +1/+1 counter to *every* creature its controller controls — including
+    /// the entering creature and every previously-existing creature. A
+    /// regression where the resolver only hits the entering creature would
+    /// catastrophically nerf the card.
+    #[test]
+    fn cathars_crusade_puts_one_counter_on_each_creature_you_control_on_etb() {
+        let mut state = setup_game_at_main_phase();
+        let crusade = create_object(
+            &mut state,
+            CardId(9150),
+            PlayerId(0),
+            "Cathars' Crusade".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&crusade).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+        }
+        apply_oracle_to_object(
+            &mut state,
+            crusade,
+            "Cathars' Crusade",
+            "Whenever a creature you control enters, put a +1/+1 counter on each creature you control.",
+        );
+        // Two existing creatures on the battlefield (no summoning sickness needed
+        // since we never attack — the test only inspects counter counts).
+        let existing_a = create_object(
+            &mut state,
+            CardId(9151),
+            PlayerId(0),
+            "Existing Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let existing_b = create_object(
+            &mut state,
+            CardId(9152),
+            PlayerId(0),
+            "Existing Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [existing_a, existing_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        // Cast a vanilla 2/2 from hand. Cathars' Crusade's trigger should
+        // fire on its ETB and place one counter on all three creatures.
+        let entering = create_object(
+            &mut state,
+            CardId(9153),
+            PlayerId(0),
+            "Entering Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&entering).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..2 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: entering,
+                card_id: CardId(9153),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        // Resolve the spell + Cathars' Crusade trigger.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        for (id, label) in [
+            (entering, "entering creature"),
+            (existing_a, "existing creature A"),
+            (existing_b, "existing creature B"),
+        ] {
+            let n = state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default();
+            assert_eq!(
+                n, 1,
+                "Cathars' Crusade must place one +1/+1 counter on every creature you control, \
+                 not just the entering creature. {label} has {n} counters."
+            );
+        }
+    }
+
+    /// Production-path Cathars' Crusade: load via `CardDatabase::from_export`
+    /// and `create_object_from_card_face` (the deck-loading path). Verifies
+    /// the resolver iterates all creatures-you-control, not just the
+    /// triggering entry.
+    #[test]
+    fn cathars_crusade_db_load_path_puts_counter_on_each_creature_you_control() {
+        use crate::database::CardDatabase;
+        use crate::game::deck_loading::create_object_from_card_face;
+        use std::path::Path;
+
+        let path = Path::new("../../client/public/card-data.json");
+        if !path.exists() {
+            eprintln!("skipping: {} missing", path.display());
+            return;
+        }
+        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let crusade_face = db
+            .get_face_by_name("Cathars' Crusade")
+            .expect("Cathars' Crusade must be in the export")
+            .clone();
+
+        let mut state = setup_game_at_main_phase();
+        let crusade = create_object_from_card_face(&mut state, &crusade_face, PlayerId(0));
+        // CR 400.7: The deck-load path puts the object in `Zone::Library`.
+        // Direct field mutation would leave `state.battlefield` (a separate
+        // list) un-updated; the proper transition runs `move_to_zone` so
+        // the battlefield index, layer dirty flag, and trigger matchers
+        // all see the object. Use a discardable scratch event vec since
+        // the test only inspects post-move state.
+        {
+            let mut scratch_events = Vec::new();
+            super::zones::move_to_zone(&mut state, crusade, Zone::Battlefield, &mut scratch_events);
+        }
+
+        // Two pre-existing controlled creatures + an entering creature.
+        let existing_a = create_object(
+            &mut state,
+            CardId(9160),
+            PlayerId(0),
+            "Existing Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let existing_b = create_object(
+            &mut state,
+            CardId(9161),
+            PlayerId(0),
+            "Existing Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [existing_a, existing_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        let entering = create_object(
+            &mut state,
+            CardId(9162),
+            PlayerId(0),
+            "Entering Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&entering).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..2 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: entering,
+                card_id: CardId(9162),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        // Resolve creature + Cathars' Crusade trigger.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        for (id, label) in [
+            (entering, "entering creature"),
+            (existing_a, "existing creature A"),
+            (existing_b, "existing creature B"),
+        ] {
+            let n = state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default();
+            assert_eq!(
+                n, 1,
+                "Cathars' Crusade (DB-load path) must place a +1/+1 counter on every \
+                 creature you control. {label} has {n} counters."
+            );
+        }
     }
 
     #[test]
