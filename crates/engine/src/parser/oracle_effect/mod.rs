@@ -2043,6 +2043,72 @@ fn try_parse_create_token_choice(
     }))
 }
 
+/// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
+/// "put your choice of A counter-pattern or B counter-pattern on TARGET".
+///
+/// Inspirit, Flagship Vessel is the motivating case:
+/// "put your choice of a +1/+1 counter or two charge counters on up to one
+/// other target artifact".
+///
+/// We split the shared choice payload and reparse each branch as a full
+/// `put ... on ...` clause so existing counter parsing (including multi-target
+/// extraction for "up to N") stays authoritative.
+fn try_parse_put_counter_choice(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let ((), after_choice_original) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("put your choice of ")).parse(i)
+    })?;
+
+    let consumed = tp.original.len() - after_choice_original.len();
+    let after_choice = TextPair::new(after_choice_original, &tp.lower[consumed..]);
+    let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
+    let (left_tp, right_tp) = choices_tp.split_around(" or ")?;
+
+    // Reject 3+ branches; this helper only handles binary choices.
+    if nom_primitives::split_once_on(left_tp.lower, " or ").is_ok()
+        || nom_primitives::split_once_on(right_tp.lower, " or ").is_ok()
+    {
+        return None;
+    }
+
+    let left_choice = left_tp.original.trim();
+    let right_choice = right_tp.original.trim();
+    let target_text = target_tp.original.trim().trim_end_matches('.');
+    if left_choice.is_empty() || right_choice.is_empty() || target_text.is_empty() {
+        return None;
+    }
+
+    let left_text = format!("put {left_choice} on {target_text}");
+    let right_text = format!("put {right_choice} on {target_text}");
+
+    let diagnostics_snapshot = ctx.diagnostics.len();
+    let left_clause = parse_effect_clause(&left_text, ctx);
+    let right_clause = parse_effect_clause(&right_text, ctx);
+
+    if !matches!(left_clause.effect, Effect::PutCounter { .. })
+        || !matches!(right_clause.effect, Effect::PutCounter { .. })
+        || matches!(left_clause.effect, Effect::Unimplemented { .. })
+        || matches!(right_clause.effect, Effect::Unimplemented { .. })
+        || matches!(left_clause.effect, Effect::TargetOnly { .. })
+        || matches!(right_clause.effect, Effect::TargetOnly { .. })
+    {
+        ctx.diagnostics.truncate(diagnostics_snapshot);
+        return None;
+    }
+
+    let mut left_def = ability_definition_from_clause(AbilityKind::Spell, left_clause);
+    left_def.description = Some(left_text);
+    let mut right_def = ability_definition_from_clause(AbilityKind::Spell, right_clause);
+    right_def.description = Some(right_text);
+
+    Some(parsed_clause(Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller,
+        branches: vec![left_def, right_def],
+    }))
+}
+
 /// CR 700.2 + CR 608.2d: Detect inline binary-choice imperatives of the form
 /// "A or B" where both A and B parse independently as supported effects.
 /// Emits `Effect::ChooseOneOf { branches: [A, B] }` so the second branch is
@@ -3026,6 +3092,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // generic inline splitter and token dispatch so "create a Food token or a
     // Treasure token" does not collapse to the first token branch.
     if let Some(clause) = try_parse_create_token_choice(tp, ctx) {
+        return clause;
+    }
+
+    // CR 122.1 + CR 608.2d: Shared-target counter choice with a shared
+    // trailing target phrase (Inspirit class).
+    if let Some(clause) = try_parse_put_counter_choice(tp, ctx) {
         return clause;
     }
 
@@ -35680,6 +35752,54 @@ mod tests {
             }
             other => panic!("expected ChooseOneOf, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn choose_one_of_detects_shared_target_counter_choice() {
+        use crate::types::counter::CounterType;
+
+        let ability = parse_effect_chain(
+            "Put your choice of a +1/+1 counter or two charge counters on up to one other target artifact.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseOneOf { chooser, branches } = &*ability.effect else {
+            panic!("expected ChooseOneOf, got {:?}", ability.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 2);
+
+        match &*branches[0].effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected first branch PutCounter, got {other:?}"),
+        }
+        assert!(
+            branches[0].multi_target.is_some(),
+            "first branch should preserve up-to target cap"
+        );
+
+        match &*branches[1].effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Generic("charge".to_string()));
+                assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+            }
+            other => panic!("expected second branch PutCounter, got {other:?}"),
+        }
+        assert!(
+            branches[1].multi_target.is_some(),
+            "second branch should preserve up-to target cap"
+        );
     }
 
     #[test]

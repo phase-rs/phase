@@ -5353,6 +5353,13 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
                 }
             }
         }
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches {
+                if ability_tree_any(branch, pred) {
+                    return true;
+                }
+            }
+        }
         Effect::CreateDelayedTrigger { effect, .. } if ability_tree_any(effect, pred) => {
             return true;
         }
@@ -9149,6 +9156,48 @@ mod tests {
                 |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
             ),
             "Should accept counters folded into token enter_with_counters: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_counter_parameter_accepts_choose_one_of_counter_branches() {
+        let mut face = make_face();
+        let oracle =
+            "Put your choice of a +1/+1 counter or two charge counters on up to one other target artifact.";
+        face.oracle_text = Some(oracle.to_string());
+
+        let plus_one_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+        );
+        let charge_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("charge".to_string()),
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+            },
+        );
+
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![plus_one_branch, charge_branch],
+            },
+        ));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings.iter().any(
+                |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
+            ),
+            "ChooseOneOf counter branches should satisfy counter parameter audit: {findings:?}"
         );
     }
 
