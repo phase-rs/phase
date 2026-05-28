@@ -695,6 +695,13 @@
     "startMatch": "Partie starten",
     "startMatchWithOpponents": "Partie starten ({{count}} Geg.)",
     "deckNotLegal": "Das Deck ist nicht legal in {{format}}.",
+    "cedhWarning": "Dein Deck ist Bracket {{bracket}} gegen eine cEDH-KI – rechne mit einer schnellen Niederlage.",
+    "cedhWarningUntagged": "ohne Bracket",
+    "bracketViolation": {
+      "title": "cEDH-Bracket-Sperre",
+      "body": "Alle Decks an einem cEDH-Tisch müssen als Bracket 5 deklariert sein. Aktualisiere das Bracket deines Decks im Deckbauer und versuche es erneut.",
+      "returnToSetup": "Zurück zur Einrichtung"
+    },
     "selectDeckPrompt": "Wähle ein Deck",
     "commanderNote": "Commander: 100-Karten-Singleton, Kommandeurschaden bei {{threshold}}",
     "formatChip": {

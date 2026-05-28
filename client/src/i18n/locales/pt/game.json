@@ -695,6 +695,13 @@
     "startMatch": "Iniciar Partida",
     "startMatchWithOpponents": "Iniciar Partida ({{count}} op.)",
     "deckNotLegal": "O deck não é válido em {{format}}.",
+    "cedhWarning": "Seu deck é bracket {{bracket}} contra uma IA cEDH — prepare-se para perder rápido.",
+    "cedhWarningUntagged": "sem bracket",
+    "bracketViolation": {
+      "title": "Bloqueio de bracket cEDH",
+      "body": "Todos os decks em uma mesa cEDH devem ser declarados como bracket 5. Atualize o bracket do seu deck no construtor de decks e tente novamente.",
+      "returnToSetup": "Voltar à configuração"
+    },
     "selectDeckPrompt": "Selecione um deck",
     "commanderNote": "Commander: singleton de 100 cartas, dano de comandante em {{threshold}}",
     "formatChip": {

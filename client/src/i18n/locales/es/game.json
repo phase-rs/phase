@@ -695,6 +695,13 @@
     "startMatch": "Empezar partida",
     "startMatchWithOpponents": "Empezar partida ({{count}} op.)",
     "deckNotLegal": "El mazo no es legal en {{format}}.",
+    "cedhWarning": "Tu mazo es de bracket {{bracket}} contra una IA cEDH: prepárate para perder rápido.",
+    "cedhWarningUntagged": "sin etiqueta",
+    "bracketViolation": {
+      "title": "Bloqueo de bracket cEDH",
+      "body": "Todos los mazos en una mesa cEDH deben estar declarados como bracket 5. Actualiza el bracket de tu mazo en el creador de mazos e inténtalo de nuevo.",
+      "returnToSetup": "Volver a la configuración"
+    },
     "selectDeckPrompt": "Selecciona un mazo",
     "commanderNote": "Commander: singleton de 100 cartas, daño de comandante a {{threshold}}",
     "formatChip": {

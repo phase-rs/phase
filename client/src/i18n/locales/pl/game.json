@@ -695,6 +695,13 @@
     "startMatch": "Rozpocznij mecz",
     "startMatchWithOpponents": "Rozpocznij mecz ({{count}} przec.)",
     "deckNotLegal": "Talia nie jest dozwolona w formacie {{format}}.",
+    "cedhWarning": "Twoja talia to bracket {{bracket}} przeciwko SI cEDH — spodziewaj się szybkiej porażki.",
+    "cedhWarningUntagged": "bez bracketu",
+    "bracketViolation": {
+      "title": "Blokada bracketu cEDH",
+      "body": "Wszystkie talie przy stole cEDH muszą być zadeklarowane jako bracket 5. Zaktualizuj bracket swojej talii w kreatorze talii i spróbuj ponownie.",
+      "returnToSetup": "Powrót do ustawień"
+    },
     "selectDeckPrompt": "Wybierz talię",
     "commanderNote": "Commander: 100 kart singleton, obrażenia od dowódcy przy {{threshold}}",
     "formatChip": {

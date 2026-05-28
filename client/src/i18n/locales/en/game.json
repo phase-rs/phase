@@ -695,6 +695,13 @@
     "startMatch": "Start Match",
     "startMatchWithOpponents": "Start Match ({{count}} opp.)",
     "deckNotLegal": "Deck is not legal in {{format}}.",
+    "cedhWarning": "Your deck is bracket {{bracket}} vs. a cEDH AI — expect to lose fast.",
+    "cedhWarningUntagged": "untagged",
+    "bracketViolation": {
+      "title": "cEDH bracket lock",
+      "body": "All decks at a cEDH table must be declared bracket 5. Update your deck's bracket in the deck builder and try again.",
+      "returnToSetup": "Return to setup"
+    },
     "selectDeckPrompt": "Select a deck",
     "commanderNote": "Commander: 100-card singleton, commander damage at {{threshold}}",
     "formatChip": {

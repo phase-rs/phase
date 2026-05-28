@@ -86,23 +86,21 @@ export function AiOpponentConfig({
   // global across all AI seats because they describe which decks are worth
   // considering, not which deck ends up assigned — a concept that doesn't
   // vary per seat.
-  const anyCedh = cedhMode;
-
   const filteredDecks = useMemo(() => {
     // In cEDH mode, restrict the random pool to bracket-5 decks.
-    const cedhFiltered = anyCedh ? filterByBracket(candidates, CEDH_BRACKET) : candidates;
+    const cedhFiltered = cedhMode ? filterByBracket(candidates, CEDH_BRACKET) : candidates;
     return cedhFiltered.filter((d) => {
       if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
       if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
         return false;
       }
-      if (!anyCedh && bracketFilter.length > 0 && selectedFormat === "Commander") {
+      if (!cedhMode && bracketFilter.length > 0 && selectedFormat === "Commander") {
         if (d.bracket === null) return false;             // untagged excluded
         if (!bracketFilter.includes(d.bracket)) return false;
       }
       return true;
     });
-  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, selectedFormat, anyCedh]);
+  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, selectedFormat, cedhMode]);
 
   // Render exactly `opponentCount` panels regardless of how many slots the
   // store currently holds — the effect above will catch the store up on the

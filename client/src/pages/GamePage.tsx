@@ -1232,21 +1232,22 @@ function GamePageContent({
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
           role="dialog"
           aria-modal="true"
-          aria-label="cEDH bracket lock"
+          aria-label={t("gameSetup.bracketViolation.title")}
           data-testid="bracket-violation-modal"
         >
           <div className="mx-4 max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-rose-700/60">
-            <h2 className="mb-2 text-lg font-bold text-rose-400">cEDH bracket lock</h2>
+            <h2 className="mb-2 text-lg font-bold text-rose-400">
+              {t("gameSetup.bracketViolation.title")}
+            </h2>
             <p className="mb-4 text-sm text-gray-300">{bracketViolationError}</p>
             <p className="mb-6 text-xs text-gray-500">
-              All decks at a cEDH table must be declared bracket 5. Update your
-              deck&#39;s bracket in the deck builder and try again.
+              {t("gameSetup.bracketViolation.body")}
             </p>
             <button
               onClick={onDismissBracketViolation}
               className="w-full rounded-lg bg-rose-700 py-2 text-sm font-semibold text-white transition hover:bg-rose-600"
             >
-              Return to setup
+              {t("gameSetup.bracketViolation.returnToSetup")}
             </button>
           </div>
         </div>

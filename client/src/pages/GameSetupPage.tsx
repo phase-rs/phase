@@ -356,11 +356,12 @@ export function GameSetupPage() {
                       role="alert"
                       className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-200"
                     >
-                      Your deck is bracket{" "}
-                      {humanDeckBracket !== null
-                        ? `${humanDeckBracket} (${BRACKET_LABEL[humanDeckBracket]})`
-                        : "untagged"}{" "}
-                      vs. a cEDH AI — expect to lose fast.
+                      {t("gameSetup.cedhWarning", {
+                        bracket:
+                          humanDeckBracket !== null
+                            ? `${humanDeckBracket} (${BRACKET_LABEL[humanDeckBracket]})`
+                            : t("gameSetup.cedhWarningUntagged"),
+                      })}
                     </div>
                   )}
                 </div>
