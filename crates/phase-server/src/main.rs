@@ -412,6 +412,42 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
     }
 }
 
+/// Returns `Some(reason)` if `action` cannot legitimately come from a client
+/// over the WebSocket draft protocol, or `None` if it is a valid client action.
+///
+/// **Exhaustive by design.** Every `DraftAction` variant is explicitly listed
+/// so adding a new variant is a compile error until the author decides its
+/// client-trust policy. A catch-all `_ => None` would default-allow future
+/// variants, which is the wrong default for a security-relevant gate.
+///
+/// Rejected variants:
+/// - `GeneratePairings`: server-hosted draft match play is not yet implemented;
+///   pairings will be computed server-internal once that path lands.
+/// - `SetSeatConnected`: engine state plumbing. The server-internal runtime in
+///   `server-core/src/draft_session.rs` broadcasts connection state via
+///   `draft_core::session::apply` directly. Accepting it from a client would
+///   let a malicious authenticated player forge another seat's connection
+///   state (GH #1254). Caller-binding at `draft_session.rs:247-249` resolves
+///   the authenticated seat from the token but discards it (`let _seat = ...`),
+///   so the payload's `seat: u8` is otherwise unchecked.
+fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction) -> Option<String> {
+    use draft_core::types::DraftAction;
+    match action {
+        DraftAction::GeneratePairings { .. } => {
+            Some("Server-hosted draft match play is not available yet".to_string())
+        }
+        DraftAction::SetSeatConnected { .. } => {
+            Some("SetSeatConnected is server-internal; not allowed from client".to_string())
+        }
+        DraftAction::StartDraft
+        | DraftAction::Pick { .. }
+        | DraftAction::SubmitDeck { .. }
+        | DraftAction::ReportMatchResult { .. }
+        | DraftAction::AdvanceRound
+        | DraftAction::ReplaceSeatWithBot { .. } => None,
+    }
+}
+
 impl SocketIdentity {
     /// Set identity and create a tracing span for field inheritance.
     fn set_session(&mut self, game_code: String, player_id: PlayerId, player_token: String) {
@@ -3751,13 +3787,8 @@ async fn handle_client_message(
 
             debug!(draft = %draft_code, action = ?action, "DraftAction");
 
-            if matches!(
-                action,
-                draft_core::types::DraftAction::GeneratePairings { .. }
-            ) {
-                let msg = ServerMessage::DraftActionRejected {
-                    reason: "Server-hosted draft match play is not available yet".to_string(),
-                };
+            if let Some(reason) = client_forbidden_draft_action_reason(&action) {
+                let msg = ServerMessage::DraftActionRejected { reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
                 }
@@ -4278,5 +4309,81 @@ mod handshake_tests {
                 guest: "def5678".into(),
             }
         );
+    }
+
+    // ------------------------------------------------------------------
+    // GH #1254: MP wire-trust — client cannot forge another seat's
+    // connection state via DraftAction::SetSeatConnected.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn client_forbidden_draft_action_rejects_set_seat_connected() {
+        // The forged payload: a malicious authenticated client passes
+        // *another* seat's index. The handler currently discards the
+        // token-resolved seat (`let _seat = ...` at draft_session.rs:247),
+        // so the payload's `seat` would flow through unchecked without
+        // this filter. Reject the variant outright — it's engine state
+        // plumbing, not user intent.
+        let action = draft_core::types::DraftAction::SetSeatConnected {
+            seat: 3,
+            connected: true,
+        };
+        let reason = client_forbidden_draft_action_reason(&action);
+        assert!(
+            reason.is_some(),
+            "SetSeatConnected MUST be rejected when sent from a client"
+        );
+        let msg = reason.unwrap();
+        assert!(
+            msg.contains("server-internal"),
+            "rejection reason should explain why: got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn client_forbidden_draft_action_rejects_generate_pairings() {
+        // Regression coverage: this rejection predates GH #1254 and must
+        // continue to fire. The user-facing reason ("not available yet")
+        // is distinct from SetSeatConnected ("server-internal"); both
+        // are forbidden but for different reasons.
+        let action = draft_core::types::DraftAction::GeneratePairings { round: 1 };
+        let reason = client_forbidden_draft_action_reason(&action);
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("not available yet"));
+    }
+
+    #[test]
+    fn client_forbidden_draft_action_allows_legitimate_variants() {
+        // Every variant that IS allowed from a client must return None.
+        // If a new DraftAction variant lands and the helper's exhaustive
+        // match doesn't handle it, this test fails at compile time on
+        // the function — and the security-relevant decision is made
+        // explicitly, not by default-allow.
+        let allowed = [
+            draft_core::types::DraftAction::StartDraft,
+            draft_core::types::DraftAction::Pick {
+                seat: 0,
+                card_instance_id: "x".into(),
+            },
+            draft_core::types::DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: vec![],
+            },
+            draft_core::types::DraftAction::ReportMatchResult {
+                match_id: "m1".into(),
+                winner_seat: Some(0),
+            },
+            draft_core::types::DraftAction::AdvanceRound,
+            draft_core::types::DraftAction::ReplaceSeatWithBot {
+                seat: 1,
+                name: None,
+            },
+        ];
+        for action in allowed {
+            assert!(
+                client_forbidden_draft_action_reason(&action).is_none(),
+                "expected {action:?} to be allowed from client"
+            );
+        }
     }
 }
