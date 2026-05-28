@@ -1649,6 +1649,8 @@ fn collect_pending_triggers(
         }
     }
 
+    collect_ring_emblem_triggers(state, events, &mut pending);
+
     // CR 603.2d: Trigger doubling — Panharmonicon-style effects.
     // Scan battlefield for objects with StaticMode::Panharmonicon statics,
     // then clone matching pending triggers.
@@ -1670,6 +1672,195 @@ fn collect_pending_triggers(
     pending.reverse();
 
     pending
+}
+
+fn collect_ring_emblem_triggers(
+    state: &GameState,
+    events: &[GameEvent],
+    pending: &mut Vec<PendingTriggerContext>,
+) {
+    for event in events {
+        let players: Vec<_> = state.ring_level.keys().copied().collect();
+        for player in players {
+            let level = state.ring_level.get(&player).copied().unwrap_or(0);
+            let Some(bearer_id) = super::effects::ring::ring_bearer_for(state, player) else {
+                continue;
+            };
+
+            if level >= 2 {
+                // CR 701.54c: Once the Ring has tempted a player two or more
+                // times, it has "Whenever your Ring-bearer attacks, draw a
+                // card, then discard a card."
+                if let GameEvent::AttackersDeclared { attacker_ids, .. } = event {
+                    if attacker_ids.contains(&bearer_id) {
+                        pending.push(ring_pending_trigger(
+                            bearer_id,
+                            player,
+                            player,
+                            event,
+                            ring_level_two_ability(bearer_id, player),
+                            "The Ring level 2",
+                        ));
+                    }
+                }
+            }
+
+            if level >= 3 {
+                // CR 701.54c: Once the Ring has tempted a player three or more
+                // times, it has "Whenever your Ring-bearer becomes blocked by
+                // a creature, the blocking creature's controller sacrifices it
+                // at end of combat."
+                if let GameEvent::BlockersDeclared { assignments } = event {
+                    for (blocker_id, attacker_id) in assignments {
+                        if *attacker_id != bearer_id {
+                            continue;
+                        }
+                        let Some(blocker) = state.objects.get(blocker_id) else {
+                            continue;
+                        };
+                        if !blocker.card_types.core_types.contains(&CoreType::Creature) {
+                            continue;
+                        }
+                        pending.push(ring_pending_trigger(
+                            bearer_id,
+                            player,
+                            player,
+                            event,
+                            ring_level_three_ability(
+                                bearer_id,
+                                blocker.id,
+                                player,
+                                blocker.controller,
+                            ),
+                            "The Ring level 3",
+                        ));
+                    }
+                }
+            }
+
+            if level >= 4 {
+                // CR 701.54c: Once the Ring has tempted a player four or more
+                // times, it has "Whenever your Ring-bearer deals combat damage
+                // to a player, each opponent loses 3 life."
+                if let GameEvent::CombatDamageDealtToPlayer { source_ids, .. } = event {
+                    if source_ids.contains(&bearer_id) {
+                        pending.push(ring_pending_trigger(
+                            bearer_id,
+                            player,
+                            player,
+                            event,
+                            ring_level_four_ability(bearer_id, player),
+                            "The Ring level 4",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn ring_pending_trigger(
+    source_id: ObjectId,
+    trigger_controller: PlayerId,
+    ability_controller: PlayerId,
+    event: &GameEvent,
+    mut ability: ResolvedAbility,
+    description: &str,
+) -> PendingTriggerContext {
+    ability.controller = ability_controller;
+    PendingTriggerContext::single(PendingTrigger {
+        source_id,
+        controller: trigger_controller,
+        condition: None,
+        ability,
+        timestamp: 0,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: Some(event.clone()),
+        modal: None,
+        mode_abilities: vec![],
+        description: Some(description.to_string()),
+        may_trigger_origin: None,
+        subject_match_count: None,
+    })
+}
+
+fn ring_level_two_ability(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+    let discard = ResolvedAbility::new(
+        Effect::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+            random: false,
+            unless_filter: None,
+            filter: None,
+        },
+        vec![],
+        source_id,
+        controller,
+    );
+    ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        source_id,
+        controller,
+    )
+    .sub_ability(discard)
+}
+
+fn ring_level_three_ability(
+    source_id: ObjectId,
+    blocker_id: ObjectId,
+    controller: PlayerId,
+    blocker_controller: PlayerId,
+) -> ResolvedAbility {
+    let target = TargetFilter::And {
+        filters: vec![
+            TargetFilter::SpecificObject { id: blocker_id },
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::ScopedPlayer)),
+        ],
+    };
+    let sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+    let mut ability = ResolvedAbility::new(
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat,
+            },
+            effect: Box::new(sacrifice),
+            uses_tracked_set: false,
+        },
+        vec![],
+        source_id,
+        controller,
+    );
+    // CR 701.54c + CR 701.21a: The Ring-bearer's controller controls the
+    // triggered and delayed abilities, but the blocking creature's controller
+    // performs the sacrifice.
+    ability.scoped_player = Some(blocker_controller);
+    ability
+}
+
+fn ring_level_four_ability(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+    let mut ability = ResolvedAbility::new(
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: None,
+        },
+        vec![],
+        source_id,
+        controller,
+    );
+    ability.player_scope = Some(PlayerFilter::Opponent);
+    ability
 }
 
 /// Process events and place triggered abilities on the stack in APNAP order.

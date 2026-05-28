@@ -74,7 +74,9 @@
     "underAttack_other": "Von {{count}} Kreaturen angegriffen",
     "target": "Ziel",
     "copy": "Kopie",
-    "copyTooltip": "Spielstein-Kopie einer echten Karte"
+    "copyTooltip": "Spielstein-Kopie einer echten Karte",
+    "ringBearer": "Ring",
+    "ringBearerTooltip": "Ringträger"
   },
   "player": {
     "opponent": "Geg {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} Energiemarke",
     "energyAriaLabel_other": "{{count}} Energiemarken",
     "energyTooltip": "Energie: {{count}}",
-    "ringAriaLabel": "Der Eine Ring verlockt dich (Stufe {{level}})",
+    "ringAriaLabel": "Der Eine Ring verlockt dich (Stufe {{level}}), Ringträger: {{bearer}}",
     "ringTooltip": "Der Eine Ring verlockt dich — Stufe {{level}}",
+    "ringBearerTooltip": "Ringträger: {{name}}",
+    "noRingBearer": "keiner",
+    "noRingBearerTooltip": "Kein Ringträger",
+    "ringLevel1": "1. Der Ringträger ist legendär und kann nicht von Kreaturen mit größerer Stärke geblockt werden.",
+    "ringLevel2": "2. Wenn er angreift, ziehst du eine Karte und wirfst dann eine Karte ab.",
+    "ringLevel3": "3. Wenn er von einer Kreatur geblockt wird, opfert deren Beherrscher sie am Ende des Kampfes.",
+    "ringLevel4": "4. Wenn er einem Spieler Kampfschaden zufügt, verliert jeder Gegner 3 Lebenspunkte.",
     "radAriaLabel_one": "{{count}} Strahlungsmarke",
     "radAriaLabel_other": "{{count}} Strahlungsmarken",
     "radTooltip": "Strahlungsmarken: {{count}}",

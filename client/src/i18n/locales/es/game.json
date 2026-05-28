@@ -74,7 +74,9 @@
     "underAttack_other": "Atacado por {{count}} criaturas",
     "target": "Objetivo",
     "copy": "Copia",
-    "copyTooltip": "Ficha copia de una carta real"
+    "copyTooltip": "Ficha copia de una carta real",
+    "ringBearer": "Anillo",
+    "ringBearerTooltip": "Portador del Anillo"
   },
   "player": {
     "opponent": "Op {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} contador de energía",
     "energyAriaLabel_other": "{{count}} contadores de energía",
     "energyTooltip": "Energía: {{count}}",
-    "ringAriaLabel": "El Anillo te tienta (nivel {{level}})",
+    "ringAriaLabel": "El Anillo te tienta (nivel {{level}}), portador del Anillo: {{bearer}}",
     "ringTooltip": "El Anillo te tienta — nivel {{level}}",
+    "ringBearerTooltip": "Portador del Anillo: {{name}}",
+    "noRingBearer": "ninguno",
+    "noRingBearerTooltip": "Sin portador del Anillo",
+    "ringLevel1": "1. El portador del Anillo es legendario y no puede ser bloqueado por criaturas con mayor fuerza.",
+    "ringLevel2": "2. Cuando ataca, roba una carta y luego descarta una carta.",
+    "ringLevel3": "3. Cuando sea bloqueado por una criatura, el controlador de esa criatura la sacrifica al final del combate.",
+    "ringLevel4": "4. Cuando haga daño de combate a un jugador, cada oponente pierde 3 vidas.",
     "radAriaLabel_one": "{{count}} contador rad",
     "radAriaLabel_other": "{{count}} contadores rad",
     "radTooltip": "Contadores rad: {{count}}",

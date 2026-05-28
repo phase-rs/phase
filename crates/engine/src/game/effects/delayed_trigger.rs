@@ -82,12 +82,15 @@ pub fn resolve(
     // After this call, `delayed_effect` holds no parent context refs.
     snapshot_parent_dependent_quantities(&mut delayed_effect, state, ability);
 
-    let delayed_ability = ResolvedAbility::new(
+    let mut delayed_ability = ResolvedAbility::new(
         delayed_effect,
         snapshot_targets,
         ability.source_id,
         ability.controller,
     );
+    // CR 603.7c: A delayed triggered ability that refers to information from
+    // its creation event keeps that creation-time binding for later resolution.
+    delayed_ability.scoped_player = ability.scoped_player;
 
     // CR 603.7c: Most delayed triggers fire once and are removed.
     // WheneverEvent triggers fire each time and persist until end-of-turn cleanup.
