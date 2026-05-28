@@ -74,7 +74,6 @@ const SETTINGS_TABS = [
   { id: "audio" },
   { id: "multiplayer" },
   { id: "data" },
-  { id: "experimental" },
 ] as const;
 
 export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
@@ -566,8 +565,6 @@ export function PreferencesModal({
           <DataSection />
         </>
       )}
-
-              {activeTab === "experimental" && <ExperimentalSection />}
             </div>
             <ResetAllFooter resetAllPreferences={resetAllPreferences} />
           </div>
@@ -601,36 +598,6 @@ function ResetAllFooter({
         {t("resetAll.button")}
       </button>
     </div>
-  );
-}
-
-function ExperimentalSection() {
-  const { t } = useTranslation("settings");
-  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
-  const setExperimentalFeatures = usePreferencesStore((s) => s.setExperimentalFeatures);
-  return (
-    <SettingsSection title={t("experimental.title")}>
-      <p className="text-xs text-slate-400">
-        {t("experimental.description")}
-      </p>
-
-      <SettingGroup label={t("experimental.draftExperiments")}>
-        <label className="flex min-h-11 items-center gap-3">
-          <input
-            type="checkbox"
-            checked={experimentalFeatures}
-            onChange={(e) => setExperimentalFeatures(e.target.checked)}
-            className="accent-cyan-500"
-          />
-          <div className="flex flex-col">
-            <span className="text-sm text-slate-200">{t("experimental.enableDraftFeatures")}</span>
-            <span className="text-xs text-slate-500">
-              {t("experimental.draftFeaturesDescription")}
-            </span>
-          </div>
-        </label>
-      </SettingGroup>
-    </SettingsSection>
   );
 }
 
