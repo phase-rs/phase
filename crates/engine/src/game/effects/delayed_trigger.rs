@@ -434,8 +434,8 @@ mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DamageKindFilter, DelayedTriggerCondition, Effect,
-        ManaProduction, ObjectScope, PtValue, QuantityExpr, QuantityRef, TriggerDefinition,
+        AbilityDefinition, AbilityKind, BounceSelection, DamageKindFilter, DelayedTriggerCondition,
+        Effect, ManaProduction, ObjectScope, PtValue, QuantityExpr, QuantityRef, TriggerDefinition,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
@@ -829,6 +829,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::ParentTarget,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
         );
         let ability = ResolvedAbility::new(

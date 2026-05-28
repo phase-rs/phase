@@ -112,7 +112,6 @@
   "landing": {
     "title": "Draft",
     "startNew": "Démarrer un nouveau",
-    "experimental": "Expérimental",
     "quickDraft": {
       "title": "Quick Draft",
       "description": "Draftez 3 boosters avec 7 drafteurs IA, construisez un deck de 40 cartes, puis jouez un match Bo1 contre l'un d'eux."

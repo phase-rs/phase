@@ -3642,7 +3642,16 @@ fn resolve_chain_body(
                         .description
                         .clone()
                         .or_else(|| ability.description.clone());
-                    state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+                    // CR 601.2c + CR 603.3d: Reflexive triggered ability whose
+                    // target choice is still outstanding. Push the entry to the
+                    // stack FIRST (in mid-construction state — `ability.targets`
+                    // empty), then enter `TriggerTargetSelection`. The on-stack
+                    // entry is identified by `state.pending_trigger_entry` and
+                    // mutated by `engine_stack::finalize_trigger_target_selection`
+                    // when the selection completes. The resolver refuses to
+                    // fire entries identified by `pending_trigger_entry` (see
+                    // `stack::resolve_top`).
+                    let pending = crate::game::triggers::PendingTrigger {
                         source_id: ability.source_id,
                         controller: ability.controller,
                         condition: None,
@@ -3656,7 +3665,19 @@ fn resolve_chain_body(
                         description: trigger_description.clone(),
                         may_trigger_origin: None,
                         subject_match_count: None,
-                    });
+                    };
+                    let trigger_events =
+                        crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
+                    let pending_for_state = pending.clone();
+                    let entry_id =
+                        crate::game::triggers::push_pending_trigger_to_stack_with_event_batch(
+                            state,
+                            pending,
+                            trigger_events,
+                            events,
+                        );
+                    state.pending_trigger = Some(pending_for_state);
+                    state.pending_trigger_entry = Some(entry_id);
                     state.waiting_for = WaitingFor::TriggerTargetSelection {
                         player: ability.controller,
                         target_slots,
@@ -4452,11 +4473,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, CastingPermission,
-        Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration,
-        FilterProp, GainLifePlayer, ManaSpendPermission, ObjectProperty, PermissionGrantee,
-        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, SpellContext,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter, UntilCondition,
+        AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
+        CastingPermission, Comparator, ContinuousModification, ControllerRef,
+        DelayedTriggerCondition, Duration, FilterProp, GainLifePlayer, ManaSpendPermission,
+        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter, UntilCondition,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -6097,6 +6119,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(permanent)],
             ObjectId(100),
@@ -6229,6 +6252,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![],
             ObjectId(100),

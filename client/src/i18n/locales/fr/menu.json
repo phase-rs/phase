@@ -38,7 +38,7 @@
     },
     "draft": {
       "title": "Draft",
-      "description": "Quick Draft contre l'IA, plus des options expérimentales de cube et de pod draft."
+      "description": "Quick Draft contre l'IA, draft de cube ou hébergez un pod draft."
     },
     "decks": {
       "title": "Decks",

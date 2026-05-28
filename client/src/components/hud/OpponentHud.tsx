@@ -12,6 +12,7 @@ import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multip
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
+import { isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
@@ -61,7 +62,13 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
 
   const eliminated = gameState?.eliminated_players ?? [];
   const liveOpponents = allOpponents.filter((id) => !eliminated.includes(id));
-  const isMultiplayer = allOpponents.length > 1;
+  // Routed through `isOneOnOne` so this can't drift from GameBoard's
+  // layout decision — the bug that motivated the helper was exactly
+  // those two derivations disagreeing after an elimination. The
+  // `gameState != null` guard preserves the original null-state default
+  // (treat as 1v1) so the pre-game placeholder renders the pill, not an
+  // empty rail.
+  const isMultiplayer = gameState != null && !isOneOnOne(gameState);
 
   // The `OpponentTab` row renders with a default-focused opponent even when
   // `focusedOpponent` is null (it falls back to the first live opponent).

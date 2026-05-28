@@ -9,8 +9,7 @@
     "combat": "Tempo",
     "audio": "Audio",
     "multiplayer": "Mehrspieler",
-    "data": "Daten",
-    "experimental": "Experimentell"
+    "data": "Daten"
   },
   "gameplay": {
     "title": "Spielablauf",
@@ -84,13 +83,6 @@
     "displayName": "Anzeigename",
     "displayNamePlaceholder": "Gib deinen Namen ein",
     "serverSelectionNote": "Die Serverauswahl ist in die Lobby verschoben — öffne den Mehrspielermodus und verwende den Server-Chip (oder „Server wählen“ im P2P-Modus), um Regionen zu wechseln, eine selbst gehostete Instanz zu konfigurieren oder die Verbindung zu testen."
-  },
-  "experimental": {
-    "title": "Experimentell",
-    "description": "Diese Funktionen befinden sich noch in Entwicklung. Sie können unvollständig oder fehlerhaft sein oder sich ohne Vorankündigung ändern. Aktiviere sie, um Dinge frühzeitig auszuprobieren.",
-    "draftExperiments": "Draft-Experimente",
-    "enableDraftFeatures": "Experimentelle Draft-Funktionen aktivieren",
-    "draftFeaturesDescription": "Schaltet Cube Draft und Pod Draft frei. Quick Draft gegen KI ist immer verfügbar."
   },
   "sync": {
     "title": "Cloud-Synchronisierung",
