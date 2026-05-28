@@ -5,7 +5,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, BounceSelection, CastingPermission,
     ControllerRef, CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction,
     ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost,
-    PlayerFilter, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
     StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
@@ -348,6 +348,14 @@ pub(crate) enum ImperativeFamilyAst {
         target_a: TargetFilter,
         target_b: TargetFilter,
     },
+    /// CR 701.12a: Exchange a player's life total with the source's power or
+    /// toughness (Tree of Perdition, Tree of Redemption, Evra). `player` is the
+    /// player whose life is exchanged (`Controller` for "your", an opponent
+    /// filter for "target opponent's"); `stat` selects which source stat.
+    ExchangeLifeWithStat {
+        player: TargetFilter,
+        stat: PtStat,
+    },
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,
@@ -381,8 +389,12 @@ pub(crate) enum ImperativeFamilyAst {
     /// CR 104.3a: "[you/target player] win(s) the game"
     WinTheGame,
     /// CR 706: Roll a die with N sides.
+    /// CR 706.2: Optional additive/subtractive modifier applied to the natural
+    /// result before result-table lookup ("Roll a d20 and add the number of
+    /// cards in your hand").
     RollDie {
         sides: u8,
+        modifier: Option<crate::types::ability::DieRollModifier>,
     },
     /// CR 705: Flip a coin.
     FlipCoin,

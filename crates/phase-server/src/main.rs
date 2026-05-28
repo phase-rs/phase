@@ -1823,6 +1823,35 @@ async fn require_host(identity: &SocketIdentity, socket: &mut WebSocket) -> Resu
     Ok(())
 }
 
+fn is_joining_current_game(identity: &SocketIdentity, target_game_code: &str) -> bool {
+    identity
+        .game_code
+        .as_deref()
+        .is_some_and(|active| active == target_game_code)
+        || identity
+            .lobby_host_game
+            .as_deref()
+            .is_some_and(|hosted| hosted == target_game_code)
+}
+
+async fn reject_joining_current_game(
+    identity: &SocketIdentity,
+    target_game_code: &str,
+    socket: &mut WebSocket,
+) -> Result<(), ()> {
+    if !is_joining_current_game(identity, target_game_code) {
+        return Ok(());
+    }
+
+    let msg = ServerMessage::Error {
+        message: "You are already in this game.".to_string(),
+    };
+    if let Ok(json) = serde_json::to_string(&msg) {
+        let _ = socket.send(Message::text(json)).await;
+    }
+    Err(())
+}
+
 async fn draft_pack_generator_for_start(
     draft_state: &SharedDraftState,
     draft_pools: &SharedDraftPools,
@@ -1989,6 +2018,13 @@ async fn handle_client_message(
 
         ClientMessage::JoinGame { game_code, deck } => {
             info!(game = %game_code, deck_size = deck.main_deck.len(), "JoinGame");
+            if reject_joining_current_game(identity, &game_code, socket)
+                .await
+                .is_err()
+            {
+                return;
+            }
+
             let resolved = match resolve_deck(db, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
@@ -2813,6 +2849,13 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, "LookupJoinTarget");
 
+            if reject_joining_current_game(identity, &game_code, socket)
+                .await
+                .is_err()
+            {
+                return;
+            }
+
             let mut reservation_token = None;
             let mut reservation_expires_at_ms = None;
 
@@ -3052,6 +3095,13 @@ async fn handle_client_message(
             reservation_token,
         } => {
             info!(game = %game_code, joiner = %display_name, "JoinGameWithPassword");
+
+            if reject_joining_current_game(identity, &game_code, socket)
+                .await
+                .is_err()
+            {
+                return;
+            }
 
             // --- Lobby-only broker path ------------------------------
             //
@@ -4121,6 +4171,25 @@ mod handshake_tests {
     use engine::types::actions::GameAction;
     use server_core::protocol::DeckData;
 
+    fn empty_identity() -> SocketIdentity {
+        SocketIdentity {
+            game_code: None,
+            player_id: None,
+            player_token: None,
+            lobby_subscribed: false,
+            session_span: None,
+            client_hello: None,
+            lobby_host_game: None,
+            seat_reservations: Vec::new(),
+            lobby_reservations: Vec::new(),
+            draft_code: None,
+            draft_seat: None,
+            draft_token: None,
+            spectator_draft_code: None,
+            spectator_visibility: None,
+        }
+    }
+
     fn empty_deck() -> DeckData {
         DeckData {
             main_deck: vec!["Forest".into()],
@@ -4310,6 +4379,27 @@ mod handshake_tests {
                 guest: "def5678".into(),
             }
         );
+    }
+
+    #[test]
+    fn joining_current_game_is_rejected_by_helper() {
+        let mut identity = empty_identity();
+        identity.game_code = Some("GAME01".to_string());
+        identity.player_id = Some(PlayerId(0));
+
+        assert!(is_joining_current_game(&identity, "GAME01"));
+        assert!(!is_joining_current_game(&identity, "GAME02"));
+
+        let mut lobby_identity = empty_identity();
+        lobby_identity.lobby_host_game = Some("GAME01".to_string());
+        assert!(is_joining_current_game(&lobby_identity, "GAME01"));
+        assert!(!is_joining_current_game(&lobby_identity, "GAME02"));
+    }
+
+    #[test]
+    fn joining_without_active_game_is_allowed_by_helper() {
+        let identity = empty_identity();
+        assert!(!is_joining_current_game(&identity, "GAME01"));
     }
 
     // ------------------------------------------------------------------

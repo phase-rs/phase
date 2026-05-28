@@ -1598,6 +1598,7 @@ mod tests {
             Effect::RollDie {
                 sides: 6,
                 results: vec![],
+                modifier: None,
             },
             vec![],
             creature,

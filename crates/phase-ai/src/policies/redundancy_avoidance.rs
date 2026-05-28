@@ -355,6 +355,7 @@ fn redundancy_delta(
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
         | Effect::BecomeCopy { .. }
@@ -494,6 +495,10 @@ fn redundancy_delta(
         // attach pick. Its redundancy is the new Aura's grants vs. the
         // existing static layer — out of scope for this policy.
         | Effect::ReturnAsAura { .. }
+        // CR 701.12a: ExchangeLifeWithStat's value depends on the live gap
+        // between a player's life and the source's stat — no static redundancy
+        // signal (it never "does nothing" the way a duplicate keyword grant does).
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::ProcessRadCounters => None,
     }
 }

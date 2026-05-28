@@ -273,7 +273,13 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
                 <DungeonBadge dungeonName={opponentDesignations.activeDungeon} roomIndex={opponentDesignations.currentRoom} />
               ) : null}
               {isOpponentPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
-              {opponentDesignations.ringLevel > 0 ? <CounterBadge kind="ring" value={opponentDesignations.ringLevel} /> : null}
+              {opponentDesignations.ringLevel > 0 ? (
+                <CounterBadge
+                  kind="ring"
+                  value={opponentDesignations.ringLevel}
+                  ringBearerName={opponentDesignations.ringBearerName}
+                />
+              ) : null}
               {opponentDesignations.energy > 0 ? <CounterBadge kind="energy" value={opponentDesignations.energy} /> : null}
               {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
               {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
@@ -674,7 +680,13 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       {designations.activeDungeon ? (
         <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
       ) : null}
-      {designations.ringLevel > 0 ? <CounterBadge kind="ring" value={designations.ringLevel} /> : null}
+      {designations.ringLevel > 0 ? (
+        <CounterBadge
+          kind="ring"
+          value={designations.ringLevel}
+          ringBearerName={designations.ringBearerName}
+        />
+      ) : null}
       {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
       {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
       {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}

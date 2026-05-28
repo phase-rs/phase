@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::game::casting;
 use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
+use crate::game::effects::prepare;
 use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
 use crate::game::mana_sources;
@@ -2434,6 +2435,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
             ));
         }
 
+        let mut prepare_castability_sim: Option<GameState> = None;
         for &obj_id in &state.battlefield {
             if let Some(obj) = state.objects.get(&obj_id) {
                 if obj.controller == player {
@@ -2458,11 +2460,17 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                     // by `game::effects::prepare`). Assign when WotC publishes
                     // SOS CR update.
                     if obj.prepared.is_some() {
-                        actions.push(candidate(
-                            GameAction::CastPreparedCopy { source: obj_id },
-                            TacticalClass::Spell,
-                            Some(player),
-                        ));
+                        let simulated =
+                            prepare_castability_sim.get_or_insert_with(|| state.clone());
+                        if prepare::can_cast_prepared_copy_now_with_simulation(
+                            simulated, player, obj_id,
+                        ) {
+                            actions.push(candidate(
+                                GameAction::CastPreparedCopy { source: obj_id },
+                                TacticalClass::Spell,
+                                Some(player),
+                            ));
+                        }
                     }
                 }
             }
@@ -3753,6 +3761,39 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
 
+    fn prepare_back_face_with_cost(mana_cost: ManaCost) -> crate::game::game_object::BackFaceData {
+        let mut card_types = crate::types::card_type::CardType::default();
+        card_types.core_types.push(CoreType::Sorcery);
+        crate::game::game_object::BackFaceData {
+            name: "Prepared Spell Face".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            card_types,
+            mana_cost,
+            keywords: Vec::new(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )],
+            trigger_definitions: crate::types::definitions::Definitions::default(),
+            replacement_definitions: crate::types::definitions::Definitions::default(),
+            static_definitions: crate::types::definitions::Definitions::default(),
+            color: Vec::new(),
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(LayoutKind::Prepare),
+        }
+    }
+
     // CR 702.xxx: Prepare (Strixhaven) — the AI candidate enumerator must
     // surface a `CastPreparedCopy` action for every prepared creature under
     // the acting player's control while they hold priority. Without this an
@@ -3853,6 +3894,8 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         state.objects.get_mut(&prepared_id).unwrap().prepared = Some(PreparedState);
+        state.objects.get_mut(&prepared_id).unwrap().back_face =
+            Some(prepare_back_face_with_cost(ManaCost::NoCost));
 
         // Create an unprepared creature on battlefield (must NOT appear).
         let plain_id = create_object(
@@ -3872,6 +3915,8 @@ mod tests {
 
         state.waiting_for = WaitingFor::Priority { player: p0 };
         state.priority_player = p0;
+        state.active_player = p0;
+        state.phase = crate::types::Phase::PreCombatMain;
 
         let actions = candidate_actions(&state);
         let has_prepared_cast = actions.iter().any(|c| {
@@ -3888,6 +3933,46 @@ mod tests {
         assert!(
             !has_plain_cast,
             "must not offer CastPreparedCopy for unprepared creatures"
+        );
+    }
+
+    #[test]
+    fn priority_actions_skip_cast_prepared_copy_when_cost_unpayable() {
+        use crate::game::game_object::PreparedState;
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let prepared_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Prepared Costly".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prepared_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&prepared_id).unwrap().prepared = Some(PreparedState);
+        state.objects.get_mut(&prepared_id).unwrap().back_face =
+            Some(prepare_back_face_with_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            }));
+
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+        state.priority_player = p0;
+
+        let actions = candidate_actions(&state);
+        let has_prepared_cast = actions.iter().any(|c| {
+            matches!(c.action, GameAction::CastPreparedCopy { source } if source == prepared_id)
+        });
+        assert!(
+            !has_prepared_cast,
+            "must not offer CastPreparedCopy when mana cost cannot be paid"
         );
     }
 

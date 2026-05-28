@@ -116,9 +116,16 @@
   "importDeck": {
     "title": "Importar Deck",
     "tabPaste": "Colar Texto",
+    "tabUrl": "De URL",
     "tabFile": "De Arquivo",
     "deckNamePlaceholder": "Nome do deck",
+    "urlPlaceholder": "https://moxfield.com/decks/… ou https://archidekt.com/decks/…",
+    "urlHint": "Importa um deck público do Moxfield ou Archidekt.",
     "import": "Importar",
+    "importing": "Importando…",
+    "errorInvalidUrl": "Insira um URL válido de deck Moxfield ou Archidekt.",
+    "errorNetworkFailure": "Não foi possível contactar o serviço de importação. Verifique sua conexão e tente novamente.",
+    "errorGeneric": "Falha ao importar o deck.",
     "fileSupports": "Suporta .dck, .dec, .txt e formato MTGA",
     "chooseFile": "Escolher Arquivo"
   },

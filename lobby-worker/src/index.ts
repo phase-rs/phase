@@ -1,21 +1,29 @@
 import { LobbyDO } from "./lobby-do";
+import { handleImportDeck, type ImportDeckEnv } from "./import-deck";
 import { handleTurnCredentials, type TurnEnv } from "./turn";
 
 // The DO class must be exported from the Worker entry so the runtime can
 // instantiate it for the binding declared in wrangler.toml.
 export { LobbyDO };
 
-interface Env extends TurnEnv {
+interface Env extends TurnEnv, ImportDeckEnv {
   LOBBY: DurableObjectNamespace;
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // Ephemeral TURN credentials endpoint (HTTP, not the WS lobby).
     if (url.pathname === "/turn-credentials") {
       return handleTurnCredentials(request, env);
+    }
+
+    // Deck import service — fetches Moxfield/Archidekt server-side and returns
+    // canonical decklist text. CORS-free for browser clients; CF-cached so a
+    // hot deck costs one upstream call.
+    if (url.pathname === "/import-deck") {
+      return handleImportDeck(request, env, ctx);
     }
 
     // Single global lobby: every other request routes to the one DO instance
