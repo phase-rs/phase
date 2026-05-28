@@ -15,7 +15,7 @@ use crate::types::zones::Zone;
 use super::turns;
 use super::zones;
 
-/// CR 103.4: Starting hand size is seven cards.
+/// CR 103.5: A player's starting hand size is normally seven cards.
 const STARTING_HAND_SIZE: usize = 7;
 /// CR 103.5 (final sentence): a player may take mulligans until their opening
 /// hand would be zero cards. In a standard game that means at most 7 mulligans
@@ -60,8 +60,8 @@ fn bottom_count_for(mulligan_count: u8, free_first: bool) -> u8 {
     }
 }
 
-/// CR 103.5: Number of cards a player keeps after deciding to keep with
-/// `mulligan_count` mulligans taken (free-first discount applied when the
+/// CR 103.5 + CR 103.5c: Number of cards a player keeps after deciding to keep
+/// with `mulligan_count` mulligans taken (free-first discount applied when the
 /// game grants one). Starting hand size minus the bottoms owed.
 pub fn kept_hand_size_after(mulligan_count: u8, free_first: bool) -> usize {
     STARTING_HAND_SIZE.saturating_sub(bottom_count_for(mulligan_count, free_first) as usize)
@@ -1658,6 +1658,8 @@ mod tests {
         assert_eq!(kept_hand_size_after(0, false), 7);
         assert_eq!(kept_hand_size_after(3, false), 4);
         assert_eq!(kept_hand_size_after(4, false), 3);
+        // Boundary: 7 mulligans bottoms the whole hand → kept hand floors at 0.
+        assert_eq!(kept_hand_size_after(7, false), 0);
     }
 
     /// CR 103.5c: Kept hand size in a free-first format (Commander / cEDH /
@@ -1669,6 +1671,8 @@ mod tests {
         assert_eq!(kept_hand_size_after(1, true), 7);
         assert_eq!(kept_hand_size_after(4, true), 4);
         assert_eq!(kept_hand_size_after(5, true), 3);
+        // Boundary: 8 mulligans (one free) bottoms 7 → kept hand floors at 0.
+        assert_eq!(kept_hand_size_after(8, true), 0);
     }
 
     /// CR 103.5 + CR 800.4a: A player who concedes during the mulligan
