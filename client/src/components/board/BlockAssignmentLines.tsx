@@ -7,7 +7,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useRafPositions } from "../../hooks/useRafPositions.ts";
 import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
-import { getOpponentIds } from "../../viewmodel/gameStateView.ts";
+import { getOpponentIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
 
 const BLOCK_COLOR = "rgba(56,189,248,0.95)";
@@ -19,13 +19,11 @@ export function BlockAssignmentLines() {
   const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
   const combat = useGameStore((s) => s.gameState?.combat ?? null);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const localPlayerId = usePlayerId();
 
-  const isMultiplayer = (seatOrder?.length ?? 0) > 2;
-
   const gameState = useGameStore((s) => s.gameState);
+  const isMultiplayer = gameState != null && !isOneOnOne(gameState);
   const opponents = useMemo(() => getOpponentIds(gameState, localPlayerId), [gameState, localPlayerId]);
   const effectiveFocusedOpponent = focusedOpponent ?? opponents[0] ?? null;
 

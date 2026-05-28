@@ -1791,6 +1791,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Bounce {
             target,
             destination,
+            ..
         } => {
             d.push(("target".into(), fmt_target(target)));
             if let Some(dest) = destination {
