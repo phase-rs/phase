@@ -1946,9 +1946,9 @@ fn prepare_spell_cast_with_variant_override_inner(
     // cast is the suspend "play it without paying its mana cost" path. Mirrors
     // Warp/Flashback's keyword-presence detection and avoids coupling
     // `Effect::CastFromZone` to a cast-variant override field.
-    // Reads the effective off-zone keyword set so Suspend granted at runtime by
-    // Jhoira of the Ghitu / The Tenth Doctor (CR 604.1) is recognized alongside
-    // printed Suspend.
+    // CR 702.62a: Suspend cast detection. Reads the effective off-zone keyword
+    // set so Suspend granted at runtime by Jhoira of the Ghitu / The Tenth Doctor
+    // (CR 604.1) is recognized alongside printed Suspend.
     let is_suspend_cast = obj.zone == Zone::Exile
         && alt_cost_from_exile.is_some()
         && super::keywords::object_has_effective_keyword_kind(
