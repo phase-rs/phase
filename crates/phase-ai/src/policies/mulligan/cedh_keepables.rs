@@ -15,8 +15,13 @@
 
 use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
+
+/// Minimum kept-hand size for a cEDH AI. A 3-card hand essentially can't win
+/// at a cEDH table, so we never take a mulligan that would leave fewer cards
+/// than this floor.
+const CEDH_MULLIGAN_FLOOR: usize = 4;
 
 use crate::combo::ComboRegistry;
 use crate::features::DeckFeatures;
@@ -48,13 +53,35 @@ impl MulliganPolicy for CedhKeepablesMulligan {
         features: &DeckFeatures,
         _plan: &PlanSnapshot,
         _turn_order: TurnOrder,
-        _mulligans_taken: u8,
+        mulligans_taken: u8,
     ) -> MulliganScore {
         // Internal gate: non-cEDH decks see a zero-delta Score (cheap no-op).
         if features.bracket_tier != CommanderBracketTier::Cedh {
             return MulliganScore::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("cedh_keepables_na"),
+            };
+        }
+
+        // CR 103.5 + CR 103.5c: cEDH card-count floor. Never take a mulligan that
+        // would leave fewer than CEDH_MULLIGAN_FLOOR cards. The cEDH policy
+        // force-mulligans aggressively; without this floor a run of mulligans could
+        // drive the kept hand toward the engine's 1-card hard cap. `ForceKeep`
+        // outranks every other policy's `ForceMulligan`, so the floor is absolute.
+        let free_first = match &state.waiting_for {
+            WaitingFor::MulliganDecision {
+                free_first_mulligan,
+                ..
+            } => *free_first_mulligan,
+            // Evaluated outside the mulligan step (e.g. projection/tests): no floor.
+            _ => false,
+        };
+        if engine::game::mulligan::kept_hand_size_after(mulligans_taken + 1, free_first)
+            < CEDH_MULLIGAN_FLOOR
+        {
+            return MulliganScore::ForceKeep {
+                reason: PolicyReason::new("cedh_keepables_card_floor")
+                    .with_fact("mulligans_taken", mulligans_taken as i64),
             };
         }
 
@@ -475,6 +502,167 @@ mod tests {
                 assert_eq!(reason.kind, "cedh_keepables_combo_in_hand");
             }
             _ => panic!("expected strong-keep Score, got {score:?}"),
+        }
+    }
+
+    /// Build a minimal bad cEDH hand (fewer than 2 lands — would ForceMulligan
+    /// absent the floor guard). Used by floor tests to ensure the floor guard
+    /// fires before the land-count branch.
+    fn make_bad_cedh_hand(state: &mut GameState) -> Vec<ObjectId> {
+        state.players[0].hand.clear();
+        let mut hand = Vec::new();
+        // 1 land (< 2 → would force-mulligan on land count without the floor).
+        hand.push(add_hand_card(state, 50, "Island", vec![CoreType::Land]));
+        // Filler — no fast-mana / tutor / interaction.
+        for i in 0..3 {
+            hand.push(add_hand_card(
+                state,
+                60 + i,
+                &format!("Filler {i}"),
+                vec![CoreType::Creature],
+            ));
+        }
+        hand
+    }
+
+    /// Non-free-first: `kept_hand_size_after(4, false) == 3 < 4` → floor fires
+    /// at `mulligans_taken == 3`. The bad hand returns `ForceKeep`.
+    #[test]
+    fn non_free_first_floor_engages_at_mulligans_taken_3() {
+        let policy = CedhKeepablesMulligan::new();
+        let mut state = GameState::new_two_player(42);
+        let hand = make_bad_cedh_hand(&mut state);
+        // Default `waiting_for` is not a `MulliganDecision` → free_first = false.
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            3,
+        );
+
+        match score {
+            MulliganScore::ForceKeep { reason } => {
+                assert_eq!(
+                    reason.kind, "cedh_keepables_card_floor",
+                    "unexpected reason kind: {}",
+                    reason.kind
+                );
+            }
+            _ => panic!("expected ForceKeep(cedh_keepables_card_floor), got {score:?}"),
+        }
+    }
+
+    /// Non-free-first: `kept_hand_size_after(3, false) == 4` — floor NOT reached
+    /// at `mulligans_taken == 2`. The bad hand should still `ForceMulligan`.
+    #[test]
+    fn non_free_first_no_floor_at_mulligans_taken_2() {
+        let policy = CedhKeepablesMulligan::new();
+        let mut state = GameState::new_two_player(42);
+        let hand = make_bad_cedh_hand(&mut state);
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            2,
+        );
+
+        assert!(
+            matches!(score, MulliganScore::ForceMulligan { .. }),
+            "floor must NOT engage at mulligans_taken=2 (non-free-first); expected ForceMulligan, got {score:?}"
+        );
+    }
+
+    /// Free-first: `kept_hand_size_after(5, true) == 3 < 4` → floor fires at
+    /// `mulligans_taken == 4`. Same bad hand returns `ForceKeep`.
+    #[test]
+    fn free_first_floor_engages_at_mulligans_taken_4() {
+        let policy = CedhKeepablesMulligan::new();
+        let mut state = GameState::new_two_player(42);
+        let hand = make_bad_cedh_hand(&mut state);
+        // Set waiting_for so free_first_mulligan = true.
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![],
+            free_first_mulligan: true,
+        };
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            4,
+        );
+
+        match score {
+            MulliganScore::ForceKeep { reason } => {
+                assert_eq!(
+                    reason.kind, "cedh_keepables_card_floor",
+                    "unexpected reason kind: {}",
+                    reason.kind
+                );
+            }
+            _ => panic!("expected ForceKeep(cedh_keepables_card_floor) at mulligans_taken=4 free_first, got {score:?}"),
+        }
+    }
+
+    /// Free-first: `kept_hand_size_after(4, true) == 4` — floor NOT reached at
+    /// `mulligans_taken == 3`. Same bad hand must still `ForceMulligan`.
+    #[test]
+    fn free_first_no_floor_at_mulligans_taken_3() {
+        let policy = CedhKeepablesMulligan::new();
+        let mut state = GameState::new_two_player(42);
+        let hand = make_bad_cedh_hand(&mut state);
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![],
+            free_first_mulligan: true,
+        };
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            3,
+        );
+
+        assert!(
+            matches!(score, MulliganScore::ForceMulligan { .. }),
+            "floor must NOT engage at mulligans_taken=3 (free-first); expected ForceMulligan, got {score:?}"
+        );
+    }
+
+    /// Non-cEDH decks are unaffected even at high `mulligans_taken`. The bracket
+    /// gate returns the zero-delta Score before the floor is ever checked.
+    #[test]
+    fn non_cedh_unaffected_at_high_mulligan_count() {
+        let policy = CedhKeepablesMulligan::new();
+        let mut state = GameState::new_two_player(42);
+        let hand = make_bad_cedh_hand(&mut state);
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(false),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            5,
+        );
+
+        match score {
+            MulliganScore::Score { delta, .. } => {
+                assert_eq!(delta, 0.0, "non-cEDH bracket must return zero-delta Score")
+            }
+            _ => panic!(
+                "expected zero-delta Score for non-cEDH deck at high mulligan count, got {score:?}"
+            ),
         }
     }
 }

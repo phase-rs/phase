@@ -9,11 +9,12 @@
 //! abilities) — not modeled here, but motivates why the mulligan decision
 //! is a first-class AI concern.
 //!
-//! Each `MulliganPolicy` returns a `MulliganScore` — either `ForceMulligan`
-//! (hard veto) or `Score { delta, reason }` (additive). The registry runs all
-//! registered policies and aggregates:
+//! Each `MulliganPolicy` returns a `MulliganScore` — `ForceKeep`, `ForceMulligan`
+//! (hard veto), or `Score { delta, reason }` (additive). The registry runs all
+//! registered policies and aggregates with three-way precedence:
 //!
-//! - Any `ForceMulligan` → the hand is mulliganed (reason kept in trace).
+//! - Any `ForceKeep` → keep (overrides every other verdict including `ForceMulligan`).
+//! - Otherwise any `ForceMulligan` → the hand is mulliganed (reason kept in trace).
 //! - Otherwise `sum(delta) > 0.0` means keep.
 //!
 //! Structured `PolicyReason` values give observability parity with
@@ -62,7 +63,12 @@ pub enum TurnOrder {
 /// A single mulligan policy's verdict on an opening hand.
 #[derive(Debug, Clone)]
 pub enum MulliganScore {
-    /// Hard veto — if any policy returns this, the hand is mulliganed.
+    /// Hard veto toward keeping — outranks `ForceMulligan`. A policy emits this
+    /// when the hand must not be mulliganed regardless of other verdicts
+    /// (e.g. a card-count floor).
+    ForceKeep { reason: PolicyReason },
+    /// Hard veto — if any policy returns this (and none returns `ForceKeep`),
+    /// the hand is mulliganed.
     ForceMulligan { reason: PolicyReason },
     /// Additive score contribution. Positive = prefer keeping; negative =
     /// prefer mulliganing.
@@ -93,8 +99,9 @@ pub trait MulliganPolicy: Send + Sync {
 }
 
 /// Registry of mulligan policies. Aggregates per-policy verdicts into a
-/// single `MulliganDecision` per the plan-mandated rule:
-/// any `ForceMulligan` → mulligan; otherwise `sum(delta) > 0.0` → keep.
+/// single `MulliganDecision` with three-way precedence:
+/// any `ForceKeep` → keep (overrides everything); else any `ForceMulligan` →
+/// mulligan; else `sum(delta) > 0.0` → keep.
 pub struct MulliganRegistry {
     policies: Vec<Box<dyn MulliganPolicy>>,
 }
@@ -129,18 +136,26 @@ impl MulliganRegistry {
         mulligans_taken: u8,
     ) -> MulliganDecision {
         let mut trace = Vec::with_capacity(self.policies.len());
-        let mut forced = false;
+        let mut forced_keep = false;
+        let mut forced_mulligan = false;
         let mut total: f64 = 0.0;
         for policy in &self.policies {
             let score = policy.evaluate(hand, state, features, plan, turn_order, mulligans_taken);
             match &score {
-                MulliganScore::ForceMulligan { .. } => forced = true,
+                MulliganScore::ForceKeep { .. } => forced_keep = true,
+                MulliganScore::ForceMulligan { .. } => forced_mulligan = true,
                 MulliganScore::Score { delta, .. } => total += *delta,
             }
             trace.push((policy.id(), score));
         }
 
-        let keep = if forced { false } else { total > 0.0 };
+        let keep = if forced_keep {
+            true
+        } else if forced_mulligan {
+            false
+        } else {
+            total > 0.0
+        };
 
         if tracing::event_enabled!(target: "phase_ai::decision_trace", tracing::Level::DEBUG) {
             tracing::debug!(
@@ -174,6 +189,8 @@ pub fn turn_order_for(state: &GameState, player: PlayerId) -> TurnOrder {
 #[cfg(test)]
 mod cedh_registration_tests {
     use super::*;
+    use crate::features::DeckFeatures;
+    use crate::plan::PlanSnapshot;
     use crate::policies::registry::PolicyId;
 
     #[test]
@@ -186,6 +203,90 @@ mod cedh_registration_tests {
         assert!(
             has,
             "MulliganRegistry::default() must register CedhKeepablesMulligan"
+        );
+    }
+
+    /// Minimal policy that always emits `ForceKeep`.
+    struct AlwaysForceKeep;
+    impl MulliganPolicy for AlwaysForceKeep {
+        fn id(&self) -> PolicyId {
+            PolicyId::CedhKeepablesMulligan
+        }
+        fn evaluate(
+            &self,
+            _hand: &[engine::types::identifiers::ObjectId],
+            _state: &GameState,
+            _features: &DeckFeatures,
+            _plan: &PlanSnapshot,
+            _turn_order: TurnOrder,
+            _mulligans_taken: u8,
+        ) -> MulliganScore {
+            MulliganScore::ForceKeep {
+                reason: PolicyReason::new("test_force_keep"),
+            }
+        }
+    }
+
+    /// Minimal policy that always emits `ForceMulligan`.
+    struct AlwaysForceMulligan;
+    impl MulliganPolicy for AlwaysForceMulligan {
+        fn id(&self) -> PolicyId {
+            PolicyId::KeepablesByLandCount
+        }
+        fn evaluate(
+            &self,
+            _hand: &[engine::types::identifiers::ObjectId],
+            _state: &GameState,
+            _features: &DeckFeatures,
+            _plan: &PlanSnapshot,
+            _turn_order: TurnOrder,
+            _mulligans_taken: u8,
+        ) -> MulliganScore {
+            MulliganScore::ForceMulligan {
+                reason: PolicyReason::new("test_force_mulligan"),
+            }
+        }
+    }
+
+    /// `ForceKeep` must override a co-occurring `ForceMulligan` — the hand is kept.
+    #[test]
+    fn force_keep_overrides_force_mulligan() {
+        let registry = MulliganRegistry {
+            policies: vec![Box::new(AlwaysForceKeep), Box::new(AlwaysForceMulligan)],
+        };
+        let state = GameState::new_two_player(0);
+        let decision = registry.evaluate_hand(
+            &[],
+            &state,
+            &DeckFeatures::default(),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+        assert!(
+            decision.keep,
+            "ForceKeep must override ForceMulligan; expected keep=true, got keep=false"
+        );
+    }
+
+    /// Without `ForceKeep`, a lone `ForceMulligan` produces `keep=false`.
+    #[test]
+    fn force_mulligan_alone_produces_mulligan() {
+        let registry = MulliganRegistry {
+            policies: vec![Box::new(AlwaysForceMulligan)],
+        };
+        let state = GameState::new_two_player(0);
+        let decision = registry.evaluate_hand(
+            &[],
+            &state,
+            &DeckFeatures::default(),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+        assert!(
+            !decision.keep,
+            "ForceMulligan without ForceKeep must produce keep=false"
         );
     }
 }
