@@ -329,9 +329,7 @@ export function DraftPage() {
   }, [searchParams]);
 
   useEffect(() => {
-    if (requestedSetupMode === "cube") {
-      setSetupMode("cube");
-    }
+    setSetupMode(requestedSetupMode === "cube" ? "cube" : "set");
   }, [requestedSetupMode]);
 
   useEffect(() => {

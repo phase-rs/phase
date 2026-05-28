@@ -275,13 +275,11 @@ function DraftModeCard({
   title,
   description,
   icon,
-  badge,
   onClick,
 }: {
   title: string;
   description: string;
   icon: ReactNode;
-  badge?: string;
   onClick: () => void;
 }) {
   return (
@@ -296,11 +294,6 @@ function DraftModeCard({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <div className="text-base font-semibold text-white">{title}</div>
-          {badge && (
-            <span className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-cyan-200">
-              {badge}
-            </span>
-          )}
         </div>
         <p className="mt-1 text-sm text-white/40">{description}</p>
       </div>
