@@ -112,7 +112,6 @@
   "landing": {
     "title": "Draft",
     "startNew": "Neu starten",
-    "experimental": "Experimentell",
     "quickDraft": {
       "title": "Quick Draft",
       "description": "Drafte 3 Booster mit 7 KI-Draftern, baue ein 40-Karten-Deck und spiele dann eine Bo1-Partie gegen einen von ihnen."
@@ -269,7 +268,11 @@
     "loadingPool": "Set-Pool-Daten werden geladen...",
     "roomCode": "Raumcode",
     "roomCodePlaceholder": "Raumcode eingeben...",
-    "joinPod": "Pod beitreten"
+    "joinPod": "Pod beitreten",
+    "tabs": {
+      "set": "Edition",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Turnierpaarungen",

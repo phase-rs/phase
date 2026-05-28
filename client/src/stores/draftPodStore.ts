@@ -16,7 +16,7 @@
 
 import { create } from "zustand";
 
-import type { TournamentFormat, PodPolicy } from "../adapter/draft-adapter";
+import type { CubeDraftSettings, TournamentFormat, PodPolicy } from "../adapter/draft-adapter";
 import type { DraftPodHostConfig } from "../adapter/draftPodHostAdapter";
 import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
 import {
@@ -29,6 +29,14 @@ import { useMultiplayerDraftStore } from "./multiplayerDraftStore";
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type DraftKind = "Premier" | "Traditional";
+
+export type PoolMode = "set" | "cube";
+
+export interface CubeForm {
+  cubeName: string;
+  cubeListText: string;
+  settings: CubeDraftSettings;
+}
 
 export interface PodConfig {
   setCode: string;
@@ -50,7 +58,11 @@ interface DraftPodState {
   joinCode: string;
   /** Guest display name. */
   guestDisplayName: string;
-  /** Set pool JSON loaded from draft-pools.json. */
+  /** Which pool source the host is configuring: a Set pool or a custom Cube list. */
+  poolMode: PoolMode;
+  /** Cube form state (cube name + list text + settings); null when poolMode === "set". */
+  cubeForm: CubeForm | null;
+  /** Set pool JSON loaded from draft-pools.json. Set-mode cache only — unused in cube mode. */
   setPoolJson: string | null;
   /** Loading state while fetching set pool data. */
   loadingPool: boolean;
@@ -69,6 +81,10 @@ interface DraftPodActions {
   setGuestDisplayName: (name: string) => void;
   /** Set join code for guest. */
   setJoinCode: (code: string) => void;
+  /** Switch between Set-pool and Cube-list pool modes. */
+  setPoolMode: (mode: PoolMode) => void;
+  /** Set the cube form (name + list text + settings) for cube-mode host setup. */
+  setCubeForm: (form: CubeForm | null) => void;
   /** Load the set pool data and create a new pod as host. */
   createPod: () => Promise<void>;
   /** Join an existing pod as guest. */
@@ -96,6 +112,8 @@ const initialState: DraftPodState = {
   hostDisplayName: "",
   guestDisplayName: "",
   joinCode: "",
+  poolMode: "set",
+  cubeForm: null,
   setPoolJson: null,
   loadingPool: false,
   configError: null,
@@ -139,41 +157,87 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       set({ joinCode: code });
     },
 
-    createPod: async () => {
-      const { config, hostDisplayName } = get();
+    setPoolMode: (mode) => {
+      set({ poolMode: mode, configError: null });
+    },
 
-      if (!config.setCode) {
-        set({ configError: "Select a set first" });
-        return;
-      }
+    setCubeForm: (form) => {
+      set({ cubeForm: form, configError: null });
+    },
+
+    createPod: async () => {
+      const { config, hostDisplayName, poolMode, cubeForm } = get();
+
       if (!hostDisplayName.trim()) {
         set({ configError: "Enter a display name" });
         return;
       }
 
-      set({ loadingPool: true, configError: null });
+      if (poolMode === "set") {
+        if (!config.setCode) {
+          set({ configError: "Select a set first" });
+          return;
+        }
+
+        set({ loadingPool: true, configError: null });
+
+        try {
+          const resp = await fetch(__DRAFT_POOLS_URL__);
+          if (!resp.ok) {
+            throw new Error(`Failed to load draft pools: ${resp.status}`);
+          }
+          const allPools: Record<string, unknown> = await resp.json();
+          const setPool =
+            allPools[config.setCode.toLowerCase()] ??
+            allPools[config.setCode.toUpperCase()];
+          if (!setPool) {
+            throw new Error(`No pool data for set: ${config.setCode}`);
+          }
+
+          const poolJson = JSON.stringify(setPool);
+          set({ setPoolJson: poolJson, loadingPool: false });
+
+          const persistenceId = crypto.randomUUID();
+          const hostConfig: DraftPodHostConfig = {
+            poolInput: { type: "Set", data: { set_pool_json: poolJson } },
+            kind: config.kind,
+            podSize: config.podSize,
+            hostDisplayName: hostDisplayName.trim(),
+            tournamentFormat: config.tournamentFormat,
+            podPolicy: config.podPolicy,
+            persistenceId,
+          };
+
+          await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          set({ configError: message, loadingPool: false });
+        }
+        return;
+      }
+
+      // Cube mode: skip the draft-pools.json fetch entirely; everything the
+      // host needs lives on the cubeForm object.
+      if (!cubeForm || !cubeForm.cubeListText.trim()) {
+        set({ configError: "Paste a cube list first" });
+        return;
+      }
+      if (!cubeForm.cubeName.trim()) {
+        set({ configError: "Enter a cube name" });
+        return;
+      }
 
       try {
-        // Load set pool data
-        const resp = await fetch(__DRAFT_POOLS_URL__);
-        if (!resp.ok) {
-          throw new Error(`Failed to load draft pools: ${resp.status}`);
-        }
-        const allPools: Record<string, unknown> = await resp.json();
-        const setPool =
-          allPools[config.setCode.toLowerCase()] ??
-          allPools[config.setCode.toUpperCase()];
-        if (!setPool) {
-          throw new Error(`No pool data for set: ${config.setCode}`);
-        }
-
-        const poolJson = JSON.stringify(setPool);
-        set({ setPoolJson: poolJson, loadingPool: false });
-
-        // Create the pod via multiplayerDraftStore
         const persistenceId = crypto.randomUUID();
         const hostConfig: DraftPodHostConfig = {
-          setPoolJson: poolJson,
+          poolInput: {
+            type: "Cube",
+            data: {
+              cube_list_text: cubeForm.cubeListText,
+              cube_name: cubeForm.cubeName,
+              cube_draft_settings: cubeForm.settings,
+            },
+          },
           kind: config.kind,
           podSize: config.podSize,
           hostDisplayName: hostDisplayName.trim(),
@@ -185,7 +249,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        set({ configError: message, loadingPool: false });
+        set({ configError: message });
       }
     },
 
@@ -218,23 +282,52 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           return;
         }
 
-        set({
-          config: {
-            setCode: "",
-            setName: "Draft Pod",
-            kind: persisted.kind,
-            podSize: persisted.podSize,
-            tournamentFormat: persisted.tournamentFormat,
-            podPolicy: persisted.podPolicy,
-          },
-          hostDisplayName: persisted.hostDisplayName,
-          setPoolJson: persisted.setPoolJson,
-          loadingPool: false,
-          configError: null,
-        });
+        // Branch on the persisted pool source: restore the matching UI
+        // state (poolMode + cubeForm or setPoolJson cache) so a refresh
+        // mid-pod lands the host back on the same tab they configured.
+        if (persisted.poolInput.type === "Cube") {
+          const cubeData = persisted.poolInput.data;
+          set({
+            config: {
+              setCode: "custom-cube",
+              setName: cubeData.cube_name,
+              kind: persisted.kind,
+              podSize: persisted.podSize,
+              tournamentFormat: persisted.tournamentFormat,
+              podPolicy: persisted.podPolicy,
+            },
+            hostDisplayName: persisted.hostDisplayName,
+            poolMode: "cube",
+            cubeForm: {
+              cubeName: cubeData.cube_name,
+              cubeListText: cubeData.cube_list_text,
+              settings: cubeData.cube_draft_settings,
+            },
+            setPoolJson: null,
+            loadingPool: false,
+            configError: null,
+          });
+        } else {
+          set({
+            config: {
+              setCode: "",
+              setName: "Draft Pod",
+              kind: persisted.kind,
+              podSize: persisted.podSize,
+              tournamentFormat: persisted.tournamentFormat,
+              podPolicy: persisted.podPolicy,
+            },
+            hostDisplayName: persisted.hostDisplayName,
+            poolMode: "set",
+            cubeForm: null,
+            setPoolJson: persisted.poolInput.data.set_pool_json,
+            loadingPool: false,
+            configError: null,
+          });
+        }
 
         const hostConfig: DraftPodHostConfig = {
-          setPoolJson: persisted.setPoolJson,
+          poolInput: persisted.poolInput,
           kind: persisted.kind,
           podSize: persisted.podSize,
           hostDisplayName: persisted.hostDisplayName,

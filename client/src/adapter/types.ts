@@ -136,10 +136,12 @@ export interface LobbyGame {
 
 /** Metadata for draft pod lobby entries. */
 export interface DraftLobbyMetadata {
-  /** Three-letter set code (e.g. "MKM", "OTJ"). */
+  /** Three-letter set code (e.g. "MKM", "OTJ"). For cube drafts, "custom-cube". */
   setCode: string;
   /** Draft kind: "Quick", "Premier", or "Traditional". */
   draftKind: string;
+  /** Human-readable cube name when the pod is a cube draft. Absent for set drafts. */
+  cubeName?: string;
 }
 
 /**

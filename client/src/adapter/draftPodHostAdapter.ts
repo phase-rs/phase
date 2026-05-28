@@ -10,7 +10,8 @@
  * draft pod instead of a 2-4 player game.
  */
 
-import type { DraftPlayerView, PairingView, PodPolicy, SeatPublicView, TournamentFormat } from "./draft-adapter";
+import { DraftAdapter } from "./draft-adapter";
+import type { DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, TournamentFormat } from "./draft-adapter";
 import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
@@ -101,7 +102,7 @@ function hostStatusForView(view: DraftPlayerView): DraftPodHostStatus {
 }
 
 export interface DraftPodHostConfig {
-  setPoolJson: string;
+  poolInput: PoolInput;
   kind: "Premier" | "Traditional";
   podSize: number;
   hostDisplayName: string;
@@ -175,7 +176,13 @@ export class DraftPodHostAdapter {
       this._roomCode = hostResult.roomCode;
       this.emit({ type: "roomCreated", roomCode: hostResult.roomCode });
 
-      // 2. Register with lobby broker if provided
+      // 2. Register with lobby broker if provided.
+      //
+      // Note: no in-tree caller currently builds a brokerRequest for draft
+      // pods. When a future caller does, it should populate
+      // `draftMetadata.cubeName` from `config.poolInput.data.cube_name` for
+      // Cube pods and leave it `undefined` for Set pods. The lobby protocol
+      // schema is already forward-ready (see DraftLobbyMetadata, #1253).
       if (config.broker && config.brokerRequest) {
         try {
           await config.broker.registerHost({
@@ -188,11 +195,23 @@ export class DraftPodHostAdapter {
         }
       }
 
-      // 3. Create P2PDraftHost
+      // 3. For cube drafts, the WASM CARD_DB must be populated before
+      //    create_multiplayer_draft is invoked (it resolves cube cards
+      //    against the database). The set branch reads its pool from JSON
+      //    and never touches CARD_DB.
+      if (config.poolInput.type === "Cube") {
+        const resp = await fetch(__CARD_DATA_URL__);
+        if (!resp.ok) {
+          throw new Error(`Failed to load card data: ${resp.status}`);
+        }
+        await new DraftAdapter().loadCardDatabase(await resp.text());
+      }
+
+      // 4. Create P2PDraftHost
       const host = new P2PDraftHost(
         hostResult.peer,
         hostResult.onGuestConnected,
-        config.setPoolJson,
+        config.poolInput,
         config.kind,
         config.podSize,
         config.hostDisplayName,

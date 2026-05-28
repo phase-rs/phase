@@ -112,7 +112,6 @@
   "landing": {
     "title": "Draft",
     "startNew": "Inizia nuovo",
-    "experimental": "Sperimentale",
     "quickDraft": {
       "title": "Quick Draft",
       "description": "Drafta 3 buste con 7 draftatori IA, costruisci un mazzo da 40 carte, poi gioca una partita Bo1 contro uno di loro."
@@ -269,7 +268,11 @@
     "loadingPool": "Caricamento dati del pool del set...",
     "roomCode": "Codice stanza",
     "roomCodePlaceholder": "Inserisci codice stanza...",
-    "joinPod": "Unisciti al pod"
+    "joinPod": "Unisciti al pod",
+    "tabs": {
+      "set": "Espansione",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Accoppiamenti torneo",

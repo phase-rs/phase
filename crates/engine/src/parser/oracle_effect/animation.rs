@@ -1,14 +1,14 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{eof, opt, peek, recognize, value};
 use nom::multi::{many0, separated_list1};
 use nom::sequence::{pair, preceded};
 use nom::Parser;
 
-use super::super::oracle_nom::error::{OracleError, OracleResult};
+use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_util::split_around;
@@ -73,9 +73,10 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         rest = after_pt;
     }
 
-    if let Some((descriptor, power, toughness)) = split_animation_base_pt_clause(rest) {
+    if let Some((descriptor, power, toughness, keywords)) = split_animation_base_pt_clause(rest) {
         spec.power = Some(power);
         spec.toughness = Some(toughness);
+        spec.keywords.extend(keywords);
         rest = descriptor;
     }
 
@@ -86,7 +87,7 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
     }
 
     let (descriptor, keywords) = split_animation_keyword_clause(rest);
-    spec.keywords = keywords;
+    spec.keywords.extend(keywords);
     rest = descriptor;
 
     if let Some((colors, after_colors)) = parse_animation_color_prefix(rest) {
@@ -255,15 +256,53 @@ fn parse_cost_x_become_pt_prefix(text: &str) -> Option<&str> {
     }
 }
 
-fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32)> {
-    const NEEDLE: &str = " with base power and toughness ";
+/// CR 613.1d/f/g: animation clauses can simultaneously change types, grant
+/// keyword abilities, and set base P/T. Keep those written components together
+/// so later lowering emits Layer 4, Layer 6, and Layer 7 modifications.
+fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32, Vec<Keyword>)> {
     let lower = text.to_lowercase();
-    let (before, _) = split_around(&lower, NEEDLE)?;
-    let pos = before.len();
-    let descriptor = text[..pos].trim_end_matches(',').trim();
-    let pt_text = text[pos + NEEDLE.len()..].trim();
-    let (power, toughness, _) = parse_fixed_become_pt_prefix(pt_text)?;
-    Some((descriptor, power, toughness))
+    let (_, (descriptor_lower, power, toughness, keywords)) =
+        parse_animation_base_pt_clause(&lower).ok()?;
+    let descriptor = text[..descriptor_lower.len()].trim_end_matches(',').trim();
+    Some((descriptor, power, toughness, keywords))
+}
+
+fn parse_animation_base_pt_clause(input: &str) -> OracleResult<'_, (&str, i32, i32, Vec<Keyword>)> {
+    let (rest, descriptor) = take_until(" with base power and toughness ").parse(input)?;
+    let (rest, _) = tag(" with base power and toughness ").parse(rest)?;
+    let (rest, (power, toughness)) = nom_primitives::parse_pt_value.parse(rest)?;
+    let (power, toughness) = match (power, toughness) {
+        (PtValue::Fixed(power), PtValue::Fixed(toughness)) => (power, toughness),
+        _ => return Err(oracle_err(rest)),
+    };
+    let (rest, keywords) = opt(parse_base_pt_trailing_keywords).parse(rest)?;
+    Ok((
+        rest,
+        (descriptor, power, toughness, keywords.unwrap_or_default()),
+    ))
+}
+
+fn parse_base_pt_trailing_keyword_intro(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = multispace0(input)?;
+    let (rest, _) = alt((tag(", and "), tag(", "), tag("and "))).parse(rest)?;
+    let (rest, _) = opt(alt((
+        tag("has "),
+        tag("have "),
+        tag("gains "),
+        tag("gain "),
+    )))
+    .parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn parse_base_pt_trailing_keywords(input: &str) -> OracleResult<'_, Vec<Keyword>> {
+    let (rest, _) = parse_base_pt_trailing_keyword_intro(input)?;
+    let (rest, raw_clause) = take_till(|c| c == '"' || c == '.').parse(rest)?;
+    let keywords = split_token_keyword_list(raw_clause.trim())
+        .into_iter()
+        .filter_map(map_token_keyword)
+        .collect();
+    Ok((rest, keywords))
 }
 
 fn parse_dynamic_pt_clause(input: &str) -> OracleResult<'_, (&str, QuantityExpr)> {
@@ -732,6 +771,42 @@ mod test_den_bugbear {
         assert!(mods.contains(
             &crate::types::ability::ContinuousModification::SetToughnessDynamic { value: expected }
         ));
+    }
+
+    #[test]
+    fn animation_base_pt_preserves_trailing_bare_keyword() {
+        let spec = parse_animation_spec(
+            "a Halfling Scout with base power and toughness 2/3 and lifelink",
+            &mut ParseContext::default(),
+        )
+        .expect("Frodo-style animation phrase should parse");
+
+        let mods = animation_modifications(&spec);
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::SetPower { value: 2 })
+        );
+        assert!(mods
+            .contains(&crate::types::ability::ContinuousModification::SetToughness { value: 3 }));
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Creature,
+            })
+        );
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddSubtype {
+                subtype: "Halfling".to_string(),
+            })
+        );
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddSubtype {
+                subtype: "Scout".to_string(),
+            })
+        );
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: Keyword::Lifelink,
+            })
+        );
     }
 
     #[test]

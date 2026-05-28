@@ -13,7 +13,7 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { DraftAdapter } from "./draft-adapter";
-import type { DraftPlayerView, MultiplayerSeatDescriptor, PairingView, SeatPublicView } from "./draft-adapter";
+import type { DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView } from "./draft-adapter";
 import type { PodPolicy, TournamentFormat } from "./draft-adapter";
 import {
   createDraftPeerSession,
@@ -183,7 +183,7 @@ export class P2PDraftHost {
     private readonly onGuestConnected: (
       handler: (conn: DataConnection) => void,
     ) => () => void,
-    private readonly setPoolJson: string,
+    private readonly poolInput: PoolInput,
     private readonly kind: "Premier" | "Traditional",
     private readonly podSize: number,
     private readonly hostDisplayName: string,
@@ -466,7 +466,7 @@ export class P2PDraftHost {
     }
 
     await this.adapter.createMultiplayerDraft(
-      this.setPoolJson,
+      this.poolInput,
       seats,
       this.kind,
       seed,
@@ -1360,7 +1360,7 @@ export class P2PDraftHost {
           draftStarted: this.draftStarted,
           draftCode: this.draftCode,
           draftSessionJson: sessionJson,
-          setPoolJson: this.setPoolJson,
+          poolInput: this.poolInput,
         };
 
         await saveDraftHostSession(this.persistenceId!, snapshot);

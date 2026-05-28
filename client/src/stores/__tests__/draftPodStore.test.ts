@@ -53,7 +53,7 @@ const persistedSession = {
   draftStarted: true,
   draftCode: "ABCDE",
   draftSessionJson: "{}",
-  setPoolJson: "{}",
+  poolInput: { type: "Set" as const, data: { set_pool_json: "{}" } },
 };
 
 describe("draftPodStore", () => {
@@ -107,6 +107,94 @@ describe("draftPodStore", () => {
 
       expect(mocks.loadDraftHostSession).toHaveBeenCalledOnce();
       expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+    });
+
+    it("restores cube poolMode + setName from a persisted cube snapshot", async () => {
+      const cubeSession = {
+        ...persistedSession,
+        poolInput: {
+          type: "Cube" as const,
+          data: {
+            cube_list_text: "1 Lightning Bolt\n",
+            cube_name: "My Cube",
+            cube_draft_settings: {
+              pod_size: 2,
+              pack_count: 1,
+              cards_per_pack: 2,
+              min_deck_size: 4,
+              addable_cards: { policy: "StandardBasics" as const, custom: [] },
+            },
+          },
+        },
+      };
+      mocks.loadActiveDraftPod.mockReturnValue(activeMeta);
+      mocks.loadDraftHostSession.mockResolvedValue(cubeSession);
+
+      await useDraftPodStore.getState().resumeHostedPod();
+
+      const state = useDraftPodStore.getState();
+      expect(state.poolMode).toBe("cube");
+      expect(state.config.setName).toBe("My Cube");
+      expect(state.config.setCode).toBe("custom-cube");
+      expect(state.cubeForm?.cubeName).toBe("My Cube");
+      expect(state.cubeForm?.cubeListText).toBe("1 Lightning Bolt\n");
+
+      // The hostConfig dispatched to multiplayerDraftStore must mirror the
+      // persisted Cube source 1:1 so the host re-initializes onto the same
+      // cube content rather than falling back to "{}".
+      const dispatched = mocks.multiplayerState.hostDraft.mock.calls[0]?.[0];
+      expect(dispatched.poolInput.type).toBe("Cube");
+    });
+  });
+
+  describe("createPod (cube branch)", () => {
+    it("rejects an empty cube list with a config error", async () => {
+      useDraftPodStore.setState({
+        poolMode: "cube",
+        cubeForm: {
+          cubeName: "C",
+          cubeListText: "   ",
+          settings: {
+            pod_size: 2,
+            pack_count: 1,
+            cards_per_pack: 2,
+            min_deck_size: 4,
+            addable_cards: { policy: "StandardBasics", custom: [] },
+          },
+        },
+        hostDisplayName: "Host",
+      });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(useDraftPodStore.getState().configError).toBeTruthy();
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+    });
+
+    it("dispatches a Cube poolInput hostConfig when cubeForm is valid", async () => {
+      useDraftPodStore.setState({
+        poolMode: "cube",
+        cubeForm: {
+          cubeName: "Test Cube",
+          cubeListText: "1 Lightning Bolt\n",
+          settings: {
+            pod_size: 2,
+            pack_count: 1,
+            cards_per_pack: 2,
+            min_deck_size: 4,
+            addable_cards: { policy: "StandardBasics", custom: [] },
+          },
+        },
+        hostDisplayName: "Host",
+      });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      const dispatched = mocks.multiplayerState.hostDraft.mock.calls[0]?.[0];
+      expect(dispatched.poolInput.type).toBe("Cube");
+      expect(dispatched.poolInput.data.cube_name).toBe("Test Cube");
+      expect(dispatched.poolInput.data.cube_list_text).toBe("1 Lightning Bolt\n");
     });
   });
 });
