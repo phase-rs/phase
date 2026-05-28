@@ -90,6 +90,7 @@ function CascadeChoiceContent({
       }
       title={t("cascadeChoice.title", { name: obj.name })}
       subtitle={subtitle}
+      previewObjectId={hitCardId}
     >
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
         <button

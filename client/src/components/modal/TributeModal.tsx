@@ -42,6 +42,8 @@ export function TributeModal() {
     <ChoiceModal
       title={t("tribute.title", { name: sourceName })}
       subtitle={t("tribute.subtitle", { count: counters, name: sourceName })}
+      previewCardName={rawSourceName ?? undefined}
+      previewObjectId={data.source_id}
       options={[
         {
           id: "pay",

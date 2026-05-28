@@ -48,6 +48,7 @@ function SlotChoiceContent({
       eyebrow={t("permanentTypeSlot.eyebrow")}
       title={t("permanentTypeSlot.title")}
       subtitle={t("permanentTypeSlot.subtitle", { name: cardName })}
+      previewObjectId={objectId}
     >
       <div className="px-3 pt-3 lg:px-5 lg:pt-4">
         <CardTextboxPreview cardName={cardName} />

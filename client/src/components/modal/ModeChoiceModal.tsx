@@ -16,6 +16,11 @@ export function ModeChoiceModal() {
   const isModeChoice = waitingFor?.type === "ModeChoice" || waitingFor?.type === "AbilityModeChoice";
   const isAbilityMode = waitingFor?.type === "AbilityModeChoice";
   const modal: ModalChoice | null = isModeChoice ? waitingFor.data.modal : null;
+  const sourceObjectId = !isModeChoice
+    ? undefined
+    : waitingFor.type === "AbilityModeChoice"
+      ? waitingFor.data.source_id
+      : waitingFor.data.pending_cast.object_id;
   const unavailableModes: number[] = useMemo(
     () =>
       isAbilityMode && "unavailable_modes" in waitingFor.data
@@ -116,6 +121,7 @@ export function ModeChoiceModal() {
       size="md"
       scrollable
       footer={footer}
+      previewObjectId={sourceObjectId}
     >
       <div className="px-3 py-3 lg:px-5 lg:py-5">
         <div className="flex flex-col gap-2">

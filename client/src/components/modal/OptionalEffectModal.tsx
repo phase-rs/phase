@@ -37,6 +37,8 @@ export function OptionalEffectModalContent({
     <ChoiceModal
       title={t("optionalEffect.title", { name: sourceName })}
       subtitle={description}
+      previewCardName={sourceObj?.name}
+      previewObjectId={waitingFor.data.source_id}
       options={[
         { id: "accept", label: t("optionalEffect.yes") },
         { id: "decline", label: t("optionalEffect.no") },
