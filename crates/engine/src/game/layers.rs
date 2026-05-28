@@ -3308,6 +3308,57 @@ mod tests {
         );
     }
 
+    /// CR 509.1b + CR 613.1f + CR 702.18a: End-to-end runtime confirmation that
+    /// Whispersilk Cloak's compound "Equipped creature can't be blocked and has
+    /// shroud." drives a real `parse_static_line_multi` output through the layer
+    /// pipeline and grants Shroud to the equipped creature. The keyword companion
+    /// (split out from the `CantBeBlocked` restriction) must actually reach the
+    /// equipped creature — not silently dropped.
+    #[test]
+    fn whispersilk_compound_grants_shroud_through_layers() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let defs = crate::parser::oracle_static::parse_static_line_multi(
+            "Equipped creature can't be blocked and has shroud.",
+        );
+        assert_eq!(defs.len(), 2, "parser must emit 2 defs, got {defs:?}");
+
+        let equipment = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Whispersilk Cloak".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+            for def in defs {
+                obj.static_definitions.push(def);
+            }
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(equipment);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let equipped = state.objects.get(&bear).unwrap();
+        assert!(
+            equipped.has_keyword(&Keyword::Shroud),
+            "equipped creature must gain Shroud from the keyword companion"
+        );
+    }
+
     /// CR 301.5 + CR 303.4 + CR 613.4c: End-to-end runtime confirmation of
     /// the Strong Back / Mantle of the Ancients class — "Enchanted creature
     /// gets +N/+N for each Aura and Equipment attached to it." The pronoun

@@ -831,6 +831,45 @@ fn collect_source_in_zones(cond: &StaticCondition, out: &mut Vec<crate::types::z
     }
 }
 
+/// CR 702.5 + CR 702.6 + CR 613.4c: Shared subject dispatch for attached-subject
+/// grant lines ("enchanted creature ...", "equipped creature ...", etc.).
+///
+/// Returns the `EnchantedBy`/`EquippedBy` `TargetFilter` plus the remaining
+/// predicate (the original-case slice after the subject prefix), or `None` when
+/// the line has no recognized attached-subject prefix. Longest-prefix-first so
+/// "enchanted permanent " is tried before "enchanted creature " cannot win
+/// erroneously — each prefix is distinct, but ordering keeps intent explicit.
+///
+/// "enchanted land is a " is intentionally NOT handled here; that type-changing
+/// branch has its own dedicated dispatch in `parse_static_line_inner`.
+fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFilter, &'a str)> {
+    if let Some(rest) = nom_tag_tp(tp, "enchanted creature ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            rest.original,
+        ));
+    }
+    if let Some(rest) = nom_tag_tp(tp, "enchanted permanent ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy])),
+            rest.original,
+        ));
+    }
+    if let Some(rest) = nom_tag_tp(tp, "enchanted land ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy])),
+            rest.original,
+        ));
+    }
+    if let Some(rest) = nom_tag_tp(tp, "equipped creature ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
+            rest.original,
+        ));
+    }
+    None
+}
+
 fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<StaticDefinition> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
@@ -1136,7 +1175,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(rest) = nom_tag_tp(&tp, "enchanted creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
+        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
+            .into_iter()
+            .next()
+        {
             return Some(def);
         }
     }
@@ -1145,7 +1187,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(rest) = nom_tag_tp(&tp, "enchanted permanent ") {
         let filter =
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
+        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
+            .into_iter()
+            .next()
+        {
             return Some(def);
         }
     }
@@ -1186,7 +1231,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(rest) = nom_tag_tp(&tp, "enchanted land ") {
         let filter =
             TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
+        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
+            .into_iter()
+            .next()
+        {
             return Some(def);
         }
     }
@@ -1195,7 +1243,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(rest) = nom_tag_tp(&tp, "equipped creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
+        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
+            .into_iter()
+            .next()
+        {
             return Some(def);
         }
     }
@@ -2856,6 +2907,28 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     // A single `StaticDefinition` cannot carry both modes, so decompose them.
     if let Some(defs) = try_split_and_must_attack_block(&stripped) {
         return defs;
+    }
+
+    // CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Attached-subject grant lines
+    // ("enchanted creature ...", "equipped creature ...") may decompose into more
+    // than one StaticDefinition (e.g. CantBeBlocked + Continuous{AddKeyword}).
+    // `parse_enchanted_equipped_predicate` is the single mechanism for all such
+    // compound forms; simple lines flow back as a length-1 Vec. The single-return
+    // `parse_static_line` path keeps only the first def, so the multi path must
+    // dispatch here before the fallback.
+    //
+    // CR 205.1a + CR 613.1d: "enchanted creature is a [type] ..." type-change
+    // lines (Darksteel Mutation) are owned by `parse_enchanted_is_type`, which
+    // the single-return fallback dispatches BEFORE the attached-subject grant
+    // branch. Defer those to the fallback so the type-line decomposition is not
+    // pre-empted by the continuous-grant parser.
+    if parse_enchanted_is_type(&tp, &stripped).is_none() {
+        if let Some((filter, rest)) = attached_subject_filter(&tp) {
+            let defs = parse_enchanted_equipped_predicate(rest, filter, &stripped);
+            if !defs.is_empty() {
+                return defs;
+            }
+        }
     }
 
     // Fall back to the single-return parser.
@@ -7991,39 +8064,227 @@ fn parse_activate_abilities_as_though_haste(
     )
 }
 
+/// CR 604.1 + CR 611.3a + CR 613.1f: a non-Continuous restriction primary
+/// (e.g. `CantBeBlocked`) may be conjoined with a trailing keyword grant
+/// ("can't be blocked and has shroud."). A single `StaticDefinition` can carry
+/// only one `StaticMode`, so when the primary is NON-Continuous and a trailing
+/// "and has <kw-list>" clause is present, emit a companion `Continuous` def for
+/// the recovered keyword(s), inheriting the primary's suffix condition.
+///
+/// GAP-1 guard: only appends a companion when the primary is non-Continuous —
+/// benign Continuous lines ("gets +1/+1 and has trample and lifelink") are
+/// already merged into one def by `parse_continuous_modifications` and must NOT
+/// be split.
+fn with_keyword_companion(
+    primary: StaticDefinition,
+    predicate: &str,
+    affected: &TargetFilter,
+    description: &str,
+    suffix_cond: Option<&StaticCondition>,
+) -> Vec<StaticDefinition> {
+    if matches!(primary.mode, StaticMode::Continuous) {
+        return vec![primary];
+    }
+    let mut companion_mods = Vec::new();
+    if let Some(keyword_text) = extract_keyword_clause(predicate) {
+        for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
+            push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
+        }
+    }
+    if companion_mods.is_empty() {
+        return vec![primary];
+    }
+    let mut companion = StaticDefinition::continuous()
+        .affected(affected.clone())
+        .modifications(companion_mods)
+        .description(description.to_string());
+    if let Some(cond) = suffix_cond {
+        companion.condition = Some(cond.clone());
+    }
+    vec![primary, companion]
+}
+
+/// CR 613.1f + CR 611.3a: Parse a comma-and list of "<keyword> if <condition>"
+/// clauses (Multiclass Baldric: "lifelink if you control a Cleric, deathtouch
+/// if you control a Rogue, ..."). The successful parse IS the detector — no
+/// `contains`. The leading "has " prefix is stripped by the caller.
+fn parse_conditional_keyword_list(
+    input: &str,
+) -> OracleResult<'_, Vec<(Keyword, StaticCondition)>> {
+    separated_list1(
+        // Oxford-comma tolerant: longest separator first.
+        alt((tag(", and "), tag(" and "), tag(", "))),
+        nom::sequence::pair(
+            map_keyword_run,
+            preceded(tag(" if "), parse_attached_condition_run),
+        ),
+    )
+    .parse(input)
+}
+
+/// Parse a single keyword spelled as a run of alphabetic words, returning the
+/// mapped `Keyword`. Consumes greedily up to (but not including) " if ".
+fn map_keyword_run(input: &str) -> OracleResult<'_, Keyword> {
+    let (rest, word) = take_until::<_, _, OracleError<'_>>(" if ").parse(input)?;
+    match map_keyword(word.trim()) {
+        Some(kw) => Ok((rest, kw)),
+        None => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::MapRes,
+        ))),
+    }
+}
+
+/// Parse a condition run up to the next list separator (", " / " and ") or the
+/// end of input, delegating the recovered text to `parse_attached_static_condition`.
+///
+/// `take_until(", ")` is tried before `take_until(" and ")` and both before the
+/// `rest` fallback: a `, ` separator (also the prefix of `, and `) terminates the
+/// clause first; the bare ` and ` form is the joiner of the final two members;
+/// `rest` captures the last member, which has no trailing separator. The
+/// recovered span is a single subtype-presence condition with no embedded
+/// separators, so the shortest non-empty match is always the correct boundary.
+fn parse_attached_condition_run(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (remaining, cond_span) = alt((
+        take_until::<_, _, OracleError<'_>>(", "),
+        take_until(" and "),
+        rest,
+    ))
+    .parse(input)?;
+    let cond_text = cond_span.trim().trim_end_matches('.');
+    match parse_attached_static_condition(cond_text) {
+        Some(cond) => Ok((remaining, cond)),
+        None => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::MapRes,
+        ))),
+    }
+}
+
 /// Parse the predicate of an enchanted/equipped grant, handling:
 /// - Non-standard keyword phrasings: "can attack as though it had haste", "can't be blocked"
 /// - Conditional grants: "gets +1/+1 as long as you control a Wizard"
+/// - Compound restriction + keyword grants: "can't be blocked and has shroud"
+/// - Per-subtype conditional keyword lists: "lifelink if you control a Cleric, ..."
+/// - Turn-gated alternatives: "has deathtouch during your turn. Otherwise, it has reach."
 /// - Standard continuous grants: "gets +N/+M", "has keyword", "for each", "where X is"
 ///
-/// CR 702.10 + CR 509.1b + CR 613.4c: Enchanted/equipped predicate dispatch.
+/// Returns a `Vec` because compound forms produce more than one
+/// `StaticDefinition` (a single `StaticDefinition` carries only one
+/// `StaticMode`). Simple lines return a length-1 vec; unparsed lines an empty
+/// vec.
+///
+/// CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Enchanted/equipped predicate dispatch.
 fn parse_enchanted_equipped_predicate(
     predicate: &str,
     affected: TargetFilter,
     description: &str,
-) -> Option<StaticDefinition> {
+) -> Vec<StaticDefinition> {
     let pred_lower = predicate.to_lowercase();
     let pred_tp = TextPair::new(predicate, &pred_lower);
+
+    // --- PATTERN 3b: ". Otherwise, [it] has <kw>" turn-gated alternative ---
+    // CR 604.1 + CR 611.3a + CR 613.1f: head clause gated DuringYourTurn (via the
+    // standard predicate path's `strip_suffix_turn_condition`), companion gated
+    // Not(DuringYourTurn). Hunter's Blowgun: "Equipped creature has deathtouch
+    // during your turn. Otherwise, it has reach."
+    type VE<'a> = OracleError<'a>;
+    if let Some((head_tp, tail_tp)) = pred_tp
+        .split_around(". otherwise, ")
+        .or_else(|| pred_tp.split_around(". otherwise "))
+    {
+        let head = head_tp.original.trim();
+        // CR 604.1: the head carries the gating turn condition
+        // ("has deathtouch during your turn"). Strip it to DuringYourTurn, then
+        // parse the bare keyword grant.
+        let (head_predicate, turn_condition) = strip_suffix_turn_condition(head);
+        if let Some(mut primary) =
+            parse_continuous_gets_has(&head_predicate, affected.clone(), description)
+        {
+            // Recover the head's EFFECTIVE gating condition (CR 611.3a — the
+            // companion must be the strict complement of whatever gates the head):
+            //   (a) a trailing turn condition ("during your turn") stripped above
+            //       → DuringYourTurn (Hunter's Blowgun); or
+            //   (b) an "as long as <cond>" condition carried on the parsed head def
+            //       (e.g. Clutch of Undeath "gets +3/+3 as long as it's a Zombie");
+            //       `parse_continuous_gets_has` populates `primary.condition` from
+            //       its own " as long as " split.
+            // If neither is present there is no recoverable head condition: do NOT
+            // emit an unconditional companion (that would apply both clauses at
+            // once). Bail out of PATTERN 3b so the line falls through to the
+            // single-def path, preventing any regression on unanticipated
+            // "otherwise" phrasings.
+            let head_condition = turn_condition.clone().or_else(|| primary.condition.clone());
+            if let Some(head_condition) = head_condition {
+                // The head def retains its own gating condition: for the turn case
+                // re-assert it; for the as-long-as case it is already preserved.
+                primary.condition = Some(head_condition.clone());
+                // The tail may start with "it " / "it has " — strip both to reach the
+                // bare continuous predicate, then re-add "has " so
+                // `parse_continuous_gets_has` sees a verb.
+                let tail_lower = tail_tp.lower;
+                let tail_orig = tail_tp.original;
+                let tail_predicate =
+                    if let Some(rest) = nom_tag_lower(tail_orig, tail_lower, "it has ") {
+                        format!("has {rest}")
+                    } else if let Some(rest) = nom_tag_lower(tail_orig, tail_lower, "it ") {
+                        rest.to_string()
+                    } else {
+                        tail_orig.trim().to_string()
+                    };
+                if let Some(mut companion) =
+                    parse_continuous_gets_has(&tail_predicate, affected.clone(), description)
+                {
+                    // CR 611.3a + CR 613.1f: companion is the strict complement gate
+                    // of the head's effective condition. Mutually exclusive so the
+                    // two clauses never apply simultaneously.
+                    companion.condition = Some(StaticCondition::Not {
+                        condition: Box::new(head_condition),
+                    });
+                    return vec![primary, companion];
+                }
+            }
+        }
+    }
+
+    // --- PATTERN 3a: "[has ]<kw> if <cond>, <kw> if <cond>, ..." list ---
+    // CR 613.1f + CR 611.3a: per-subtype conditional keyword grants. Each clause
+    // becomes a Continuous{AddKeyword} gated on its own condition. The combinator
+    // parse IS the detector (no contains). Multiclass Baldric.
+    {
+        let list_input = nom_tag_lower(&pred_lower, &pred_lower, "has ").unwrap_or(&pred_lower);
+        if let Ok((rest, pairs)) = parse_conditional_keyword_list(list_input) {
+            if rest.trim().trim_end_matches('.').is_empty() && pairs.len() > 1 {
+                return pairs
+                    .into_iter()
+                    .map(|(kw, cond)| {
+                        StaticDefinition::continuous()
+                            .affected(affected.clone())
+                            .modifications(vec![ContinuousModification::AddKeyword { keyword: kw }])
+                            .condition(cond)
+                            .description(description.to_string())
+                    })
+                    .collect();
+            }
+        }
+    }
 
     // --- Non-standard keyword phrasings (check before continuous grants) ---
 
     // CR 702.10: "can attack as though it had haste" → AddKeyword(Haste)
     if nom_primitives::scan_contains(&pred_lower, "can attack as though it had haste") {
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddKeyword {
-                    keyword: Keyword::Haste,
-                }])
-                .description(description.to_string()),
-        );
+        return vec![StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])
+            .description(description.to_string())];
     }
 
     // CR 702.3b: "can attack as though <pronoun> didn't have defender" →
     // CanAttackWithDefender. Accepts both pronoun forms so plural subjects
     // ("Creatures you control …they didn't…") routed through the
     // creatures-you-control prefix handler (line ~620) land here.
-    type VE<'a> = OracleError<'a>;
     if alt((
         tag::<_, _, VE>("can attack as though it didn't have defender"),
         tag::<_, _, VE>("can attack as though they didn't have defender"),
@@ -8031,11 +8292,9 @@ fn parse_enchanted_equipped_predicate(
     .parse(pred_lower.as_str())
     .is_ok()
     {
-        return Some(
-            StaticDefinition::new(StaticMode::CanAttackWithDefender)
-                .affected(affected)
-                .description(description.to_string()),
-        );
+        return vec![StaticDefinition::new(StaticMode::CanAttackWithDefender)
+            .affected(affected)
+            .description(description.to_string())];
     }
 
     // CR 509.1b: "can't be blocked" on enchanted/equipped creature
@@ -8061,12 +8320,18 @@ fn parse_enchanted_equipped_predicate(
             let mut def = StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
                 kind: classify_block_exception(rest),
             })
-            .affected(affected)
+            .affected(affected.clone())
             .description(description.to_string());
-            if let Some(condition) = suffix_condition {
-                def.condition = Some(condition);
+            if let Some(condition) = &suffix_condition {
+                def.condition = Some(condition.clone());
             }
-            return Some(def);
+            return with_keyword_companion(
+                def,
+                body_tp.original,
+                &affected,
+                description,
+                suffix_condition.as_ref(),
+            );
         }
         // CR 509.1b: "can't be blocked by <filter>" → CantBeBlockedBy
         if let Some(rest) = nom_tag_lower(body_lower, body_lower, "can't be blocked by ") {
@@ -8080,21 +8345,33 @@ fn parse_enchanted_equipped_predicate(
             });
             if !matches!(filter, TargetFilter::Any) {
                 let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
-                    .affected(affected)
+                    .affected(affected.clone())
                     .description(description.to_string());
-                if let Some(condition) = suffix_condition {
-                    def.condition = Some(condition);
+                if let Some(condition) = &suffix_condition {
+                    def.condition = Some(condition.clone());
                 }
-                return Some(def);
+                return with_keyword_companion(
+                    def,
+                    body_tp.original,
+                    &affected,
+                    description,
+                    suffix_condition.as_ref(),
+                );
             }
         }
         let mut def = StaticDefinition::new(StaticMode::CantBeBlocked)
-            .affected(affected)
+            .affected(affected.clone())
             .description(description.to_string());
-        if let Some(condition) = suffix_condition {
-            def.condition = Some(condition);
+        if let Some(condition) = &suffix_condition {
+            def.condition = Some(condition.clone());
         }
-        return Some(def);
+        return with_keyword_companion(
+            def,
+            body_tp.original,
+            &affected,
+            description,
+            suffix_condition.as_ref(),
+        );
     }
 
     // --- Conditional grants: split "as long as" before passing to continuous parser ---
@@ -8111,12 +8388,18 @@ fn parse_enchanted_equipped_predicate(
                 },
             );
             def.condition = Some(condition);
-            return Some(def);
+            return vec![def];
         }
     }
 
-    // --- Standard continuous grants (gets/has/for each/where X) ---
-    parse_continuous_gets_has(predicate, affected, description)
+    // --- STANDARD DEFAULT (GAP-1 regression guard): whole-predicate continuous
+    // parse. "gets +N/+M and has trample and lifelink" is merged into ONE
+    // Continuous def by `parse_continuous_modifications`, so it returns here and
+    // is NEVER split. ---
+    match parse_continuous_gets_has(predicate, affected, description) {
+        Some(def) => vec![def],
+        None => vec![],
+    }
 }
 
 /// Parse "gets +N/+M [and has {keyword}]" after the subject.
@@ -8453,6 +8736,26 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
                 part.as_ref(),
                 where_x_expression.as_deref(),
             );
+        }
+    }
+
+    // CR 613.1f: Pre-quote keyword recovery for compound lines like Swashbuckler's
+    // Whip: 'has reach, "{2}, {T}: ...," and "{8}, {T}: ...".' Stripping the quoted
+    // segments can mangle the boundary between the leading bare keyword and the
+    // first quote, so the keyword clause above may miss "reach". Scan the slice
+    // BEFORE the first quote independently. GUARD: only run when the post-strip
+    // path produced no AddKeyword (prevents double-adding a keyword).
+    if text.contains('"')
+        && !modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. }))
+    {
+        if let Ok((_, pre_quote)) = take_until::<_, _, OracleError<'_>>("\"").parse(text_stripped) {
+            if let Some(keyword_text) = extract_keyword_clause(pre_quote) {
+                for part in split_keyword_list(keyword_text.trim().trim_end_matches(',').trim()) {
+                    push_grant_clause_modifications(&mut modifications, part.as_ref(), None);
+                }
+            }
         }
     }
 
@@ -15017,6 +15320,265 @@ mod tests {
                 }
             )),
             "missing CantBeBlocked grant in {mods:?}"
+        );
+    }
+
+    /// Extract the subtype string from a single-subtype `IsPresent` filter, for
+    /// asserting per-subtype conditional keyword grants.
+    fn is_present_subtype(cond: &StaticCondition) -> Option<String> {
+        let StaticCondition::IsPresent { filter: Some(f) } = cond else {
+            return None;
+        };
+        let TargetFilter::Typed(tf) = f else {
+            return None;
+        };
+        tf.type_filters.iter().find_map(|tfilter| match tfilter {
+            TypeFilter::Subtype(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    fn add_keyword_mods(def: &StaticDefinition) -> Vec<Keyword> {
+        def.modifications
+            .iter()
+            .filter_map(|m| match m {
+                ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 509.1b + CR 613.1f + CR 702.18a: Whispersilk Cloak — a `CantBeBlocked`
+    /// restriction conjoined with a keyword grant must emit BOTH a
+    /// `CantBeBlocked` def and a `Continuous{AddKeyword(Shroud)}` companion, each
+    /// affecting the equipped creature.
+    #[test]
+    fn attached_compound_cant_be_blocked_and_keyword() {
+        let defs = parse_static_line_multi("Equipped creature can't be blocked and has shroud.");
+        assert_eq!(defs.len(), 2, "expected 2 defs, got {defs:?}");
+
+        let restriction = defs
+            .iter()
+            .find(|d| matches!(d.mode, StaticMode::CantBeBlocked))
+            .expect("missing CantBeBlocked def");
+        let keyword_def = defs
+            .iter()
+            .find(|d| matches!(d.mode, StaticMode::Continuous))
+            .expect("missing Continuous keyword companion");
+
+        assert_eq!(
+            keyword_def.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Shroud
+            }],
+            "companion must grant exactly Shroud"
+        );
+        let equipped =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]));
+        assert_eq!(restriction.affected.as_ref(), Some(&equipped));
+        assert_eq!(keyword_def.affected.as_ref(), Some(&equipped));
+    }
+
+    /// CR 613.1f + CR 702.17a: Swashbuckler's Whip — "has reach" plus two quoted
+    /// granted abilities must merge into ONE `Continuous` def carrying
+    /// `AddKeyword(Reach)` and two `GrantAbility` modifications.
+    #[test]
+    fn attached_compound_keyword_and_quoted_abilities() {
+        let defs = parse_static_line_multi(
+            "Equipped creature has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\"",
+        );
+        assert_eq!(defs.len(), 1, "expected 1 merged def, got {defs:?}");
+        let def = &defs[0];
+        assert!(
+            matches!(def.mode, StaticMode::Continuous),
+            "expected Continuous mode"
+        );
+        assert!(
+            add_keyword_mods(def).contains(&Keyword::Reach),
+            "missing AddKeyword(Reach) in {:?}",
+            def.modifications
+        );
+        let grant_count = def
+            .modifications
+            .iter()
+            .filter(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+            .count();
+        assert_eq!(grant_count, 2, "expected 2 GrantAbility mods in {def:?}");
+    }
+
+    /// CR 613.1f + CR 611.3a: Multiclass Baldric — four per-subtype conditional
+    /// keyword grants, each its own `Continuous{AddKeyword}` gated on
+    /// `IsPresent{<subtype>}`.
+    #[test]
+    fn attached_conditional_keyword_list() {
+        let defs = parse_static_line_multi(
+            "Equipped creature has lifelink if you control a Cleric, deathtouch if you control a Rogue, haste if you control a Warrior, and flying if you control a Wizard.",
+        );
+        assert_eq!(defs.len(), 4, "expected 4 defs, got {defs:?}");
+
+        let expected = [
+            (Keyword::Lifelink, "Cleric"),
+            (Keyword::Deathtouch, "Rogue"),
+            (Keyword::Haste, "Warrior"),
+            (Keyword::Flying, "Wizard"),
+        ];
+        for (def, (kw, subtype)) in defs.iter().zip(expected.iter()) {
+            assert!(matches!(def.mode, StaticMode::Continuous));
+            assert_eq!(add_keyword_mods(def), vec![kw.clone()]);
+            let cond = def.condition.as_ref().expect("missing condition");
+            assert_eq!(
+                is_present_subtype(cond).as_deref(),
+                Some(*subtype),
+                "condition {cond:?} should be IsPresent {subtype}"
+            );
+        }
+    }
+
+    /// CR 604.1 + CR 611.3a + CR 613.1f: Hunter's Blowgun — a turn-gated keyword
+    /// alternative emits `AddKeyword(Deathtouch)` gated `DuringYourTurn` and
+    /// `AddKeyword(Reach)` gated `Not(DuringYourTurn)`.
+    #[test]
+    fn attached_otherwise_turn_gated_keywords() {
+        let defs = parse_static_line_multi(
+            "Equipped creature has deathtouch during your turn. Otherwise, it has reach.",
+        );
+        assert_eq!(defs.len(), 2, "expected 2 defs, got {defs:?}");
+
+        let deathtouch = &defs[0];
+        assert_eq!(add_keyword_mods(deathtouch), vec![Keyword::Deathtouch]);
+        assert_eq!(
+            deathtouch.condition.as_ref(),
+            Some(&StaticCondition::DuringYourTurn)
+        );
+
+        let reach = &defs[1];
+        assert_eq!(add_keyword_mods(reach), vec![Keyword::Reach]);
+        assert_eq!(
+            reach.condition.as_ref(),
+            Some(&StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn)
+            })
+        );
+    }
+
+    /// CR 611.3a: the ". Otherwise" split must work for an "as long as <cond>"
+    /// head condition (not only the turn-gated case). Clutch of Undeath-style
+    /// "gets +3/+3 as long as it's a Zombie. Otherwise, it gets -3/-3." must emit
+    /// two MUTUALLY EXCLUSIVE defs: the head gated on its own condition and the
+    /// companion gated on `Not(<head condition>)`. A companion with `condition ==
+    /// None` would apply both clauses at once (net +0/+0) — the regression this
+    /// guards against.
+    #[test]
+    fn attached_otherwise_as_long_as_gated() {
+        let defs = parse_static_line_multi(
+            "Enchanted creature gets +3/+3 as long as it's a Zombie. Otherwise, it gets -3/-3.",
+        );
+        assert_eq!(defs.len(), 2, "expected 2 defs, got {defs:?}");
+
+        // The head carries its own "as long as" gating condition.
+        let head_condition = defs[0]
+            .condition
+            .clone()
+            .expect("head def must retain its as-long-as condition");
+
+        // The companion must be the strict complement of the head condition,
+        // never unconditional.
+        assert_eq!(
+            defs[1].condition.as_ref(),
+            Some(&StaticCondition::Not {
+                condition: Box::new(head_condition)
+            }),
+            "companion must be Not(<head condition>), not None"
+        );
+    }
+
+    /// CR 509.1b + CR 702.18a: the compound restriction+keyword split applies to
+    /// all attached-subject prefixes, with the correct `EnchantedBy`/`EquippedBy`
+    /// filter.
+    #[test]
+    fn attached_compound_split_all_subjects() {
+        let cases = [
+            (
+                "Enchanted creature can't be blocked and has shroud.",
+                TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                ),
+            ),
+            (
+                "Enchanted permanent can't be blocked and has shroud.",
+                TargetFilter::Typed(
+                    TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
+                ),
+            ),
+            (
+                "Enchanted land can't be blocked and has shroud.",
+                TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy])),
+            ),
+        ];
+        for (line, expected_filter) in cases {
+            let defs = parse_static_line_multi(line);
+            assert_eq!(defs.len(), 2, "{line}: expected 2 defs, got {defs:?}");
+            assert!(
+                defs.iter()
+                    .any(|d| matches!(d.mode, StaticMode::CantBeBlocked)),
+                "{line}: missing CantBeBlocked"
+            );
+            let kw_def = defs
+                .iter()
+                .find(|d| matches!(d.mode, StaticMode::Continuous))
+                .expect("missing keyword companion");
+            assert_eq!(
+                kw_def.modifications,
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Shroud
+                }]
+            );
+            assert_eq!(kw_def.affected.as_ref(), Some(&expected_filter));
+        }
+    }
+
+    /// GAP-1 regression: benign continuous lines must NOT split. A "gets +N/+M
+    /// and has <keywords>" line is merged into ONE Continuous def by
+    /// `parse_continuous_modifications` and must return as a single def.
+    #[test]
+    fn attached_continuous_gets_and_keywords_no_split() {
+        let defs =
+            parse_static_line_multi("Equipped creature gets +1/+1 and has trample and lifelink.");
+        assert_eq!(defs.len(), 1, "expected exactly 1 def, got {defs:?}");
+        assert_eq!(
+            defs[0].modifications,
+            vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Lifelink
+                },
+            ]
+        );
+
+        // Loxodon Warhammer's grant line.
+        let warhammer =
+            parse_static_line_multi("Equipped creature gets +3/+0 and has trample and lifelink.");
+        assert_eq!(
+            warhammer.len(),
+            1,
+            "Warhammer: expected 1 def, got {warhammer:?}"
+        );
+        assert_eq!(
+            warhammer[0].modifications,
+            vec![
+                ContinuousModification::AddPower { value: 3 },
+                ContinuousModification::AddToughness { value: 0 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Lifelink
+                },
+            ]
         );
     }
 
