@@ -14,7 +14,6 @@ import {
   type ActiveDraftPodMeta,
 } from "../services/draftPersistence";
 import { loadGame } from "../services/gamePersistence";
-import { usePreferencesStore } from "../stores/preferencesStore";
 
 const SET_LABELS: Record<string, string> = {
   otj: "Outlaws of Thunder Junction",
@@ -60,7 +59,6 @@ export function DraftLandingPage() {
   const navigate = useNavigate();
   const [activeDraft, setActiveDraft] = useState<ActiveQuickDraftMeta | null>(null);
   const [activePod, setActivePod] = useState<ActiveDraftPodMeta | null>(null);
-  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
 
   useEffect(() => {
     setActiveDraft(loadActiveQuickDraft());
@@ -91,25 +89,19 @@ export function DraftLandingPage() {
             onClick={() => navigate("/draft/quick")}
           />
 
-          {experimentalFeatures && (
-            <>
-              <DraftModeCard
-                title={t("landing.cubeDraft.title")}
-                description={t("landing.cubeDraft.description")}
-                icon={<CubeIcon />}
-                badge={t("landing.experimental")}
-                onClick={() => navigate("/draft/quick?mode=cube")}
-              />
+          <DraftModeCard
+            title={t("landing.cubeDraft.title")}
+            description={t("landing.cubeDraft.description")}
+            icon={<CubeIcon />}
+            onClick={() => navigate("/draft/quick?mode=cube")}
+          />
 
-              <DraftModeCard
-                title={t("landing.podDraft.title")}
-                description={t("landing.podDraft.description")}
-                icon={<PodIcon />}
-                badge={t("landing.experimental")}
-                onClick={() => navigate("/draft-pod")}
-              />
-            </>
-          )}
+          <DraftModeCard
+            title={t("landing.podDraft.title")}
+            description={t("landing.podDraft.description")}
+            icon={<PodIcon />}
+            onClick={() => navigate("/draft-pod")}
+          />
         </div>
       </div>
     </div>

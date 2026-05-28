@@ -112,7 +112,6 @@
   "landing": {
     "title": "Draft",
     "startNew": "Start New",
-    "experimental": "Experimental",
     "quickDraft": {
       "title": "Quick Draft",
       "description": "Draft 3 packs with 7 AI drafters, build a 40-card deck, then play a Bo1 match against one of them."
