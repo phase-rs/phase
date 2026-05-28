@@ -1,33 +1,67 @@
 use rand::Rng;
 
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::game::quantity::resolve_quantity;
+use crate::types::ability::{DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 use super::resolve_ability_chain;
 
 /// CR 706: Roll a die and execute the matching result branch.
+///
+/// CR 706.2: The natural roll is taken from a uniform 1..=sides distribution
+/// using the game's seeded RNG; the (optional) modifier is then applied to
+/// produce the *actual* result, which is what result-table branches consult
+/// and what downstream effects ("where X is the result") snapshot via
+/// `GameEvent::DieRolled.result`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (sides, results) = match &ability.effect {
-        Effect::RollDie { sides, results } => (*sides, results),
+    let (sides, results, modifier) = match &ability.effect {
+        Effect::RollDie {
+            sides,
+            results,
+            modifier,
+        } => (*sides, results, modifier.as_ref()),
         _ => return Err(EffectError::MissingParam("RollDie".to_string())),
     };
 
-    // CR 706.2: Roll the die using the game's seeded RNG.
-    let result = state.rng.random_range(1..=sides);
+    // CR 706.2: Roll the die using the game's seeded RNG. This is the
+    // "natural result" before any modifiers.
+    let natural = state.rng.random_range(1..=sides);
+
+    // CR 706.2: Apply the (optional) modifier to produce the actual result.
+    // The result is clamped to a u8-representable non-negative integer so a
+    // large subtract doesn't wrap; branches with `min`/`max` already in u8
+    // simply won't match when the actual result is 0.
+    let actual = if let Some(m) = modifier {
+        // Carry the sign as the saturating operation rather than negating the
+        // resolved delta: `-resolve_quantity(..)` would panic in debug builds
+        // (and wrap in release) when the quantity resolves to `i32::MIN`.
+        let combined =
+            match m {
+                DieRollModifier::Add { value } => (natural as i32).saturating_add(
+                    resolve_quantity(state, value, ability.controller, ability.source_id),
+                ),
+                DieRollModifier::Subtract { value } => (natural as i32).saturating_sub(
+                    resolve_quantity(state, value, ability.controller, ability.source_id),
+                ),
+            };
+        combined.clamp(0, u8::MAX as i32) as u8
+    } else {
+        natural
+    };
 
     events.push(GameEvent::DieRolled {
         player_id: ability.controller,
         sides,
-        result,
+        result: actual,
     });
 
     // CR 706.2: Find the matching result branch and resolve its effect.
-    if let Some(branch) = results.iter().find(|b| result >= b.min && result <= b.max) {
+    if let Some(branch) = results.iter().find(|b| actual >= b.min && actual <= b.max) {
         let sub = ResolvedAbility::new(
             *branch.effect.effect.clone(),
             ability.targets.clone(),
@@ -70,6 +104,7 @@ mod tests {
             Effect::RollDie {
                 sides: 20,
                 results: vec![branch],
+                modifier: None,
             },
             vec![],
             ObjectId(1),
@@ -115,6 +150,7 @@ mod tests {
             Effect::RollDie {
                 sides: 20,
                 results: vec![branch],
+                modifier: None,
             },
             vec![],
             ObjectId(1),
@@ -136,6 +172,7 @@ mod tests {
             Effect::RollDie {
                 sides: 6,
                 results: vec![],
+                modifier: None,
             },
             vec![],
             ObjectId(1),
@@ -148,5 +185,381 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::DieRolled { sides: 6, .. })));
+    }
+
+    /// CR 706.2: "Roll a d20 and add the number of cards in your hand" — the
+    /// modifier shifts the natural roll upward. We choose a generous branch
+    /// covering 1..=40 so the test is RNG-deterministic regardless of seed.
+    #[test]
+    fn roll_die_add_modifier_shifts_result_upward() {
+        let mut state = GameState::new_two_player(42);
+        // Seed two cards into the controller's hand so the modifier resolves to 2.
+        state.players[0]
+            .hand
+            .push_back(crate::types::identifiers::ObjectId(100));
+        state.players[0]
+            .hand
+            .push_back(crate::types::identifiers::ObjectId(101));
+        let branch = DieResultBranch {
+            min: 1,
+            max: 40,
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: crate::types::ability::TargetFilter::Controller,
+                },
+            )),
+        };
+        // Add a card to draw.
+        crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            crate::types::zones::Zone::Library,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![branch],
+                modifier: Some(DieRollModifier::Add {
+                    value: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
+                    },
+                }),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result),
+                _ => None,
+            })
+            .expect("DieRolled event should be present");
+        // Natural roll ∈ 1..=20, modifier = +2 (two cards in hand), so actual ∈ 3..=22.
+        assert!(
+            (3..=22).contains(&result),
+            "actual result {result} should reflect +2 modifier"
+        );
+    }
+
+    /// CR 706.2: "Roll a d20 and subtract the number of cards in your hand" —
+    /// the modifier shifts the natural roll downward. With many cards in
+    /// hand, the actual result can be 0 or below, which clamps to 0.
+    #[test]
+    fn roll_die_subtract_modifier_clamps_at_zero() {
+        let mut state = GameState::new_two_player(42);
+        // Twenty-five cards in hand → modifier resolves to 25; any d20 roll
+        // produces actual ≤ 0, which clamps to 0.
+        for i in 0..25 {
+            state.players[0]
+                .hand
+                .push_back(crate::types::identifiers::ObjectId(200 + i));
+        }
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![],
+                modifier: Some(DieRollModifier::Subtract {
+                    value: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
+                    },
+                }),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result),
+                _ => None,
+            })
+            .expect("DieRolled event should be present");
+        assert_eq!(result, 0, "subtract modifier should clamp at 0");
+    }
+
+    /// CR 706.2: With a seeded RNG, rolling the same die twice from two
+    /// identically-seeded states must produce the same natural result.
+    /// This is foundational for replays and AI-search determinism.
+    #[test]
+    fn roll_die_with_seeded_rng_is_deterministic() {
+        let mut state_a = GameState::new_two_player(7);
+        let mut state_b = GameState::new_two_player(7);
+        let ability = |state_seed: PlayerId| {
+            ResolvedAbility::new(
+                Effect::RollDie {
+                    sides: 20,
+                    results: vec![],
+                    modifier: None,
+                },
+                vec![],
+                ObjectId(1),
+                state_seed,
+            )
+        };
+        let mut ev_a = Vec::new();
+        let mut ev_b = Vec::new();
+        resolve(&mut state_a, &ability(PlayerId(0)), &mut ev_a).unwrap();
+        resolve(&mut state_b, &ability(PlayerId(0)), &mut ev_b).unwrap();
+        let r_a = ev_a
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result),
+                _ => None,
+            })
+            .unwrap();
+        let r_b = ev_b
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(r_a, r_b, "identically-seeded RNG must roll the same result");
+    }
+
+    /// CR 706.1: All sides in the supported set produce results in 1..=sides.
+    /// This sweeps a representative slice of polyhedral dice to ensure the
+    /// RNG range is correct for every die size used in Magic (d4, d6, d8,
+    /// d10, d12, d20, d100).
+    #[test]
+    fn roll_die_produces_value_in_range_for_each_die_size() {
+        for sides in [4_u8, 6, 8, 10, 12, 20, 100] {
+            let mut state = GameState::new_two_player(sides as u64);
+            let ability = ResolvedAbility::new(
+                Effect::RollDie {
+                    sides,
+                    results: vec![],
+                    modifier: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            // Roll fifty times per size; every roll must be in 1..=sides.
+            for _ in 0..50 {
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                let r = events
+                    .iter()
+                    .find_map(|e| match e {
+                        GameEvent::DieRolled { result, .. } => Some(*result),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!((1..=sides).contains(&r), "d{sides} result {r} out of range");
+            }
+        }
+    }
+
+    /// CR 706.2 + CR 608.2c: After a RollDie resolves, the actual result is
+    /// stamped into `state.last_effect_amount` so a follow-up sub-ability with
+    /// `AbilityCondition::PreviousEffectAmount` can gate on it. This is the
+    /// channel that powers "If the result is 0 or less, discard your hand"
+    /// (Deck of Many Things) and analogous result-conditional riders.
+    #[test]
+    fn roll_die_stamps_last_effect_amount_for_chain() {
+        use crate::types::ability::{AbilityCondition, Comparator};
+        let mut state = GameState::new_two_player(7);
+        // No modifier: actual result == natural ∈ 1..=20, always > 0.
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result as i32),
+                _ => None,
+            })
+            .expect("DieRolled event must be present");
+        assert_eq!(
+            state.last_effect_amount,
+            Some(result),
+            "last_effect_amount must mirror the actual rolled result so PreviousEffectAmount conditions can read it"
+        );
+        // And the AbilityCondition resolver consumes that channel correctly.
+        let cond = AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        let dummy = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "probe".into(),
+                description: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            crate::game::effects::evaluate_condition(&cond, &state, &dummy),
+            "result {result} ≥ 1, so the PreviousEffectAmount(GE, 1) condition must hold"
+        );
+    }
+
+    /// CR 706.2 (Deck of Many Things, end-to-end): "Roll a d20 and subtract
+    /// the number of cards in your hand. If the result is 0 or less, discard
+    /// your hand." With 25 cards in hand the modifier dominates any d20 →
+    /// actual clamps to 0, so the conditional Discard sub-ability MUST fire.
+    #[test]
+    fn roll_die_conditional_subability_fires_when_result_le_zero() {
+        use crate::types::ability::{
+            AbilityCondition, Comparator, DieRollModifier, PlayerScope, QuantityRef, TargetFilter,
+        };
+        let mut state = GameState::new_two_player(42);
+        // Seed 25 real hand objects so the modifier (-25) overpowers any
+        // d20 natural roll and the Discard has cards to actually move.
+        for i in 0..25 {
+            crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(2000 + i as u64),
+                PlayerId(0),
+                format!("Card {i}"),
+                crate::types::zones::Zone::Hand,
+            );
+        }
+        let hand_before = state.players[0].hand.len();
+        // Conditional Discard guarded by "result ≤ 0".
+        let discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        });
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![],
+                modifier: Some(DieRollModifier::Subtract {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                }),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(discard);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        // Roll clamped to 0; condition LE 0 holds; controller discards hand.
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "result ≤ 0 should fire the guarded Discard, emptying the hand from {hand_before}"
+        );
+    }
+
+    /// CR 706.2 (Deck of Many Things, end-to-end): "Roll a d20 and subtract
+    /// the number of cards in your hand. If the result is 0 or less, discard
+    /// your hand." With zero cards in hand the modifier is 0 → natural roll
+    /// (≥ 1) wins → result ≥ 1, so the conditional Discard MUST NOT fire.
+    #[test]
+    fn roll_die_conditional_subability_skipped_when_result_positive() {
+        use crate::types::ability::{
+            AbilityCondition, AggregateFunction, Comparator, DieRollModifier, PlayerScope,
+            QuantityRef, TargetFilter,
+        };
+        let mut state = GameState::new_two_player(7);
+        // Seed two real hand objects; with 0 cards we'd test nothing — we want
+        // visible objects that would have been discarded had the gate broken.
+        for i in 0..2 {
+            crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(3000 + i as u64),
+                PlayerId(0),
+                format!("Card {i}"),
+                crate::types::zones::Zone::Hand,
+            );
+        }
+        // Modifier reads opponent's hand size (which is 0) so the result
+        // equals the natural d20 ≥ 1.
+        let discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        });
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![],
+                modifier: Some(DieRollModifier::Subtract {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Sum,
+                            },
+                        },
+                    },
+                }),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(discard);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        // Result ≥ 1, so the LE 0 gate fails and the Discard is skipped.
+        assert_eq!(
+            state.players[0].hand.len(),
+            2,
+            "result ≥ 1 must not fire the guarded Discard"
+        );
     }
 }

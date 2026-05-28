@@ -182,6 +182,12 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         obj_mut.counters.clear();
     }
 
+    if from == Zone::Battlefield {
+        // CR 701.54e: A player's Ring-bearer designation applies only while
+        // that permanent remains on the battlefield under that player's control.
+        super::effects::ring::clear_ring_bearer_if_object(state, object_id);
+    }
+
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {

@@ -875,6 +875,11 @@ pub struct PendingCast {
     /// quantities can resolve later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 601.2i + CR 722.3c: Optional source permanent to re-mark as
+    /// prepared if this cast is cancelled and rolled back. Used by the
+    /// prepared-copy special action to restore pre-cast state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_restore_prepared_source: Option<ObjectId>,
     #[serde(default)]
     pub payment_mode: CastPaymentMode,
 }
@@ -909,6 +914,7 @@ impl PendingCast {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
         }
     }
@@ -3098,6 +3104,33 @@ impl WaitingFor {
         }
     }
 
+    /// Mutable variant of `pending_cast_ref()` for call sites that need to
+    /// annotate in-flight cast metadata (for example rollback markers).
+    pub fn pending_cast_mut(&mut self) -> Option<&mut PendingCast> {
+        match self {
+            WaitingFor::ChooseXValue { pending_cast, .. }
+            | WaitingFor::TargetSelection { pending_cast, .. }
+            | WaitingFor::ModeChoice { pending_cast, .. }
+            | WaitingFor::OptionalCostChoice { pending_cast, .. }
+            | WaitingFor::DefilerPayment { pending_cast, .. }
+            | WaitingFor::DiscardForCost { pending_cast, .. }
+            | WaitingFor::SacrificeForCost { pending_cast, .. }
+            | WaitingFor::ReturnToHandForCost { pending_cast, .. }
+            | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::RemoveCounterForCost { pending_cast, .. }
+            | WaitingFor::BlightChoice { pending_cast, .. }
+            | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
+            | WaitingFor::BeholdForCost { pending_cast, .. }
+            | WaitingFor::ExileForCost { pending_cast, .. }
+            | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
+            WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
+                CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
+                CollectEvidenceResume::Effect { .. } => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Whether this state is part of the casting flow and can be backed out of
     /// with `CancelCast` (CR 601.2).
     ///
@@ -3738,6 +3771,16 @@ pub struct GameState {
     /// trigger context, consumed when the pending trigger is put on the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_trigger_event_batch: Vec<GameEvent>,
+    /// CR 603.3c + CR 603.3d: ObjectId of the stack entry currently being
+    /// constructed (mode / target / division still being chosen by the
+    /// controller). `Some` only while a pause-path `WaitingFor` is outstanding.
+    ///
+    /// "Push first, choose second" invariant: when this is `Some(id)`, the top
+    /// of `state.stack` is the trigger entry with that id, and its
+    /// `ResolvedAbility` has unfilled slots that the active `WaitingFor` is
+    /// gathering. `stack::resolve_top` refuses to fire on this id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_trigger_entry: Option<ObjectId>,
     /// CR 113.2c + CR 603.2 + CR 603.3b: Queue of triggers that fired in the
     /// same pass but were deferred because an earlier trigger needed player
     /// input (modal choice, target selection, or division). Each instance of a
@@ -4664,6 +4707,7 @@ impl GameState {
             spells_cast_last_turn: None,
             pending_trigger: None,
             pending_trigger_event_batch: Vec::new(),
+            pending_trigger_entry: None,
             deferred_triggers: Vec::new(),
             pending_trigger_order: None,
             exile_links: Vec::new(),
@@ -4942,6 +4986,7 @@ impl PartialEq for GameState {
             && self.spells_cast_this_turn == other.spells_cast_this_turn
             && self.spells_cast_last_turn == other.spells_cast_last_turn
             && self.pending_trigger == other.pending_trigger
+            && self.pending_trigger_entry == other.pending_trigger_entry
             && self.deferred_triggers == other.deferred_triggers
             && self.pending_trigger_order == other.pending_trigger_order
             && self.exile_links == other.exile_links
@@ -5230,6 +5275,7 @@ mod tests {
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
+                cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
             })
         }
@@ -5524,6 +5570,7 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
         });
         let choose_x = WaitingFor::ChooseXValue {

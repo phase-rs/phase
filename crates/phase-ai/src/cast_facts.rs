@@ -1,6 +1,7 @@
 use engine::game::game_object::GameObject;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, BounceSelection, Effect, ReplacementDefinition, TargetFilter,
+    TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -338,13 +339,22 @@ fn is_permanent_spell(object: &GameObject) -> bool {
 
 fn effect_requires_targets(effect: &Effect) -> bool {
     match effect {
+        // CR 115.1 + Whitemane Lion ruling: A non-targeted Bounce ("return a
+        // creature you control") does NOT use the word "target" — the
+        // controller chooses at resolution time via `EffectZoneChoice`, so
+        // the spell does not need a target slot to be cast. Targeted Bounce
+        // (with "target") follows the standard target-required predicate.
+        Effect::Bounce {
+            target, selection, ..
+        } => {
+            matches!(selection, BounceSelection::Targeted) && !matches!(target, TargetFilter::None)
+        }
         Effect::Destroy { target, .. }
         | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Tap { target }
         | Effect::Untap { target }
-        | Effect::Bounce { target, .. }
         | Effect::GainControl { target, .. }
         | Effect::PhaseOut { target }
         | Effect::Fight { target, .. }

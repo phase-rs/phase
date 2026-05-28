@@ -1,6 +1,6 @@
 import { useShallow } from "zustand/react/shallow";
 
-import type { DungeonId, PlayerId } from "../adapter/types.ts";
+import type { DungeonId, ObjectId, PlayerId } from "../adapter/types.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 
 export interface PlayerDesignations {
@@ -8,6 +8,8 @@ export interface PlayerDesignations {
   hasInitiative: boolean;
   hasCityBlessing: boolean;
   ringLevel: number;
+  ringBearerId: ObjectId | null;
+  ringBearerName: string | null;
   energy: number;
   /** The active dungeon, or null when the player is not currently venturing.
    *  `dungeon_progress` may carry a stale entry with `current_dungeon: null`
@@ -27,6 +29,8 @@ const EMPTY: PlayerDesignations = {
   hasInitiative: false,
   hasCityBlessing: false,
   ringLevel: 0,
+  ringBearerId: null,
+  ringBearerName: null,
   energy: 0,
   activeDungeon: null,
   currentRoom: 0,
@@ -44,6 +48,8 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
       const hasInitiative = gs.initiative != null && gs.initiative === playerId;
       const hasCityBlessing = gs.city_blessing?.includes(playerId) ?? false;
       const ringLevel = gs.ring_level?.[playerKey(playerId)] ?? 0;
+      const ringBearerId = gs.ring_bearer?.[playerKey(playerId)] ?? null;
+      const ringBearerName = ringBearerId != null ? (gs.objects[String(ringBearerId)]?.name ?? null) : null;
       const energy = gs.players[playerId]?.energy ?? 0;
       const hasAny =
         isMonarch
@@ -57,6 +63,8 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
         hasInitiative,
         hasCityBlessing,
         ringLevel,
+        ringBearerId,
+        ringBearerName,
         energy,
         activeDungeon,
         currentRoom: dungeon?.current_room ?? 0,

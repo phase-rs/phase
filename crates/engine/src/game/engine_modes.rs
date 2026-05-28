@@ -284,6 +284,12 @@ fn handle_triggered_mode_choice(
                 state, trigger, resolved, events,
             ));
         } else {
+            // CR 601.2c + CR 603.3d: Mode chosen but target choice still
+            // outstanding. The entry is already on the stack (pushed at modal
+            // pause-time); mutate its ability with the resolved mode so the
+            // target prompt operates on the chosen mode. `pending_trigger_entry`
+            // stays set — construction continues through target selection.
+            triggers::mutate_pending_trigger_entry(state, &trigger.ability);
             let description = trigger.description.clone();
             state.pending_trigger = Some(trigger);
             let pending_trigger = state
@@ -306,12 +312,20 @@ fn handle_triggered_mode_choice(
             });
         }
     } else {
-        triggers::push_pending_trigger_to_stack(state, trigger, events);
+        // CR 603.3c: Mode chosen and no further input needed. Entry is already
+        // on the stack (pushed at modal pause-time); mutate its ability with
+        // the resolved mode and clear `pending_trigger_entry` so the resolver
+        // may fire this entry.
+        triggers::finalize_pending_trigger_entry(state, &trigger.ability);
         state.priority_passes.clear();
         state.priority_pass_count = 0;
         // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred behind this
         // modal trigger so each independent instance reaches the stack
         // (issue #416).
+        debug_assert!(
+            !triggers::is_pending_trigger_construction_active(state),
+            "deferred-trigger drain entered with construction still active",
+        );
         if let Some(waiting_for) = triggers::drain_deferred_trigger_queue(state, events) {
             return Ok(waiting_for);
         }

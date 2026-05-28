@@ -1643,6 +1643,7 @@ export interface GameState {
   monarch?: PlayerId | null;
   city_blessing?: PlayerId[];
   ring_level?: Record<string, number>;
+  ring_bearer?: Record<string, ObjectId | null>;
   commander_damage?: CommanderDamageEntry[];
   exile_links?: Array<{ exiled_id: ObjectId; source_id: ObjectId }>;
   match_config?: MatchConfig;
