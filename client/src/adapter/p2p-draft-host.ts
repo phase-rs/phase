@@ -13,7 +13,7 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { DraftAdapter } from "./draft-adapter";
-import type { DraftPlayerView, MultiplayerSeatDescriptor, PairingView, SeatPublicView } from "./draft-adapter";
+import type { DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView } from "./draft-adapter";
 import type { PodPolicy, TournamentFormat } from "./draft-adapter";
 import {
   createDraftPeerSession,
@@ -465,8 +465,13 @@ export class P2PDraftHost {
       throw new Error("Need at least two seats to start a pod draft");
     }
 
+    // TRANSIENT (removed in Commit 3 when setPoolJson field is replaced by poolInput).
+    const poolInput: PoolInput = {
+      type: "Set",
+      data: { set_pool_json: this.setPoolJson },
+    };
     await this.adapter.createMultiplayerDraft(
-      this.setPoolJson,
+      poolInput,
       seats,
       this.kind,
       seed,

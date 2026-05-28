@@ -93,6 +93,22 @@ export type MultiplayerSeatDescriptor =
   | { type: "Human"; player_id: number; display_name: string }
   | { type: "Bot"; name: string };
 
+/**
+ * Pool source for multiplayer draft creation. Mirrors the Rust `PoolInput`
+ * enum in draft-wasm. Snake_case fields match the existing `CubeDraftSettings`
+ * TS↔Rust mirror convention (no `rename_all` machinery on the Rust side).
+ */
+export type PoolInput =
+  | { type: "Set"; data: { set_pool_json: string } }
+  | {
+      type: "Cube";
+      data: {
+        cube_list_text: string;
+        cube_name: string;
+        cube_draft_settings: CubeDraftSettings;
+      };
+    };
+
 export interface SuggestedDeck {
   main_deck: string[];
   lands: Record<string, number>;
@@ -222,7 +238,7 @@ export class DraftAdapter {
   }
 
   async createMultiplayerDraft(
-    setPoolJson: string,
+    poolInput: PoolInput,
     seats: MultiplayerSeatDescriptor[],
     kind: "Premier" | "Traditional",
     seed: number,
@@ -233,7 +249,7 @@ export class DraftAdapter {
     const wasm = await ensureDraftWasm();
     const kindId = kind === "Premier" ? 1 : 2;
     return wasm.create_multiplayer_draft(
-      setPoolJson,
+      JSON.stringify(poolInput),
       JSON.stringify(seats),
       kindId,
       seed,
