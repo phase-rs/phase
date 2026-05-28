@@ -24,7 +24,8 @@ use engine::game::effects::bounce;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ControllerRef, Effect, FilterProp, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
+    BounceSelection, ControllerRef, Effect, FilterProp, ResolvedAbility, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::CardId;
@@ -97,6 +98,7 @@ fn skullwinder_chosen_opponent_picks_their_own_card() {
         Effect::Bounce {
             target,
             destination: None,
+            selection: BounceSelection::Targeted,
         },
         Vec::new(),
         skullwinder,

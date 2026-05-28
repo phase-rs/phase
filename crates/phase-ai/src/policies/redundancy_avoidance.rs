@@ -300,6 +300,7 @@ fn redundancy_delta(
         Effect::Bounce {
             target,
             destination,
+            ..
         } => match destination {
             None | Some(Zone::Hand) => {
                 bounce_self_undo_redundancy(state, source_id, target, origin)
@@ -861,7 +862,7 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, PtValue, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, BounceSelection, PtValue, QuantityExpr, TargetFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::WaitingFor;
@@ -1371,6 +1372,7 @@ mod tests {
                     Effect::Bounce {
                         target: bounce_target,
                         destination,
+                        selection: BounceSelection::Targeted,
                     },
                 )),
         );
@@ -1475,6 +1477,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
         );
 

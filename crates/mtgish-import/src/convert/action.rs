@@ -7,7 +7,7 @@
 //! lands phase by phase.
 
 use engine::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
     GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
     ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
@@ -2863,6 +2863,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ReturnAnyNumberOfPermanentsToTheirOwnersHands(filter) => Effect::Bounce {
             target: convert_permanents(filter)?,
             destination: None,
+            selection: BounceSelection::Targeted,
         },
         // CR 400.7: Return to owner's hand — mass variant.
         // "Return each <filter> to its owner's hand." Mirrors
@@ -2872,6 +2873,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::PutEachPermanentIntoItsOwnersHand(filter) => Effect::Bounce {
             target: convert_permanents(filter)?,
             destination: None,
+            selection: BounceSelection::Targeted,
         },
 
         // CR 701.32: Sacrifice an effect on a permanent (rare; usually via cost).
@@ -2925,6 +2927,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::PutPermanentIntoItsOwnersHand(p) => Effect::Bounce {
             target: convert_permanent(p)?,
             destination: None,
+            selection: BounceSelection::Targeted,
         },
 
         // CR 401.1 + CR 608.2c: "Put [target permanent] on top of its owner's
@@ -3309,6 +3312,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::PutAPermanentIntoItsOwnersHand(filter) => Effect::Bounce {
             target: convert_permanents(filter)?,
             destination: None,
+            selection: BounceSelection::Targeted,
         },
 
         // CR 701.3a + CR 701.3b: Attach. The mtgish shape is
