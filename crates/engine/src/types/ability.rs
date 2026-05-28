@@ -410,6 +410,19 @@ pub struct DieResultBranch {
     pub effect: Box<AbilityDefinition>,
 }
 
+/// CR 706.2: Modifier applied to a die roll's natural result before the
+/// effect's result table is consulted. "Roll a d20 and add the number of
+/// cards in your hand" → `Add(QuantityExpr::Ref(HandSize { player: Controller }))`.
+/// "Roll a d20 and subtract the number of cards in your hand" → `Subtract(...)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DieRollModifier {
+    /// Add the resolved quantity to the natural roll.
+    Add { value: QuantityExpr },
+    /// Subtract the resolved quantity from the natural roll.
+    Subtract { value: QuantityExpr },
+}
+
 impl std::str::FromStr for Parity {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {
@@ -6156,10 +6169,14 @@ pub enum Effect {
     WinTheGame,
     /// CR 706: Roll a die with the given number of sides.
     /// If `results` is non-empty, execute the matching branch.
+    /// CR 706.2: `modifier` adjusts the natural roll before result-branch lookup.
+    /// `None` means the natural result is used unchanged.
     RollDie {
         sides: u8,
         #[serde(default)]
         results: Vec<DieResultBranch>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifier: Option<DieRollModifier>,
     },
     /// CR 705: Flip a coin. Optionally execute different effects on win/lose.
     FlipCoin {

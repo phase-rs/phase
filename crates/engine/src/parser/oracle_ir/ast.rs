@@ -381,8 +381,12 @@ pub(crate) enum ImperativeFamilyAst {
     /// CR 104.3a: "[you/target player] win(s) the game"
     WinTheGame,
     /// CR 706: Roll a die with N sides.
+    /// CR 706.2: Optional additive/subtractive modifier applied to the natural
+    /// result before result-table lookup ("Roll a d20 and add the number of
+    /// cards in your hand").
     RollDie {
         sides: u8,
+        modifier: Option<crate::types::ability::DieRollModifier>,
     },
     /// CR 705: Flip a coin.
     FlipCoin,

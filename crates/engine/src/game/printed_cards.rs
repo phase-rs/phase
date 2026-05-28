@@ -1802,6 +1802,7 @@ mod tests {
                 max: 6,
                 effect: Box::new(conjure_ability("roll", Zone::Hand)),
             }],
+            modifier: None,
         };
         walk_effect(&roll, &mut names);
 

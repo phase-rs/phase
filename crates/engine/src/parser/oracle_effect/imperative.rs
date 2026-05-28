@@ -5238,10 +5238,10 @@ pub(super) fn parse_imperative_family_ast(
             .ok()
             .map(|(_, ast)| ast)
         }
-        // CR 706: "roll a d20"
-        "roll" | "rolls" => {
-            try_parse_roll_die_sides(lower).map(|sides| ImperativeFamilyAst::RollDie { sides })
-        }
+        // CR 706 + CR 706.2: "roll a d20" with an optional "and add/subtract X"
+        // modifier suffix attached as a typed `DieRollModifier`.
+        "roll" | "rolls" => try_parse_roll_die_with_modifier(lower)
+            .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier }),
         // CR 725.1: "become the monarch"
         "become" | "becomes" => {
             if lower == "become the monarch" || lower == "becomes the monarch" {
@@ -5763,19 +5763,30 @@ fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
     Some(ImperativeFamilyAst::FlipCoins { count: expr })
 }
 
-fn try_parse_roll_die_sides(lower: &str) -> Option<u8> {
+/// CR 706.1a: Returns `(sides, remainder)`. The remainder is the slice immediately after
+/// the consumed die phrase, with whitespace untrimmed. Callers needing to
+/// attach trailing modifiers / clauses can branch on the remainder shape.
+fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     // Strip the "roll a " / "rolls a " prefix.
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll a "), tag("rolls a ")))
         .parse(lower)
         .ok()?;
-    // Numeric form: "d20", "d6", "d4"
-    if let Ok((num_rest, _)) = tag::<_, _, OracleError<'_>>("d").parse(rest) {
-        if let Ok(sides) = num_rest.parse::<u8>() {
-            return Some(sides);
+    // CR 706.1a: Numeric form — consume "d" followed by the longest run of
+    // ASCII digits. This permits trailing text like " and add the number of
+    // cards in your hand" or terminating punctuation.
+    if let Ok((after_d, _)) = tag::<_, _, OracleError<'_>>("d").parse(rest) {
+        let digit_end = after_d
+            .bytes()
+            .position(|b| !b.is_ascii_digit())
+            .unwrap_or(after_d.len());
+        if digit_end > 0 {
+            if let Ok(sides) = after_d[..digit_end].parse::<u8>() {
+                return Some((sides, &after_d[digit_end..]));
+            }
         }
     }
-    // CR 706: Word-form: "six-sided die", "four-sided die", etc.
-    let (_, sides) = alt((
+    // CR 706.1a: Word-form — "six-sided die", "four-sided die", etc.
+    let (after_word, sides) = alt((
         value(
             4_u8,
             alt((tag::<_, _, OracleError<'_>>("four-sided"), tag("4-sided"))),
@@ -5788,24 +5799,83 @@ fn try_parse_roll_die_sides(lower: &str) -> Option<u8> {
     ))
     .parse(rest)
     .ok()?;
-    Some(sides)
+    // Consume the optional " die" suffix so it doesn't leak into the
+    // modifier-detection path. Tolerant of absence ("roll a six-sided").
+    let after_word = alt((
+        value((), tag::<_, _, OracleError<'_>>(" die")),
+        value((), tag("")),
+    ))
+    .parse(after_word)
+    .ok()
+    .map(|(rest, _)| rest)
+    .unwrap_or(after_word);
+    Some((sides, after_word))
 }
 
-/// CR 706.2: Try to parse a d20 result table line like "1—9 | Draw two cards"
-/// or "20 | Search your library for a card". Returns `(min, max, effect_text)`.
+/// CR 706 + CR 706.2: Try to parse a full `"roll a d{N}"` clause, including
+/// an optional trailing `" and (add|subtract) {quantity}"` modifier that the
+/// resolver applies to the natural roll before result-table lookup.
+///
+/// Returns `(sides, modifier)` on success. The modifier is `None` when the
+/// remainder is empty or only contains trailing punctuation; otherwise the
+/// remainder must shape as a recognized add/subtract clause.
+fn try_parse_roll_die_with_modifier(
+    lower: &str,
+) -> Option<(u8, Option<crate::types::ability::DieRollModifier>)> {
+    let (sides, rest) = try_parse_roll_die_sides_with_rest(lower)?;
+    let rest = rest.trim_end_matches(['.', ',', ';']).trim();
+    if rest.is_empty() {
+        return Some((sides, None));
+    }
+    // Modifier shapes: "and add X", "and subtract X". Anything else means the
+    // clause is wider than just a roll — let the dispatch fall through to
+    // higher-level chain parsing (e.g., "roll a d20 for each player").
+    let (after_and, _) = tag::<_, _, OracleError<'_>>("and ").parse(rest).ok()?;
+    let (modifier_text, sign) = alt((
+        value(true, tag::<_, _, OracleError<'_>>("add ")),
+        value(false, tag("subtract ")),
+    ))
+    .parse(after_and)
+    .ok()?;
+    let value = crate::parser::oracle_quantity::parse_quantity_ref(modifier_text)?;
+    let modifier = if sign {
+        crate::types::ability::DieRollModifier::Add {
+            value: crate::types::ability::QuantityExpr::Ref { qty: value },
+        }
+    } else {
+        crate::types::ability::DieRollModifier::Subtract {
+            value: crate::types::ability::QuantityExpr::Ref { qty: value },
+        }
+    };
+    Some((sides, Some(modifier)))
+}
+
+/// CR 706.2: Try to parse a d20 result table line like "1—9 | Draw two cards",
+/// "20 | Search your library for a card", or "15+ | Scry X, then draw X cards".
+/// Returns `(min, max, effect_text)`. Open-ended upper bounds ("15+") set
+/// `max = u8::MAX` so any modifier-boosted roll above the printed lower bound
+/// resolves to this branch — see CR 706.2 on modifier-shifted results
+/// (Diviner's Portent, Gale's Redirection, etc.).
 pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
     let trimmed = text.trim();
 
-    // Find the pipe separator: "N—M | effect" or "N | effect"
+    // Find the pipe separator: "N—M | effect", "N+ | effect", or "N | effect"
     let (_, (range_part, effect_text)) = nom_primitives::split_once_on(trimmed, " | ").ok()?;
     let range_part = range_part.trim();
     let effect_text = effect_text.trim();
 
-    // Parse range: "1—9" (em dash U+2014), "10—19", "20" (single value)
+    // Parse range: "1—9" (em dash U+2014), "10—19", "15+" (open-ended upper),
+    // or "20" (single value).
     let (min, max) = if let Some(dash_idx) = range_part.find('\u{2014}') {
         let min_str = &range_part[..dash_idx];
         let max_str = &range_part[dash_idx + '\u{2014}'.len_utf8()..];
         (min_str.parse::<u8>().ok()?, max_str.parse::<u8>().ok()?)
+    } else if let Some(min_str) = range_part.strip_suffix('+') {
+        // CR 706.2: "N+" — modifier-shifted rolls can exceed the printed die's
+        // face count, so the upper bound is open. allow-noncombinator: nom is
+        // overkill for a single trailing-char check on a pre-split numeric
+        // token; the surrounding range_part is already nom-split off the pipe.
+        (min_str.trim().parse::<u8>().ok()?, u8::MAX)
     } else {
         // Single value like "20"
         let val = range_part.parse::<u8>().ok()?;
@@ -6095,9 +6165,10 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::LoseKeyword(effect) => effect,
         ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame,
         ImperativeFamilyAst::WinTheGame => Effect::WinTheGame,
-        ImperativeFamilyAst::RollDie { sides } => Effect::RollDie {
+        ImperativeFamilyAst::RollDie { sides, modifier } => Effect::RollDie {
             sides,
             results: vec![],
+            modifier,
         },
         ImperativeFamilyAst::FlipCoin => Effect::FlipCoin {
             win_effect: None,
@@ -9748,5 +9819,116 @@ mod tests {
             }
             other => panic!("expected Effect::PutCounter, got {other:?}"),
         }
+    }
+
+    /// CR 706 + CR 706.2: "Roll a d20" with no modifier parses to a bare RollDie.
+    #[test]
+    fn roll_a_d20_no_modifier_parses_to_roll_die() {
+        let def = super::super::parse_effect_chain("Roll a d20.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie {
+                sides,
+                modifier,
+                results,
+            } => {
+                assert_eq!(*sides, 20);
+                assert!(modifier.is_none());
+                assert!(results.is_empty());
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.2: "Roll a d20 and add the number of cards in your hand" parses
+    /// to RollDie with an Add modifier referencing controller hand size.
+    #[test]
+    fn roll_a_d20_with_add_modifier_parses_to_roll_die_with_modifier() {
+        let def = super::super::parse_effect_chain(
+            "Roll a d20 and add the number of cards in your hand.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::RollDie {
+                sides, modifier, ..
+            } => {
+                assert_eq!(*sides, 20);
+                let m = modifier.as_ref().expect("expected Add modifier");
+                match m {
+                    crate::types::ability::DieRollModifier::Add { value } => match value {
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize { player },
+                        } => {
+                            assert!(matches!(
+                                player,
+                                crate::types::ability::PlayerScope::Controller
+                            ));
+                        }
+                        other => panic!("expected HandSize ref, got {other:?}"),
+                    },
+                    other => panic!("expected Add modifier, got {other:?}"),
+                }
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.2: "Roll a d20 and subtract the number of cards in your hand"
+    /// parses to RollDie with a Subtract modifier. Mirrors the Add case to
+    /// guarantee the sign path is wired.
+    #[test]
+    fn roll_a_d20_with_subtract_modifier_parses_to_roll_die_with_modifier() {
+        let def = super::super::parse_effect_chain(
+            "Roll a d20 and subtract the number of cards in your hand.",
+            AbilityKind::Activated,
+        );
+        match &*def.effect {
+            Effect::RollDie {
+                sides, modifier, ..
+            } => {
+                assert_eq!(*sides, 20);
+                let m = modifier.as_ref().expect("expected Subtract modifier");
+                assert!(matches!(
+                    m,
+                    crate::types::ability::DieRollModifier::Subtract { .. }
+                ));
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.2: "Roll a six-sided die" is the word-form variant — parses to
+    /// RollDie { sides: 6 } so cards printed in the older "N-sided die"
+    /// phrasing continue to work alongside the modern "dN" shorthand.
+    #[test]
+    fn roll_a_six_sided_die_parses_to_roll_die_six() {
+        let def = super::super::parse_effect_chain("Roll a six-sided die.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie {
+                sides, modifier, ..
+            } => {
+                assert_eq!(*sides, 6);
+                assert!(modifier.is_none());
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.2: open-ended upper bound "N+" parses to (min=N, max=u8::MAX) so
+    /// modifier-boosted rolls beyond the printed face count still resolve to
+    /// the intended branch.
+    #[test]
+    fn die_result_line_open_ended_upper_bound() {
+        assert_eq!(
+            super::try_parse_die_result_line("15+ | Draw two cards."),
+            Some((15, u8::MAX, "Draw two cards."))
+        );
+        assert_eq!(
+            super::try_parse_die_result_line("1\u{2014}9 | Draw a card."),
+            Some((1, 9, "Draw a card."))
+        );
+        assert_eq!(
+            super::try_parse_die_result_line("20 | Win the game."),
+            Some((20, 20, "Win the game."))
+        );
     }
 }

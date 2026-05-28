@@ -10,9 +10,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
-    DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp, GainLifePlayer,
-    GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
-    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp,
+    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, SharedQuality, SharedQualityRelation, SpeedDelta,
     SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter,
     TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
@@ -1939,10 +1939,21 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("free cast".into(), "yes".into()));
             }
         }
-        Effect::RollDie { sides, results } => {
+        Effect::RollDie {
+            sides,
+            results,
+            modifier,
+        } => {
             d.push(("sides".into(), sides.to_string()));
             if !results.is_empty() {
                 d.push(("branches".into(), results.len().to_string()));
+            }
+            if let Some(m) = modifier {
+                let label = match m {
+                    DieRollModifier::Add { .. } => "add",
+                    DieRollModifier::Subtract { .. } => "subtract",
+                };
+                d.push(("modifier".into(), label.into()));
             }
         }
         Effect::FlipCoin {

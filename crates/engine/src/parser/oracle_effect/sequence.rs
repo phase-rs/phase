@@ -605,6 +605,19 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             ))
                             .parse(remainder_trimmed)
                             .is_ok();
+                    // CR 706.2: "roll a d{N} and (add|subtract) {quantity}" —
+                    // the modifier clause is part of the same RollDie effect
+                    // (it shifts the natural result) and must NOT be peeled
+                    // off as a sibling clause. Without this suppression
+                    // "Roll a d20 and add the number of cards in your hand"
+                    // would split into ["Roll a d20", "add ..."] and the
+                    // modifier silently becomes an Unimplemented sub_ability
+                    // — bypassing the typed modifier path on every D&D-set
+                    // d20 card.
+                    let roll_die_modifier_continuation = ends_with_roll_die_phrase(&before_lower)
+                        && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
+                            .parse(remainder_trimmed)
+                            .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -615,7 +628,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || compound_subject_each
                         || inside_otherwise_body
                         || have_base_pt_continuation
-                        || continuous_modifier_conjunct;
+                        || continuous_modifier_conjunct
+                        || roll_die_modifier_continuation;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -860,6 +874,46 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
     let rest = &lower[first_word.len()..];
     let deconjugated = format!("{base}{rest}");
     starts_clause_text_lower(&deconjugated)
+}
+
+/// CR 706.2: True iff `before_lower` ends with a "roll a d{N}" phrase (with
+/// the standard set of polyhedral side counts) or the word-form variants
+/// "six-sided die", "twenty-sided die", etc. Used by the bare-and splitter to
+/// keep "roll a d20 and add/subtract X" intact so the typed modifier path
+/// fires instead of producing a stray Unimplemented sub_ability.
+fn ends_with_roll_die_phrase(before_lower: &str) -> bool {
+    let trimmed = before_lower.trim_end();
+    // Numeric form: any "roll a d<digits>" tail. allow-noncombinator:
+    // structural rsplit on a runtime ' ' separator (not a literal dispatch
+    // token) followed by a char-class digit scan — no string-method dispatch
+    // against any literal phrase.
+    if let Some(last_word) = trimmed.rsplit(' ').next() {
+        if let Some(digits) = last_word.strip_prefix('d') {
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    // Word-form: "...-sided die". The tail must match one of the polyhedral
+    // phrases. Take the last three space-separated tokens (`<N>-sided die`)
+    // and parse them with nom alternatives.
+    let tail = trimmed.rsplitn(3, ' ').collect::<Vec<_>>();
+    if tail.len() != 3 {
+        return false;
+    }
+    // tail is reversed; reconstruct "<N>-sided die" by re-joining.
+    let candidate = format!("{} {}", tail[1], tail[0]);
+    let parsed: Result<((), ()), nom::Err<OracleError<'_>>> = alt((
+        value((), tag::<_, _, OracleError<'_>>("four-sided die")),
+        value((), tag("six-sided die")),
+        value((), tag("eight-sided die")),
+        value((), tag("ten-sided die")),
+        value((), tag("twelve-sided die")),
+        value((), tag("twenty-sided die")),
+    ))
+    .parse(candidate.as_str())
+    .map(|(_, v)| ((), v));
+    parsed.is_ok()
 }
 
 fn starts_you_control_subject_predicate(s: &str) -> bool {
