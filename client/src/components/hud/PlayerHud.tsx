@@ -92,7 +92,13 @@ export function PlayerHud() {
               <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
             ) : null}
             {isPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
-            {designations.ringLevel > 0 ? <CounterBadge kind="ring" value={designations.ringLevel} /> : null}
+            {designations.ringLevel > 0 ? (
+              <CounterBadge
+                kind="ring"
+                value={designations.ringLevel}
+                ringBearerName={designations.ringBearerName}
+              />
+            ) : null}
             {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
             {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
             {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}

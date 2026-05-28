@@ -4519,6 +4519,41 @@ mod tests {
     }
 
     #[test]
+    fn toxic_deluge_full_oracle_parses_x_life_cost_and_x_pump() {
+        let r = parse(
+            "As an additional cost to cast this spell, pay X life.\nAll creatures get -X/-X until end of turn.",
+            "Toxic Deluge",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+
+        assert_eq!(
+            r.additional_cost,
+            Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }))
+        );
+        assert_eq!(r.abilities.len(), 1);
+        match r.abilities[0].effect.as_ref() {
+            Effect::PumpAll {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(power, &PtValue::Variable("-X".to_string()));
+                assert_eq!(toughness, &PtValue::Variable("-X".to_string()));
+                assert_eq!(target, &TargetFilter::Typed(TypedFilter::creature()));
+            }
+            other => panic!("expected all-creature -X/-X pump, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn llanowar_elves_mana_ability() {
         let r = parse(
             "{T}: Add {G}.",

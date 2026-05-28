@@ -2256,6 +2256,10 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    if let Some(condition) = parse_die_result_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     // CR 702.62a: "it doesn't have [keyword]" / "it does not have [keyword]" — pronoun
     // subject lacks-keyword check (e.g., "If it doesn't have suspend, it gains suspend").
     // Mirrors the "~ doesn't have" / "this creature doesn't have" handler in oracle_condition.rs.
@@ -2871,6 +2875,26 @@ fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityC
     Some(AbilityCondition::PreviousEffectAmount {
         comparator: Comparator::GT,
         rhs: QuantityExpr::Fixed { value: 0 },
+    })
+}
+
+/// CR 706.2 + CR 608.2c: "If the result is N or less / N or more / N or
+/// greater / less than N / greater than N / equal to N / N" — a comparator on
+/// the *actual* result of the most recent die roll in this resolution. Maps
+/// to `AbilityCondition::PreviousEffectAmount`, which reads
+/// `state.last_effect_amount` (populated for `Effect::RollDie` by
+/// `previous_effect_amount_from_events`). Covers Deck of Many Things' "If the
+/// result is 0 or less, discard your hand" and the analogous "is N or
+/// less/more" phrasings used by every dice-table rider in the corpus.
+fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
+    let rest = tag::<_, _, OracleError<'_>>("the result is ")
+        .parse(lower)
+        .ok()
+        .map(|(rest, _)| rest)?;
+    let (comparator, value) = parse_comparison_suffix(rest)?;
+    Some(AbilityCondition::PreviousEffectAmount {
+        comparator,
+        rhs: QuantityExpr::Fixed { value },
     })
 }
 

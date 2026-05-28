@@ -130,6 +130,7 @@ fn self_recursion_trigger_zone(
         crate::types::ability::Effect::Bounce {
             target: TargetFilter::SelfRef,
             destination,
+            ..
         } if destination.is_none_or(|zone| zone == Zone::Hand) => {
             parse_self_return_origin_zone(source_lower)
         }
@@ -2436,6 +2437,38 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::WasCast),
             }),
+        );
+    }
+
+    // CR 603.4 + CR 603.6a: "if it wasn't put onto the battlefield with this
+    // ability" — anti-recursion intervening-if (Kodama of the East Tree). The
+    // entering permanent must NOT have been placed by this very ability, so a
+    // permanent Kodama itself puts onto the battlefield does not re-trigger it.
+    // Ordered before the positive arm; the two phrases are disjoint ("wasn't put"
+    // does not contain "was put"), mirroring the WasCast/Not(WasCast) disjointness.
+    if let Some((prefix, _)) = scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("if it wasn't put onto the battlefield with this ability")
+            .parse(i)
+    }) {
+        let pat = "if it wasn't put onto the battlefield with this ability";
+        return (
+            strip_condition_clause(text, prefix.len(), pat.len()),
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::PlacedByAbilitySource),
+            }),
+        );
+    }
+
+    // CR 603.4 + CR 603.6a: positive "if it was put onto the battlefield with
+    // this ability" — the entering permanent was placed by this very ability.
+    if let Some((prefix, _)) = scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("if it was put onto the battlefield with this ability")
+            .parse(i)
+    }) {
+        let pat = "if it was put onto the battlefield with this ability";
+        return (
+            strip_condition_clause(text, prefix.len(), pat.len()),
+            Some(TriggerCondition::PlacedByAbilitySource),
         );
     }
 
@@ -9854,11 +9887,11 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, CastingPermission,
-        Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
-        DelayedTriggerCondition, Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope,
-        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, BounceSelection,
+        CastingPermission, Comparator, ContinuousModification, ControllerRef, CountScope,
+        DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp,
+        ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -11597,6 +11630,47 @@ mod tests {
         assert!(
             cond.is_some(),
             "leading intervening-if must still be hoisted, got {cond:?}",
+        );
+    }
+
+    /// CR 603.4 + CR 603.6a: "if it wasn't put onto the battlefield with this
+    /// ability" — Kodama of the East Tree anti-recursion guard. Must hoist to
+    /// `Not(PlacedByAbilitySource)` and excise the clause so no `Condition_If`
+    /// SwallowedClause warning is emitted.
+    #[test]
+    fn extract_if_condition_wasnt_put_with_this_ability() {
+        let (cleaned, cond) = extract_if_condition(
+            "if it wasn't put onto the battlefield with this ability, you may put a permanent card with equal or lesser mana value from your hand onto the battlefield.",
+        );
+        assert!(
+            matches!(
+                cond,
+                Some(TriggerCondition::Not { ref condition }) if matches!(**condition, TriggerCondition::PlacedByAbilitySource)
+            ),
+            "expected Not(PlacedByAbilitySource), got {cond:?}",
+        );
+        assert!(
+            // allow-noncombinator: test assertion verifying clause excision, not parsing dispatch
+            !cleaned.contains("put onto the battlefield with this ability"),
+            "intervening-if clause must be excised, got: {cleaned}",
+        );
+    }
+
+    /// CR 603.4 + CR 603.6a: positive "if it was put onto the battlefield with
+    /// this ability" → `PlacedByAbilitySource` (no negation wrapper).
+    #[test]
+    fn extract_if_condition_was_put_with_this_ability() {
+        let (cleaned, cond) = extract_if_condition(
+            "if it was put onto the battlefield with this ability, draw a card.",
+        );
+        assert!(
+            matches!(cond, Some(TriggerCondition::PlacedByAbilitySource)),
+            "expected PlacedByAbilitySource, got {cond:?}",
+        );
+        assert!(
+            // allow-noncombinator: test assertion verifying clause excision, not parsing dispatch
+            !cleaned.contains("put onto the battlefield with this ability"),
+            "intervening-if clause must be excised, got: {cleaned}",
         );
     }
 
@@ -16271,6 +16345,7 @@ mod tests {
             Some(Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             })
         ));
     }
@@ -16290,6 +16365,7 @@ mod tests {
             Some(Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             })
         ));
     }
@@ -16313,6 +16389,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             }
         ));
         assert!(matches!(

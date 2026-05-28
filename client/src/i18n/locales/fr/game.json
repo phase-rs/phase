@@ -74,7 +74,9 @@
     "underAttack_other": "Attaqué par {{count}} créatures",
     "target": "Cible",
     "copy": "Copie",
-    "copyTooltip": "Jeton-copie d'une vraie carte"
+    "copyTooltip": "Jeton-copie d'une vraie carte",
+    "ringBearer": "Anneau",
+    "ringBearerTooltip": "Porteur de l'Anneau"
   },
   "player": {
     "opponent": "Adv {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} marqueur énergie",
     "energyAriaLabel_other": "{{count}} marqueurs énergie",
     "energyTooltip": "Énergie : {{count}}",
-    "ringAriaLabel": "L'Anneau vous tente (niveau {{level}})",
+    "ringAriaLabel": "L'Anneau vous tente (niveau {{level}}), porteur de l'Anneau : {{bearer}}",
     "ringTooltip": "L'Anneau vous tente — niveau {{level}}",
+    "ringBearerTooltip": "Porteur de l'Anneau : {{name}}",
+    "noRingBearer": "aucun",
+    "noRingBearerTooltip": "Aucun porteur de l'Anneau",
+    "ringLevel1": "1. Le porteur de l'Anneau est légendaire et ne peut pas être bloqué par des créatures de force supérieure.",
+    "ringLevel2": "2. Quand il attaque, piochez une carte, puis défaussez-vous d'une carte.",
+    "ringLevel3": "3. Quand il devient bloqué par une créature, le contrôleur de cette créature la sacrifie à la fin du combat.",
+    "ringLevel4": "4. Quand il inflige des blessures de combat à un joueur, chaque adversaire perd 3 points de vie.",
     "radAriaLabel_one": "{{count}} marqueur rad",
     "radAriaLabel_other": "{{count}} marqueurs rad",
     "radTooltip": "Marqueurs rad : {{count}}",

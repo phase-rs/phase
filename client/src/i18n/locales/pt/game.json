@@ -74,7 +74,9 @@
     "underAttack_other": "Atacado por {{count}} criaturas",
     "target": "Alvo",
     "copy": "Cópia",
-    "copyTooltip": "Cópia em ficha de uma carta real"
+    "copyTooltip": "Cópia em ficha de uma carta real",
+    "ringBearer": "Anel",
+    "ringBearerTooltip": "Portador do Anel"
   },
   "player": {
     "opponent": "Op {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} marcador de energia",
     "energyAriaLabel_other": "{{count}} marcadores de energia",
     "energyTooltip": "Energia: {{count}}",
-    "ringAriaLabel": "O Anel o tenta (nível {{level}})",
+    "ringAriaLabel": "O Anel o tenta (nível {{level}}), portador do Anel: {{bearer}}",
     "ringTooltip": "O Anel o tenta — nível {{level}}",
+    "ringBearerTooltip": "Portador do Anel: {{name}}",
+    "noRingBearer": "nenhum",
+    "noRingBearerTooltip": "Nenhum portador do Anel",
+    "ringLevel1": "1. O portador do Anel é lendário e não pode ser bloqueado por criaturas com poder maior.",
+    "ringLevel2": "2. Quando ele ataca, compre uma carta e depois descarte uma carta.",
+    "ringLevel3": "3. Quando ele for bloqueado por uma criatura, o controlador daquela criatura a sacrifica no final do combate.",
+    "ringLevel4": "4. Quando ele causa dano de combate a um jogador, cada oponente perde 3 pontos de vida.",
     "radAriaLabel_one": "{{count}} marcador de radiação",
     "radAriaLabel_other": "{{count}} marcadores de radiação",
     "radTooltip": "Marcadores de radiação: {{count}}",

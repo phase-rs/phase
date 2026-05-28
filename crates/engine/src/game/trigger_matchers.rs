@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::types::ability::{
     AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DestinationConstraint, EffectKind,
@@ -179,6 +180,23 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
 // ---------------------------------------------------------------------------
 
 /// Build a registry mapping every TriggerMode to its matcher function.
+/// Process-wide cached trigger-matcher registry.
+///
+/// The registry is a pure constant (`TriggerMode` → fn-pointer) with no
+/// per-call state, so it is built exactly once. `unimplemented_mechanics`
+/// consults it for every battlefield object on every `apply()`; rebuilding
+/// the map per call (619 objects × every action) was the dominant cost in
+/// display derivation. Callers on hot paths must use [`trigger_registry`];
+/// `build_trigger_registry` remains for the `LazyLock` initializer and tests
+/// that need an owned copy.
+static TRIGGER_REGISTRY: LazyLock<HashMap<TriggerMode, TriggerMatcher>> =
+    LazyLock::new(build_trigger_registry);
+
+/// Cached accessor for the trigger-matcher registry. Built once on first use.
+pub fn trigger_registry() -> &'static HashMap<TriggerMode, TriggerMatcher> {
+    &TRIGGER_REGISTRY
+}
+
 pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     let mut r: HashMap<TriggerMode, TriggerMatcher> = HashMap::new();
 
