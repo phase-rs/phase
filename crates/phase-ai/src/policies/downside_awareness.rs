@@ -100,7 +100,7 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, TargetFilter};
+    use engine::types::ability::{AbilityDefinition, AbilityKind, BounceSelection, TargetFilter};
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::player::PlayerId;
@@ -197,7 +197,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::Card,
@@ -215,7 +215,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::Card,
@@ -229,7 +229,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::TappedFish,
@@ -250,7 +250,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             None,
         );
@@ -267,7 +267,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::TappedFish,
@@ -283,7 +283,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::TappedFish,

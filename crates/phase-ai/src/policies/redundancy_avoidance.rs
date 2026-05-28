@@ -862,7 +862,7 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, PtValue, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, BounceSelection, PtValue, QuantityExpr, TargetFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::WaitingFor;
@@ -1372,7 +1372,7 @@ mod tests {
                     Effect::Bounce {
                         target: bounce_target,
                         destination,
-                        non_targeting: false,
+                        selection: BounceSelection::Targeted,
                     },
                 )),
         );
@@ -1477,7 +1477,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
         );
 

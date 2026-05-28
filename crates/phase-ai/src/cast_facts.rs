@@ -1,6 +1,7 @@
 use engine::game::game_object::GameObject;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, BounceSelection, Effect, ReplacementDefinition, TargetFilter,
+    TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -344,10 +345,10 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         // the spell does not need a target slot to be cast. Targeted Bounce
         // (with "target") follows the standard target-required predicate.
         Effect::Bounce {
-            target,
-            non_targeting,
-            ..
-        } => !*non_targeting && !matches!(target, TargetFilter::None),
+            target, selection, ..
+        } => {
+            matches!(selection, BounceSelection::Targeted) && !matches!(target, TargetFilter::None)
+        }
         Effect::Destroy { target, .. }
         | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }

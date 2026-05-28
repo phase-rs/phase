@@ -32,8 +32,8 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
-    parse_event_context_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
-    parse_type_phrase,
+    parse_event_context_ref, parse_target, parse_target_with_ctx, parse_target_with_syntax,
+    parse_that_clause_suffix, parse_type_phrase, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
@@ -43,14 +43,14 @@ use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, CardPlayMode,
-    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
-    CombatDamageScope, Comparator, ConjureCard, ContinuousModification, ControllerRef,
-    DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget, Duration, Effect,
-    FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission,
-    MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope,
-    PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef,
-    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
+    BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
+    ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
+    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
+    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction,
+    ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr,
+    QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
     StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TargetChoiceTiming,
     TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
     TypedFilter, UnlessPayModifier, UntilCondition,
@@ -6532,22 +6532,26 @@ fn try_parse_verb_and_target<'a>(
         } else {
             (false, target_text)
         };
-        // CR 115.1 + Whitemane Lion ruling: Reset the saw_target_keyword flag
-        // before parsing the target phrase so the post-parse value reflects
-        // only this call (not residue from an earlier clause's parse).
-        ctx.saw_target_keyword = false;
-        let (target, mut rem) = parse_target_with_ctx(target_text, ctx);
+        // CR 115.1 + Whitemane Lion ruling: Use `parse_target_with_syntax` so
+        // the "target"-keyword vs descriptor discriminator flows back from
+        // this parse alone, with no cross-clause residue to clear.
+        let (target, mut rem, target_syntax) = parse_target_with_syntax(target_text, ctx);
         if rem.is_empty() {
             rem = dest_remainder;
         }
         let origin = infer_origin_zone(rest_lower);
         let target = add_inferred_origin_constraints_to_target(target, origin, rest_lower);
-        // CR 115.1: A bounce is "non-targeted" iff the Oracle text omitted the
-        // word "target" AND the filter has a controller scope to enumerate
+        // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
+        // the word "target" AND the filter has a controller scope to enumerate
         // against. Computed here so both Hand-destined and default-None
         // branches below can stamp it onto the AST.
-        let non_targeting =
-            !ctx.saw_target_keyword && imperative::filter_has_controller_scope(&target);
+        let selection = if matches!(target_syntax, TargetSyntax::Descriptor)
+            && imperative::filter_has_controller_scope(&target)
+        {
+            BounceSelection::AtResolution
+        } else {
+            BounceSelection::Targeted
+        };
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
                 if is_mass && d.enter_with_counters.is_empty() {
@@ -6586,13 +6590,7 @@ fn try_parse_verb_and_target<'a>(
                         rem,
                     ))
                 } else {
-                    Some((
-                        TargetedImperativeAst::Return {
-                            target,
-                            non_targeting,
-                        },
-                        rem,
-                    ))
+                    Some((TargetedImperativeAst::Return { target, selection }, rem))
                 }
             }
             Some(d) => {
@@ -6617,13 +6615,7 @@ fn try_parse_verb_and_target<'a>(
                     ))
                 }
             }
-            None => Some((
-                TargetedImperativeAst::Return {
-                    target,
-                    non_targeting,
-                },
-                rem,
-            )),
+            None => Some((TargetedImperativeAst::Return { target, selection }, rem)),
         };
     }
 
@@ -18191,13 +18183,13 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityCondition, AggregateFunction, CardTypeSetSource, CastVariantPaid, ChoiceType,
-        CombatRelation, CombatRelationSubject, Comparator, ContinuousModification, ControllerRef,
-        CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp, GainLifePlayer,
-        LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty,
-        ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValueScope, QuantityExpr,
-        QuantityRef, SearchSelectionConstraint, TargetChoiceTiming, TypeFilter, TypedFilter,
-        ZoneRef,
+        AbilityCondition, AggregateFunction, BounceSelection, CardTypeSetSource, CastVariantPaid,
+        ChoiceType, CombatRelation, CombatRelationSubject, Comparator, ContinuousModification,
+        ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp,
+        GainLifePlayer, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
+        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, SearchSelectionConstraint, TargetChoiceTiming, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -21898,20 +21890,18 @@ mod tests {
     /// control to its owner's hand" does NOT contain the word "target" — per
     /// the Whitemane Lion ruling, the controller chooses at resolution time
     /// and the effect bypasses the targeting pipeline. The parser must produce
-    /// `Effect::Bounce { non_targeting: true, .. }` so the resolver and
+    /// `Effect::Bounce { selection: AtResolution, .. }` so the resolver and
     /// targeting pipeline pick the non-targeted branch.
     #[test]
     fn effect_bounce_non_targeting_when_target_keyword_absent() {
         let e = parse_effect("Return a creature you control to its owner's hand");
         match e {
             Effect::Bounce {
-                non_targeting,
-                target,
-                ..
+                selection, target, ..
             } => {
                 assert!(
-                    non_targeting,
-                    "no 'target' keyword + controller-scoped filter must produce non_targeting=true; got target={target:?}"
+                    matches!(selection, BounceSelection::AtResolution),
+                    "no 'target' keyword + controller-scoped filter must produce AtResolution; got target={target:?}"
                 );
             }
             other => panic!("expected Effect::Bounce, got {other:?}"),
@@ -21920,20 +21910,18 @@ mod tests {
 
     /// CR 115.1 (issue #563 boundary): "Return target creature you control to
     /// its owner's hand" DOES contain the word "target" — the spell follows
-    /// standard target selection and must produce `non_targeting: false`. Pins
+    /// standard target selection and must produce `selection: Targeted`. Pins
     /// the keyword-presence axis against the non-targeting carve-out.
     #[test]
     fn effect_bounce_targeting_when_target_keyword_present() {
         let e = parse_effect("Return target creature you control to its owner's hand");
         match e {
             Effect::Bounce {
-                non_targeting,
-                target,
-                ..
+                selection, target, ..
             } => {
                 assert!(
-                    !non_targeting,
-                    "explicit 'target' keyword must produce non_targeting=false; got target={target:?}"
+                    matches!(selection, BounceSelection::Targeted),
+                    "explicit 'target' keyword must produce Targeted; got target={target:?}"
                 );
             }
             other => panic!("expected Effect::Bounce, got {other:?}"),

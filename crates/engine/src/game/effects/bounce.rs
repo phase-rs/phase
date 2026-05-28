@@ -1,7 +1,7 @@
 use crate::game::zones;
 use crate::types::ability::{
-    ControllerRef, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter,
-    TargetRef, TypedFilter,
+    BounceSelection, ControllerRef, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastingVariant, GameState, StackEntryKind, WaitingFor};
@@ -112,7 +112,7 @@ pub fn resolve(
         Effect::Bounce {
             target,
             destination,
-            non_targeting,
+            selection,
         } => (
             target,
             // CR 608.2c: Default to owner's hand — mirrors `BounceAll`'s
@@ -122,7 +122,7 @@ pub fn resolve(
             // parser branches that route through `Bounce` with non-`Hand`
             // destinations don't need a separate resolver.
             destination.unwrap_or(Zone::Hand),
-            *non_targeting,
+            matches!(selection, BounceSelection::AtResolution),
         ),
         _ => (&TargetFilter::None, Zone::Hand, false),
     };
@@ -142,7 +142,7 @@ pub fn resolve(
     // CR 115.1 + Whitemane Lion ruling (issue #563): Non-targeted
     // controller-scoped *battlefield* bounce. Oracle text like "return a
     // creature you control to its owner's hand" parses to a
-    // `Bounce { non_targeting: true, target: Typed{Creature, controller:You}, .. }`.
+    // `Bounce { selection: AtResolution, target: Typed{Creature, controller:You}, .. }`.
     // The targeting pipeline does NOT create target slots for non-targeted
     // effects (`extract_target_filter_from_effect` returns `None`), so
     // `targets` is empty here. Enumerate the eligible permanents on the
@@ -476,7 +476,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -516,7 +516,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::StackSpell,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(spell_id)],
             ObjectId(100),
@@ -566,7 +566,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::StackSpell,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(spell_id)],
             ObjectId(100),
@@ -635,7 +635,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::StackAbility { controller: None },
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(stack_id)],
             ObjectId(100),
@@ -666,7 +666,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::None,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![],
             obj_id,
@@ -695,7 +695,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -735,7 +735,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: Some(Zone::Library),
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -772,7 +772,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -805,7 +805,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::ParentTarget,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![],
             obj_id,
@@ -834,7 +834,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
             vec![],
             obj_id,
@@ -878,7 +878,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::ParentTarget,
                 destination: None,
-                non_targeting: false,
+                selection: BounceSelection::Targeted,
             },
         )));
         state
@@ -1176,7 +1176,7 @@ mod tests {
                     TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
                 ),
                 destination: None,
-                non_targeting: true,
+                selection: BounceSelection::AtResolution,
             },
             vec![],
             ObjectId(100),
@@ -1237,7 +1237,7 @@ mod tests {
                     TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
                 ),
                 destination: None,
-                non_targeting: true,
+                selection: BounceSelection::AtResolution,
             },
             vec![],
             ObjectId(100),
@@ -1289,7 +1289,7 @@ mod tests {
                     TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
                 ),
                 destination: None,
-                non_targeting: true,
+                selection: BounceSelection::AtResolution,
             },
             vec![],
             ObjectId(100),

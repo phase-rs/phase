@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, CommanderOwnership,
-    ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect, ModalChoice,
-    PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TributeOutcome,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute,
+    CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
+    ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -3665,7 +3665,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     if matches!(
         effect,
         Effect::Bounce {
-            non_targeting: true,
+            selection: BounceSelection::AtResolution,
             ..
         }
     ) {
@@ -6663,7 +6663,7 @@ pub mod tests {
                             .controller(ControllerRef::You),
                     ),
                     destination: None,
-                    non_targeting: false,
+                    selection: BounceSelection::Targeted,
                 },
             );
             execute.optional_targeting = true;
@@ -8783,26 +8783,26 @@ pub mod tests {
         let effect = Effect::Bounce {
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             destination: None,
-            non_targeting: true,
+            selection: BounceSelection::AtResolution,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
-            "non_targeting Bounce should not extract a target filter (resolution-time selection)"
+            "AtResolution Bounce should not extract a target filter (resolution-time selection)"
         );
     }
 
-    /// CR 115.1 boundary: A targeted Bounce (`non_targeting: false`) still uses
+    /// CR 115.1 boundary: A targeted Bounce (`selection: Targeted`) still uses
     /// the targeting pipeline. Mirrors `extract_target_keeps_change_zone_from_battlefield`.
     #[test]
     fn extract_target_keeps_targeting_bounce() {
         let effect = Effect::Bounce {
             target: TargetFilter::Typed(TypedFilter::creature()),
             destination: None,
-            non_targeting: false,
+            selection: BounceSelection::Targeted,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
-            "targeted Bounce (non_targeting=false) must extract a target filter"
+            "targeted Bounce (Targeted) must extract a target filter"
         );
     }
 

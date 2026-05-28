@@ -143,8 +143,8 @@ fn transform_effect_in_place(effect: &mut Effect) {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, PtValue, QuantityExpr, TargetFilter, TypeFilter,
-        TypedFilter,
+        AbilityDefinition, AbilityKind, BounceSelection, Effect, PtValue, QuantityExpr,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::Zone;
 
@@ -215,7 +215,7 @@ mod tests {
         let mut def = leaf(Effect::Bounce {
             target: creature_filter(),
             destination: None,
-            non_targeting: false,
+            selection: BounceSelection::Targeted,
         });
         transform_ability_def(&mut def);
         match *def.effect {
@@ -235,7 +235,7 @@ mod tests {
         let mut def_lib = leaf(Effect::Bounce {
             target: creature_filter(),
             destination: Some(Zone::Library),
-            non_targeting: false,
+            selection: BounceSelection::Targeted,
         });
         transform_ability_def(&mut def_lib);
         match *def_lib.effect {
