@@ -155,6 +155,10 @@ describe("useConcedeHandler", () => {
 
     await act(async () => {
       result.current();
+      // Hook chains: sendPromise -> .catch -> .then(report) -> .then(clear+nav).
+      // Four microtask flushes cover the whole chain.
+      await Promise.resolve();
+      await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -164,5 +168,97 @@ describe("useConcedeHandler", () => {
     expect(clearGameMock).toHaveBeenCalledWith("g1");
     expect(navigateMock).toHaveBeenCalledWith("/draft-pod");
     expect(dispatchMock).not.toHaveBeenCalled();
+
+    // Regression coverage for PR #1252 review: sendConcede must complete
+    // BEFORE reportActiveMatchConcession + clearGame + navigate. Without
+    // the chained await on the host-side async sendConcede (which fans
+    // out player_conceded to every guest's PeerJS data channel), tearing
+    // down the adapter mid-fan-out drops peer notifications.
+    const sendOrder = sendConcedeMock.mock.invocationCallOrder[0];
+    const reportOrder = reportActiveMatchConcessionMock.mock.invocationCallOrder[0];
+    const clearOrder = clearGameMock.mock.invocationCallOrder[0];
+    expect(sendOrder).toBeLessThan(reportOrder);
+    expect(reportOrder).toBeLessThan(clearOrder);
+  });
+
+  it("isDraftPodMatch branch awaits async sendConcede before reporting concession (race fix)", async () => {
+    // Discriminating regression: the host-side sendConcede returns a
+    // Promise (it awaits engine concedePlayer then broadcasts to guests).
+    // A fire-and-forget call would invoke reportActiveMatchConcession
+    // synchronously after sendConcede returns its pending promise — this
+    // test gates on the unresolved promise to catch that regression.
+    let releaseSend: () => void = () => {};
+    const sendPending = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    sendConcedeMock.mockReturnValueOnce(sendPending);
+
+    const { result } = renderHook(
+      () =>
+        useConcedeHandler({
+          gameId: "g1",
+          isOnlineMode: false,
+          isDraft: false,
+          isDraftPodMatch: true,
+        }),
+      { wrapper },
+    );
+
+    await act(async () => {
+      result.current();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // sendConcede has been called but its promise is still pending —
+    // downstream chain must not have run.
+    expect(sendConcedeMock).toHaveBeenCalledTimes(1);
+    expect(reportActiveMatchConcessionMock).not.toHaveBeenCalled();
+    expect(clearGameMock).not.toHaveBeenCalled();
+    expect(navigateMock).not.toHaveBeenCalled();
+
+    // Releasing the send promise lets the chain proceed.
+    await act(async () => {
+      releaseSend();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(reportActiveMatchConcessionMock).toHaveBeenCalledTimes(1);
+    expect(clearGameMock).toHaveBeenCalledWith("g1");
+    expect(navigateMock).toHaveBeenCalledWith("/draft-pod");
+  });
+
+  it("isDraftPodMatch branch still navigates if reportActiveMatchConcession rejects", async () => {
+    // User intent on Concede is to leave — a store-mutation failure
+    // must not strand them on the conceded screen.
+    reportActiveMatchConcessionMock.mockRejectedValueOnce(new Error("store failed"));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { result } = renderHook(
+      () =>
+        useConcedeHandler({
+          gameId: "g1",
+          isOnlineMode: false,
+          isDraft: false,
+          isDraftPodMatch: true,
+        }),
+      { wrapper },
+    );
+
+    await act(async () => {
+      result.current();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(clearGameMock).toHaveBeenCalledWith("g1");
+    expect(navigateMock).toHaveBeenCalledWith("/draft-pod");
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
   });
 });

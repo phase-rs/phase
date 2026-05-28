@@ -73,16 +73,29 @@ export function useConcedeHandler({
       const adapter = useGameStore.getState().adapter as {
         sendConcede?: () => void | Promise<void>;
       } | null;
-      void adapter?.sendConcede?.();
-      void useMultiplayerDraftStore
-        .getState()
-        .reportActiveMatchConcession()
+      // Host's sendConcede (p2p-adapter.ts:1062) is async — it awaits
+      // concedePlayer (engine dispatch) then fans out player_conceded to
+      // every guest's PeerJS data channel. Guest/WS versions are sync
+      // void-returners; Promise.resolve() normalizes both shapes so we
+      // serialize the chain and never tear down the adapter mid-fan-out.
+      const sendPromise = adapter?.sendConcede
+        ? Promise.resolve(adapter.sendConcede())
+        : Promise.resolve();
+      void sendPromise
+        .catch((err) => {
+          console.error("[useConcedeHandler] sendConcede failed:", err);
+        })
+        .then(() => useMultiplayerDraftStore.getState().reportActiveMatchConcession())
         .then(() => {
           clearGame(gameId);
           navigate("/draft-pod");
         })
         .catch((err) => {
+          // User intent is to leave — strand them on the conceded screen
+          // is a worse outcome than logging the store-mutation failure.
           console.error("[useConcedeHandler] failed to report draft pod concession:", err);
+          clearGame(gameId);
+          navigate("/draft-pod");
         });
       return;
     }
