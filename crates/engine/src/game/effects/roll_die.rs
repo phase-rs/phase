@@ -37,15 +37,18 @@ pub fn resolve(
     // large subtract doesn't wrap; branches with `min`/`max` already in u8
     // simply won't match when the actual result is 0.
     let actual = if let Some(m) = modifier {
-        let delta = match m {
-            DieRollModifier::Add { value } => {
-                resolve_quantity(state, value, ability.controller, ability.source_id)
-            }
-            DieRollModifier::Subtract { value } => {
-                -resolve_quantity(state, value, ability.controller, ability.source_id)
-            }
-        };
-        let combined = (natural as i32).saturating_add(delta);
+        // Carry the sign as the saturating operation rather than negating the
+        // resolved delta: `-resolve_quantity(..)` would panic in debug builds
+        // (and wrap in release) when the quantity resolves to `i32::MIN`.
+        let combined =
+            match m {
+                DieRollModifier::Add { value } => (natural as i32).saturating_add(
+                    resolve_quantity(state, value, ability.controller, ability.source_id),
+                ),
+                DieRollModifier::Subtract { value } => (natural as i32).saturating_sub(
+                    resolve_quantity(state, value, ability.controller, ability.source_id),
+                ),
+            };
         combined.clamp(0, u8::MAX as i32) as u8
     } else {
         natural
