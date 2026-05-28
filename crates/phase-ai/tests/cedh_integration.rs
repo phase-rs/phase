@@ -183,17 +183,22 @@ fn cedh_full_stack_smoke() {
         "4-player CEDH must skip paranoid scaling"
     );
 
-    // 3. DeckFeatures::is_cedh is false by default (non-cEDH bracket).
+    // 3. DeckFeatures::bracket_tier defaults to a non-cEDH tier.
     let features = DeckFeatures::default();
-    assert!(!features.is_cedh);
+    assert_ne!(
+        features.bracket_tier,
+        engine::game::bracket_estimate::CommanderBracketTier::Cedh
+    );
 
-    // 4. DeckFeatures::analyze sets is_cedh = true when the bracket tier is
-    //    CommanderBracketTier::Cedh.
+    // 4. DeckFeatures::analyze records the Cedh tier when given it.
     let cedh_features = DeckFeatures::analyze(
         &[],
         engine::game::bracket_estimate::CommanderBracketTier::Cedh,
     );
-    assert!(cedh_features.is_cedh);
+    assert_eq!(
+        cedh_features.bracket_tier,
+        engine::game::bracket_estimate::CommanderBracketTier::Cedh
+    );
 
     // 5. Default PolicyRegistry includes ComboLineProgress — the policy that
     //    consults ComboRegistry during cEDH AI decisions.

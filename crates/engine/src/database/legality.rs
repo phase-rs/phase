@@ -226,6 +226,14 @@ pub fn any_ai_difficulty_is_cedh(ai_difficulties: &[String]) -> bool {
 /// This is a **tag check only** — the estimator never assigns `Cedh`
 /// algorithmically, so the declaration must come from the player at deck
 /// submission time.
+///
+/// No CR annotation: the cEDH bracket system is WotC's *Commander Bracket*
+/// product/format guidance (2024+), not part of the MTG Comprehensive Rules.
+/// There is no CR number for "bracket 5" or a per-table bracket gate, so an
+/// annotation here would be fabricated. This function enforces a format/setup
+/// policy, not a game rule — the rules-level Commander constraints it sits
+/// near (deck construction, singleton, color identity) live in CR 903 and are
+/// validated separately by the deck-legality path.
 pub fn validate_cedh_bracket(decks: &[&PlayerDeckPayload]) -> Result<(), CedhBracketError> {
     // Seat-count guard runs first: a 5+ seat cEDH table is invalid regardless
     // of bracket declarations, and surfacing the structural error before the

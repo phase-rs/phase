@@ -1,6 +1,6 @@
 //! `CedhKeepablesMulligan` — stub aggressive mulligan policy for cEDH decks.
-//! Gated internally on `features.is_cedh` (`MulliganPolicy` has no `activation()`
-//! method; every registered policy is consulted on every hand).
+//! Gated internally on `features.bracket_tier == Cedh` (`MulliganPolicy` has no
+//! `activation()` method; every registered policy is consulted on every hand).
 //!
 //! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding to keep after the
 //! mulligan process.
@@ -13,6 +13,7 @@
 //! small static staple set. This is explicitly documented as a stub; it is
 //! refined to card-data feature tags once the right tag names are confirmed.
 
+use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -50,7 +51,7 @@ impl MulliganPolicy for CedhKeepablesMulligan {
         _mulligans_taken: u8,
     ) -> MulliganScore {
         // Internal gate: non-cEDH decks see a zero-delta Score (cheap no-op).
-        if !features.is_cedh {
+        if features.bracket_tier != CommanderBracketTier::Cedh {
             return MulliganScore::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("cedh_keepables_na"),
@@ -196,7 +197,11 @@ mod tests {
 
     fn features_cedh(is_cedh: bool) -> DeckFeatures {
         DeckFeatures {
-            is_cedh,
+            bracket_tier: if is_cedh {
+                CommanderBracketTier::Cedh
+            } else {
+                CommanderBracketTier::Core
+            },
             ..DeckFeatures::default()
         }
     }

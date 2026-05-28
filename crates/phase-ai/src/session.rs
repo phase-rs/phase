@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn cedh_tier_pool_sets_is_cedh_true() {
+    fn cedh_tier_pool_records_cedh_bracket() {
         let mut state = GameState::new_two_player(42);
         state.deck_pools.clear();
         state
@@ -256,23 +256,25 @@ mod tests {
             .features
             .get(&PlayerId(0))
             .expect("player 0 features should be populated");
-        assert!(
-            p0_features.is_cedh,
-            "PlayerDeckPool with CommanderBracketTier::Cedh must set is_cedh = true"
+        assert_eq!(
+            p0_features.bracket_tier,
+            CommanderBracketTier::Cedh,
+            "PlayerDeckPool with CommanderBracketTier::Cedh must record the Cedh tier"
         );
 
         let p1_features = session
             .features
             .get(&PlayerId(1))
             .expect("player 1 features should be populated");
-        assert!(
-            !p1_features.is_cedh,
-            "PlayerDeckPool with CommanderBracketTier::Core must leave is_cedh = false"
+        assert_ne!(
+            p1_features.bracket_tier,
+            CommanderBracketTier::Cedh,
+            "PlayerDeckPool with CommanderBracketTier::Core must not record Cedh"
         );
     }
 
     #[test]
-    fn optimized_tier_pool_leaves_is_cedh_false() {
+    fn optimized_tier_pool_records_non_cedh_bracket() {
         let mut state = GameState::new_two_player(42);
         state.deck_pools.clear();
         state.deck_pools.push(make_pool_with_tier(
@@ -289,10 +291,12 @@ mod tests {
             .features
             .get(&PlayerId(0))
             .expect("player 0 features should be populated");
-        assert!(
-            !p0_features.is_cedh,
-            "CommanderBracketTier::Optimized (highest non-cEDH tier) must leave is_cedh = false"
+        assert_eq!(
+            p0_features.bracket_tier,
+            CommanderBracketTier::Optimized,
+            "CommanderBracketTier::Optimized (highest non-cEDH tier) must be recorded as-is"
         );
+        assert_ne!(p0_features.bracket_tier, CommanderBracketTier::Cedh);
     }
 
     #[test]

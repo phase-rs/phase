@@ -29,6 +29,8 @@ pub use spellslinger_prowess::SpellslingerProwessFeature;
 pub use tokens_wide::TokensWideFeature;
 pub use tribal::TribalFeature;
 
+use engine::game::bracket_estimate::CommanderBracketTier;
+
 use crate::deck_profile::DeckArchetype;
 use crate::strategy_profile::StrategyProfile;
 
@@ -51,27 +53,24 @@ pub struct DeckFeatures {
     pub tokens_wide: TokensWideFeature,
     pub plus_one_counters: PlusOneCountersFeature,
     pub spellslinger_prowess: SpellslingerProwessFeature,
-    /// Declaration-derived: `true` iff the deck's declared bracket tier is
-    /// `CommanderBracketTier::Cedh`. Unlike the other fields here, this is
-    /// not structurally detected from card text — it is a per-deck
-    /// declaration set at deck-analysis time from deck metadata. Used by
-    /// `ComboLinePolicy::activation()` and `CedhKeepablesMulligan` as a
-    /// gating signal.
-    pub is_cedh: bool,
+    /// Declaration-derived: the deck's declared bracket tier. Unlike the
+    /// other fields here, this is not structurally detected from card text —
+    /// it is a per-deck declaration set at deck-analysis time from deck
+    /// metadata. Stored as the full `CommanderBracketTier` (not a `bool`) so
+    /// the design space stays open: `ComboLinePolicy::activation()` and
+    /// `CedhKeepablesMulligan` gate on `== Cedh` today, but bracket-aware
+    /// behavior for other tiers can read the same field without a new flag.
+    pub bracket_tier: CommanderBracketTier,
 }
 
 impl DeckFeatures {
     /// Construct `DeckFeatures` from a deck. Walks each per-class detector
-    /// (`landfall::detect`, `mana_ramp::detect`, ...) and sets `is_cedh`
-    /// from the declared bracket tier.
+    /// (`landfall::detect`, `mana_ramp::detect`, ...) and records the declared
+    /// `bracket_tier`.
     ///
     /// Per-class detectors are pure functions over `&[DeckEntry]`. The tier
     /// argument flows in from deck metadata at the AI-setup boundary.
-    pub fn analyze(
-        deck: &[engine::game::DeckEntry],
-        tier: engine::game::bracket_estimate::CommanderBracketTier,
-    ) -> Self {
-        use engine::game::bracket_estimate::CommanderBracketTier;
+    pub fn analyze(deck: &[engine::game::DeckEntry], tier: CommanderBracketTier) -> Self {
         let profile = crate::deck_profile::DeckProfile::analyze(deck);
         let archetype = match &profile.classification {
             crate::deck_profile::ArchetypeClassification::Pure(arch) => *arch,
@@ -90,7 +89,7 @@ impl DeckFeatures {
             tokens_wide: tokens_wide::detect(deck),
             plus_one_counters: plus_one_counters::detect(deck),
             spellslinger_prowess: spellslinger_prowess::detect(deck),
-            is_cedh: tier == CommanderBracketTier::Cedh,
+            bracket_tier: tier,
         }
     }
 }
@@ -100,23 +99,21 @@ mod cedh_field_tests {
     use super::*;
 
     #[test]
-    fn default_features_is_not_cedh() {
+    fn default_features_tier_is_not_cedh() {
         let f = DeckFeatures::default();
-        assert!(!f.is_cedh);
+        assert_ne!(f.bracket_tier, CommanderBracketTier::Cedh);
     }
 
     #[test]
-    fn analyze_with_cedh_tier_sets_is_cedh() {
-        use engine::game::bracket_estimate::CommanderBracketTier;
-        // Use an empty deck — structural features default to zero; is_cedh
+    fn analyze_records_cedh_tier() {
+        // Use an empty deck — structural features default to zero; bracket_tier
         // should follow only the tier argument.
         let f = DeckFeatures::analyze(&[], CommanderBracketTier::Cedh);
-        assert!(f.is_cedh, "Cedh tier must set is_cedh = true");
+        assert_eq!(f.bracket_tier, CommanderBracketTier::Cedh);
     }
 
     #[test]
-    fn analyze_with_non_cedh_tier_leaves_is_cedh_false() {
-        use engine::game::bracket_estimate::CommanderBracketTier;
+    fn analyze_records_non_cedh_tier() {
         for tier in [
             CommanderBracketTier::Exhibition,
             CommanderBracketTier::Core,
@@ -124,10 +121,8 @@ mod cedh_field_tests {
             CommanderBracketTier::Optimized,
         ] {
             let f = DeckFeatures::analyze(&[], tier);
-            assert!(
-                !f.is_cedh,
-                "non-Cedh tier ({tier:?}) must leave is_cedh = false"
-            );
+            assert_eq!(f.bracket_tier, tier);
+            assert_ne!(f.bracket_tier, CommanderBracketTier::Cedh);
         }
     }
 }

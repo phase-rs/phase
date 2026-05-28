@@ -1,8 +1,10 @@
 //! ComboLinePolicy — boosts priors on candidate actions that progress a
-//! reachable combo line. Gating: `activation()` returns `None` unless
-//! `features.is_cedh`, so non-cEDH decks pay zero cost (the per-DecisionKind
-//! index in PolicyRegistry still includes us, but activation skips us).
+//! reachable combo line. Gating: `activation()` returns `None` unless the
+//! deck's `bracket_tier` is `Cedh`, so non-cEDH decks pay zero cost (the
+//! per-DecisionKind index in PolicyRegistry still includes us, but activation
+//! skips us).
 
+use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -58,7 +60,7 @@ impl TacticalPolicy for ComboLinePolicy {
         _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        if features.is_cedh {
+        if features.bracket_tier == CommanderBracketTier::Cedh {
             // activation-constant: combo-line guidance is only active for cEDH decks.
             Some(1.0)
         } else {
@@ -69,8 +71,10 @@ impl TacticalPolicy for ComboLinePolicy {
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
         // TODO(cedh-perf): cache reachable_lines() by (quick_state_hash(state), ai_player)
         // — verdict() runs per candidate, and CastSpell/ActivateAbility/SelectTarget
-        // can each carry many candidates. Defer until the registry holds enough
-        // lines that per-call cost is noticeable (currently 1 line, O(pieces)).
+        // can each carry many candidates. The registry currently holds 3 lines,
+        // each O(pieces) zone scans; the per-candidate cost is still small but
+        // grows with the line count, so a (state, ai)-keyed cache shared across
+        // sibling search nodes is the next optimization if it lands more lines.
         let reachable = self.registry.reachable_lines(ctx.state, ctx.ai_player);
         for (_id, reachability) in &reachable {
             match reachability {
@@ -172,9 +176,9 @@ mod tests {
         GameState::new_two_player(0)
     }
 
-    fn make_features(is_cedh: bool) -> DeckFeatures {
+    fn make_features(tier: CommanderBracketTier) -> DeckFeatures {
         DeckFeatures {
-            is_cedh,
+            bracket_tier: tier,
             ..DeckFeatures::default()
         }
     }
@@ -183,7 +187,7 @@ mod tests {
     fn activation_returns_none_when_not_cedh() {
         let policy = ComboLinePolicy::new();
         let state = make_state();
-        let features = make_features(false);
+        let features = make_features(CommanderBracketTier::Core);
         let activation = policy.activation(&features, &state, PlayerId(0));
         assert!(activation.is_none());
     }
@@ -192,7 +196,7 @@ mod tests {
     fn activation_returns_some_when_is_cedh() {
         let policy = ComboLinePolicy::new();
         let state = make_state();
-        let features = make_features(true);
+        let features = make_features(CommanderBracketTier::Cedh);
         let activation = policy.activation(&features, &state, PlayerId(0));
         assert_eq!(activation, Some(1.0));
     }

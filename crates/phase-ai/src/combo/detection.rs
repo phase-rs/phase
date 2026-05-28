@@ -37,7 +37,11 @@ impl ComboDetector for StructuralComboDetector {
             // All pieces present. Check mana.
             let available = crate::zone_eval::available_mana(state, ai);
             let required = mana_cost_total(&line.mana_cost);
-            let shortfall = required.saturating_sub(available as i32);
+            // Saturate on unsigned ints: an i32 `saturating_sub` floors at
+            // i32::MIN, so `2 - 3 = -1` would cast to `u8` as 255 and make the
+            // policy think an affordable combo is unreachable. `required` is
+            // always >= 0 (mana cost), so the u32 cast is lossless.
+            let shortfall = (required as u32).saturating_sub(available);
             // Resolve each ComboStep against state to produce concrete
             // GameAction values. Targets are intentionally left empty —
             // ComboLinePolicy fires as a prior-boost *before* target
@@ -63,8 +67,14 @@ impl ComboDetector for StructuralComboDetector {
 }
 
 pub(crate) fn piece_present(piece: &ComboPiece, state: &GameState, ai: PlayerId) -> bool {
+    // Index defensively: a player may have been eliminated/removed, so a raw
+    // `state.players[ai.0]` could panic. A missing player means no piece.
+    let player = match state.players.get(ai.0 as usize) {
+        Some(p) => p,
+        None => return false,
+    };
     match piece {
-        ComboPiece::InHand(pred) => state.players[ai.0 as usize]
+        ComboPiece::InHand(pred) => player
             .hand
             .iter()
             .any(|&id| matches_in_zone(pred, state, id)),
@@ -74,7 +84,7 @@ pub(crate) fn piece_present(piece: &ComboPiece, state: &GameState, ai: PlayerId)
                 .get(&id)
                 .is_some_and(|obj| obj.controller == ai && matches_predicate(pred, &obj.name))
         }),
-        ComboPiece::InGraveyard(pred) => state.players[ai.0 as usize]
+        ComboPiece::InGraveyard(pred) => player
             .graveyard
             .iter()
             .any(|&id| matches_in_zone(pred, state, id)),
@@ -149,7 +159,9 @@ fn find_battlefield_object(
 }
 
 fn find_hand_object(state: &GameState, ai: PlayerId, pred: &CardPredicate) -> Option<ObjectId> {
-    state.players[ai.0 as usize]
+    state
+        .players
+        .get(ai.0 as usize)?
         .hand
         .iter()
         .copied()

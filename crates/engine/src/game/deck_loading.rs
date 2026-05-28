@@ -102,20 +102,16 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
 /// using a `CardDatabase` for lookup. Unresolvable names are silently skipped.
 ///
-/// The `bracket_tier` field on `list` is forwarded directly into the returned
-/// payload. Callers that need to override the tier (e.g., the WASM bridge
-/// overriding with an explicit value) should set it on the `PlayerDeckList`
-/// before calling this function.
-pub fn resolve_player_deck_list(
-    db: &CardDatabase,
-    list: &PlayerDeckList,
-    bracket_tier: CommanderBracketTier,
-) -> PlayerDeckPayload {
+/// The `bracket_tier` is taken from `list.bracket_tier` — `PlayerDeckList`
+/// already carries the declared tier, so there is no separate parameter to
+/// keep in sync. Callers that need a specific tier set it on the
+/// `PlayerDeckList` before calling.
+pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> PlayerDeckPayload {
     PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
-        bracket_tier,
+        bracket_tier: list.bracket_tier,
     }
 }
 

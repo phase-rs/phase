@@ -355,11 +355,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             commander: Vec::new(),
             bracket_tier: Default::default(),
         };
-        let payload = resolve_player_deck_list(
-            db,
-            &list,
-            engine::game::bracket_estimate::CommanderBracketTier::Core,
-        );
+        let payload = resolve_player_deck_list(db, &list);
         let profile = DeckProfile::analyze(&payload.main_deck);
         Ok(to_js(&DeckProfileResult::from(&profile)))
     })
