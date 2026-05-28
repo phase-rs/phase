@@ -159,4 +159,87 @@ export const BUNDLED_CEDH_DECKS: Readonly<Record<string, DeckEntry>> = {
       { name: "Swamp", count: 34 },
     ],
   },
+
+  /**
+   * Demo deck — Winota, Joiner of Forces + Kiki-Jiki, Mirror Breaker +
+   * Felidar Guardian combo.
+   *
+   * Boros (Red/White) Commander build. Winota is the commander; the featured
+   * win condition is the Kiki-Jiki + Felidar Guardian loop: Kiki-Jiki
+   * (Red) creates a haste copy of Felidar Guardian (White); Felidar
+   * Guardian's ETB blinks Kiki-Jiki, resetting its tap; the new Kiki-Jiki
+   * copy creates another haste Felidar Guardian copy — infinite hasty tokens
+   * → lethal combat damage. This is the third registered combo in the cEDH
+   * combo registry (crates/phase-ai/src/combo/registry.rs).
+   *
+   * Per CR 903.4, every mainboard card's color identity must be ⊆ {Red,
+   * White, colorless}. No Islands/Swamps/Forests — Blue/Black/Green cards
+   * are off-color for Boros. Kiki-Jiki is mono-Red and Felidar Guardian is
+   * mono-White, so both are legal under the R/W color identity.
+   *
+   * Like the other demo decks, the curated portion is a "skeleton" (not a
+   * tournament list) and the remainder is padded with Plains and Mountains
+   * so the picker always has a well-formed 100-card deck (1 commander + 99
+   * mainboard) to hand to the engine. The split leans slightly toward Plains
+   * given the White-heavy combo and removal suite; per CR 903.5a.
+   */
+  BundledCedh_WinotaKikiFelidar_Demo: {
+    code: "BCDW",
+    name: "cEDH Demo - Winota Kiki-Felidar Combo",
+    type: "Commander Deck",
+    releaseDate: undefined,
+    // Placeholder: a real coverage % is computed by the engine when the
+    // deck is evaluated through `evaluateDeckCompatibility`. The catalog
+    // surfaces this value only for UI display; it does not gate inclusion.
+    coveragePct: 0,
+    commander: [{ name: "Winota, Joiner of Forces", count: 1 }],
+    mainBoard: [
+      // Combo pieces (Red + White — both within Boros color identity)
+      { name: "Kiki-Jiki, Mirror Breaker", count: 1 },
+      { name: "Felidar Guardian", count: 1 },
+
+      // Fast mana (colorless)
+      { name: "Sol Ring", count: 1 },
+      { name: "Mana Crypt", count: 1 },
+      { name: "Mox Diamond", count: 1 },
+      { name: "Lotus Petal", count: 1 },
+      { name: "Chrome Mox", count: 1 },
+      { name: "Mana Vault", count: 1 },
+
+      // Removal (White)
+      { name: "Swords to Plowshares", count: 1 },
+      { name: "Path to Exile", count: 1 },
+      { name: "Generous Gift", count: 1 },
+
+      // Tutors (White artifact/enchantment tutor)
+      { name: "Enlightened Tutor", count: 1 },
+
+      // Card advantage / utility (Red + colorless)
+      { name: "Faithless Looting", count: 1 },
+      { name: "Wheel of Fortune", count: 1 },
+      { name: "Skullclamp", count: 1 },
+
+      // Interaction (Red)
+      { name: "Red Elemental Blast", count: 1 },
+      { name: "Pyroblast", count: 1 },
+
+      // Utility (White)
+      { name: "Grand Abolisher", count: 1 },
+
+      // Lands (colorless color identity — legal in Boros per CR 903.4)
+      { name: "Command Tower", count: 1 },
+      { name: "Mana Confluence", count: 1 },
+      { name: "City of Brass", count: 1 },
+      { name: "Reflecting Pool", count: 1 },
+      { name: "Exotic Orchard", count: 1 },
+
+      // Basic lands — padded to reach exactly 99 mainboard copies
+      // (CR 903.5a). Curated slots: 23 (above). Padding: 99 − 23 = 76.
+      // Split leans Plains (White) to support the White-heavy removal and
+      // combo piece (Felidar Guardian). No Forests/Swamps/Islands —
+      // Green/Black/Blue are off-color for Boros.
+      { name: "Plains", count: 40 },
+      { name: "Mountain", count: 36 },
+    ],
+  },
 };

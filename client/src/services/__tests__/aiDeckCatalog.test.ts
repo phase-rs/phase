@@ -300,7 +300,7 @@ describe("bundled cEDH decks", () => {
   });
 
   it("surfaces all bundled cEDH demo decks (multi-deck enumeration)", async () => {
-    // Regression guard for the dedup refactor: both bundled decks must be
+    // Regression guard for the dedup refactor: all bundled decks must be
     // emitted by the same shared push helper. If a future change reverts
     // the helper to per-deck duplicated logic, or accidentally skips
     // entries past the first, this test catches it.
@@ -309,13 +309,17 @@ describe("bundled cEDH decks", () => {
     const candidates = await buildDeckCatalog({ includePrecons: true });
     const heliod = candidates.find((c) => c.id === "precon:BundledCedh_HeliodBallista_Demo");
     const inalla = candidates.find((c) => c.id === "precon:BundledCedh_InallaThoracle_Demo");
+    const winota = candidates.find((c) => c.id === "precon:BundledCedh_WinotaKikiFelidar_Demo");
 
     expect(heliod).toBeDefined();
     expect(inalla).toBeDefined();
+    expect(winota).toBeDefined();
     expect(heliod?.source.type).toBe("precon");
     expect(inalla?.source.type).toBe("precon");
+    expect(winota?.source.type).toBe("precon");
     expect(heliod?.bracket).toBe(CEDH_BRACKET);
     expect(inalla?.bracket).toBe(CEDH_BRACKET);
+    expect(winota?.bracket).toBe(CEDH_BRACKET);
   });
 
   it("filterByBracket(5) surfaces the bundled cEDH demo deck through the legal AI catalog", async () => {
