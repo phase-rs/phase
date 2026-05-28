@@ -721,11 +721,20 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
-        // Phyrexian payment: pay mana for all shards (safe default).
+        // Phyrexian payment: preserve each shard's only legal route when there
+        // is no scored candidate to choose from.
         WaitingFor::PhyrexianPayment { shards, .. } => {
             let choices = shards
                 .iter()
-                .map(|_| engine::types::game_state::ShardChoice::PayMana)
+                .map(|shard| match shard.options {
+                    engine::types::game_state::ShardOptions::LifeOnly => {
+                        engine::types::game_state::ShardChoice::PayLife
+                    }
+                    engine::types::game_state::ShardOptions::ManaOrLife
+                    | engine::types::game_state::ShardOptions::ManaOnly => {
+                        engine::types::game_state::ShardChoice::PayMana
+                    }
+                })
                 .collect();
             Some(GameAction::SubmitPhyrexianChoices { choices })
         }
@@ -772,7 +781,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // happen but CancelCast is not valid here. Use empty selection.
         WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
+        | WaitingFor::ExileForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
@@ -814,6 +823,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::SeparatePilesChoice { .. } => Some(GameAction::ChoosePile {
             pile: engine::types::game_state::PileSide::A,
         }),
+        WaitingFor::MoveCountersDistribution { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::ChooseCounterMoveDistribution { .. })),
 
         // Remaining pending-cast states are caught by the has_pending_cast
         // guard above. This arm is structurally unreachable but required
@@ -1399,9 +1411,10 @@ pub(crate) fn deterministic_choice(
         };
 
         let pay = match additional_cost {
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Mana { cost: extra_mana },
-            ) => affordable_mana_cost(extra_mana),
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Mana { cost: extra_mana },
+                ..
+            } => affordable_mana_cost(extra_mana),
             // CR 702.33c: a multikicker / kicker re-prompt presents exactly one
             // live cost. When that cost is pure mana, apply the same
             // affordability + over-commit guard as Optional(Mana).
@@ -1418,12 +1431,14 @@ pub(crate) fn deterministic_choice(
                 affordable_mana_cost(extra_mana)
             }
             // Non-mana optional costs: sacrifice → usually worth it for the upgrade
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Sacrifice { .. },
-            ) => false, // Conservative: don't sacrifice unless search says so
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::PayLife { amount },
-            ) => {
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Sacrifice { .. },
+                ..
+            } => false, // Conservative: don't sacrifice unless search says so
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::PayLife { amount },
+                ..
+            } => {
                 // CR 119.4 + CR 903.4: PayLife carries a QuantityExpr; resolve
                 // against the activator/source so dynamic costs (e.g. commander
                 // color identity) are costed correctly. Source = 0 falls back
@@ -1439,7 +1454,7 @@ pub(crate) fn deterministic_choice(
                 let life = state.players[player.0 as usize].life;
                 life > resolved * 3
             }
-            engine::types::ability::AdditionalCost::Optional(_) => true,
+            engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
             engine::types::ability::AdditionalCost::Choice(_, _) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,

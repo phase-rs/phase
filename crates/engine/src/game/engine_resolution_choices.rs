@@ -185,7 +185,7 @@ fn apply_search_partition(
                 target: crate::types::ability::TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: split.primary_enter_tapped,
                 enters_attacking: false,
                 up_to: false,
@@ -1698,7 +1698,7 @@ pub(super) fn handle_resolution_choice(
                 destination,
                 enter_tapped,
                 enter_transformed,
-                under_your_control,
+                enters_under_player,
                 enters_attacking,
                 owner_library: _,
                 track_exiled_by_source,
@@ -1798,7 +1798,7 @@ pub(super) fn handle_resolution_choice(
                         destination: dest_zone,
                         enter_transformed,
                         enter_tapped,
-                        under_your_control,
+                        enters_under_player,
                         enters_attacking,
                         enter_with_counters: vec![],
                         duration: None,
@@ -1825,7 +1825,7 @@ pub(super) fn handle_resolution_choice(
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
                                         enter_tapped: ctx.enter_tapped,
-                                        under_your_control: ctx.under_your_control,
+                                        enters_under_player: ctx.enters_under_player,
                                         enters_attacking: ctx.enters_attacking,
                                         enter_with_counters: ctx.enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
@@ -1841,6 +1841,49 @@ pub(super) fn handle_resolution_choice(
                                     events,
                                     state.waiting_for.clone(),
                                 ));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Tap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_tap(state, card_id, source_id, events)
+                        {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Untap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_untap(state, card_id, events) {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
                             }
                         }
                     }
@@ -1903,12 +1946,28 @@ pub(super) fn handle_resolution_choice(
             }
             if matches!(
                 effect_kind,
-                EffectKind::ChangeZone | EffectKind::BounceAll | EffectKind::PutAtLibraryPosition
+                EffectKind::Sacrifice
+                    | EffectKind::ChangeZone
+                    | EffectKind::BounceAll
+                    | EffectKind::Tap
+                    | EffectKind::Untap
+                    | EffectKind::PutAtLibraryPosition
             ) && state.pending_continuation.is_some()
             {
+                let tracked = if matches!(effect_kind, EffectKind::Sacrifice) {
+                    events[events_before_effect..]
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    chosen.clone()
+                };
                 let tracked_id = TrackedSetId(state.next_tracked_set_id);
                 state.next_tracked_set_id += 1;
-                state.tracked_object_sets.insert(tracked_id, chosen.clone());
+                state.tracked_object_sets.insert(tracked_id, tracked);
                 state.chain_tracked_set_id = Some(tracked_id);
             }
             state.last_effect_count = Some(chosen.len() as i32);

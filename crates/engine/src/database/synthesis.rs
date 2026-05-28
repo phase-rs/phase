@@ -5,14 +5,14 @@ use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
-    AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, Comparator,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration,
-    Effect, FilterProp, GainLifePlayer, KickerVariant, ManaContribution, ManaProduction,
-    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
+    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CounterTriggerFilter, Duration, Effect, FilterProp, GainLifePlayer, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -825,7 +825,10 @@ pub fn synthesize_buyback(face: &mut CardFace) {
         BuybackCost::Mana(mana_cost) => AbilityCost::Mana { cost: mana_cost },
         BuybackCost::NonMana(ac) => ac,
     };
-    face.additional_cost = Some(AdditionalCost::Optional(cost));
+    face.additional_cost = Some(AdditionalCost::Optional {
+        cost,
+        repeatable: false,
+    });
 }
 
 /// CR 702.166a: Synthesize `additional_cost` from `Keyword::Bargain`.
@@ -836,16 +839,21 @@ pub fn synthesize_bargain(face: &mut CardFace) {
         return;
     }
 
-    face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
-        target: TargetFilter::Or {
-            filters: vec![
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
-                TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Token])),
-            ],
+    face.additional_cost = Some(AdditionalCost::Optional {
+        cost: AbilityCost::Sacrifice {
+            target: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+                    TargetFilter::Typed(
+                        TypedFilter::permanent().properties(vec![FilterProp::Token]),
+                    ),
+                ],
+            },
+            count: 1,
         },
-        count: 1,
-    }));
+        repeatable: false,
+    });
 }
 
 /// Synthesize Gift optional cost and delivery effect.
@@ -873,9 +881,12 @@ pub fn synthesize_gift(face: &mut CardFace) {
     };
 
     // Gift uses a zero-cost optional additional cost — the "cost" is just a decision.
-    face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana {
-        cost: ManaCost::zero(),
-    }));
+    face.additional_cost = Some(AdditionalCost::Optional {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        },
+        repeatable: false,
+    });
 
     // Inject GiftDelivery as a wrapper around the first spell ability.
     // The delivery effect is a no-op when the gift wasn't promised, so the
@@ -1109,7 +1120,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
@@ -1300,10 +1311,13 @@ pub fn synthesize_casualty(face: &mut CardFace) {
                 },
             },
         ]));
-        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
-            target: sacrifice_filter,
-            count: 1,
-        }));
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::Sacrifice {
+                target: sacrifice_filter,
+                count: 1,
+            },
+            repeatable: false,
+        });
     }
 
     // CR 702.153a: "When you cast this spell, if a casualty cost was paid, copy it.
@@ -1395,7 +1409,7 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1514,9 +1528,104 @@ pub fn synthesize_cumulative_upkeep(face: &mut CardFace) {
     });
 }
 
+/// Insert a synthesis-level unsupported sentinel once.
+///
+/// Coverage already treats `Effect::Unimplemented` on any ability as an
+/// unsupported card-data gap. `AbilityKind::Spell` is used deliberately here
+/// because `AbilityDefinition` has no non-runtime sentinel kind; cards with
+/// this marker stay unsupported rather than entering legal play paths.
+fn defer_synthesis(face: &mut CardFace, name: &str, description: String) {
+    let already_deferred = face.abilities.iter().any(|ability| {
+        matches!(
+            &*ability.effect,
+            Effect::Unimplemented {
+                name: existing, ..
+            } if existing == name
+        )
+    });
+    if already_deferred {
+        return;
+    }
+
+    face.abilities.push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Unimplemented {
+            name: name.to_string(),
+            description: Some(description),
+        },
+    ));
+}
+
+fn install_etb_copy_on_additional_cost(
+    face: &mut CardFace,
+    additional_cost: AdditionalCost,
+    payment_source: AdditionalCostPaymentSource,
+    min_count: u32,
+    count: QuantityExpr,
+    additional_modifications: Vec<ContinuousModification>,
+    description: String,
+) {
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(additional_cost);
+    }
+
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.condition,
+                Some(TriggerCondition::AdditionalCostPaid {
+                    source,
+                    min_count: existing_min_count,
+                    ..
+                }) if source == payment_source && existing_min_count == min_count
+            )
+            && t.execute.as_deref().is_some_and(|a| match &*a.effect {
+                Effect::CopyTokenOf {
+                    count: existing_count,
+                    additional_modifications: existing_modifications,
+                    ..
+                } => {
+                    existing_count == &count && existing_modifications == &additional_modifications
+                }
+                _ => false,
+            })
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    let copy_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count,
+            extra_keywords: vec![],
+            additional_modifications,
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::AdditionalCostPaid {
+            source: payment_source,
+            variant: None,
+            kicker_cost: None,
+            min_count,
+        })
+        .execute(copy_effect)
+        .description(description);
+    face.triggers.push(trigger);
+}
+
 /// CR 702.175a: Offspring represents two abilities:
 ///   1. "You may pay an additional [cost] as you cast this spell" — modeled as
-///      `AdditionalCost::Optional(AbilityCost::Mana { cost })`.
+///      `AdditionalCost::Optional { repeatable: false, .. }`.
 ///   2. "When this permanent enters, if its offspring cost was paid, create a
 ///      token that's a copy of it, except it's 1/1." — modeled as an ETB trigger
 ///      with `TriggerCondition::AdditionalCostPaid` and `Effect::CopyTokenOf`
@@ -1532,65 +1641,74 @@ pub fn synthesize_offspring(face: &mut CardFace) {
         return;
     };
 
-    // CR 702.175a ability 1: Optional additional cost.
-    // Only set if no additional_cost was already parsed (e.g., a card with both
-    // kicker and offspring would need the kicker cost to take precedence since
-    // AdditionalCost is a single slot — but no such card exists in print).
-    if face.additional_cost.is_none() {
-        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana {
-            cost: offspring_cost,
-        }));
-    }
+    install_etb_copy_on_additional_cost(
+        face,
+        AdditionalCost::Optional {
+            cost: AbilityCost::Mana {
+                cost: offspring_cost,
+            },
+            repeatable: false,
+        },
+        AdditionalCostPaymentSource::Any,
+        1,
+        QuantityExpr::Fixed { value: 1 },
+        vec![
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+        ],
+        "CR 702.175a: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
+            .to_string(),
+    );
+}
 
-    // CR 702.175a ability 2: ETB trigger creating a 1/1 copy token.
-    // Idempotency: skip if an AdditionalCostPaid + CopyTokenOf ETB trigger already exists.
-    let already_has_trigger = face.triggers.iter().any(|t| {
-        matches!(t.mode, TriggerMode::ChangesZone)
-            && t.destination == Some(Zone::Battlefield)
-            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-            && matches!(
-                t.condition,
-                Some(TriggerCondition::AdditionalCostPaid { .. })
-            )
-            && matches!(
-                t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::CopyTokenOf { .. })
-            )
-    });
-    if already_has_trigger {
+/// CR 702.157a: Squad represents a repeatable optional additional cost and an
+/// ETB trigger that creates one copy token for each time the squad cost was paid.
+pub fn synthesize_squad(face: &mut CardFace) {
+    let squad_costs: Vec<_> = face
+        .keywords
+        .iter()
+        .filter_map(|k| match k {
+            Keyword::Squad(cost) => Some(cost.clone()),
+            _ => None,
+        })
+        .collect();
+    if squad_costs.is_empty() {
         return;
     }
 
-    let copy_effect = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::CopyTokenOf {
-            target: TargetFilter::SelfRef,
-            owner: TargetFilter::Controller,
-            source_filter: None,
-            enters_attacking: false,
-            tapped: false,
-            count: QuantityExpr::Fixed { value: 1 },
-            extra_keywords: vec![],
-            additional_modifications: vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
-            ],
-        },
-    );
-    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
-        .destination(Zone::Battlefield)
-        .valid_card(TargetFilter::SelfRef)
-        .condition(TriggerCondition::AdditionalCostPaid {
-            variant: None,
-            kicker_cost: None,
-            min_count: 1,
-        })
-        .execute(copy_effect)
-        .description(
-            "CR 702.175a: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
+    // CR 702.157b: Multiple Squad instances are paid independently and each
+    // instance's linked trigger counts only its own payments. Do not collapse
+    // them into one repeatable cost; leave coverage unsupported until the
+    // linked-instance model exists.
+    if squad_costs.len() > 1 {
+        defer_synthesis(
+            face,
+            "squad_multiple_instances",
+            "CR 702.157b: multiple Squad instances require per-instance payment tracking"
                 .to_string(),
         );
-    face.triggers.push(trigger);
+        return;
+    }
+
+    let squad_cost = squad_costs[0].clone();
+
+    install_etb_copy_on_additional_cost(
+        face,
+        AdditionalCost::Optional {
+            cost: AbilityCost::Mana {
+                cost: squad_cost,
+            },
+            repeatable: true,
+        },
+        AdditionalCostPaymentSource::NonKicker,
+        0,
+        QuantityExpr::Ref {
+            qty: QuantityRef::AdditionalCostPaymentCount,
+        },
+        vec![],
+        "CR 702.157a: When this permanent enters, create a token that's a copy of it for each time its squad cost was paid."
+            .to_string(),
+    );
 }
 
 /// CR 702.123a: Fabricate N — "When this permanent enters, you may put N
@@ -1733,8 +1851,8 @@ pub fn synthesize_fabricate(face: &mut CardFace) {
 ///     against `state.lki_cache` for the source's pre-death counter map.
 ///   * Execute body: `Effect::ChangeZone` from `Graveyard` → `Battlefield`
 ///     targeting `SelfRef`, with `enter_with_counters = [("P1P1", 1)]`. The
-///     default `under_your_control = false` matches the rule's "under its
-///     owner's control" exactly.
+///     default `enters_under = None` matches the rule's "under its owner's
+///     control" exactly (CR 110.2a).
 ///
 /// Per CR 113.2c ("If an object has multiple instances of the same ability,
 /// each instance functions independently") combined with the absence of a
@@ -2479,7 +2597,7 @@ fn build_dies_return_with_counter_trigger(
         // CR 702.93a / CR 702.79a: "under its owner's control" — default
         // (false) sends the object to its owner's control. `true` would
         // override to the ability controller's control.
-        under_your_control: false,
+        enters_under: None,
         enter_tapped: false,
         enters_attacking: false,
         up_to: false,
@@ -3450,6 +3568,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_cumulative_upkeep(face);
     // CR 702.175a: Offspring — optional additional cost + ETB 1/1 copy trigger.
     synthesize_offspring(face);
+    // CR 702.157a: Squad — repeatable optional additional cost + ETB copy trigger.
+    synthesize_squad(face);
     // CR 702.123a: Fabricate N — ETB trigger with controller-chosen branch
     // between N +1/+1 counters or N 1/1 colorless Servo artifact creature
     // tokens. Modeled via `Effect::ChooseOneOf`.
@@ -3598,7 +3718,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -4044,6 +4164,7 @@ mod kicker_synthesis_tests {
                 modal: Some(crate::types::ability::ModalChoice {
                     constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
                         condition: ModalSelectionCondition::AdditionalCostPaid {
+                            source: AdditionalCostPaymentSource::Kicker,
                             variant: None,
                             kicker_cost: Some(ManaCost::Cost {
                                 generic: 1,
@@ -4080,6 +4201,7 @@ mod kicker_synthesis_tests {
         assert!(matches!(
             condition,
             ModalSelectionCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::Kicker,
                 variant: Some(KickerVariant::Second),
                 kicker_cost: None,
                 min_count: 1
@@ -4106,7 +4228,10 @@ mod buyback_synthesis_tests {
         synthesize_buyback(&mut face);
 
         match face.additional_cost.expect("additional_cost set") {
-            AdditionalCost::Optional(AbilityCost::Mana { cost }) => {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Mana { cost },
+                repeatable: false,
+            } => {
                 assert!(matches!(
                     cost,
                     ManaCost::Cost {
@@ -4135,7 +4260,10 @@ mod buyback_synthesis_tests {
         synthesize_buyback(&mut face);
 
         match face.additional_cost.expect("additional_cost set") {
-            AdditionalCost::Optional(cost) => assert_eq!(cost, sac_cost),
+            AdditionalCost::Optional {
+                cost,
+                repeatable: false,
+            } => assert_eq!(cost, sac_cost),
             other => panic!("expected Optional(Sacrifice), got {other:?}"),
         }
     }
@@ -4203,7 +4331,10 @@ mod bargain_synthesis_tests {
         synthesize_bargain(&mut face);
 
         match face.additional_cost.expect("additional_cost set") {
-            AdditionalCost::Optional(AbilityCost::Sacrifice { target, count }) => {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Sacrifice { target, count },
+                repeatable: false,
+            } => {
                 assert_eq!(count, 1);
                 let TargetFilter::Or { filters } = target else {
                     panic!("expected artifact/enchantment/token disjunction, got {target:?}");
@@ -5017,7 +5148,7 @@ mod undying_persist_synthesis_tests {
             origin,
             destination,
             target,
-            under_your_control,
+            enters_under,
             enter_with_counters,
             ..
         } = &*execute.effect
@@ -5029,7 +5160,7 @@ mod undying_persist_synthesis_tests {
         assert!(matches!(target, TargetFilter::SelfRef));
         // CR 702.93a: "under its owner's control" — default routing (no
         // override) places the object under its owner.
-        assert!(!*under_your_control);
+        assert_eq!(*enters_under, None);
         assert_eq!(enter_with_counters.len(), 1);
         let (ct, qty) = &enter_with_counters[0];
         assert_eq!(ct, &CounterType::Plus1Plus1);
@@ -5426,30 +5557,31 @@ mod undying_persist_runtime_tests {
     /// the routing implicitly depends on, instead of poking `obj.controller`
     /// directly.
     ///
-    /// Discrimination mechanism (`under_your_control: false` vs a
-    /// `true`-regression): when the creature dies, `apply_zone_exit_cleanup`
-    /// (`zones.rs`) prunes the `SpecificObject`-bound control effect via
-    /// `prune_affected_object_left_effects` regardless of duration, but does
-    /// NOT reset `obj.controller` — only `reset_for_battlefield_exit` resets
-    /// `base_controller`. So the graveyard object still reads
-    /// `controller = P1`, and the dies-trigger captures
-    /// `ability.controller = P1`. With `under_your_control: false`,
+    /// Discrimination mechanism (`enters_under: None` vs a
+    /// `Some(ControllerRef::You)`-regression): when the creature dies,
+    /// `apply_zone_exit_cleanup` (`zones.rs`) prunes the `SpecificObject`-
+    /// bound control effect via `prune_affected_object_left_effects` regardless
+    /// of duration, but does NOT reset `obj.controller` — only
+    /// `reset_for_battlefield_exit` resets `base_controller`. So the graveyard
+    /// object still reads `controller = P1`, and the dies-trigger captures
+    /// `ability.controller = P1`. With `enters_under: None`,
     /// `ctrl_override = None` → `reset_for_battlefield_entry` sets
     /// `controller`/`base_controller` to the owner → Layer 2 yields P0
-    /// (test passes). With a `true`-regression,
+    /// (test passes). With a `Some(ControllerRef::You)`-regression,
     /// `apply_battlefield_entry_controller_override` writes
     /// `base_controller = Some(P1)`, which Layer 2 preserves → P1 (test fails).
     /// The mutation check (flipping the synthesized Persist trigger's
-    /// `under_your_control` to `true`) was performed during implementation and
-    /// confirmed to make this test fail — proof the assertion discriminates.
+    /// `enters_under` to `Some(ControllerRef::You)`) was performed during
+    /// implementation and confirmed to make this test fail — proof the
+    /// assertion discriminates.
     ///
     /// The post-return lookup uses `state.objects.get(&obj_id)` directly:
     /// Persist's return does not create a new object — `move_to_zone` mutates
     /// the existing `GameObject` in place, keeping the same `ObjectId` across
     /// Battlefield→Graveyard→Battlefield.
     ///
-    /// This pins the `under_your_control: false` field's "send to owner"
-    /// semantics: without it, a control-grab would steal the Persist /
+    /// This pins the `enters_under: None` field's "send to owner" semantics
+    /// (CR 110.2a): without it, a control-grab would steal the Persist /
     /// Undying creature permanently on death.
     #[test]
     fn persist_returns_under_owner_not_controller_after_control_grab() {
@@ -5510,7 +5642,7 @@ mod undying_persist_runtime_tests {
             "persist returns the permanent to the battlefield"
         );
         // CR 702.79a "under its owner's control" — owner wins over the
-        // pre-death controller. `under_your_control: false` on the
+        // pre-death controller. `enters_under: None` on the
         // `Effect::ChangeZone` causes `move_to_zone` not to write any
         // controller override; CR 613.1b then resets controller to owner
         // during the next layers pass.
@@ -8566,7 +8698,10 @@ mod offspring_synthesis_tests {
 
         // Part 1: additional_cost is Optional(Mana { offspring_cost })
         match face.additional_cost.as_ref().expect("additional_cost set") {
-            AdditionalCost::Optional(AbilityCost::Mana { cost }) => {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Mana { cost },
+                repeatable: false,
+            } => {
                 assert_eq!(*cost, offspring_cost);
             }
             other => panic!("expected Optional(Mana), got {other:?}"),
@@ -8653,6 +8788,119 @@ mod offspring_synthesis_tests {
         assert_eq!(face.additional_cost, Some(existing));
         // Trigger is still synthesized
         assert_eq!(face.triggers.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod squad_synthesis_tests {
+    use super::*;
+    use crate::types::mana::ManaCostShard;
+
+    /// CR 702.157a: Squad synthesizes a repeatable optional additional cost and
+    /// an ETB trigger whose copy count is the number of squad payments.
+    #[test]
+    fn synthesize_squad_sets_repeatable_cost_and_payment_count_copy_trigger() {
+        let squad_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White],
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Squad(squad_cost.clone())],
+            ..CardFace::default()
+        };
+
+        synthesize_squad(&mut face);
+
+        match face.additional_cost.as_ref().expect("additional_cost set") {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Mana { cost },
+                repeatable: true,
+            } => {
+                assert_eq!(cost, &squad_cost);
+            }
+            other => panic!("expected repeatable additional cost, got {other:?}"),
+        }
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+                    && matches!(
+                        t.condition,
+                        Some(TriggerCondition::AdditionalCostPaid { .. })
+                    )
+            })
+            .expect("squad ETB trigger");
+        let effect = &trigger.execute.as_ref().expect("execute body").effect;
+        match &**effect {
+            Effect::CopyTokenOf { target, count, .. } => {
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::AdditionalCostPaymentCount
+                    }
+                ));
+            }
+            other => panic!("expected CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthesize_squad_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Squad(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })],
+            ..CardFace::default()
+        };
+
+        synthesize_squad(&mut face);
+        let first_cost = face.additional_cost.clone();
+        let first_trigger_count = face.triggers.len();
+        synthesize_squad(&mut face);
+
+        assert_eq!(face.additional_cost, first_cost);
+        assert_eq!(face.triggers.len(), first_trigger_count);
+    }
+
+    #[test]
+    fn synthesize_squad_defers_multiple_instances() {
+        let mut face = CardFace {
+            keywords: vec![
+                Keyword::Squad(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![],
+                }),
+                Keyword::Squad(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                }),
+            ],
+            ..CardFace::default()
+        };
+
+        synthesize_squad(&mut face);
+        synthesize_squad(&mut face);
+
+        assert!(face.additional_cost.is_none());
+        assert!(face.triggers.is_empty());
+        assert_eq!(
+            face.abilities
+                .iter()
+                .filter(|ability| {
+                    matches!(
+                        &*ability.effect,
+                        Effect::Unimplemented { name, .. }
+                            if name == "squad_multiple_instances"
+                    )
+                })
+                .count(),
+            1
+        );
     }
 }
 

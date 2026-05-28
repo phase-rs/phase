@@ -32,16 +32,34 @@ interface SeatBadgeProps {
 function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
   const { t } = useTranslation("draft");
   const botLabel = t("lobby.botSeat");
-  const borderColor = isLocal
-    ? "border-emerald-400/40"
-    : PICK_STATUS_BORDER[seat.pick_status];
+  // Disconnected humans get a red border that overrides the pick-status colour.
+  // Bots are always "connected" by construction so we ignore the field for them.
+  const showDisconnected = !seat.is_bot && !seat.connected;
+  const borderColor = showDisconnected
+    ? "border-rose-400/50"
+    : isLocal
+      ? "border-emerald-400/40"
+      : PICK_STATUS_BORDER[seat.pick_status];
 
   return (
     <div
       className={`flex items-center gap-1.5 rounded-[12px] border bg-black/18 px-2 py-1 backdrop-blur-md ${borderColor}`}
     >
-      <div className={`h-1.5 w-1.5 rounded-full ${PICK_STATUS_DOT[seat.pick_status]}`} />
-      <span className="truncate text-xs text-white/70">
+      <div
+        className={`h-1.5 w-1.5 rounded-full ${
+          showDisconnected
+            ? "bg-rose-400"
+            : PICK_STATUS_DOT[seat.pick_status]
+        }`}
+        aria-label={
+          showDisconnected ? t("seat.disconnected") : t("seat.connected")
+        }
+      />
+      <span
+        className={`truncate text-xs ${
+          showDisconnected ? "text-white/40 line-through" : "text-white/70"
+        }`}
+      >
         {seat.display_name || t("seat.label", { number: seat.seat_index + 1 })}
       </span>
       {seat.is_bot && <BotIndicator label={botLabel} size="sm" />}

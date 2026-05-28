@@ -1269,7 +1269,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         enter_transformed: d.transformed,
-                        under_your_control: d.under_your_control,
+                        enters_under: d.enters_under,
                         enter_tapped: d.enter_tapped,
                         enter_with_counters: d.enter_with_counters,
                     })
@@ -1457,7 +1457,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             origin,
             enter_transformed,
-            under_your_control,
+            enters_under,
             enter_tapped,
             enter_with_counters,
         } => Effect::ChangeZone {
@@ -1466,7 +1466,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             owner_library: false,
             enter_transformed,
-            under_your_control,
+            enters_under,
             enter_tapped,
             enters_attacking: false,
             up_to: false,
@@ -1483,7 +1483,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -3290,26 +3290,32 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         }
     }
 
-    if let Some(Effect::ChangeZone {
-        origin,
-        destination,
-        target,
-        under_your_control,
-        enter_tapped,
-        enter_transformed,
-        enters_attacking,
-        enter_with_counters,
-        ..
-    }) = super::try_parse_put_zone_change(lower, text)
+    if let Some((
+        Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+            enter_transformed,
+            enters_attacking,
+            up_to,
+            enter_with_counters,
+            ..
+        },
+        choice_count,
+    )) = super::try_parse_put_zone_change_parts(lower, text)
     {
         return Some(PutImperativeAst::ZoneChange {
             origin,
             destination,
             target,
-            under_your_control,
+            enters_under,
             enter_tapped,
             enter_transformed,
             enters_attacking,
+            up_to,
+            choice_count,
             enter_with_counters,
         });
     }
@@ -3331,10 +3337,12 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             origin,
             destination,
             target,
-            under_your_control,
+            enters_under,
             enter_tapped,
             enter_transformed,
             enters_attacking,
+            up_to,
+            choice_count: _,
             enter_with_counters,
         } => {
             // CR 610.3: Mass filters (ExiledBySource, TrackedSet) act on all matching
@@ -3361,12 +3369,12 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     target,
                     owner_library: false,
                     enter_transformed,
-                    under_your_control,
+                    enters_under,
                     enter_tapped,
                     // CR 508.4: Propagated from the inline-tail patcher in
                     // `try_parse_put_zone_change` (Kaalia / Ilharg class).
                     enters_attacking,
-                    up_to: false,
+                    up_to,
                     enter_with_counters,
                 }
             }
@@ -3768,7 +3776,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 target,
                 owner_library,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -3794,7 +3802,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 target,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -3903,7 +3911,7 @@ pub(super) fn lower_multi_filter_search_library(
         target: TargetFilter::Any,
         owner_library: false,
         enter_transformed: false,
-        under_your_control: false,
+        enters_under: None,
         enter_tapped,
         enters_attacking: false,
         up_to: false,
@@ -5861,6 +5869,34 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
         // Intercepted here (rather than in lower_zone_counter_ast which returns
         // a bare Effect) because the chain requires a sub_ability linkage that
         // only ParsedEffectClause can express.
+        ImperativeFamilyAst::Put(PutImperativeAst::ZoneChange {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+            enter_transformed,
+            enters_attacking,
+            up_to,
+            choice_count: Some(choice_count),
+            enter_with_counters,
+        }) => {
+            let effect = lower_put_ast(PutImperativeAst::ZoneChange {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped,
+                enter_transformed,
+                enters_attacking,
+                up_to,
+                choice_count: Some(choice_count.clone()),
+                enter_with_counters,
+            });
+            let mut clause = parsed_clause(effect);
+            clause.multi_target = Some(choice_count);
+            clause
+        }
         ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::PutCounterList {
             entries,
             target,
@@ -6138,6 +6174,7 @@ pub(super) fn parse_zone_counter_ast(
                 counter_type,
                 count,
                 mode,
+                selection,
                 target,
             },
             _rem,
@@ -6148,6 +6185,7 @@ pub(super) fn parse_zone_counter_ast(
                 counter_type,
                 count,
                 mode,
+                selection,
                 target,
             });
         }
@@ -6226,6 +6264,7 @@ pub(super) fn parse_zone_counter_ast(
             counter_type,
             count,
             mode,
+            selection,
             target,
         }) = try_parse_move_counters_from(lower, ctx)
         {
@@ -6234,6 +6273,7 @@ pub(super) fn parse_zone_counter_ast(
                 counter_type,
                 count,
                 mode,
+                selection,
                 target,
             });
         }
@@ -6279,7 +6319,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     target,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -6380,12 +6420,14 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             counter_type,
             count,
             mode,
+            selection,
             target,
         } => Effect::MoveCounters {
             source,
             counter_type,
             count,
             mode,
+            selection,
             target,
         },
     }

@@ -118,6 +118,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_quantity_quantity_comparison,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
+        parse_card_exiled_with_source_condition,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
@@ -4167,6 +4168,21 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
     ))
 }
 
+fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("a card is "), tag("one or more cards are "))).parse(input)?;
+    let (rest, _) = tag("exiled with ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("~"),
+        tag("it"),
+        tag("this artifact"),
+        tag("this creature"),
+        tag("this land"),
+        tag("this permanent"),
+    ))
+    .parse(rest)?;
+    Ok((rest, make_quantity_ge(QuantityRef::CardsExiledBySource, 1)))
+}
+
 /// Parse "there is a/an X card and a/an Y card in your <zone>" as two
 /// independent zone-count predicates sharing the same zone/scope suffix.
 fn parse_there_exists_compound_zone_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -5610,6 +5626,35 @@ mod tests {
     }
 
     #[test]
+    fn test_control_count_ge_creature_subtype() {
+        let (rest, c) = parse_inner_condition("you control four or more wizards").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(typed),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            } => {
+                assert!(
+                    typed
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Wizard".to_string())),
+                    "expected Wizard subtype filter, got {:?}",
+                    typed.type_filters
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected ObjectCount Wizard GE 4, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_graveyard_count_ge() {
         let (rest, c) =
             parse_inner_condition("you have five or more cards in your graveyard").unwrap();
@@ -5912,6 +5957,23 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 2 },
             } => {}
             other => panic!("expected CardsExiledBySource GE 2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_a_card_is_exiled_with_source() {
+        let (rest, c) = parse_inner_condition("a card is exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected CardsExiledBySource GE 1, got {other:?}"),
         }
     }
 

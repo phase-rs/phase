@@ -7,9 +7,10 @@ use nom::multi::many0;
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, Comparator, ControllerRef, FilterProp, ObjectProperty,
-    ObjectScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter,
-    TargetSelectionMode, TypeFilter, TypedFilter,
+    AggregateFunction, AttachmentKind, CombatRelation, CombatRelationSubject, Comparator,
+    ControllerRef, FilterProp, ObjectProperty, ObjectScope, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1555,6 +1556,11 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    if let Some((prop, consumed)) = parse_combat_relation_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // CR 205.3a: Comma-separated type lists ("artifacts, creatures, and lands") are
     // syntactic sugar for set-union, same as "and" between two types.
     let rest_lower = lower[pos..].trim_start();
@@ -1623,7 +1629,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     }
 
     // Check "with power N or less/greater" suffix
-    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..]) {
+    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
         properties.push(prop);
         pos += consumed;
     }
@@ -2356,6 +2362,22 @@ fn parse_token_suffix(text: &str) -> Option<usize> {
     None
 }
 
+fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>(" blocking or blocked by target "),
+        tag("creature"),
+    )
+        .parse(text)
+        .ok()?;
+    Some((
+        FilterProp::CombatRelation {
+            relation: CombatRelation::BlockingOrBlockedBy,
+            subject: CombatRelationSubject::ParentTarget,
+        },
+        text.len() - rest.len(),
+    ))
+}
+
 /// Parse a color adjective prefix: "white ", "blue ", "black ", "red ", "green ".
 /// Returns (FilterProp::HasColor, bytes consumed including trailing space).
 ///
@@ -2448,7 +2470,7 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
 /// into the byte-offset return contract this call site expects. Used by Arnyn
 /// Deathbloom Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail,
 /// etc.
-fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
+fn parse_power_suffix(text: &str, ctx: &mut ParseContext) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
 
     // CR 509.1b: "with greater power" — relative to the source object. This is
@@ -2456,6 +2478,12 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     // P/T-comparison combinator, so it is handled here.
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("with greater power").parse(trimmed) {
         return Some((FilterProp::PowerGTSource, text.len() - after.len()));
+    }
+
+    if let Some((prop @ FilterProp::PtComparison { .. }, consumed)) =
+        parse_superlative_property_suffix(text, ctx)
+    {
+        return Some((prop, consumed));
     }
 
     // Delegate the full P/T-comparison grammar to the canonical combinator. It
@@ -2466,22 +2494,76 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     Some((prop, text.len() - rest.len()))
 }
 
-/// CR 202.3 + CR 608.2h: Postnominal superlative mana-value qualifier —
-/// "with the greatest|highest mana value among <type-set> <controller> control(s)".
-/// Encoded as `FilterProp::Cmc { EQ, QuantityRef::Aggregate { Max, ManaValue,
-/// <eligible set> } }`, mirroring the library-search path in
+fn superlative_property_filter_prop(
+    function: AggregateFunction,
+    property: ObjectProperty,
+    filter: TargetFilter,
+) -> FilterProp {
+    let value = QuantityExpr::Ref {
+        qty: QuantityRef::Aggregate {
+            function,
+            property,
+            filter,
+        },
+    };
+    match property {
+        ObjectProperty::ManaValue => FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value,
+        },
+        ObjectProperty::Power => FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value,
+        },
+        ObjectProperty::Toughness => FilterProp::PtComparison {
+            stat: PtStat::Toughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value,
+        },
+    }
+}
+
+/// Postnominal superlative qualifier —
+/// "with the greatest|highest <power|toughness|mana value> among <type-set> <controller> control(s)".
+/// Encoded as a dynamic equality comparison against `QuantityRef::Aggregate`,
+/// mirroring the library-search path in
 /// `oracle_effect/search.rs::parse_highest_mana_value_library_suffix`.
 /// The eligible set after "among " is parsed by the authoritative
 /// `parse_type_phrase_with_ctx` combinator (type list + controller suffix).
 /// Returns (FilterProp, bytes consumed from the original text).
-fn parse_superlative_mana_value_suffix(
+fn parse_superlative_property_suffix(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("with the greatest mana value among "),
-        tag::<_, _, OracleError<'_>>("with the highest mana value among "),
+    let (rest, (function, property)) = alt((
+        value(
+            (AggregateFunction::Max, ObjectProperty::Power),
+            tag::<_, _, OracleError<'_>>("with the greatest power among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Power),
+            tag("with the highest power among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Toughness),
+            tag("with the greatest toughness among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Toughness),
+            tag("with the highest toughness among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::ManaValue),
+            tag("with the greatest mana value among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::ManaValue),
+            tag("with the highest mana value among "),
+        ),
     ))
     .parse(trimmed)
     .ok()?;
@@ -2489,16 +2571,7 @@ fn parse_superlative_mana_value_suffix(
     // authoritative type-phrase combinator — it parses the multi-type
     // or/and list, any leading article, and the trailing controller suffix.
     let (eligible, after) = parse_type_phrase_with_ctx(rest, ctx);
-    let prop = FilterProp::Cmc {
-        comparator: Comparator::EQ,
-        value: QuantityExpr::Ref {
-            qty: QuantityRef::Aggregate {
-                function: AggregateFunction::Max,
-                property: ObjectProperty::ManaValue,
-                filter: eligible,
-            },
-        },
-    };
+    let prop = superlative_property_filter_prop(function, property, eligible);
     Some((prop, text.len() - after.len()))
 }
 
@@ -2514,7 +2587,7 @@ pub(crate) fn parse_mana_value_suffix(
     let trimmed = text.trim_start();
     // CR 202.3: try the more specific superlative head ("with the
     // greatest/highest mana value among ...") before the comparator forms.
-    if let Some((prop, consumed)) = parse_superlative_mana_value_suffix(text, ctx) {
+    if let Some((prop, consumed)) = parse_superlative_property_suffix(text, ctx) {
         return Some((prop, consumed));
     }
     if let Some((prop, after)) = parse_relative_mana_value_suffix(trimmed) {
@@ -4446,6 +4519,21 @@ mod tests {
     }
 
     #[test]
+    fn creatures_blocking_or_blocked_by_target_creature() {
+        let (filter, rest) = parse_target("creatures blocking or blocked by target creature");
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockingOrBlockedBy,
+                    subject: CombatRelationSubject::ParentTarget,
+                }
+            ]))
+        );
+    }
+
+    #[test]
     fn random_target_creature_marks_random_mode_on_context() {
         // CR 115.1 + CR 701.9b: "random target X" — the inner filter is parsed
         // exactly as a normal target, but the parse context records that the
@@ -5676,10 +5764,30 @@ mod tests {
     }
 
     #[test]
+    fn creature_you_control_with_exact_base_power() {
+        let (f, rest) = parse_type_phrase("creature you control with base power 1");
+        assert_eq!(rest, "");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Fixed { value: 1 }
+                    }])
+            )
+        );
+    }
+
+    #[test]
     fn creature_with_power_x_or_less() {
         // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
         // `Variable("X")` marker so it can resolve against `chosen_x` at effect time.
-        let (prop, _) = parse_power_suffix("with power x or less").expect("parses");
+        let (prop, _) = parse_power_suffix("with power x or less", &mut ParseContext::default())
+            .expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -5697,7 +5805,8 @@ mod tests {
 
     #[test]
     fn creature_with_power_x_or_greater() {
-        let (prop, _) = parse_power_suffix("with power x or greater").expect("parses");
+        let (prop, _) = parse_power_suffix("with power x or greater", &mut ParseContext::default())
+            .expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -9265,6 +9374,43 @@ mod tests {
             }
             other => panic!("expected Or eligible set, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn superlative_power_suffix_emits_aggregate_pt_comparison() {
+        let mut ctx = ParseContext::default();
+        let input = "with the greatest power among creatures they control";
+        let (prop, consumed) =
+            parse_power_suffix(input, &mut ctx).expect("superlative suffix should parse");
+        assert_eq!(consumed, input.len(), "should consume the whole suffix");
+        let FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } = prop
+        else {
+            panic!("expected FilterProp::PtComparison, got {prop:?}");
+        };
+        assert_eq!(stat, PtStat::Power);
+        assert_eq!(scope, PtValueScope::Current);
+        assert_eq!(comparator, Comparator::EQ);
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } = value
+        else {
+            panic!("expected QuantityRef::Aggregate, got {value:?}");
+        };
+        assert_eq!(function, AggregateFunction::Max);
+        assert_eq!(property, ObjectProperty::Power);
+        let tf = typed_leg(&filter).expect("eligible set should be Typed");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(has_type(tf, TypeFilter::Creature));
     }
 
     /// Issue #463: Soul Shatter's full target phrase must carry the superlative

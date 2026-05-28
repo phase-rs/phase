@@ -356,7 +356,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             origin: Some(Zone::Hand),
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -4050,7 +4050,7 @@ mod tests {
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::replacements::ReplacementEvent;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -4128,6 +4128,28 @@ mod tests {
         assert_eq!(r.abilities.len(), 1, "expected one spell ability");
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
         assert!(matches!(*r.abilities[0].effect, Effect::DealDamage { .. }));
+    }
+
+    #[test]
+    fn mindlock_orb_routes_to_static_search_prohibition() {
+        let r = parse(
+            "Players can't search libraries.",
+            "Mindlock Orb",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(
+            r.abilities.is_empty(),
+            "Mindlock Orb should not emit spell abilities"
+        );
+        assert_eq!(r.statics.len(), 1, "expected one static search prohibition");
+        assert_eq!(
+            r.statics[0].mode,
+            StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::AllPlayers,
+            }
+        );
     }
 
     /// CR 115.1 + CR 701.9b: "random target X" — the parser stamps
@@ -6398,6 +6420,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_ugin_labyrinth_exiled_card_mana_as_delta() {
+        let r = parse(
+            "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n{T}: Add {C}. If a card is exiled with Ugin's Labyrinth, add {C}{C} instead.",
+            "Ugin's Labyrinth",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        match ability.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected base colorless mana, got {other:?}"),
+        }
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional delta");
+        match sub.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected colorless mana delta, got {other:?}"),
+        }
+        match sub.condition.as_ref().expect("expected condition") {
+            AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected exiled-with-source condition, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_compound_activate_only_constraints() {
         let r = parse(
             "{T}: Add {R}. Activate only as a sorcery and only once each turn.",
@@ -7033,6 +7097,7 @@ mod tests {
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -7061,6 +7126,7 @@ mod tests {
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Any,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -10586,7 +10652,10 @@ mod tests {
             .iter()
             .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
         assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(r.statics[0].active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            r.statics[0].active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
         assert!(
             r.parse_warnings
                 .iter()
@@ -11624,9 +11693,10 @@ mod tests {
 
         assert_eq!(
             result.additional_cost,
-            Some(AdditionalCost::Optional(AbilityCost::CollectEvidence {
-                amount: 8,
-            }))
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::CollectEvidence { amount: 8 },
+                repeatable: false,
+            })
         );
         assert_eq!(result.abilities.len(), 1);
         let ability = &result.abilities[0];

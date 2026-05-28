@@ -56,7 +56,9 @@
   "seat": {
     "label": "Siège {{number}}",
     "passingLeft": "→ Passage à gauche →",
-    "passingRight": "← Passage à droite ←"
+    "passingRight": "← Passage à droite ←",
+    "connected": "Connected",
+    "disconnected": "Disconnected"
   },
   "setSelector": {
     "botDifficulty": "Difficulté des bots",
@@ -281,7 +283,12 @@
     "reviewPool": "Examiner le pool",
     "roundComplete": "Manche terminée",
     "waitingNextRound": "En attente que l'hôte démarre la manche suivante...",
-    "nextRoundShortly": "La manche suivante commence bientôt..."
+    "nextRoundShortly": "La manche suivante commence bientôt...",
+    "pauseReason": {
+      "PlayerDisconnected": "Draft paused — a player disconnected.",
+      "PausedByHost": "Draft paused by host.",
+      "DisconnectGraceExpired": "A player did not return in time."
+    }
   },
   "betweenGames": {
     "game": "Partie {{number}}",

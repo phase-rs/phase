@@ -861,7 +861,7 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
         // dragon-reveal kicker, blight, behold, etc.
         || matches!(
             parsed.additional_cost,
-            Some(crate::types::ability::AdditionalCost::Optional(_)
+            Some(crate::types::ability::AdditionalCost::Optional { .. }
                 | crate::types::ability::AdditionalCost::Kicker { .. }
                 | crate::types::ability::AdditionalCost::Choice(_, _))
         )

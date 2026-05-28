@@ -381,7 +381,7 @@ pub enum GameEvent {
         dropped: Vec<ObjectId>,
     },
     BecomesTarget {
-        object_id: ObjectId,
+        target: TargetRef,
         source_id: ObjectId,
     },
     /// CR 702.122d: A Vehicle's crew ability resolved.

@@ -1995,20 +1995,20 @@ fn apply_action(
             &chosen,
             &mut events,
         )?,
-        // CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Player selected battlefield
-        // permanent(s) to exile as a mana ability cost (Food Chain class).
+        // CR 117.1 + CR 118.3 + CR 605.3b + CR 400.7j: Player selected
+        // object(s) to exile as a mana ability cost.
         (
-            WaitingFor::ExileFromBattlefieldForManaAbility {
+            WaitingFor::ExileForManaAbility {
                 count,
-                permanents,
+                cards,
                 pending_mana_ability,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => super::mana_abilities::handle_exile_from_battlefield_for_mana_ability(
+        ) => super::mana_abilities::handle_exile_for_mana_ability(
             state,
             *count,
-            permanents,
+            cards,
             pending_mana_ability,
             &chosen,
             &mut events,
@@ -3944,6 +3944,35 @@ fn apply_action(
                 state.waiting_for.clone()
             }
         }
+        (
+            WaitingFor::MoveCountersDistribution {
+                player,
+                source_id,
+                available,
+                destinations,
+                pending_effect,
+                ..
+            },
+            GameAction::ChooseCounterMoveDistribution { selections },
+        ) => {
+            let p = *player;
+            effects::counters::validate_and_queue_counter_move_distribution(
+                state,
+                &selections,
+                *source_id,
+                available,
+                destinations,
+                pending_effect,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            effects::counters::drain_pending_counter_moves(state, &mut events);
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                effects::drain_pending_continuation(state, &mut events);
+            }
+            state.waiting_for.clone()
+        }
         // CR 115.7: Retarget a spell or ability on the stack via the dialog
         // path — the multi-target (`All`-scope) UI submits every new target at
         // once.
@@ -4104,22 +4133,39 @@ pub(super) fn begin_pending_trigger_target_selection(
     // CR 700.2b: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
+            let player = trigger.controller;
+            let source_id = trigger.source_id;
+            let mode_abilities = trigger.mode_abilities.clone();
+            let trigger_event = trigger.trigger_event.clone();
+            let trigger_events = if state.pending_trigger_event_batch.is_empty() {
+                trigger_event.iter().cloned().collect::<Vec<_>>()
+            } else {
+                state.pending_trigger_event_batch.clone()
+            };
+            let subject_match_count = trigger.subject_match_count;
             let modal = modal_choice_for_player(
                 state,
-                trigger.controller,
-                trigger.source_id,
+                player,
+                source_id,
                 modal,
                 &crate::types::ability::SpellContext::default(),
             );
-            let mut unavailable_modes = compute_unavailable_modes(state, trigger.source_id, &modal);
+            let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+            let context_snapshot = super::triggers::push_trigger_event_context(
+                state,
+                trigger_event.as_ref(),
+                &trigger_events,
+                subject_match_count,
+            );
             super::ability_utils::filter_modes_by_target_legality(
                 state,
-                trigger.source_id,
-                trigger.controller,
-                &trigger.mode_abilities,
+                source_id,
+                player,
+                &mode_abilities,
                 &modal,
                 &mut unavailable_modes,
             );
+            super::triggers::restore_trigger_event_context(state, context_snapshot);
 
             // CR 700.2b: All modes unavailable (previously chosen OR no legal
             // targets) — ability cannot be put on the stack. Clear pending
@@ -4130,10 +4176,10 @@ pub(super) fn begin_pending_trigger_target_selection(
             }
 
             return Ok(Some(WaitingFor::AbilityModeChoice {
-                player: trigger.controller,
+                player,
                 modal,
-                source_id: trigger.source_id,
-                mode_abilities: trigger.mode_abilities.clone(),
+                source_id,
+                mode_abilities,
                 is_activated: false,
                 ability_index: None,
                 ability_cost: None,
@@ -4142,26 +4188,42 @@ pub(super) fn begin_pending_trigger_target_selection(
         }
     }
 
-    let target_slots = build_target_slots(state, &trigger.ability)?;
-    if target_slots.is_empty() {
-        return Ok(None);
-    }
-
+    let ability = trigger.ability.clone();
     let player = trigger.controller;
+    let source_id = trigger.source_id;
     let target_constraints = trigger.target_constraints.clone();
-    let selection = begin_target_selection_for_ability(
+    let description = trigger.description.clone();
+    let trigger_event = trigger.trigger_event.clone();
+    let trigger_events = if state.pending_trigger_event_batch.is_empty() {
+        trigger_event.iter().cloned().collect::<Vec<_>>()
+    } else {
+        state.pending_trigger_event_batch.clone()
+    };
+    let subject_match_count = trigger.subject_match_count;
+    let context_snapshot = super::triggers::push_trigger_event_context(
         state,
-        &trigger.ability,
-        &target_slots,
-        &target_constraints,
-    )?;
+        trigger_event.as_ref(),
+        &trigger_events,
+        subject_match_count,
+    );
+    let selection_result = build_target_slots(state, &ability).and_then(|target_slots| {
+        if target_slots.is_empty() {
+            return Ok(None);
+        }
+        begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
+            .map(|selection| Some((target_slots, selection)))
+    });
+    super::triggers::restore_trigger_event_context(state, context_snapshot);
+    let Some((target_slots, selection)) = selection_result? else {
+        return Ok(None);
+    };
     Ok(Some(WaitingFor::TriggerTargetSelection {
         player,
         target_slots,
         target_constraints,
         selection,
-        source_id: Some(trigger.source_id),
-        description: trigger.description.clone(),
+        source_id: Some(source_id),
+        description,
     }))
 }
 
@@ -4228,6 +4290,12 @@ fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>)
         return;
     };
     state.exile_play_permissions_used.insert(source_id);
+}
+
+fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.played_from_zone = Some(zone);
+    }
 }
 
 fn handle_play_land(
@@ -4447,6 +4515,7 @@ fn handle_play_land(
             } = event
             {
                 zones::move_to_zone(state, object_id, to, events);
+                mark_land_played_from_zone(state, object_id, origin_zone);
                 // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
                 // defaults. Override only when the replacement pipeline changed them.
                 if let Some(obj) = state.objects.get_mut(&object_id) {
@@ -4497,6 +4566,7 @@ fn handle_play_land(
                     )
                 {
                     state.lands_played_this_turn += 1;
+                    mark_land_played_from_zone(state, object_id, origin_zone);
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     record_exile_play_permission(state, exile_permission_source);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
@@ -4524,6 +4594,7 @@ fn handle_play_land(
             // Increment counters now — the land play is committed, only the ETB
             // effect is pending.
             state.lands_played_this_turn += 1;
+            mark_land_played_from_zone(state, object_id, origin_zone);
             // CR 604.2: Record once-per-turn graveyard play permission usage.
             record_graveyard_play_permission(state, gy_permission_source, object_id);
             record_exile_play_permission(state, exile_permission_source);
@@ -4547,6 +4618,7 @@ fn handle_play_land(
 
     // Increment land counter
     state.lands_played_this_turn += 1;
+    mark_land_played_from_zone(state, object_id, origin_zone);
     // CR 604.2: Record once-per-turn graveyard play permission usage.
     record_graveyard_play_permission(state, gy_permission_source, object_id);
     record_exile_play_permission(state, exile_permission_source);
@@ -6074,6 +6146,411 @@ mod tests {
             Zone::Graveyard,
             "Chalice trigger should counter the matching spell"
         );
+    }
+
+    /// CR 107.3m + CR 614.1c + CR 704.5f: Walking Ballista is the canonical
+    /// 0/0 X-cost creature with "enters with X +1/+1 counters." Casting with
+    /// X=4 must (a) stamp `cost_x_paid = Some(4)` during `finalize_cast`,
+    /// (b) let the ETB replacement read it via `QuantityRef::CostXPaid`,
+    /// (c) put 4 +1/+1 counters on the entering Ballista BEFORE SBAs run,
+    /// (d) leave a live 4/4 on the battlefield (counters set P/T to 4/4
+    /// before the 0/0 SBA would otherwise put it in the graveyard).
+    #[test]
+    fn walking_ballista_enters_with_x_counters_and_survives_zero_zero_sba() {
+        let mut state = setup_game_at_main_phase();
+        let ballista = create_object(
+            &mut state,
+            CardId(9130),
+            PlayerId(0),
+            "Walking Ballista".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&ballista).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Construct".to_string());
+            obj.power = Some(0);
+            obj.toughness = Some(0);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            };
+        }
+        apply_oracle_to_object(
+            &mut state,
+            ballista,
+            "Walking Ballista",
+            "Walking Ballista enters with X +1/+1 counters on it.\n{4}: Put a +1/+1 counter on this creature.\nRemove a +1/+1 counter from this creature: It deals 1 damage to any target.",
+        );
+        // Pay 2X = 8 colorless mana for X = 4.
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..8 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: ballista,
+                card_id: CardId(9130),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 4 }).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        // CR 614.1c: counters land before CR 704.5f checks 0 toughness, so
+        // the Ballista must be alive on the battlefield, not in the graveyard.
+        assert_eq!(
+            state.objects[&ballista].zone,
+            Zone::Battlefield,
+            "Walking Ballista must enter and survive — counters land before 0/0 SBA (CR 614.1c + CR 704.5f). \
+             Got zone {:?}, cost_x_paid={:?}, counters={:?}",
+            state.objects[&ballista].zone,
+            state.objects[&ballista].cost_x_paid,
+            state.objects[&ballista].counters,
+        );
+        assert_eq!(
+            state.objects[&ballista]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            4,
+            "Walking Ballista must enter with X=4 +1/+1 counters"
+        );
+    }
+
+    /// CR 107.3m + CR 614.1c: Production-path variant of the Walking Ballista
+    /// test. Loads the card face from the live `client/public/card-data.json`
+    /// export and hydrates the object via `create_object_from_card_face`
+    /// (the same path used by deck loading at game start). The earlier
+    /// test exercises `apply_oracle_to_object` (re-parses oracle text at test
+    /// time); this one exercises the same JSON hydration path the running
+    /// game uses, so any divergence between "parsed at test time" and
+    /// "loaded from card-data.json" shows up as a test failure here.
+    #[test]
+    fn walking_ballista_db_load_path_enters_with_x_counters() {
+        use crate::database::CardDatabase;
+        use crate::game::deck_loading::create_object_from_card_face;
+        use std::path::Path;
+
+        let path = Path::new("../../client/public/card-data.json");
+        if !path.exists() {
+            // Card-data export missing in this build context (e.g. fresh
+            // clone before `gen-card-data.sh` runs). Skip rather than fail.
+            eprintln!("skipping: {} missing", path.display());
+            return;
+        }
+        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let face = db
+            .get_face_by_name("Walking Ballista")
+            .expect("Walking Ballista must be in the export")
+            .clone();
+
+        let mut state = setup_game_at_main_phase();
+        let ballista = create_object_from_card_face(&mut state, &face, PlayerId(0));
+        // Move the just-loaded object from Library to Hand so we can cast.
+        state.objects.get_mut(&ballista).unwrap().zone = Zone::Hand;
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == PlayerId(0)) {
+            player.library.retain(|id| *id != ballista);
+            player.hand.push_back(ballista);
+        }
+
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..8 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        let card_id = state.objects[&ballista].card_id;
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: ballista,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 4 }).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert_eq!(
+            state.objects[&ballista].zone,
+            Zone::Battlefield,
+            "DB-loaded Walking Ballista with X=4 must survive 0/0 SBA. \
+             cost_x_paid={:?}, counters={:?}, replacements={:?}",
+            state.objects[&ballista].cost_x_paid,
+            state.objects[&ballista].counters,
+            state.objects[&ballista]
+                .replacement_definitions
+                .0
+                .iter()
+                .map(|r| (r.event.to_string(), r.description.clone()))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            state.objects[&ballista]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            4,
+            "Walking Ballista must enter with X=4 +1/+1 counters (DB-load path)"
+        );
+    }
+
+    /// CR 603.6c + CR 614.1c: Cathars' Crusade triggers on any creature you
+    /// control entering. Its `PutCounterAll` effect must distribute one
+    /// +1/+1 counter to *every* creature its controller controls — including
+    /// the entering creature and every previously-existing creature. A
+    /// regression where the resolver only hits the entering creature would
+    /// catastrophically nerf the card.
+    #[test]
+    fn cathars_crusade_puts_one_counter_on_each_creature_you_control_on_etb() {
+        let mut state = setup_game_at_main_phase();
+        let crusade = create_object(
+            &mut state,
+            CardId(9150),
+            PlayerId(0),
+            "Cathars' Crusade".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&crusade).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+        }
+        apply_oracle_to_object(
+            &mut state,
+            crusade,
+            "Cathars' Crusade",
+            "Whenever a creature you control enters, put a +1/+1 counter on each creature you control.",
+        );
+        // Two existing creatures on the battlefield (no summoning sickness needed
+        // since we never attack — the test only inspects counter counts).
+        let existing_a = create_object(
+            &mut state,
+            CardId(9151),
+            PlayerId(0),
+            "Existing Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let existing_b = create_object(
+            &mut state,
+            CardId(9152),
+            PlayerId(0),
+            "Existing Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [existing_a, existing_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        // Cast a vanilla 2/2 from hand. Cathars' Crusade's trigger should
+        // fire on its ETB and place one counter on all three creatures.
+        let entering = create_object(
+            &mut state,
+            CardId(9153),
+            PlayerId(0),
+            "Entering Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&entering).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..2 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: entering,
+                card_id: CardId(9153),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        // Resolve the spell + Cathars' Crusade trigger.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        for (id, label) in [
+            (entering, "entering creature"),
+            (existing_a, "existing creature A"),
+            (existing_b, "existing creature B"),
+        ] {
+            let n = state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default();
+            assert_eq!(
+                n, 1,
+                "Cathars' Crusade must place one +1/+1 counter on every creature you control, \
+                 not just the entering creature. {label} has {n} counters."
+            );
+        }
+    }
+
+    /// Production-path Cathars' Crusade: load via `CardDatabase::from_export`
+    /// and `create_object_from_card_face` (the deck-loading path). Verifies
+    /// the resolver iterates all creatures-you-control, not just the
+    /// triggering entry.
+    #[test]
+    fn cathars_crusade_db_load_path_puts_counter_on_each_creature_you_control() {
+        use crate::database::CardDatabase;
+        use crate::game::deck_loading::create_object_from_card_face;
+        use std::path::Path;
+
+        let path = Path::new("../../client/public/card-data.json");
+        if !path.exists() {
+            eprintln!("skipping: {} missing", path.display());
+            return;
+        }
+        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let crusade_face = db
+            .get_face_by_name("Cathars' Crusade")
+            .expect("Cathars' Crusade must be in the export")
+            .clone();
+
+        let mut state = setup_game_at_main_phase();
+        let crusade = create_object_from_card_face(&mut state, &crusade_face, PlayerId(0));
+        // CR 400.7: The deck-load path puts the object in `Zone::Library`.
+        // Direct field mutation would leave `state.battlefield` (a separate
+        // list) un-updated; the proper transition runs `move_to_zone` so
+        // the battlefield index, layer dirty flag, and trigger matchers
+        // all see the object. Use a discardable scratch event vec since
+        // the test only inspects post-move state.
+        {
+            let mut scratch_events = Vec::new();
+            super::zones::move_to_zone(&mut state, crusade, Zone::Battlefield, &mut scratch_events);
+        }
+
+        // Two pre-existing controlled creatures + an entering creature.
+        let existing_a = create_object(
+            &mut state,
+            CardId(9160),
+            PlayerId(0),
+            "Existing Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let existing_b = create_object(
+            &mut state,
+            CardId(9161),
+            PlayerId(0),
+            "Existing Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [existing_a, existing_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        let entering = create_object(
+            &mut state,
+            CardId(9162),
+            PlayerId(0),
+            "Entering Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&entering).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..2 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: entering,
+                card_id: CardId(9162),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        // Resolve creature + Cathars' Crusade trigger.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        for (id, label) in [
+            (entering, "entering creature"),
+            (existing_a, "existing creature A"),
+            (existing_b, "existing creature B"),
+        ] {
+            let n = state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default();
+            assert_eq!(
+                n, 1,
+                "Cathars' Crusade (DB-load path) must place a +1/+1 counter on every \
+                 creature you control. {label} has {n} counters."
+            );
+        }
     }
 
     #[test]
@@ -11468,7 +11945,7 @@ mod trigger_target_tests {
                 ),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -11567,7 +12044,7 @@ mod trigger_target_tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -12424,7 +12901,7 @@ mod exile_return_tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -13084,7 +13561,7 @@ mod phase_trigger_regression_tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -14591,7 +15068,7 @@ mod phase_trigger_regression_tests {
             destination: None,
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -14624,6 +15101,63 @@ mod phase_trigger_regression_tests {
     }
 
     #[test]
+    fn effect_zone_choice_handler_resolves_untap_selection() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let chosen_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chosen Land".to_string(),
+            Zone::Battlefield,
+        );
+        let unchosen_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unchosen Land".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [chosen_land, unchosen_land] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.tapped = true;
+        }
+
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![chosen_land, unchosen_land],
+            count: 2,
+            min_count: 0,
+            up_to: true,
+            source_id,
+            effect_kind: EffectKind::Untap,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            count_param: 0,
+        };
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![chosen_land],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!state.objects[&chosen_land].tapped);
+        assert!(state.objects[&unchosen_land].tapped);
+        assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
     fn effect_zone_choice_up_to_respects_min_count() {
         let mut state = setup_game_at_main_phase();
         let source_id = ObjectId(100);
@@ -14646,7 +15180,7 @@ mod phase_trigger_regression_tests {
             destination: None,
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -15750,7 +16284,7 @@ mod phase_trigger_regression_tests {
                     target: TargetFilter::ParentTarget,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -15940,7 +16474,7 @@ mod phase_trigger_regression_tests {
                         target: TargetFilter::ParentTarget,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,

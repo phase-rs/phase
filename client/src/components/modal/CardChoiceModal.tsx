@@ -30,6 +30,7 @@ import {
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
 import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
+import { MoveCountersDistributionModal } from "./MoveCountersDistributionModal.tsx";
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
@@ -48,7 +49,7 @@ type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
 type SacrificeForCost = Extract<WaitingFor, { type: "SacrificeForCost" }>;
 type SacrificeForManaAbility = Extract<WaitingFor, { type: "SacrificeForManaAbility" }>;
 type DiscardForManaAbility = Extract<WaitingFor, { type: "DiscardForManaAbility" }>;
-type ExileFromBattlefieldForManaAbility = Extract<WaitingFor, { type: "ExileFromBattlefieldForManaAbility" }>;
+type ExileForManaAbility = Extract<WaitingFor, { type: "ExileForManaAbility" }>;
 type MultiTargetSelection = Extract<WaitingFor, { type: "MultiTargetSelection" }>;
 type ParadigmCastOffer = Extract<WaitingFor, { type: "ParadigmCastOffer" }>;
 type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
@@ -230,9 +231,9 @@ export function CardChoiceModal() {
     case "DiscardForManaAbility":
       if (!canActForWaitingState) return null;
       return <DiscardModal data={waitingFor.data} title={t("cardChoice.discard.titleManaAbility")} />;
-    case "ExileFromBattlefieldForManaAbility":
+    case "ExileForManaAbility":
       if (!canActForWaitingState) return null;
-      return <ExileFromBattlefieldForManaAbilityModal data={waitingFor.data} />;
+      return <ExileForManaAbilityModal data={waitingFor.data} />;
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
       return <MultiTargetSelectionModal data={waitingFor.data} />;
@@ -311,6 +312,9 @@ export function CardChoiceModal() {
     case "DistributeAmong":
       if (!canActForWaitingState) return null;
       return <DistributeAmongModal data={waitingFor.data} />;
+    case "MoveCountersDistribution":
+      if (!canActForWaitingState) return null;
+      return <MoveCountersDistributionModal data={waitingFor.data} />;
     case "RetargetChoice":
       if (!canActForWaitingState) return null;
       // CR 115.7: Single-target retargets are picked directly on the board via
@@ -1554,9 +1558,9 @@ function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility[
   );
 }
 
-// ── Exile From Battlefield For Mana Ability Modal ─────────────────────────────
+// ── Exile For Mana Ability Modal ──────────────────────────────────────────────
 
-function ExileFromBattlefieldForManaAbilityModal({ data }: { data: ExileFromBattlefieldForManaAbility["data"] }) {
+function ExileForManaAbilityModal({ data }: { data: ExileForManaAbility["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -1582,15 +1586,16 @@ function ExileFromBattlefieldForManaAbilityModal({ data }: { data: ExileFromBatt
   if (!objects) return null;
 
   const isReady = selected.size === data.count;
+  const sourceLabel = t(`cardChoice.exileForManaAbility.sources.${data.zone}`);
 
   return (
     <ChoiceOverlay
-      title={t("cardChoice.exileBattlefield.title")}
-      subtitle={t("cardChoice.exileBattlefield.subtitle", { count: data.count })}
+      title={t("cardChoice.exileForManaAbility.title")}
+      subtitle={t("cardChoice.exileForManaAbility.subtitle", { count: data.count, source: sourceLabel })}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.exileCount", { selected: selected.size, count: data.count })} />}
     >
       <ScrollableCardStrip>
-        {data.permanents.map((id, index) => {
+        {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           const isSelected = selected.has(id);
@@ -1790,7 +1795,7 @@ function PermanentCostModal({
     | SacrificeForCost["data"]
     | ReturnToHandForCost["data"]
     | RemoveCounterForCost["data"]
-    | ExileFromBattlefieldForManaAbility["data"]
+    | ExileForManaAbility["data"]
     | SacrificeForManaAbility["data"];
   choices: ObjectId[];
   title: string;

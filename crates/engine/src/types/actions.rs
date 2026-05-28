@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
-    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, ShardChoice,
+    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterMoveChoice,
+    ShardChoice,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -516,6 +517,10 @@ pub enum GameAction {
     /// CR 601.2d: Distribute N among targets at casting time.
     DistributeAmong {
         distribution: Vec<(TargetRef, u32)>,
+    },
+    /// CR 122.5 + CR 608.2d: Submit resolution-time counter-move distribution.
+    ChooseCounterMoveDistribution {
+        selections: Vec<CounterMoveChoice>,
     },
     /// CR 107.1c + CR 107.14: Submit the chosen amount for a
     /// `WaitingFor::PayAmountChoice` prompt ("pay any amount of {E}" and
@@ -1147,6 +1152,7 @@ impl GameAction {
             | GameAction::SetPhaseStops { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::DistributeAmong { .. }
+            | GameAction::ChooseCounterMoveDistribution { .. }
             | GameAction::SubmitPayAmount { .. }
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }

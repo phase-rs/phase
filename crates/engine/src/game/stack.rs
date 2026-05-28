@@ -446,6 +446,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         .map(|o| o.kickers_paid.clone())
                         .unwrap_or_default()
                 });
+            let additional_cost_payment_count = ability
+                .as_ref()
+                .map(|a| a.context.additional_cost_payment_count)
+                .unwrap_or_else(|| {
+                    state
+                        .objects
+                        .get(&entry.id)
+                        .map(|o| o.additional_cost_payment_count)
+                        .unwrap_or_default()
+                });
             let cast_timing_permission = state
                 .objects
                 .get(&entry.id)
@@ -547,6 +557,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             // — because placeholder permanent spells have
                             // `ability == None` and would otherwise lose the data.
                             obj.kickers_paid = kickers_paid;
+                            obj.additional_cost_payment_count = additional_cost_payment_count;
                         }
                         if let Some(exiled_id) = ability
                             .as_ref()
@@ -632,6 +643,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 .map(|o| o.kickers_paid.clone())
                                 .unwrap_or_default()
                         });
+                    let additional_cost_payment_count = ability
+                        .as_ref()
+                        .map(|a| a.context.additional_cost_payment_count)
+                        .unwrap_or_else(|| {
+                            state
+                                .objects
+                                .get(&entry.id)
+                                .map(|o| o.additional_cost_payment_count)
+                                .unwrap_or_default()
+                        });
                     state.pending_spell_resolution =
                         Some(crate::types::game_state::PendingSpellResolution {
                             object_id: entry.id,
@@ -642,6 +663,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             spell_targets: spell_targets.clone(),
                             actual_mana_spent,
                             kickers_paid,
+                            additional_cost_payment_count,
                             convoked_creatures,
                         });
                     state.waiting_for =
@@ -1252,7 +1274,7 @@ pub(crate) fn create_warp_delayed_trigger(
             target: crate::types::ability::TargetFilter::SelfRef,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -1439,7 +1461,7 @@ mod tests {
         );
 
         let trigger_event = GameEvent::BecomesTarget {
-            object_id: ObjectId(999), // target doesn't matter for this test
+            target: TargetRef::Object(ObjectId(999)), // target doesn't matter for this test
             source_id: spell_id,
         };
 
@@ -2584,7 +2606,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2631,7 +2653,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,

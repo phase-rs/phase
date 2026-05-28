@@ -1283,9 +1283,7 @@ impl GameRunner {
             WaitingFor::TapCreaturesForSpellCost { .. } => "TapCreaturesForSpellCost",
             WaitingFor::TapCreaturesForManaAbility { .. } => "TapCreaturesForManaAbility",
             WaitingFor::DiscardForManaAbility { .. } => "DiscardForManaAbility",
-            WaitingFor::ExileFromBattlefieldForManaAbility { .. } => {
-                "ExileFromBattlefieldForManaAbility"
-            }
+            WaitingFor::ExileForManaAbility { .. } => "ExileForManaAbility",
             WaitingFor::SacrificeForManaAbility { .. } => "SacrificeForManaAbility",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
@@ -1304,6 +1302,7 @@ impl GameRunner {
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",
+            WaitingFor::MoveCountersDistribution { .. } => "MoveCountersDistribution",
             WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",
             WaitingFor::RetargetChoice { .. } => "RetargetChoice",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",

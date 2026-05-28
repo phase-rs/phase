@@ -409,6 +409,12 @@ pub struct GameObject {
     /// spell has left the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+    /// CR 601.2b/f/h + CR 702.157a: Count of non-kicker repeatable
+    /// additional costs paid while casting the spell that produced this
+    /// permanent. Kept separate from `kickers_paid` so Squad does not inherit
+    /// Kicker semantics.
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
+    pub additional_cost_payment_count: u32,
     /// CR 702.51c: Creatures tapped to pay the convoke cost of the spell that
     /// produced this object. Stored as object ids so future convoke-reference
     /// classes can inspect identity; `QuantityRef::ConvokedCreatureCount`
@@ -605,6 +611,13 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
 
+    /// CR 305.1 + CR 603.4: Transient field tracking the zone a land was played
+    /// from. Consumed by ETB trigger processing for conditions like "without
+    /// being played"; permanents put onto the battlefield by effects leave this
+    /// unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub played_from_zone: Option<Zone>,
+
     /// CR 601.2h: Whether mana was actually spent to cast this object.
     /// Set during casting finalization when mana is paid. Used for trigger conditions
     /// like "if no mana was spent to cast it" (e.g., Satoru, the Infiltrator).
@@ -799,6 +812,7 @@ impl GameObject {
             cast_timing_permission: None,
             cost_x_paid: None,
             kickers_paid: Vec::new(),
+            additional_cost_payment_count: 0,
             convoked_creatures: Vec::new(),
             bestow_form: None,
             unimplemented_mechanics: Vec::new(),
@@ -835,6 +849,7 @@ impl GameObject {
             room_unlocks: None,
             class_level: None,
             cast_from_zone: None,
+            played_from_zone: None,
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),
             mana_spent_to_cast_amount: 0,
@@ -906,6 +921,7 @@ impl GameObject {
         // memory of prior kicker payments — clear before the cast resolution
         // path repopulates from the resolving spell's `SpellContext`.
         self.kickers_paid.clear();
+        self.additional_cost_payment_count = 0;
         // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
         // spell-resolution event that created this object. A re-entering
         // permanent has no memory of a prior convoke payment.
@@ -955,6 +971,9 @@ impl GameObject {
         // re-checks resolve correctly. A permanent that leaves the battlefield
         // is a new object on any re-entry — clear the stale cast provenance.
         self.cast_from_zone = None;
+        // CR 305.1 + CR 603.4: Land-play provenance is likewise battlefield-
+        // entry scoped and must not survive a later zone change.
+        self.played_from_zone = None;
         self.convoked_creatures.clear();
         // CR 702.103f: `bestow_form` is intentionally NOT cleared here.
         // The zone-exit cleanup in `apply_zone_exit_cleanup` (zones.rs) reads

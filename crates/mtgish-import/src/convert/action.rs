@@ -37,7 +37,7 @@ use crate::schema::types::{
     CreatureType, DamageRecipient, DamageToRecipients, DistributedTarget, Distribution,
     FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent, Player, Players,
     ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction,
-    Spell, Spells, TokenFlag,
+    Spell, Spells, Target, TokenFlag,
 };
 
 /// Modal-choice arity for `ActionsConversion::Modal`. Mirrors the engine's
@@ -211,6 +211,11 @@ pub enum ActionsConversion {
 #[derive(Debug, Clone, Default)]
 struct VariableBindings {
     x: Option<QuantityExpr>,
+    /// CR 115.1 / CR 608.2b: Typed target constraint inherited from an outer
+    /// `Actions::Targeted` wrapper. When set, inner `Ref_TargetPermanent`
+    /// references that collapsed to `TargetFilter::Any` are rewritten to this
+    /// typed filter so the engine can surface a proper target slot at cast time.
+    target_filter: Option<TargetFilter>,
 }
 
 impl VariableBindings {
@@ -231,6 +236,19 @@ impl VariableBindings {
             .iter_mut()
             .map(|effect| rewrite_bound_x_in_effect(effect, binding))
             .sum()
+    }
+
+    /// CR 115.1: Rewrite `TargetFilter::Any` in effect target fields with the
+    /// typed constraint from the outer `Actions::Targeted` wrapper. This
+    /// preserves the typed target slot so the engine can prompt for targets
+    /// at cast/activation time (CR 601.2c).
+    fn rewrite_target_filters(&self, effects: &mut [Effect]) {
+        let Some(typed) = &self.target_filter else {
+            return;
+        };
+        for effect in effects.iter_mut() {
+            rewrite_any_target_filter_in_effect(effect, typed);
+        }
     }
 }
 
@@ -557,6 +575,132 @@ fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usi
             .map(|branch| rewrite_bound_x_in_ability_definition(branch, binding))
             .sum(),
         _ => 0,
+    }
+}
+
+/// CR 115.1 + CR 601.2c: Replace `TargetFilter::Any` in an effect's target
+/// field with a typed constraint inherited from an outer `Actions::Targeted`
+/// wrapper. Only rewrites the top-level target axis — sub-abilities and
+/// delayed triggers keep their own target semantics.
+fn rewrite_any_target_filter_in_effect(effect: &mut Effect, typed: &TargetFilter) {
+    match effect {
+        // GenericEffect carries an Option<TargetFilter>; rewrite if it's Any.
+        Effect::GenericEffect { ref mut target, .. }
+            if target.as_ref() == Some(&TargetFilter::Any) =>
+        {
+            *target = Some(typed.clone());
+        }
+        // LoseLife and Mana also carry Option<TargetFilter>.
+        Effect::LoseLife { ref mut target, .. } | Effect::Mana { ref mut target, .. }
+            if target.as_ref() == Some(&TargetFilter::Any) =>
+        {
+            *target = Some(typed.clone());
+        }
+        // Effects with a direct `target: TargetFilter` field.
+        Effect::AddCounter { ref mut target, .. }
+        | Effect::AddTargetReplacement { ref mut target, .. }
+        | Effect::AdditionalPhase { ref mut target, .. }
+        | Effect::Animate { ref mut target, .. }
+        | Effect::Attach { ref mut target, .. }
+        | Effect::BecomeCopy { ref mut target, .. }
+        | Effect::BecomePrepared { ref mut target, .. }
+        | Effect::BecomeUnprepared { ref mut target, .. }
+        | Effect::Bounce { ref mut target, .. }
+        | Effect::BounceAll { ref mut target, .. }
+        | Effect::CastFromZone { ref mut target, .. }
+        | Effect::ChangeZone { ref mut target, .. }
+        | Effect::ChangeZoneAll { ref mut target, .. }
+        | Effect::ChangeTargets { ref mut target, .. }
+        | Effect::ChooseCard { ref mut target, .. }
+        | Effect::Connive { ref mut target, .. }
+        | Effect::ControlNextTurn { ref mut target, .. }
+        | Effect::CopySpell { ref mut target, .. }
+        | Effect::Counter { ref mut target, .. }
+        | Effect::CounterAll { ref mut target, .. }
+        | Effect::DamageAll { ref mut target, .. }
+        | Effect::DealDamage { ref mut target, .. }
+        | Effect::Destroy { ref mut target, .. }
+        | Effect::DestroyAll { ref mut target, .. }
+        | Effect::Detain { ref mut target, .. }
+        | Effect::Discard { ref mut target, .. }
+        | Effect::DiscardCard { ref mut target, .. }
+        | Effect::Double { ref mut target, .. }
+        | Effect::DoublePT { ref mut target, .. }
+        | Effect::DoublePTAll { ref mut target, .. }
+        | Effect::Draw { ref mut target, .. }
+        | Effect::Exploit { ref mut target, .. }
+        | Effect::ExtraTurn { ref mut target, .. }
+        | Effect::Fight { ref mut target, .. }
+        | Effect::ForceBlock { ref mut target, .. }
+        | Effect::GainControl { ref mut target, .. }
+        | Effect::GiveControl { ref mut target, .. }
+        | Effect::GivePlayerCounter { ref mut target, .. }
+        | Effect::Goad { ref mut target, .. }
+        | Effect::GoadAll { ref mut target, .. }
+        | Effect::GrantCastingPermission { ref mut target, .. }
+        | Effect::GrantExtraLoyaltyActivations { ref mut target, .. }
+        | Effect::LoseAllPlayerCounters { ref mut target, .. }
+        | Effect::Manifest { ref mut target, .. }
+        | Effect::Mill { ref mut target, .. }
+        | Effect::MoveCounters { ref mut target, .. }
+        | Effect::MultiplyCounter { ref mut target, .. }
+        | Effect::PairWith { ref mut target, .. }
+        | Effect::PhaseIn { ref mut target, .. }
+        | Effect::PhaseOut { ref mut target, .. }
+        | Effect::PreventDamage { ref mut target, .. }
+        | Effect::Pump { ref mut target, .. }
+        | Effect::PumpAll { ref mut target, .. }
+        | Effect::PutAtLibraryPosition { ref mut target, .. }
+        | Effect::PutCounter { ref mut target, .. }
+        | Effect::PutCounterAll { ref mut target, .. }
+        | Effect::PutOnTopOrBottom { ref mut target, .. }
+        | Effect::Regenerate { ref mut target, .. }
+        | Effect::RemoveCounter { ref mut target, .. }
+        | Effect::RemoveFromCombat { ref mut target, .. }
+        | Effect::Reveal { ref mut target, .. }
+        | Effect::RevealHand { ref mut target, .. }
+        | Effect::Sacrifice { ref mut target, .. }
+        | Effect::Scry { ref mut target, .. }
+        | Effect::SetLifeTotal { ref mut target, .. }
+        | Effect::Shuffle { ref mut target, .. }
+        | Effect::SkipNextStep { ref mut target, .. }
+        | Effect::SkipNextTurn { ref mut target, .. }
+        | Effect::Surveil { ref mut target, .. }
+        | Effect::Suspect { ref mut target, .. }
+        | Effect::SwitchPT { ref mut target, .. }
+        | Effect::Tap { ref mut target, .. }
+        | Effect::TapAll { ref mut target, .. }
+        | Effect::TargetOnly { ref mut target, .. }
+        | Effect::Transform { ref mut target, .. }
+        | Effect::UnattachAll { ref mut target, .. }
+        | Effect::Untap { ref mut target, .. }
+        | Effect::UntapAll { ref mut target, .. }
+            if *target == TargetFilter::Any =>
+        {
+            *target = typed.clone();
+        }
+        _ => {}
+    }
+}
+
+/// Convert the first `Target` descriptor from an `Actions::Targeted` wrapper
+/// into a `TargetFilter`. Returns `None` when the descriptor doesn't carry a
+/// typed permanent constraint (e.g., `AnyTarget` stays as `TargetFilter::Any`
+/// and is not useful for rewriting).
+fn target_descriptor_to_filter(targets: &[Target]) -> Option<TargetFilter> {
+    let first = targets.first()?;
+    match first {
+        Target::TargetPermanent(permanents)
+        | Target::UptoOneTargetPermanent(permanents)
+        | Target::UptoOneTargetPermanent_Optional(permanents)
+        | Target::AnyNumberOfTargetPermanents(permanents)
+        | Target::OneOrMoreTargetPermanents(permanents)
+        | Target::OneOrTwoTargetPermanents(permanents) => filter_mod::convert(permanents).ok(),
+        Target::NumberTargetPermanents(_, permanents)
+        | Target::UptoNumberTargetPermanents(_, permanents) => filter_mod::convert(permanents).ok(),
+        Target::TargetPlayer(_) | Target::UptoOneTargetPlayer(_) => Some(TargetFilter::Player),
+        // AnyTarget and other shapes stay as-is — no typed constraint to thread.
+        _ => None,
     }
 }
 
@@ -2211,7 +2355,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2240,7 +2384,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                 target: TargetFilter::ParentTarget,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2254,7 +2398,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2678,7 +2822,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanent(target)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2690,7 +2834,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanents(filter)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2708,7 +2852,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanents(filter)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2808,7 +2952,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: card_in_graveyard_to_filter(card)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2827,7 +2971,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: filter_mod::cards_in_graveyard_to_filter(cards)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2855,7 +2999,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 },
                 owner_library: false,
                 enter_transformed: r.enter_transformed,
-                under_your_control: r.under_your_control,
+                enters_under: r.under_your_control.then_some(ControllerRef::You),
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
@@ -2879,7 +3023,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 target: card_in_graveyard_to_filter(card)?,
                 owner_library: false,
                 enter_transformed: r.enter_transformed,
-                under_your_control: r.under_your_control,
+                enters_under: r.under_your_control.then_some(ControllerRef::You),
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
@@ -3064,7 +3208,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: card_in_graveyard_to_filter(card)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -3265,7 +3409,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 target: card_in_exile_to_filter(card)?,
                 owner_library: false,
                 enter_transformed: r.enter_transformed,
-                under_your_control: r.under_your_control,
+                enters_under: r.under_your_control.then_some(ControllerRef::You),
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
@@ -3284,7 +3428,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: card_in_graveyard_to_filter(card)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -3433,7 +3577,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 target: cards_in_hand_to_filter(cards)?,
                 owner_library: false,
                 enter_transformed: r.enter_transformed,
-                under_your_control: r.under_your_control,
+                enters_under: r.under_your_control.then_some(ControllerRef::You),
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
@@ -4491,10 +4635,19 @@ fn convert_list_with_bindings(
         //
         // CR 608.2b notes that target choice is made at cast/activation time;
         // the typed constraint described by the outer Target descriptor is
-        // surfaced when the engine prompts for targets. Today the inner
-        // refs collapse to `TargetFilter::Any`, which loses the typed
-        // constraint but preserves resolution semantics.
-        Actions::Targeted(_targets, inner) => convert_list_with_bindings(inner, bindings),
+        // surfaced when the engine prompts for targets. The inner refs
+        // collapse to `TargetFilter::Any` during conversion; we rewrite them
+        // here with the typed constraint so the engine can surface a proper
+        // target slot at cast time (CR 601.2c).
+        Actions::Targeted(targets, inner) => {
+            let mut inner_bindings = bindings.clone();
+            if let Some(typed) = target_descriptor_to_filter(targets) {
+                inner_bindings.target_filter = Some(typed);
+            }
+            let mut effects = convert_list_with_bindings(inner, &inner_bindings)?;
+            inner_bindings.rewrite_target_filters(&mut effects);
+            Ok(effects)
+        }
 
         // CR 601.2c + CR 115.1: Distributed-damage / distributed-counters
         // wrapper (e.g. "Distribute three +1/+1 counters among any number
@@ -5879,7 +6032,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         target: TargetFilter::Any,
         owner_library: false,
         enter_transformed: enter_repls.enter_transformed,
-        under_your_control: enter_repls.under_your_control,
+        enters_under: enter_repls.under_your_control.then_some(ControllerRef::You),
         enter_tapped: enter_repls.enter_tapped,
         enters_attacking: enter_repls.enters_attacking,
         up_to: false,
@@ -5941,7 +6094,7 @@ fn convert_multi_filter_search_library(
             target: TargetFilter::Any,
             owner_library: false,
             enter_transformed: enter_repls.enter_transformed,
-            under_your_control: enter_repls.under_your_control,
+            enters_under: enter_repls.under_your_control.then_some(ControllerRef::You),
             enter_tapped: enter_repls.enter_tapped,
             enters_attacking: enter_repls.enters_attacking,
             up_to: false,
@@ -5992,8 +6145,13 @@ fn group_filter_tag(group: &GroupFilter) -> String {
 struct EnterReplacements {
     /// CR 614.1: Object enters tapped.
     enter_tapped: bool,
-    /// CR 110.2: Object enters under the ability controller's control
-    /// (rather than its owner's).
+    /// CR 110.2a: Object enters under the ability controller's control
+    /// (rather than its owner's). Local bool carrier — mapped at the
+    /// `Effect::ChangeZone` boundary via
+    /// `enters_under: under_your_control.then_some(ControllerRef::You)`.
+    /// Only `ControllerRef::You` is producible from this AST, so a bool
+    /// is the natural local shape (Player-axis variants strict-fail in
+    /// `extract_enter_replacements`).
     under_your_control: bool,
     /// CR 712.2: Object enters showing its back face.
     enter_transformed: bool,
@@ -6010,7 +6168,7 @@ struct EnterReplacements {
 /// |------------------------------------------|-----------------------|
 /// | `EntersNormally`                         | (no-op marker)        |
 /// | `EntersTapped`                           | `enter_tapped`        |
-/// | `EntersUnderPlayersControl(Player::You)` | `under_your_control`  |
+/// | `EntersUnderPlayersControl(Player::You)` | `enters_under`        |
 /// | `EntersUnderOwnersControl`               | (no-op — engine default) |
 /// | `EntersTransformed`                      | `enter_transformed`   |
 /// | `EntersAttacking`                        | `enters_attacking`    |
@@ -6948,6 +7106,35 @@ mod tests {
             .type_filters
             .iter()
             .any(|filter| matches!(filter, TypeFilter::Creature)));
+    }
+
+    #[test]
+    fn targeted_wrapper_rewrite_covers_prevention_and_discard_targets() {
+        let typed = TargetFilter::Typed(TypedFilter::creature());
+        let mut effects = vec![
+            Effect::PreventDamage {
+                amount: engine::types::ability::PreventionAmount::Next(1),
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: Default::default(),
+                damage_source_filter: None,
+            },
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+        ];
+
+        for effect in &mut effects {
+            rewrite_any_target_filter_in_effect(effect, &typed);
+        }
+
+        for effect in effects {
+            assert_eq!(effect.target_filter(), Some(&typed));
+        }
     }
 
     #[test]

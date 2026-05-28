@@ -434,6 +434,7 @@
     "blockersDeclared_one": "{{count}} Blocker zugeordnet",
     "blockersDeclared_other": "{{count}} Blocker zugeordnet",
     "becomesTarget": "Objekt {{objectId}} von {{sourceId}} anvisiert",
+    "becomesTargetPlayer": "{{player}} von {{sourceId}} anvisiert",
     "replacementApplied": "Ersatzeffekt angewendet: {{eventType}}",
     "companionRevealed": "{{player}} hat den Gefährten aufgedeckt: {{cardName}}",
     "companionMovedToHand": "{{player}} hat den Gefährten {{cardName}} auf die Hand genommen",
@@ -875,6 +876,20 @@
       "title": "Exil",
       "subtitle_one": "Wähle {{count}} bleibende Karte fürs Exil",
       "subtitle_other": "Wähle {{count}} bleibende Karten fürs Exil"
+    },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "multiTarget": {
       "title": "Ziele wählen",
@@ -1360,5 +1375,9 @@
     "PostCombatMain": "Hauptphase 2",
     "End": "Endschritt",
     "Cleanup": "Aufräumen"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

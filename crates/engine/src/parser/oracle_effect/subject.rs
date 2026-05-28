@@ -1160,6 +1160,14 @@ pub(super) fn parse_subject_application(
     None
 }
 
+pub(super) fn parse_leading_subject_application(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
+    let subject_text = extract_subject_text(text)?;
+    parse_subject_application(&subject_text, ctx)
+}
+
 /// CR 608.2k: Resolve bare pronoun "they" based on parser context.
 /// In trigger effects where the subject is a player (e.g., "an opponent"),
 /// "they" refers to the triggering player (`TriggeringPlayer`). A player-type

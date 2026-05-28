@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, ControllerRef,
     CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction, ManaSpendRestriction,
     ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost, PlayerFilter, PtValue,
     QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition,
@@ -235,6 +235,10 @@ pub(crate) enum ContinuationAst {
     /// library-to-hand search continuation are already represented by the intrinsic
     /// SearchDestination + reveal flag and should be absorbed.
     SearchResultClauseHandled,
+    /// "reveal it" immediately after a SearchLibrary whose destination is handled
+    /// by a later conditional branch. Patches SearchLibrary.reveal without adding
+    /// a default ChangeZone.
+    SearchRevealResult,
     /// "Put the rest on the bottom of your library ..." after a tracked-set choice that
     /// already moved chosen cards out of the library. Appends a library-bottom placement
     /// step onto the preceding ChangeZone so the unchosen cards are handled by that chain.
@@ -616,8 +620,10 @@ pub(crate) enum TargetedImperativeAst {
         origin: Option<Zone>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
-        /// CR 110.2: "under your control" — controller override.
-        under_your_control: bool,
+        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
+        /// to the player resolved from `ref`. `None` leaves the object under
+        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
+        enters_under: Option<ControllerRef>,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
@@ -863,8 +869,10 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2: "under your control" — controller override on ETB.
-        under_your_control: bool,
+        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
+        /// to the player resolved from `ref`. `None` leaves the object under
+        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
+        enters_under: Option<ControllerRef>,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
         /// CR 701.28c: "transformed" — enters with its back face up.
@@ -874,6 +882,12 @@ pub(crate) enum PutImperativeAst {
         /// having been declared as one). Set by the inline-tail patcher in
         /// `try_parse_put_zone_change` for the Kaalia / Ilharg class.
         enters_attacking: bool,
+        /// "Up to one" resolution-choice zone changes may move zero matching objects.
+        up_to: bool,
+        /// CR 107.1c + CR 608.2c: Cardinality for non-targeted zone-change
+        /// choices made during resolution, e.g. "put any number of creature
+        /// cards from your hand onto the battlefield."
+        choice_count: Option<MultiTargetSpec>,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.
@@ -1028,6 +1042,7 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: Option<QuantityExpr>,
         mode: crate::types::ability::CounterTransferMode,
+        selection: crate::types::ability::CounterMoveSelection,
         target: TargetFilter,
     },
 }
