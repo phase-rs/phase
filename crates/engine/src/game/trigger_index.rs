@@ -771,7 +771,14 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Station
         | EffectKind::Saddle
         | EffectKind::Transform
-        | EffectKind::TurnFaceUp => {}
+        | EffectKind::TurnFaceUp
+        // Added on origin/main after this branch point. No production
+        // EffectResolved-dispatching matcher consumes either: cast-copy fires
+        // on cast events (CastCopyOfCard, Mizzix's Mastery), and life/P-T
+        // exchange emits LifeChanged/PowerToughnessChanged handled by their own
+        // event arms (ExchangeLifeWithStat). No-op here.
+        | EffectKind::CastCopyOfCard
+        | EffectKind::ExchangeLifeWithStat => {}
     }
 }
 
