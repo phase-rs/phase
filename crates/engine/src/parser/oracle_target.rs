@@ -1736,8 +1736,8 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
-    if let Some(consumed) = parse_same_name_as_source_suffix(&lower[pos..]) {
-        properties.push(FilterProp::SameName);
+    if let Some((prop, consumed)) = parse_same_name_suffix(&lower[pos..]) {
+        properties.push(prop);
         pos += consumed;
     }
 
@@ -3320,22 +3320,51 @@ fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> 
     }
 }
 
-fn parse_same_name_as_source_suffix(text: &str) -> Option<usize> {
+/// CR 201.2: Parse a "with the same name as <referent>" filter suffix, mapping
+/// the referent class to the matching name-resolution `FilterProp`:
+///   * "~" / "this <type>" → the *source* object's name (`FilterProp::SameName`).
+///   * "that <type>" → the resolving ability's first object target's name
+///     (`FilterProp::SameNameAsParentTarget`). This is the "destroy/exile/return
+///     target X and all other Xs with the same name as that X" class — Maelstrom
+///     Pulse, the Echoing cycle, Bile Blight, Homing Lightning, Detention Sphere.
+///     Without it the secondary mass effect drops the name constraint and
+///     degrades into an unconditional board wipe.
+fn parse_same_name_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
-    for suffix in &[
-        "with the same name as ~",
-        "with the same name as this creature",
-        "with the same name as this permanent",
-        "with the same name as this artifact",
-        "with the same name as this enchantment",
-        "with the same name as this land",
-    ] {
-        if tag::<_, _, OracleError<'_>>(*suffix).parse(trimmed).is_ok() {
-            return Some(leading_ws + suffix.len());
-        }
-    }
-    None
+    let (rest, _) = tag::<_, _, OracleError<'_>>("with the same name as ")
+        .parse(trimmed)
+        .ok()?;
+    let (after, prop) = alt((
+        value(FilterProp::SameName, tag("~")),
+        value(
+            FilterProp::SameName,
+            (tag("this "), parse_same_name_referent_noun),
+        ),
+        value(
+            FilterProp::SameNameAsParentTarget,
+            (tag("that "), parse_same_name_referent_noun),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some((prop, leading_ws + (trimmed.len() - after.len())))
+}
+
+/// CR 205: The permanent-type noun naming the "same name" referent ("that
+/// permanent", "this creature", etc.). The noun only provides grammatical
+/// agreement with the target — name matching is by name, not type.
+fn parse_same_name_referent_noun(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    alt((
+        tag("permanent"),
+        tag("creature"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+        tag("card"),
+    ))
+    .parse(input)
 }
 
 fn parse_ownership_or_controller_suffix(

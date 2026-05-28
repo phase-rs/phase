@@ -35688,6 +35688,40 @@ mod tests {
         assert!(matches!(&*effect.effect, Effect::Draw { .. }));
     }
 
+    /// CR 201.2: "Destroy target nonland permanent and all other permanents
+    /// with the same name as that permanent" (Maelstrom Pulse, and the Echoing
+    /// cycle, Bile Blight, Homing Lightning, Detention Sphere class). The
+    /// secondary mass effect must filter to permanents whose name matches the
+    /// targeted permanent (`SameNameAsParentTarget`) — without it the effect
+    /// degrades into an unconditional board wipe.
+    #[test]
+    fn maelstrom_pulse_destroys_only_same_named_permanents() {
+        let def = parse_effect_chain(
+            "Destroy target nonland permanent and all other permanents with the same name as that permanent.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(&*def.effect, Effect::Destroy { .. }));
+        let sub = def.sub_ability.as_ref().expect("DestroyAll continuation");
+        let Effect::DestroyAll { target, .. } = &*sub.effect else {
+            panic!("expected DestroyAll, got {:?}", sub.effect);
+        };
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected Typed filter, got {target:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .contains(&FilterProp::SameNameAsParentTarget),
+            "DestroyAll must restrict to the parent target's name, got {:?}",
+            typed.properties
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Another),
+            "DestroyAll must exclude the targeted permanent itself, got {:?}",
+            typed.properties
+        );
+    }
+
     #[test]
     fn kindred_dominance_excludes_chosen_creature_type() {
         use crate::types::ability::{ChoiceType, TypedFilter};
