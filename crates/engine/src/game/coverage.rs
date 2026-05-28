@@ -5354,10 +5354,8 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
             }
         }
         Effect::ChooseOneOf { branches, .. } => {
-            for branch in branches {
-                if ability_tree_any(branch, pred) {
-                    return true;
-                }
+            if branches.iter().any(|branch| ability_tree_any(branch, pred)) {
+                return true;
             }
         }
         Effect::CreateDelayedTrigger { effect, .. } if ability_tree_any(effect, pred) => {
