@@ -5870,11 +5870,8 @@ pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
         let min_str = &range_part[..dash_idx];
         let max_str = &range_part[dash_idx + '\u{2014}'.len_utf8()..];
         (min_str.parse::<u8>().ok()?, max_str.parse::<u8>().ok()?)
+    // allow-noncombinator: CR 706.2 "N+" open-ended upper bound — single-char structural suffix on a pre-tokenized numeric range slice; the surrounding nom split already isolated `range_part` off the pipe delimiter (Pattern 3 in PATTERNS.md).
     } else if let Some(min_str) = range_part.strip_suffix('+') {
-        // CR 706.2: "N+" — modifier-shifted rolls can exceed the printed die's
-        // face count, so the upper bound is open. allow-noncombinator: nom is
-        // overkill for a single trailing-char check on a pre-split numeric
-        // token; the surrounding range_part is already nom-split off the pipe.
         (min_str.trim().parse::<u8>().ok()?, u8::MAX)
     } else {
         // Single value like "20"

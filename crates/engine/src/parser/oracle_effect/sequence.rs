@@ -888,6 +888,7 @@ fn ends_with_roll_die_phrase(before_lower: &str) -> bool {
     // token) followed by a char-class digit scan — no string-method dispatch
     // against any literal phrase.
     if let Some(last_word) = trimmed.rsplit(' ').next() {
+        // allow-noncombinator: CR 706.1a "d{digits}" structural shape — single-char prefix `d` followed by an ASCII-digit run on a pre-tokenized last-word slice; this is a CR-spec character-class scan, not dispatch against any literal phrase.
         if let Some(digits) = last_word.strip_prefix('d') {
             if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
                 return true;
