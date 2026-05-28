@@ -3582,10 +3582,10 @@ fn apply_action(
             super::companion::handle_companion_to_hand(state, *player, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
-        // CR 702.xxx: Prepare (Strixhaven) — priority-time cast of a prepared
-        // creature's face-`b` spell. Produces a token spell-copy on the stack;
-        // the source becomes unprepared at cast time. Assign when WotC
-        // publishes SOS CR update.
+        // CR 722.3c / CR 601.2: Prepare (Strixhaven) — cast a copy of the
+        // prepared face through the normal spell-casting pipeline (costs,
+        // targeting, and mode choices all run through casting.rs single
+        // authority). Assign when WotC publishes SOS CR update.
         (WaitingFor::Priority { player }, GameAction::CastPreparedCopy { source }) => {
             let p = *player;
             // Validate controller.
@@ -3600,18 +3600,8 @@ fn apply_action(
                     "CastPreparedCopy: source not controlled by acting player".to_string(),
                 ));
             }
-            let copy_id = effects::prepare::cast_prepared_copy(state, src, p, &mut events)
-                .map_err(EngineError::InvalidAction)?;
-            // CR 707.10c: If the copy's spell ability has target slots, open
-            // target selection via CopyRetarget. Otherwise return to priority
-            // and let the copy resolve on the stack.
-            if effects::prepare::open_copy_target_selection(state, copy_id, p)
+            effects::prepare::cast_prepared_copy(state, src, p, &mut events)
                 .map_err(EngineError::InvalidAction)?
-            {
-                state.waiting_for.clone()
-            } else {
-                WaitingFor::Priority { player: p }
-            }
         }
         // CR 702.xxx: Paradigm (Strixhaven) — accept the turn-based offer to
         // cast a copy of an exiled paradigm source. Assign when WotC
