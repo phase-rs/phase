@@ -9658,6 +9658,17 @@ pub enum TriggerCondition {
     /// current phase is the draw step, AND `nth_in_step == 1`; otherwise `true`.
     ExceptFirstDrawInDrawStep,
 
+    /// CR 603.4 + CR 603.6a + CR 400.7: "if it was put onto the battlefield with
+    /// this ability" — true when the triggering zone-change object's
+    /// `entered_via_ability_source` equals the trigger's own source id (i.e. THIS
+    /// ability placed it). Used by anti-recursion ETB guards (Kodama of the East
+    /// Tree). The negation ("if it wasn't ... with this ability") wraps via
+    /// `Not { condition: Box::new(PlacedByAbilitySource) }`, mirroring
+    /// `Not(WasCast)` — no `negated: bool`. Resolves the entering object from the
+    /// `GameEvent::ZoneChanged` event, falling back to the trigger source for
+    /// self-referential cases.
+    PlacedByAbilitySource,
+
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")
     And { conditions: Vec<TriggerCondition> },

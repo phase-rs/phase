@@ -128,6 +128,20 @@ pub(crate) fn deliver_replaced_zone_change(
                 obj.tapped = true;
             }
         }
+        // CR 603.6a + CR 400.7: Record which ability placed this permanent so
+        // anti-recursion intervening-ifs ("if it wasn't put onto the battlefield
+        // with this ability") can exclude permanents this very ability placed.
+        // `move_to_zone` already ran `reset_for_battlefield_entry` (clearing the
+        // field to None); set it only for ability-effect-driven entries. This is
+        // synchronous and lands before `process_triggers`, so the field is
+        // visible at ETB trigger fire-time (CR 603.4).
+        if to == Zone::Battlefield {
+            if let Some(src) = source_id {
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    obj.entered_via_ability_source = Some(src);
+                }
+            }
+        }
         // CR 110.2a: Apply controller override if the effect specifies
         // "under your control" — set before triggers fire.
         if let Some(new_controller) = ctrl_override {
@@ -1624,6 +1638,63 @@ mod tests {
         assert!(
             !state.battlefield.contains(&source_id),
             "SelfRef source should no longer be on battlefield"
+        );
+    }
+
+    /// CR 603.6a + CR 400.7: An ability-effect-driven battlefield entry through
+    /// `execute_zone_move` stamps `entered_via_ability_source` with the resolving
+    /// ability's source. Building-block coverage for the Kodama anti-recursion
+    /// provenance field — independent of any single card.
+    #[test]
+    fn ability_driven_entry_records_placing_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Placer".to_string(),
+            Zone::Battlefield,
+        );
+        let moved = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Placed Card".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+
+        let result = execute_zone_move(
+            &mut state,
+            moved,
+            Zone::Hand,
+            Zone::Battlefield,
+            source_id,
+            None,
+            false,
+            false,
+            None,
+            &[],
+            false,
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+
+        let obj = &state.objects[&moved];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(
+            obj.entered_via_ability_source,
+            Some(source_id),
+            "an ability-effect-driven entry must record the placing ability's source",
+        );
+
+        // CR 400.7: moving the permanent off the battlefield clears the
+        // provenance — a re-entering permanent is a new object.
+        let mut events2 = Vec::new();
+        zones::move_to_zone(&mut state, moved, Zone::Graveyard, &mut events2);
+        assert_eq!(
+            state.objects[&moved].entered_via_ability_source, None,
+            "battlefield exit must clear the ability-placement provenance (CR 400.7)",
         );
     }
 

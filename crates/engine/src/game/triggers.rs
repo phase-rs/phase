@@ -3424,6 +3424,29 @@ pub(crate) fn check_trigger_condition(
                 .and_then(|id| state.objects.get(&id))
                 .is_some_and(|obj| obj.cast_from_zone.is_some())
         }
+        // CR 603.4 + CR 603.6a: "put onto the battlefield with this ability" —
+        // the entering object was placed by THIS trigger's source ability.
+        // Resolve the entering object from the ZoneChanged event (self-referential
+        // triggers fall back to the trigger source); compare its
+        // `entered_via_ability_source` to the trigger source id. The negation
+        // ("wasn't ... with this ability") wraps via `Not`.
+        TriggerCondition::PlacedByAbilitySource => {
+            let checked_id = trigger_event
+                .and_then(|e| match e {
+                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .or(source_id);
+            matches!(
+                (
+                    checked_id
+                        .and_then(|id| state.objects.get(&id))
+                        .and_then(|o| o.entered_via_ability_source),
+                    source_id,
+                ),
+                (Some(via), Some(src)) if via == src
+            )
+        }
         // CR 305.1 + CR 603.4: "without being played" is encoded as
         // `Not(WasPlayed)` and checks the triggering zone-change object first.
         TriggerCondition::WasPlayed => {

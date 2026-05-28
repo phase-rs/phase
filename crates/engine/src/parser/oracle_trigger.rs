@@ -2440,6 +2440,38 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         );
     }
 
+    // CR 603.4 + CR 603.6a: "if it wasn't put onto the battlefield with this
+    // ability" — anti-recursion intervening-if (Kodama of the East Tree). The
+    // entering permanent must NOT have been placed by this very ability, so a
+    // permanent Kodama itself puts onto the battlefield does not re-trigger it.
+    // Ordered before the positive arm; the two phrases are disjoint ("wasn't put"
+    // does not contain "was put"), mirroring the WasCast/Not(WasCast) disjointness.
+    if let Some((prefix, _)) = scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("if it wasn't put onto the battlefield with this ability")
+            .parse(i)
+    }) {
+        let pat = "if it wasn't put onto the battlefield with this ability";
+        return (
+            strip_condition_clause(text, prefix.len(), pat.len()),
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::PlacedByAbilitySource),
+            }),
+        );
+    }
+
+    // CR 603.4 + CR 603.6a: positive "if it was put onto the battlefield with
+    // this ability" — the entering permanent was placed by this very ability.
+    if let Some((prefix, _)) = scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("if it was put onto the battlefield with this ability")
+            .parse(i)
+    }) {
+        let pat = "if it was put onto the battlefield with this ability";
+        return (
+            strip_condition_clause(text, prefix.len(), pat.len()),
+            Some(TriggerCondition::PlacedByAbilitySource),
+        );
+    }
+
     // CR 603.4 + CR 702.138b: "unless it escaped" — the trigger fires unless
     // the source permanent was cast from a graveyard with its escape ability.
     // Phlage, Titan of Fire's Fury: "sacrifice it unless it escaped." The
@@ -11598,6 +11630,47 @@ mod tests {
         assert!(
             cond.is_some(),
             "leading intervening-if must still be hoisted, got {cond:?}",
+        );
+    }
+
+    /// CR 603.4 + CR 603.6a: "if it wasn't put onto the battlefield with this
+    /// ability" — Kodama of the East Tree anti-recursion guard. Must hoist to
+    /// `Not(PlacedByAbilitySource)` and excise the clause so no `Condition_If`
+    /// SwallowedClause warning is emitted.
+    #[test]
+    fn extract_if_condition_wasnt_put_with_this_ability() {
+        let (cleaned, cond) = extract_if_condition(
+            "if it wasn't put onto the battlefield with this ability, you may put a permanent card with equal or lesser mana value from your hand onto the battlefield.",
+        );
+        assert!(
+            matches!(
+                cond,
+                Some(TriggerCondition::Not { ref condition }) if matches!(**condition, TriggerCondition::PlacedByAbilitySource)
+            ),
+            "expected Not(PlacedByAbilitySource), got {cond:?}",
+        );
+        assert!(
+            // allow-noncombinator: test assertion verifying clause excision, not parsing dispatch
+            !cleaned.contains("put onto the battlefield with this ability"),
+            "intervening-if clause must be excised, got: {cleaned}",
+        );
+    }
+
+    /// CR 603.4 + CR 603.6a: positive "if it was put onto the battlefield with
+    /// this ability" → `PlacedByAbilitySource` (no negation wrapper).
+    #[test]
+    fn extract_if_condition_was_put_with_this_ability() {
+        let (cleaned, cond) = extract_if_condition(
+            "if it was put onto the battlefield with this ability, draw a card.",
+        );
+        assert!(
+            matches!(cond, Some(TriggerCondition::PlacedByAbilitySource)),
+            "expected PlacedByAbilitySource, got {cond:?}",
+        );
+        assert!(
+            // allow-noncombinator: test assertion verifying clause excision, not parsing dispatch
+            !cleaned.contains("put onto the battlefield with this ability"),
+            "intervening-if clause must be excised, got: {cleaned}",
         );
     }
 
