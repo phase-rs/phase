@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchDeckFromUrl, isSupportedDeckUrl } from "../deckUrlImport";
+import { fetchDeckFromUrl, isSupportedDeckUrl, IMPORT_ERROR_KEYS } from "../deckUrlImport";
 import { detectAndParseDeck, resolveCommander, type ParsedDeck } from "../deckParser";
 
 // resolveCommander delegates commander eligibility to the WASM engine; every
@@ -45,6 +45,11 @@ describe("isSupportedDeckUrl", () => {
     expect(isSupportedDeckUrl("https://archidekt.com/decks/456789/my_deck")).toBe(true);
   });
 
+  it("accepts protocol-less URLs (users often copy-paste without https://)", () => {
+    expect(isSupportedDeckUrl("moxfield.com/decks/abc123")).toBe(true);
+    expect(isSupportedDeckUrl("www.archidekt.com/decks/789")).toBe(true);
+  });
+
   it("rejects unrelated or malformed URLs", () => {
     expect(isSupportedDeckUrl("https://example.com/decks/abc")).toBe(false);
     expect(isSupportedDeckUrl("https://archidekt.com/decks/not-numeric")).toBe(false);
@@ -69,18 +74,25 @@ describe("fetchDeckFromUrl", () => {
     expect(calledUrl).toContain(encodeURIComponent("https://www.moxfield.com/decks/oEWXWHM5"));
   });
 
-  it("rejects malformed input without hitting the worker", async () => {
+  it("rejects malformed input by throwing the invalid-URL translation key", async () => {
     global.fetch = vi.fn();
-    await expect(fetchDeckFromUrl("nonsense")).rejects.toThrow(/valid Moxfield or Archidekt/);
+    await expect(fetchDeckFromUrl("nonsense")).rejects.toThrow(IMPORT_ERROR_KEYS.invalidUrl);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  it("rejects unsupported sources without hitting the worker", async () => {
+  it("rejects unsupported sources by throwing the invalid-URL translation key", async () => {
     global.fetch = vi.fn();
     await expect(fetchDeckFromUrl("https://example.com/decks/abc")).rejects.toThrow(
-      /valid Moxfield or Archidekt/,
+      IMPORT_ERROR_KEYS.invalidUrl,
     );
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("normalizes protocol-less URLs before sending to the worker", async () => {
+    mockWorkerText("Name: X\n[Main]\n1 Forest\n");
+    await fetchDeckFromUrl("moxfield.com/decks/abc");
+    const [calledUrl] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(calledUrl).toContain(encodeURIComponent("https://moxfield.com/decks/abc"));
   });
 
   it("surfaces the worker's user-facing error message verbatim", async () => {
@@ -101,10 +113,10 @@ describe("fetchDeckFromUrl", () => {
     );
   });
 
-  it("surfaces a network failure with actionable guidance", async () => {
+  it("surfaces a network failure by throwing the network-failure translation key", async () => {
     global.fetch = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
     await expect(fetchDeckFromUrl("https://moxfield.com/decks/zzz")).rejects.toThrow(
-      /Couldn't reach the deck import service/,
+      IMPORT_ERROR_KEYS.networkFailure,
     );
   });
 });

@@ -8,6 +8,11 @@ import { STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta } from "../../con
 import { deriveImportedDeckName, detectAndParseDeck, resolveCommander } from "../../services/deckParser";
 import { fetchDeckFromUrl } from "../../services/deckUrlImport";
 
+// Frontend-authored error messages from deckUrlImport.ts arrive as translation
+// keys prefixed `importDeck.`. Worker-authored messages flow through as-is
+// (server pass-through, per client/src/i18n/README.md).
+const I18N_KEY_PREFIX = "importDeck.";
+
 type ImportTab = "paste" | "url" | "file";
 
 interface ImportDeckModalProps {
@@ -80,7 +85,8 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
       onImported(name, listSavedDeckNames());
       resetAndClose();
     } catch (err) {
-      setUrlError(err instanceof Error ? err.message : "Failed to import deck.");
+      const raw = err instanceof Error ? err.message : t("importDeck.errorGeneric");
+      setUrlError(raw.startsWith(I18N_KEY_PREFIX) ? t(raw) : raw);
     } finally {
       setUrlLoading(false);
     }
@@ -150,7 +156,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                 {t("importDeck.tabPaste")}
               </button>
               <button className={TAB_CLASS(tab === "url")} onClick={() => setTab("url")}>
-                From URL
+                {t("importDeck.tabUrl")}
               </button>
               <button className={TAB_CLASS(tab === "file")} onClick={() => setTab("file")}>
                 {t("importDeck.tabFile")}
@@ -194,7 +200,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                   type="text"
                   value={deckName}
                   onChange={(e) => setDeckName(e.target.value)}
-                  placeholder="Deck name (optional)"
+                  placeholder={t("importDeck.deckNamePlaceholder")}
                   className="rounded-xl border border-white/25 bg-white/8 px-3 py-2 text-sm text-white placeholder-white/30 outline-none backdrop-blur-sm focus:border-amber-300/70"
                 />
                 <input
@@ -207,11 +213,11 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                   onKeyDown={(e) => {
                     if (e.key === "Enter") void handleUrlImport();
                   }}
-                  placeholder="https://moxfield.com/decks/… or https://archidekt.com/decks/…"
+                  placeholder={t("importDeck.urlPlaceholder")}
                   className="rounded-xl border border-white/25 bg-white/8 px-3 py-2 text-sm text-white placeholder-white/30 outline-none backdrop-blur-sm focus:border-amber-300/70"
                 />
                 <p className="text-xs text-white/40">
-                  Imports a public deck from Moxfield or Archidekt.
+                  {t("importDeck.urlHint")}
                 </p>
                 {urlError && <p className="text-xs text-red-400">{urlError}</p>}
                 <button
@@ -224,7 +230,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                     className: "w-full font-bold",
                   })}
                 >
-                  {urlLoading ? "Importing…" : "Import"}
+                  {urlLoading ? t("importDeck.importing") : t("importDeck.import")}
                 </button>
               </div>
             )}

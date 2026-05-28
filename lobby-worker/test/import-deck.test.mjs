@@ -47,10 +47,35 @@ test("OPTIONS preflight returns 204 with CORS headers", async () => {
   assert.match(resp.headers.get("Access-Control-Allow-Methods") ?? "", /GET/);
 });
 
-test("non-GET, non-OPTIONS method is rejected", async () => {
+test("non-GET, non-OPTIONS method is rejected with method_not_allowed code", async () => {
   const req = new Request("https://lobby.example/import-deck?url=https://moxfield.com/decks/x", { method: "POST" });
   const resp = await handleImportDeck(req, {});
   assert.equal(resp.status, 405);
+  const body = await resp.json();
+  assert.equal(body.error, "method_not_allowed");
+});
+
+test("protocol-less URLs are accepted (https:// is auto-prepended)", async () => {
+  mockUpstream({ name: "X", commanders: { a: { quantity: 1, card: { name: "Foo" } } } });
+  const req = new Request(
+    "https://lobby.example/import-deck?url=" + encodeURIComponent("moxfield.com/decks/x"),
+  );
+  const resp = await handleImportDeck(req, {});
+  assert.equal(resp.status, 200);
+});
+
+test("Moxfield: upstream returns non-JSON body → 502 upstream_unavailable (not 504)", async () => {
+  // Maintenance pages and HTML login walls are 2xx + non-JSON. Must be
+  // distinct from a network timeout (504) so the user sees a useful error.
+  global.fetch = async () =>
+    new Response("<!DOCTYPE html><html>maintenance</html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    });
+  const resp = await call("https://moxfield.com/decks/maint");
+  assert.equal(resp.status, 502);
+  const body = await resp.json();
+  assert.equal(body.error, "upstream_unavailable");
 });
 
 test("missing url query parameter returns 400 invalid_url", async () => {

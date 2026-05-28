@@ -29,6 +29,7 @@ interface DeckSections {
 
 type ErrorCode =
   | "invalid_url"
+  | "method_not_allowed"
   | "unsupported_source"
   | "invalid_id"
   | "not_found"
@@ -80,9 +81,13 @@ interface ParsedDeckUrl {
 }
 
 function parseDeckUrl(raw: string): ParsedDeckUrl | null {
+  // Direct API consumers (curl, third-party clients) often omit the protocol.
+  // The WHATWG URL parser requires one; normalize so we accept both forms.
+  const trimmed = raw.trim();
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
   let url: URL;
   try {
-    url = new URL(raw.trim());
+    url = new URL(withScheme);
   } catch {
     return null;
   }
@@ -284,22 +289,30 @@ function projectArchidekt(deck: ArchidektDeck): { text: string; empty: boolean }
 
 type UpstreamResult =
   | { ok: true; json: unknown }
-  | { ok: false; status: number }; // status 0 = network/timeout
+  | { ok: false; status: number }; // status 0 = network/timeout, -1 = bad JSON
 
 async function fetchUpstream(url: string): Promise<UpstreamResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  let resp: Response;
   try {
-    const resp = await fetch(url, {
+    resp = await fetch(url, {
       headers: { "User-Agent": USER_AGENT, Accept: "application/json" },
       signal: controller.signal,
     });
-    if (!resp.ok) return { ok: false, status: resp.status };
-    return { ok: true, json: await resp.json() };
   } catch {
-    return { ok: false, status: 0 };
+    return { ok: false, status: 0 }; // network failure or AbortController timeout
   } finally {
     clearTimeout(timer);
+  }
+  if (!resp.ok) return { ok: false, status: resp.status };
+  try {
+    return { ok: true, json: await resp.json() };
+  } catch {
+    // Upstream returned a 2xx body that isn't JSON — maintenance page, HTML
+    // login wall, edge cache miss, etc. Surface as a distinct error so the
+    // caller doesn't conflate it with a network timeout (504 → 502).
+    return { ok: false, status: -1 };
   }
 }
 
@@ -327,7 +340,7 @@ export async function handleImportDeck(
     return new Response(null, { status: 204, headers: cors });
   }
   if (request.method !== "GET") {
-    return errorResponse(405, "invalid_url", "Method not allowed.", cors);
+    return errorResponse(405, "method_not_allowed", "Method not allowed.", cors);
   }
 
   const requestUrl = new URL(request.url);
@@ -379,6 +392,16 @@ export async function handleImportDeck(
         504,
         "upstream_timeout",
         `${parsed.source === "moxfield" ? "Moxfield" : "Archidekt"} didn't respond in time. Try again in a moment.`,
+        cors,
+        { source: parsed.source },
+      );
+    }
+    if (upstream.status === -1) {
+      console.error({ event: "import_deck_upstream_bad_json", source: parsed.source, id: parsed.id });
+      return errorResponse(
+        502,
+        "upstream_unavailable",
+        `${parsed.source === "moxfield" ? "Moxfield" : "Archidekt"} returned an unexpected response. The deck source may be down or behind a maintenance page.`,
         cors,
         { source: parsed.source },
       );

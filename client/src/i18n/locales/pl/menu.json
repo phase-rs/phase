@@ -116,9 +116,16 @@
   "importDeck": {
     "title": "Importuj talię",
     "tabPaste": "Wklej tekst",
+    "tabUrl": "Z URL",
     "tabFile": "Z pliku",
     "deckNamePlaceholder": "Nazwa talii",
+    "urlPlaceholder": "https://moxfield.com/decks/… lub https://archidekt.com/decks/…",
+    "urlHint": "Importuje publiczną talię z Moxfield lub Archidekt.",
     "import": "Importuj",
+    "importing": "Importowanie…",
+    "errorInvalidUrl": "Wprowadź prawidłowy URL talii Moxfield lub Archidekt.",
+    "errorNetworkFailure": "Nie udało się połączyć z usługą importu. Sprawdź połączenie i spróbuj ponownie.",
+    "errorGeneric": "Nie udało się zaimportować talii.",
     "fileSupports": "Obsługuje formaty .dck, .dec, .txt oraz MTGA",
     "chooseFile": "Wybierz plik"
   },
