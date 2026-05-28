@@ -122,7 +122,16 @@ export async function loadDraftHostSession(
       DRAFT_HOST_PREFIX + id,
       getDraftStore(),
     );
-    return s ?? null;
+    if (!s) return null;
+    // C6 shape guard: legacy snapshots (pre-#1253) carried a flat
+    // `setPoolJson: string` field instead of the PoolInput discriminated
+    // union. Discriminate on the new shape; reject anything that doesn't
+    // self-identify as Set or Cube so the resume path falls back to
+    // "no draft pod to resume" instead of crashing on `persisted.poolInput.data`.
+    if (s.poolInput?.type !== "Set" && s.poolInput?.type !== "Cube") {
+      return null;
+    }
+    return s;
   } catch {
     return null;
   }
