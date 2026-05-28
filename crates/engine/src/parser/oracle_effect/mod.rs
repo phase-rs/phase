@@ -2043,6 +2043,54 @@ fn try_parse_create_token_choice(
     }))
 }
 
+/// CR 115.1 + CR 608.2d + CR 701.26a-b: "tap or untap target <object>"
+/// declares a single target as the trigger/spell is put on the stack, then the
+/// controller chooses the tap or untap instruction while resolving.
+fn try_parse_tap_or_untap_choice(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let ((), rest) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("tap or untap ")).parse(i)
+    })?;
+    let (target_text, multi_target) = strip_optional_target_prefix(rest.trim_start());
+    let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+    if matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    #[cfg(debug_assertions)]
+    assert_no_compound_remainder(_rem, tp.original);
+
+    let mut tap_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Tap {
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    tap_branch.description = Some("tap".to_string());
+    let mut untap_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Untap {
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    untap_branch.description = Some("untap".to_string());
+
+    let mut choice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![tap_branch, untap_branch],
+        },
+    );
+    choice.description = Some("tap or untap".to_string());
+
+    let mut clause = parsed_clause(Effect::TargetOnly { target });
+    clause.multi_target = multi_target;
+    clause.sub_ability = Some(Box::new(choice));
+    Some(clause)
+}
+
 /// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
 /// "put your choice of A counter-pattern or B counter-pattern on TARGET".
 ///
@@ -3092,6 +3140,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // generic inline splitter and token dispatch so "create a Food token or a
     // Treasure token" does not collapse to the first token branch.
     if let Some(clause) = try_parse_create_token_choice(tp, ctx) {
+        return clause;
+    }
+
+    // CR 115.1 + CR 608.2d + CR 701.26a-b: Shared-target tap/untap choice
+    // must run before the generic "A or B" splitter and before simple `tap`
+    // verb dispatch, otherwise the second instruction can be swallowed.
+    if let Some(clause) = try_parse_tap_or_untap_choice(tp, ctx) {
         return clause;
     }
 
@@ -24005,6 +24060,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shared_target_tap_or_untap_uses_resolution_choice() {
+        let def = parse_effect_chain("Tap or untap target permanent", AbilityKind::Spell);
+
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(target),
+        } = &*def.effect
+        else {
+            panic!("expected TargetOnly head, got {:?}", def.effect);
+        };
+        assert!(target
+            .type_filters
+            .iter()
+            .any(|filter| matches!(filter, TypeFilter::Permanent)));
+
+        let choice = def
+            .sub_ability
+            .as_deref()
+            .expect("tap-or-untap must chain a resolution choice");
+        let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+            panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 2);
+        assert!(matches!(
+            &*branches[0].effect,
+            Effect::Tap {
+                target: TargetFilter::ParentTarget
+            }
+        ));
+        assert!(matches!(
+            &*branches[1].effect,
+            Effect::Untap {
+                target: TargetFilter::ParentTarget
+            }
+        ));
+    }
+
+    #[test]
+    fn shared_target_tap_or_untap_preserves_up_to_target_count() {
+        let def = parse_effect_chain(
+            "Tap or untap up to one target permanent",
+            AbilityKind::Spell,
+        );
+
+        assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
+        assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+        assert!(matches!(
+            *def.sub_ability
+                .expect("tap-or-untap must chain a resolution choice")
+                .effect,
+            Effect::ChooseOneOf { .. }
+        ));
+    }
+
     /// Issue #501 FOLLOW-UP — ROOT CAUSE A building-block test. A "gains
     /// suspend" continuous keyword grant carries `Duration::Permanent` (CR
     /// 702.62b + CR 611.2a): the suspend mechanic owns the card's lifetime, so
@@ -35902,6 +36012,40 @@ mod tests {
         assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
         // Inner effect should parse as a draw.
         assert!(matches!(&*effect.effect, Effect::Draw { .. }));
+    }
+
+    /// CR 201.2: "Destroy target nonland permanent and all other permanents
+    /// with the same name as that permanent" (Maelstrom Pulse, and the Echoing
+    /// cycle, Bile Blight, Homing Lightning, Detention Sphere class). The
+    /// secondary mass effect must filter to permanents whose name matches the
+    /// targeted permanent (`SameNameAsParentTarget`) — without it the effect
+    /// degrades into an unconditional board wipe.
+    #[test]
+    fn maelstrom_pulse_destroys_only_same_named_permanents() {
+        let def = parse_effect_chain(
+            "Destroy target nonland permanent and all other permanents with the same name as that permanent.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(&*def.effect, Effect::Destroy { .. }));
+        let sub = def.sub_ability.as_ref().expect("DestroyAll continuation");
+        let Effect::DestroyAll { target, .. } = &*sub.effect else {
+            panic!("expected DestroyAll, got {:?}", sub.effect);
+        };
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected Typed filter, got {target:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .contains(&FilterProp::SameNameAsParentTarget),
+            "DestroyAll must restrict to the parent target's name, got {:?}",
+            typed.properties
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Another),
+            "DestroyAll must exclude the targeted permanent itself, got {:?}",
+            typed.properties
+        );
     }
 
     /// CR 701.12a: Tree of Perdition / Tree of Redemption / Evra — "exchange
