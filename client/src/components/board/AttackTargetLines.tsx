@@ -5,6 +5,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import {
   arcPath,
   useAttackerArrowPositions,
@@ -60,16 +61,17 @@ function AttackArrowPath({ arrow, isMinimal }: { arrow: AttackArrowData; isMinim
  *  Player-target arrows only draw in multiplayer (>2 players); in 1v1 the
  *  player attack is implicit and drawing would be visual noise. */
 export function AttackTargetLines() {
-  const combat = useGameStore((s) => s.gameState?.combat ?? null);
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const seatOrder = useGameStore((s) => s.gameState?.seat_order);
-  const eliminatedPlayers = useGameStore((s) => s.gameState?.eliminated_players);
+  const gameState = useGameStore((s) => s.gameState);
+  const combat = gameState?.combat ?? null;
+  const objects = gameState?.objects;
+  const seatOrder = gameState?.seat_order;
+  const eliminatedPlayers = gameState?.eliminated_players;
   const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const localPlayerId = usePlayerId();
   const isMinimal = vfxQuality === "minimal";
 
-  const isMultiplayer = (seatOrder?.length ?? 0) > 2;
+  const isMultiplayer = gameState != null && !isOneOnOne(gameState);
   const effectiveFocusedOpponent = useMemo(() => {
     if (focusedOpponent != null) return focusedOpponent;
     const eliminated = new Set(eliminatedPlayers ?? []);

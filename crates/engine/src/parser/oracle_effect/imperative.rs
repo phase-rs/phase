@@ -24,11 +24,11 @@ use crate::parser::oracle_static::{
 #[cfg(test)]
 use crate::types::ability::TypeFilter;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ChoiceType, Chooser,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect, FilterProp,
-    GainLifePlayer, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PaymentCost,
-    PlayerScope, PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
+    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
+    Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
+    FilterProp, GainLifePlayer, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool,
+    PaymentCost, PlayerScope, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
+    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -37,7 +37,8 @@ use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_type_phrase, resolve_pronoun_target,
+    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
+    resolve_pronoun_target, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
@@ -56,6 +57,23 @@ enum PhaseDir {
 /// reminder text stripping removes the parenthetical that contains the target).
 pub(super) fn default_earthbend_target() -> TargetFilter {
     TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You))
+}
+
+/// CR 115.1 + Whitemane Lion ruling: True iff the filter constrains by a
+/// controller scope (`controller: Some(...)`) at the top level (or inside an
+/// `And`/`Or`/`Not` composition). This is the precondition for treating a
+/// non-targeted bounce as a controller-choice EffectZoneChoice instead of a
+/// no-op — without a controller scope, the resolver has no eligible-set to
+/// enumerate. Mirrors the shape of `filter_targets_zone` in `effects/bounce.rs`.
+pub(super) fn filter_has_controller_scope(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.is_some(),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_has_controller_scope)
+        }
+        TargetFilter::Not { filter } => filter_has_controller_scope(filter),
+        _ => false,
+    }
 }
 
 fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
@@ -1242,12 +1260,29 @@ pub(super) fn parse_targeted_action_ast(
             }
         });
         let count = counted_return.as_ref().map(|(_, count)| count.clone());
-        let (target, _count_for_shape) = counted_return.unwrap_or_else(|| {
-            let (target, _rem) = parse_target_with_ctx(target_text, ctx);
-            #[cfg(debug_assertions)]
-            assert_no_compound_remainder(_rem, text);
-            (target, QuantityExpr::Fixed { value: 0 })
-        });
+        // CR 115.1 + Whitemane Lion ruling: Use `parse_target_with_syntax` so
+        // the "target"-keyword vs descriptor discriminator flows back from
+        // this parse alone, with no cross-clause residue to clear.
+        let (target, target_syntax, _count_for_shape) = match counted_return {
+            Some((target, c)) => (target, TargetSyntax::TargetKeyword, c),
+            None => {
+                let (target, _rem, syntax) = parse_target_with_syntax(target_text, ctx);
+                #[cfg(debug_assertions)]
+                assert_no_compound_remainder(_rem, text);
+                (target, syntax, QuantityExpr::Fixed { value: 0 })
+            }
+        };
+        // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
+        // the word "target" AND the filter has a controller scope to enumerate
+        // against (Whitemane Lion's "a creature you control" — the controller
+        // picks at resolution time via EffectZoneChoice).
+        let selection = if matches!(target_syntax, TargetSyntax::Descriptor)
+            && filter_has_controller_scope(&target)
+        {
+            BounceSelection::AtResolution
+        } else {
+            BounceSelection::Targeted
+        };
         let is_mass = is_mass || count.is_some();
         let origin = super::infer_origin_zone(rest_lower);
 
@@ -1290,7 +1325,7 @@ pub(super) fn parse_targeted_action_ast(
                         enter_tapped: false,
                     })
                 } else {
-                    Some(TargetedImperativeAst::Return { target })
+                    Some(TargetedImperativeAst::Return { target, selection })
                 }
             }
             Some(d) => {
@@ -1317,7 +1352,7 @@ pub(super) fn parse_targeted_action_ast(
                 if is_mass {
                     Some(TargetedImperativeAst::ReturnAll { target, count })
                 } else {
-                    Some(TargetedImperativeAst::Return { target })
+                    Some(TargetedImperativeAst::Return { target, selection })
                 }
             }
         };
@@ -1438,9 +1473,10 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         // implicit (1 per parent-affected ID; the runtime expands ParentTarget
         // into the full set at rebind time).
         TargetedImperativeAst::DiscardCard { target } => Effect::DiscardCard { count: 1, target },
-        TargetedImperativeAst::Return { target } => Effect::Bounce {
+        TargetedImperativeAst::Return { target, selection } => Effect::Bounce {
             target,
             destination: None,
+            selection,
         },
         // CR 400.7 + CR 611.2c: "Return all/each [filter]" mass-bounce — the
         // resolver iterates every matching permanent. Class filter is preserved

@@ -54,7 +54,8 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
+        BounceSelection, ContinuousModification, ControllerRef, StaticDefinition, TargetFilter,
+        TypedFilter,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -207,6 +208,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),

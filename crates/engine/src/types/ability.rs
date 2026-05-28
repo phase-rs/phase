@@ -4934,6 +4934,26 @@ impl StepSkipTarget {
     }
 }
 
+/// CR 115.1: Whether the `Bounce` effect selects its affected object at
+/// cast/activation time ("target", locked) or at resolution time (controller-
+/// scoped filter like "a creature you control" — Whitemane Lion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BounceSelection {
+    /// Default — target chosen at cast/activation via the targeting pipeline.
+    #[default]
+    Targeted,
+    /// CR 608.2c: Controller chooses an eligible object at resolution.
+    AtResolution,
+}
+
+impl BounceSelection {
+    /// Helper for `#[serde(skip_serializing_if = ...)]`.
+    pub fn is_targeted(&self) -> bool {
+        matches!(self, Self::Targeted)
+    }
+}
+
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
 // clippy::large_enum_variant: `Effect` is the engine's central 100+ variant
@@ -5368,6 +5388,12 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default)]
         destination: Option<Zone>,
+        /// CR 115.1 + Whitemane Lion ruling: Controls whether this effect uses
+        /// the targeting pipeline (`Targeted`) or selects at resolution
+        /// (`AtResolution` — Whitemane Lion class). Card-data.json records
+        /// predating this field deserialize as `Targeted` via the default.
+        #[serde(default, skip_serializing_if = "BounceSelection::is_targeted")]
+        selection: BounceSelection,
     },
     /// CR 400.7 + CR 611.2c: Mass-bounce — return every permanent matching
     /// `target` to its owner's hand (default) or `destination` if set. Mirrors
