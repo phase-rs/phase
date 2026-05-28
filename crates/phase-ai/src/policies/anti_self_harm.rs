@@ -1726,6 +1726,7 @@ mod tests {
                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
                 ),
                 destination: None,
+                non_targeting: false,
             },
         )]);
 
@@ -1785,6 +1786,7 @@ mod tests {
                         .controller(engine::types::ability::ControllerRef::You),
                 ),
                 destination: None,
+                non_targeting: false,
             },
         )]);
 

@@ -300,6 +300,7 @@ fn redundancy_delta(
         Effect::Bounce {
             target,
             destination,
+            ..
         } => match destination {
             None | Some(Zone::Hand) => {
                 bounce_self_undo_redundancy(state, source_id, target, origin)
@@ -1371,6 +1372,7 @@ mod tests {
                     Effect::Bounce {
                         target: bounce_target,
                         destination,
+                        non_targeting: false,
                     },
                 )),
         );
@@ -1475,6 +1477,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 destination: None,
+                non_targeting: false,
             },
         );
 

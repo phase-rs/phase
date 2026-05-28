@@ -97,6 +97,7 @@ fn skullwinder_chosen_opponent_picks_their_own_card() {
         Effect::Bounce {
             target,
             destination: None,
+            non_targeting: false,
         },
         Vec::new(),
         skullwinder,

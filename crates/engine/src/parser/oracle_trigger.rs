@@ -130,6 +130,7 @@ fn self_recursion_trigger_zone(
         crate::types::ability::Effect::Bounce {
             target: TargetFilter::SelfRef,
             destination,
+            ..
         } if destination.is_none_or(|zone| zone == Zone::Hand) => {
             parse_self_return_origin_zone(source_lower)
         }
@@ -16081,6 +16082,7 @@ mod tests {
             Some(Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                non_targeting: false,
             })
         ));
     }
@@ -16100,6 +16102,7 @@ mod tests {
             Some(Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                non_targeting: false,
             })
         ));
     }
@@ -16123,6 +16126,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                non_targeting: false,
             }
         ));
         assert!(matches!(

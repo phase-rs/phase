@@ -58,6 +58,23 @@ pub(super) fn default_earthbend_target() -> TargetFilter {
     TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You))
 }
 
+/// CR 115.1 + Whitemane Lion ruling: True iff the filter constrains by a
+/// controller scope (`controller: Some(...)`) at the top level (or inside an
+/// `And`/`Or`/`Not` composition). This is the precondition for treating a
+/// non-targeted bounce as a controller-choice EffectZoneChoice instead of a
+/// no-op — without a controller scope, the resolver has no eligible-set to
+/// enumerate. Mirrors the shape of `filter_targets_zone` in `effects/bounce.rs`.
+pub(super) fn filter_has_controller_scope(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.is_some(),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_has_controller_scope)
+        }
+        TargetFilter::Not { filter } => filter_has_controller_scope(filter),
+        _ => false,
+    }
+}
+
 fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
     if preceded(
         take_until::<_, _, OracleError<'_>>("target player's library"),
@@ -1242,12 +1259,21 @@ pub(super) fn parse_targeted_action_ast(
             }
         });
         let count = counted_return.as_ref().map(|(_, count)| count.clone());
+        // CR 115.1 + Whitemane Lion ruling: Reset the saw_target_keyword flag
+        // before parsing the target phrase so the post-parse value reflects
+        // only this call (not residue from an earlier clause's parse).
+        ctx.saw_target_keyword = false;
         let (target, _count_for_shape) = counted_return.unwrap_or_else(|| {
             let (target, _rem) = parse_target_with_ctx(target_text, ctx);
             #[cfg(debug_assertions)]
             assert_no_compound_remainder(_rem, text);
             (target, QuantityExpr::Fixed { value: 0 })
         });
+        // CR 115.1: A bounce is "non-targeted" iff the Oracle text omitted the
+        // word "target" AND the filter has a controller scope to enumerate
+        // against (Whitemane Lion's "a creature you control" — the controller
+        // picks at resolution time via EffectZoneChoice).
+        let non_targeting = !ctx.saw_target_keyword && filter_has_controller_scope(&target);
         let is_mass = is_mass || count.is_some();
         let origin = super::infer_origin_zone(rest_lower);
 
@@ -1290,7 +1316,10 @@ pub(super) fn parse_targeted_action_ast(
                         enter_tapped: false,
                     })
                 } else {
-                    Some(TargetedImperativeAst::Return { target })
+                    Some(TargetedImperativeAst::Return {
+                        target,
+                        non_targeting,
+                    })
                 }
             }
             Some(d) => {
@@ -1317,7 +1346,10 @@ pub(super) fn parse_targeted_action_ast(
                 if is_mass {
                     Some(TargetedImperativeAst::ReturnAll { target, count })
                 } else {
-                    Some(TargetedImperativeAst::Return { target })
+                    Some(TargetedImperativeAst::Return {
+                        target,
+                        non_targeting,
+                    })
                 }
             }
         };
@@ -1438,9 +1470,13 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         // implicit (1 per parent-affected ID; the runtime expands ParentTarget
         // into the full set at rebind time).
         TargetedImperativeAst::DiscardCard { target } => Effect::DiscardCard { count: 1, target },
-        TargetedImperativeAst::Return { target } => Effect::Bounce {
+        TargetedImperativeAst::Return {
+            target,
+            non_targeting,
+        } => Effect::Bounce {
             target,
             destination: None,
+            non_targeting,
         },
         // CR 400.7 + CR 611.2c: "Return all/each [filter]" mass-bounce — the
         // resolver iterates every matching permanent. Class filter is preserved

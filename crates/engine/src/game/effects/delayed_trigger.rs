@@ -829,6 +829,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::ParentTarget,
                 destination: None,
+                non_targeting: false,
             },
         );
         let ability = ResolvedAbility::new(

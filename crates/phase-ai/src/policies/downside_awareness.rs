@@ -197,6 +197,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                non_targeting: false,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::Card,
@@ -214,6 +215,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                non_targeting: false,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::Card,
@@ -227,6 +229,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                non_targeting: false,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::TappedFish,
@@ -247,6 +250,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                non_targeting: false,
             },
             None,
         );
@@ -263,6 +267,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                non_targeting: false,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::TappedFish,
@@ -278,6 +283,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                non_targeting: false,
             },
             Some(Effect::GiftDelivery {
                 kind: GiftKind::TappedFish,

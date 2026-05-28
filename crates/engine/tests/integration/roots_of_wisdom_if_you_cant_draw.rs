@@ -187,6 +187,7 @@ fn bounce_then_gated_draw(source: ObjectId, controller: PlayerId) -> ResolvedAbi
         Effect::Bounce {
             target: land_in_graveyard,
             destination: Some(Zone::Hand),
+            non_targeting: false,
         },
         vec![],
         source,

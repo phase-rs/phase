@@ -554,12 +554,20 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     // "targets" or the leading word of "target creature".
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("target").parse(lower.as_str()) {
         if rest.is_empty() || rest.starts_with([',', '.']) {
+            // CR 115.1: "target" keyword consumed — flag for downstream lowering
+            // (e.g. Bounce non_targeting detection).
+            ctx.saw_target_keyword = true;
             return (TargetFilter::Any, &text[lower.len() - rest.len()..]);
         }
     }
 
     // "target" group — longest-match-first within
     if let Ok((after_target, _)) = tag::<_, _, OracleError<'_>>("target ").parse(lower.as_str()) {
+        // CR 115.1: "target" keyword consumed — flag for downstream lowering
+        // (e.g. Bounce non_targeting detection). Whitemane Lion's "return a
+        // creature you control" parses through this path's *absence*, so a
+        // false here lets the lowering pipeline pick the non-targeted variant.
+        ctx.saw_target_keyword = true;
         let target_offset = lower.len() - after_target.len();
         // "target player or planeswalker"
         if let Ok((rest, _)) =

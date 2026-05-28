@@ -3654,6 +3654,23 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     if matches!(effect, Effect::Sacrifice { .. }) {
         return None;
     }
+    // CR 115.1 + Whitemane Lion ruling: A `Bounce` whose Oracle text omitted
+    // the word "target" ("return a creature you control to its owner's hand")
+    // is NOT a targeted effect — the controller chooses an eligible permanent
+    // at resolution time via `EffectZoneChoice`. Returning a filter here would
+    // route resolution through the targeted path, which (a) creates spurious
+    // target selection slots at stack-push time and (b) leaves the resolver's
+    // targets vector empty, causing the effect to silently no-op. Mirrors the
+    // Sacrifice carve-out above.
+    if matches!(
+        effect,
+        Effect::Bounce {
+            non_targeting: true,
+            ..
+        }
+    ) {
+        return None;
+    }
     // CR 702.95a + CR 115.10a + CR 608.2d: Soulbond pair choices are not
     // targets. PairWith computes its legal partner while resolving.
     if matches!(effect, Effect::PairWith { .. }) {
@@ -6590,6 +6607,7 @@ pub mod tests {
                             .controller(ControllerRef::You),
                     ),
                     destination: None,
+                    non_targeting: false,
                 },
             );
             execute.optional_targeting = true;
@@ -8697,6 +8715,38 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
             "Sacrifice should not extract a target filter (resolution-time selection)"
+        );
+    }
+
+    /// CR 115.1 + Whitemane Lion ruling (issue #563): A non-targeted Bounce
+    /// (Oracle text without the word "target", e.g. "return a creature you
+    /// control to its owner's hand") must not extract a target filter —
+    /// resolution-time `EffectZoneChoice` handles the controller-scoped pick.
+    #[test]
+    fn extract_target_skips_non_targeting_bounce() {
+        let effect = Effect::Bounce {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            destination: None,
+            non_targeting: true,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "non_targeting Bounce should not extract a target filter (resolution-time selection)"
+        );
+    }
+
+    /// CR 115.1 boundary: A targeted Bounce (`non_targeting: false`) still uses
+    /// the targeting pipeline. Mirrors `extract_target_keeps_change_zone_from_battlefield`.
+    #[test]
+    fn extract_target_keeps_targeting_bounce() {
+        let effect = Effect::Bounce {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            destination: None,
+            non_targeting: false,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "targeted Bounce (non_targeting=false) must extract a target filter"
         );
     }
 

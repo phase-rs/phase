@@ -6097,6 +6097,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                non_targeting: false,
             },
             vec![TargetRef::Object(permanent)],
             ObjectId(100),
@@ -6229,6 +6230,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                non_targeting: false,
             },
             vec![],
             ObjectId(100),

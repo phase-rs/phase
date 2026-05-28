@@ -81,6 +81,18 @@ pub(crate) struct ParseContext {
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of
     /// inventing a parent target.
     pub parent_target_available: bool,
+    /// CR 115.1: Whether the parser consumed the word "target" while extracting
+    /// the current target phrase. Set by `parse_target_with_ctx` at every
+    /// "target"/"target X"/"random target X" leaf consumer and read by
+    /// downstream effect lowering (e.g. `imperative.rs` for `Effect::Bounce`)
+    /// to distinguish *targeted* effects ("return target creature you control")
+    /// from *non-targeted* controller-scoped effects ("return a creature you
+    /// control" — Whitemane Lion / Stonecloaker / Aether Adept's ETB return).
+    /// Per the Whitemane Lion ruling, the latter doesn't target — the
+    /// controller chooses at resolution time, so it bypasses the targeting
+    /// pipeline. Callers must reset to `false` before each independent target
+    /// phrase parse.
+    pub saw_target_keyword: bool,
 }
 
 impl ParseContext {

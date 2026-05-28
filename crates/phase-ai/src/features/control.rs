@@ -362,6 +362,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                non_targeting: false,
             },
         )
     }

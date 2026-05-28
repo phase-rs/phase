@@ -207,6 +207,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                non_targeting: false,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),

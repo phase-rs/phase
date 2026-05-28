@@ -5368,6 +5368,17 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default)]
         destination: Option<Zone>,
+        /// CR 115.1 + Whitemane Lion ruling: When `true`, the effect does NOT
+        /// use the word "target" in its Oracle text ("return a creature you
+        /// control to its owner's hand"). The controller chooses an eligible
+        /// permanent at resolution time via `WaitingFor::EffectZoneChoice`,
+        /// bypassing the targeting pipeline (`extract_target_filter_from_effect`
+        /// returns `None`). When `false`, the effect uses "target" and follows
+        /// standard target selection. Defaults to `false` so existing
+        /// card-data.json records (which predate this field) continue to
+        /// deserialize as the canonical targeted form.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        non_targeting: bool,
     },
     /// CR 400.7 + CR 611.2c: Mass-bounce — return every permanent matching
     /// `target` to its owner's hand (default) or `destination` if set. Mirrors

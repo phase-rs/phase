@@ -6532,12 +6532,22 @@ fn try_parse_verb_and_target<'a>(
         } else {
             (false, target_text)
         };
+        // CR 115.1 + Whitemane Lion ruling: Reset the saw_target_keyword flag
+        // before parsing the target phrase so the post-parse value reflects
+        // only this call (not residue from an earlier clause's parse).
+        ctx.saw_target_keyword = false;
         let (target, mut rem) = parse_target_with_ctx(target_text, ctx);
         if rem.is_empty() {
             rem = dest_remainder;
         }
         let origin = infer_origin_zone(rest_lower);
         let target = add_inferred_origin_constraints_to_target(target, origin, rest_lower);
+        // CR 115.1: A bounce is "non-targeted" iff the Oracle text omitted the
+        // word "target" AND the filter has a controller scope to enumerate
+        // against. Computed here so both Hand-destined and default-None
+        // branches below can stamp it onto the AST.
+        let non_targeting =
+            !ctx.saw_target_keyword && imperative::filter_has_controller_scope(&target);
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
                 if is_mass && d.enter_with_counters.is_empty() {
@@ -6576,7 +6586,13 @@ fn try_parse_verb_and_target<'a>(
                         rem,
                     ))
                 } else {
-                    Some((TargetedImperativeAst::Return { target }, rem))
+                    Some((
+                        TargetedImperativeAst::Return {
+                            target,
+                            non_targeting,
+                        },
+                        rem,
+                    ))
                 }
             }
             Some(d) => {
@@ -6601,7 +6617,13 @@ fn try_parse_verb_and_target<'a>(
                     ))
                 }
             }
-            None => Some((TargetedImperativeAst::Return { target }, rem)),
+            None => Some((
+                TargetedImperativeAst::Return {
+                    target,
+                    non_targeting,
+                },
+                rem,
+            )),
         };
     }
 
@@ -21870,6 +21892,52 @@ mod tests {
             matches!(e, Effect::Bounce { .. }),
             "single-target return must stay Bounce, got {e:?}"
         );
+    }
+
+    /// CR 115.1 + Whitemane Lion ruling (issue #563): "Return a creature you
+    /// control to its owner's hand" does NOT contain the word "target" — per
+    /// the Whitemane Lion ruling, the controller chooses at resolution time
+    /// and the effect bypasses the targeting pipeline. The parser must produce
+    /// `Effect::Bounce { non_targeting: true, .. }` so the resolver and
+    /// targeting pipeline pick the non-targeted branch.
+    #[test]
+    fn effect_bounce_non_targeting_when_target_keyword_absent() {
+        let e = parse_effect("Return a creature you control to its owner's hand");
+        match e {
+            Effect::Bounce {
+                non_targeting,
+                target,
+                ..
+            } => {
+                assert!(
+                    non_targeting,
+                    "no 'target' keyword + controller-scoped filter must produce non_targeting=true; got target={target:?}"
+                );
+            }
+            other => panic!("expected Effect::Bounce, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1 (issue #563 boundary): "Return target creature you control to
+    /// its owner's hand" DOES contain the word "target" — the spell follows
+    /// standard target selection and must produce `non_targeting: false`. Pins
+    /// the keyword-presence axis against the non-targeting carve-out.
+    #[test]
+    fn effect_bounce_targeting_when_target_keyword_present() {
+        let e = parse_effect("Return target creature you control to its owner's hand");
+        match e {
+            Effect::Bounce {
+                non_targeting,
+                target,
+                ..
+            } => {
+                assert!(
+                    !non_targeting,
+                    "explicit 'target' keyword must produce non_targeting=false; got target={target:?}"
+                );
+            }
+            other => panic!("expected Effect::Bounce, got {other:?}"),
+        }
     }
 
     /// CR 400.7: "Return all <filter> to the battlefield" (Open the Vaults,
