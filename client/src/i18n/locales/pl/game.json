@@ -434,6 +434,7 @@
     "blockersDeclared_one": "{{count}} blokujący przydzielony",
     "blockersDeclared_other": "{{count}} blokujących przydzielonych",
     "becomesTarget": "Obiekt {{objectId}} obrany za cel przez {{sourceId}}",
+    "becomesTargetPlayer": "{{player}} obrany za cel przez {{sourceId}}",
     "replacementApplied": "Zastosowano efekt zastępujący: {{eventType}}",
     "companionRevealed": "{{player}} ujawnił towarzysza: {{cardName}}",
     "companionMovedToHand": "{{player}} wziął towarzysza {{cardName}} do ręki",

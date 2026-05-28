@@ -1461,7 +1461,7 @@ mod tests {
         );
 
         let trigger_event = GameEvent::BecomesTarget {
-            object_id: ObjectId(999), // target doesn't matter for this test
+            target: TargetRef::Object(ObjectId(999)), // target doesn't matter for this test
             source_id: spell_id,
         };
 

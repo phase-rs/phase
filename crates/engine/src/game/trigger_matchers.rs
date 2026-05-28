@@ -648,12 +648,15 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PermanentSacrificed { object_id, .. }
         | GameEvent::PermanentTapped { object_id, .. }
         | GameEvent::PermanentUntapped { object_id } => count_one(*object_id),
-        // CR 120.3: Damage dealt to an object yields the damaged object as
-        // subject. Damage dealt to a player has no object subject.
-        GameEvent::DamageDealt { target, .. } => match target {
-            TargetRef::Object(id) => count_one(*id),
-            TargetRef::Player(_) => 0,
-        },
+        // Object target events yield the affected object as subject. Player
+        // target events carry no object subject; player scoping lives on
+        // `valid_target`.
+        GameEvent::DamageDealt { target, .. } | GameEvent::BecomesTarget { target, .. } => {
+            match target {
+                TargetRef::Object(id) => count_one(*id),
+                TargetRef::Player(_) => 0,
+            }
+        }
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
@@ -689,7 +692,6 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::BlockersDeclared { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
-        | GameEvent::BecomesTarget { .. }
         | GameEvent::VehicleCrewed { .. }
         | GameEvent::Stationed { .. }
         | GameEvent::Saddled { .. }
@@ -1656,7 +1658,7 @@ pub(super) fn match_becomes_target(
     state: &GameState,
 ) -> bool {
     let GameEvent::BecomesTarget {
-        object_id,
+        target,
         source_id: targeting_spell_id,
     } = event
     else {
@@ -1689,11 +1691,20 @@ pub(super) fn match_becomes_target(
         }
     }
 
-    // Check if the targeted object matches the trigger's valid_card filter
-    if trigger.valid_card.is_some() {
-        valid_card_matches(trigger, state, *object_id, source_id)
-    } else {
-        *object_id == source_id
+    match target {
+        TargetRef::Object(object_id) => {
+            // Check if the targeted object matches the trigger's valid_card filter.
+            if trigger.valid_card.is_some() {
+                valid_card_matches(trigger, state, *object_id, source_id)
+            } else {
+                *object_id == source_id
+            }
+        }
+        TargetRef::Player(player_id) => {
+            trigger.valid_card.is_none()
+                && trigger.valid_target.is_some()
+                && valid_player_matches(trigger, state, *player_id, source_id)
+        }
     }
 }
 
@@ -2408,8 +2419,11 @@ pub(super) fn match_damage_received(
         ..
     } = event
     {
-        if matches!(trigger.damage_kind, DamageKindFilter::CombatOnly) && !is_combat {
-            return false;
+        match trigger.damage_kind {
+            DamageKindFilter::Any => {}
+            DamageKindFilter::CombatOnly if !is_combat => return false,
+            DamageKindFilter::NoncombatOnly if *is_combat => return false,
+            DamageKindFilter::CombatOnly | DamageKindFilter::NoncombatOnly => {}
         }
         // CR 603.2 + CR 120.1: Per-event damage-amount threshold. Mirrors
         // `match_damage_done` so a "is dealt N or more damage" trigger sets
@@ -6510,7 +6524,7 @@ mod tests {
 
         // Event: trigger_owner becomes the target of spell_id
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
         };
         // No valid_card, so fallback: event.object_id == source_id param
@@ -6531,7 +6545,7 @@ mod tests {
 
         // Event: trigger_owner becomes the target of an activated ability
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
         };
         assert!(!match_becomes_target(
@@ -6551,10 +6565,91 @@ mod tests {
 
         // Event: trigger_owner becomes the target of an activated ability — should still fire
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
         };
         assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_player_matches_valid_target_controller() {
+        let (mut state, spell_id) = setup_with_spell_on_stack(false);
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Player Target Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Player(PlayerId(0)),
+            source_id: spell_id,
+        };
+
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_player_rejects_wrong_player() {
+        let (mut state, spell_id) = setup_with_spell_on_stack(false);
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Player Target Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Player(PlayerId(1)),
+            source_id: spell_id,
+        };
+
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_player_rejects_object_subject_shape() {
+        let (mut state, spell_id) = setup_with_spell_on_stack(false);
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Player Target Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Player(PlayerId(0)),
+            source_id: spell_id,
+        };
+
+        assert!(!match_becomes_target(
             &event,
             &trigger,
             trigger_owner,
@@ -6570,7 +6665,7 @@ mod tests {
         trigger.valid_source = Some(aura_stack_spell_filter());
 
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
         };
         assert!(match_becomes_target(
@@ -6589,7 +6684,7 @@ mod tests {
         trigger.valid_source = Some(aura_stack_spell_filter());
 
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
         };
         assert!(!match_becomes_target(
@@ -6608,7 +6703,7 @@ mod tests {
         trigger.valid_source = Some(aura_stack_spell_filter());
 
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
         };
         assert!(!match_becomes_target(
@@ -6684,6 +6779,56 @@ mod tests {
             excess: 0,
         };
         assert!(match_damage_done(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn damage_received_noncombat_only_rejects_combat() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Receiver".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.damage_kind = DamageKindFilter::NoncombatOnly;
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+
+        assert!(!match_damage_received(&event, &trigger, source_id, &state));
+    }
+
+    #[test]
+    fn damage_received_noncombat_only_accepts_noncombat() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Receiver".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.damage_kind = DamageKindFilter::NoncombatOnly;
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+
+        assert!(match_damage_received(&event, &trigger, source_id, &state));
     }
 
     #[test]

@@ -698,14 +698,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(&format!("{kind:?}")),
         ],
 
-        GameEvent::BecomesTarget {
-            object_id,
-            source_id,
-        } => vec![
-            card_seg(state, *object_id),
-            text(" is targeted by "),
-            card_seg(state, *source_id),
-        ],
+        GameEvent::BecomesTarget { target, source_id } => {
+            let mut segments = Vec::new();
+            match target {
+                TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),
+                TargetRef::Player(player_id) => segments.push(player_seg(state, *player_id)),
+            }
+            segments.push(text(" is targeted by "));
+            segments.push(card_seg(state, *source_id));
+            segments
+        }
 
         GameEvent::ReplacementApplied {
             source_id,

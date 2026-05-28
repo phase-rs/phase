@@ -4375,6 +4375,21 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
             return (filter, rest);
         }
 
+        if let Ok((rest, filter)) = alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                alt((
+                    tag::<_, _, OracleError<'_>>("your opponents"),
+                    tag("opponents"),
+                )),
+            ),
+            value(TargetFilter::Player, tag("players")),
+        ))
+        .parse(after_quantifier)
+        {
+            return (filter, rest.trim_start());
+        }
+
         let (filter, rest) = parse_type_phrase(after_quantifier);
         if rest.len() < after_quantifier.len() {
             return (filter, rest);
@@ -4401,11 +4416,20 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
     if let Ok((rest, filter)) = alt((
         value(
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-            alt((tag::<_, _, OracleError<'_>>("an opponent"), tag("opponent"))),
+            alt((
+                tag::<_, _, OracleError<'_>>("your opponents"),
+                tag("opponents"),
+                tag("an opponent"),
+                tag("opponent"),
+            )),
         ),
         value(
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             tag("each opponent"),
+        ),
+        value(
+            TargetFilter::Controller,
+            terminated(tag("you"), peek(alt((space1, eof)))),
         ),
         value(TargetFilter::Player, alt((tag("a player"), tag("player")))),
     ))
@@ -4732,6 +4756,28 @@ fn subject_is_opponent(subject: &TargetFilter) -> bool {
             ..
         })
     )
+}
+
+fn subject_is_player(subject: &TargetFilter) -> bool {
+    matches!(
+        subject,
+        TargetFilter::Player | TargetFilter::Controller | TargetFilter::AllPlayers
+    ) || matches!(
+        subject,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: Some(_),
+            properties,
+        }) if type_filters.is_empty() && properties.is_empty()
+    )
+}
+
+fn set_trigger_subject(def: &mut TriggerDefinition, subject: &TargetFilter) {
+    if subject_is_player(subject) {
+        def.valid_target = Some(subject.clone());
+    } else {
+        def.valid_card = Some(subject.clone());
+    }
 }
 
 fn parse_attachment_self_host(input: &str) -> OracleResult<'_, ()> {
@@ -5279,6 +5325,11 @@ fn try_parse_event(
                 SimpleEvent::BecomesTargetSpellOrAbility,
                 tag("becomes the target of a spell or ability"),
             ),
+            // CR 115.1: Plural form for batched "become the target" triggers.
+            value(
+                SimpleEvent::BecomesTargetSpellOrAbility,
+                tag("become the target of a spell or ability"),
+            ),
             value(
                 SimpleEvent::BecomesTargetSpell {
                     qualifier: Some(TargetFilter::Typed(
@@ -5295,12 +5346,23 @@ fn try_parse_event(
                 SimpleEvent::DealtCombatDamage,
                 tag("is dealt combat damage"),
             ),
+            // CR 120.2: Plural form for batched "are dealt combat damage" triggers.
+            value(
+                SimpleEvent::DealtCombatDamage,
+                tag("are dealt combat damage"),
+            ),
             value(SimpleEvent::DealtDamage, tag("is dealt damage")),
+            // CR 120.2: Plural form for batched "are dealt damage" triggers.
+            value(SimpleEvent::DealtDamage, tag("are dealt damage")),
             value(SimpleEvent::BecomesTapped, tag("becomes tapped")),
+            // CR 701.21: Plural form for batched "one or more ... become tapped" triggers.
+            value(SimpleEvent::BecomesTapped, tag("become tapped")),
             value(SimpleEvent::TappedForMana, tag("is tapped for mana")),
         ))
         .or(alt((
             value(SimpleEvent::BecomesUntapped, tag("becomes untapped")),
+            // CR 701.21: Plural form for batched "one or more ... become untapped" triggers.
+            value(SimpleEvent::BecomesUntapped, tag("become untapped")),
             value(SimpleEvent::BecomesUntapped, tag("untaps")),
             value(SimpleEvent::TurnFaceUp, tag("is turned face up")),
             // CR 701.37b: "When ~ becomes monstrous" trigger event.
@@ -5359,13 +5421,13 @@ fn try_parse_event(
             }
             SimpleEvent::BecomesTargetSpellOrAbility => {
                 def.mode = TriggerMode::BecomesTarget;
-                def.valid_card = Some(subject.clone());
+                set_trigger_subject(&mut def, subject);
             }
             // CR 115.1a + CR 115.1b: "target" spell text defines targeted spells,
             // and Aura spells are always targeted via enchant.
             SimpleEvent::BecomesTargetSpell { qualifier } => {
                 def.mode = TriggerMode::BecomesTarget;
-                def.valid_card = Some(subject.clone());
+                set_trigger_subject(&mut def, subject);
                 def.valid_source = Some(if let Some(extra_filter) = qualifier {
                     TargetFilter::And {
                         filters: vec![TargetFilter::StackSpell, extra_filter],
@@ -5377,11 +5439,11 @@ fn try_parse_event(
             SimpleEvent::DealtCombatDamage => {
                 def.mode = TriggerMode::DamageReceived;
                 def.damage_kind = DamageKindFilter::CombatOnly;
-                def.valid_card = Some(subject.clone());
+                set_trigger_subject(&mut def, subject);
             }
             SimpleEvent::DealtDamage => {
                 def.mode = TriggerMode::DamageReceived;
-                def.valid_card = Some(subject.clone());
+                set_trigger_subject(&mut def, subject);
             }
             SimpleEvent::BecomesTapped => {
                 def.mode = TriggerMode::Taps;
@@ -12652,6 +12714,42 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
+    /// CR 701.21 + CR 603.2c: Batched plural form "become tapped" for
+    /// "Whenever one or more nontoken Merfolk you control become tapped" —
+    /// Deeproot Pilgrimage.
+    #[test]
+    fn trigger_one_or_more_become_tapped() {
+        let def = parse_trigger_line(
+            "Whenever one or more nontoken Merfolk you control become tapped, create a 1/1 blue Merfolk creature token with hexproof.",
+            "Deeproot Pilgrimage",
+        );
+        assert_eq!(def.mode, TriggerMode::Taps);
+        assert!(def.batched);
+        // valid_card should be a Typed filter for nontoken Merfolk you control
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                // type_filters should contain the Merfolk subtype (no core type needed —
+                // "Merfolk" alone identifies the creature subtype per CR 205.3m).
+                assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Merfolk".to_string())),
+                    "expected Subtype(Merfolk) in type_filters, got {:?}",
+                    tf.type_filters
+                );
+                // Should have NonToken property
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::NonToken)),
+                    "expected NonToken property, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_you_cast_this_spell() {
         let def = parse_trigger_line(
@@ -15665,6 +15763,36 @@ mod tests {
                     TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string())),
                 ],
             })
+        );
+    }
+
+    #[test]
+    fn trigger_you_become_target_uses_valid_target() {
+        let def = parse_trigger_line(
+            "Whenever you become the target of a spell or ability, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.valid_card, None);
+        assert_eq!(def.valid_source, None);
+    }
+
+    #[test]
+    fn trigger_opponents_are_dealt_combat_damage_uses_valid_target() {
+        let def = parse_trigger_line(
+            "Whenever one or more opponents are dealt combat damage, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert!(def.batched);
+        assert_eq!(def.valid_card, None);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
         );
     }
 

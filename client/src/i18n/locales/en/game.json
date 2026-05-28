@@ -434,6 +434,7 @@
     "blockersDeclared_one": "{{count}} blocker assigned",
     "blockersDeclared_other": "{{count}} blockers assigned",
     "becomesTarget": "Object {{objectId}} targeted by {{sourceId}}",
+    "becomesTargetPlayer": "{{player}} targeted by {{sourceId}}",
     "replacementApplied": "Replacement applied: {{eventType}}",
     "companionRevealed": "{{player}} revealed companion: {{cardName}}",
     "companionMovedToHand": "{{player}} put companion {{cardName}} into hand",

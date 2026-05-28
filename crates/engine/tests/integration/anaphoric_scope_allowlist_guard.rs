@@ -163,6 +163,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "brightmare",
     "brokers charm",
     "calibrated blast",
+    "captain ripley vance",
     "champion of the path",
     "champion of wits",
     "chastise",
@@ -458,8 +459,8 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        264,
-        "Expected exactly 264 cards retaining ObjectScope::Anaphoric (the #495 \
+        265,
+        "Expected exactly 265 cards retaining ObjectScope::Anaphoric (the #495 \
          behavior-neutral floor of 156, minus four cards unlocked by #607's \
          target-subject DamageAll source wrapper, plus 89 cards from category 4, \
          plus the UUID-disambiguated Reanimate print key \
@@ -469,13 +470,14 @@ fn anaphoric_scope_set_is_frozen() {
          equal to its power\" fight spells newly parsed by the token-then-pump \
          chain fix, anaphoric on the spell's chosen target creature, plus \
          Phthisis — destroy-target-creature + LoseLife-equal-to-its-P+T, \
-         category-3 target-spell anaphora); count moved to {}.",
+         category-3 target-spell anaphora, plus Captain Ripley Vance category-1 \
+         trigger-source anaphora); count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        264,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 264 cards."
+        265,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 265 cards."
     );
 }
 

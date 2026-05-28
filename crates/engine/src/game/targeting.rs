@@ -822,10 +822,10 @@ pub(crate) fn extract_player_from_event(
         GameEvent::AttackersDeclared { attacker_ids, .. } => attacker_ids
             .iter()
             .find_map(|id| state.objects.get(id).map(|obj| obj.controller)),
-        // For object-centric events, extract the controller
-        GameEvent::BecomesTarget { source_id, .. } => {
-            state.objects.get(source_id).map(|obj| obj.controller)
-        }
+        GameEvent::BecomesTarget { target, source_id } => match target {
+            TargetRef::Player(player_id) => Some(*player_id),
+            TargetRef::Object(_) => state.objects.get(source_id).map(|obj| obj.controller),
+        },
         // CR 603.7c: "that player" for DamageDone triggers refers to the damaged player.
         GameEvent::DamageDealt { target, .. } => match target {
             TargetRef::Player(pid) => Some(*pid),

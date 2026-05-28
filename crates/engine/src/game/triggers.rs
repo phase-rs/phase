@@ -1068,7 +1068,7 @@ fn collect_pending_triggers(
             // triggers independently. Only fires for permanents (battlefield scan).
             if !ward_costs.is_empty() {
                 if let GameEvent::BecomesTarget {
-                    object_id: targeted_id,
+                    target: TargetRef::Object(targeted_id),
                     source_id: targeting_source_id,
                 } = event
                 {
@@ -7677,7 +7677,7 @@ pub mod tests {
 
         // Fire BecomesTarget event
         let events = vec![GameEvent::BecomesTarget {
-            object_id: creature,
+            target: TargetRef::Object(creature),
             source_id: spell,
         }];
 
@@ -7747,7 +7747,7 @@ pub mod tests {
         });
 
         let events = vec![GameEvent::BecomesTarget {
-            object_id: creature,
+            target: TargetRef::Object(creature),
             source_id: spell,
         }];
 
@@ -7800,7 +7800,7 @@ pub mod tests {
         });
 
         let events = vec![GameEvent::BecomesTarget {
-            object_id: creature,
+            target: TargetRef::Object(creature),
             source_id: spell,
         }];
 
@@ -7852,7 +7852,7 @@ pub mod tests {
         });
 
         let events = vec![GameEvent::BecomesTarget {
-            object_id: creature,
+            target: TargetRef::Object(creature),
             source_id: spell,
         }];
 

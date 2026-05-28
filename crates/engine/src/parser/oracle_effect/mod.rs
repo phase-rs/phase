@@ -8060,9 +8060,29 @@ fn replace_target_with_self(effect: &mut Effect) {
 /// rewrite path so spell-context anaphors (Dispatch, kicker-instead chains)
 /// still inherit the parent target.
 fn ctx_has_typed_trigger_subject(ctx: &ParseContext) -> bool {
+    fn is_player_subject(subject: &TargetFilter) -> bool {
+        matches!(
+            subject,
+            TargetFilter::Player
+                | TargetFilter::Controller
+                | TargetFilter::AllPlayers
+                | TargetFilter::SpecificPlayer { .. }
+                | TargetFilter::ScopedPlayer
+        ) || matches!(
+            subject,
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(_),
+                properties,
+            }) if type_filters.is_empty() && properties.is_empty()
+        )
+    }
+
     matches!(
         &ctx.subject,
-        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any)
+        Some(subject)
+            if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any)
+                && !is_player_subject(subject)
     )
 }
 

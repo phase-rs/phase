@@ -95,7 +95,7 @@ pub(crate) fn emit_targeting_events(
         match target {
             TargetRef::Object(obj_id) => {
                 events.push(GameEvent::BecomesTarget {
-                    object_id: *obj_id,
+                    target: TargetRef::Object(*obj_id),
                     source_id,
                 });
                 if !crime_committed {
@@ -107,6 +107,10 @@ pub(crate) fn emit_targeting_events(
                 }
             }
             TargetRef::Player(pid) => {
+                events.push(GameEvent::BecomesTarget {
+                    target: TargetRef::Player(*pid),
+                    source_id,
+                });
                 if !crime_committed && *pid != controller {
                     crime_committed = true;
                 }
@@ -16285,9 +16289,13 @@ mod tests {
             PlayerId(0),
             &mut events,
         );
-        assert!(events.iter().any(
-            |e| matches!(e, GameEvent::BecomesTarget { object_id, .. } if *object_id == target)
-        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::BecomesTarget {
+                target: TargetRef::Object(object_id),
+                ..
+            } if *object_id == target
+        )));
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
         ));
@@ -16330,6 +16338,13 @@ mod tests {
             PlayerId(0),
             &mut events,
         );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::BecomesTarget {
+                target: TargetRef::Player(PlayerId(1)),
+                ..
+            }
+        )));
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
         ));
@@ -16427,7 +16442,10 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                GameEvent::BecomesTarget { object_id, .. } if *object_id == creature
+                GameEvent::BecomesTarget {
+                    target: TargetRef::Object(object_id),
+                    ..
+                } if *object_id == creature
             )
         }));
         assert!(events.iter().any(|event| {
