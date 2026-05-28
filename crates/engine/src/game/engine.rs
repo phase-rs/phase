@@ -3930,19 +3930,7 @@ fn apply_action(
                 // * Entry id references a `TriggeredAbility` `StackEntry`.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                let entry_id = state.pending_trigger_entry.take().expect(
-                    "DistributeAmong completion: pending_trigger_entry must be set under the push-first contract",
-                );
-                let entry = state
-                    .stack
-                    .iter_mut()
-                    .rev()
-                    .find(|entry| entry.id == entry_id)
-                    .expect("DistributeAmong completion: pending_trigger_entry must reference a stack entry");
-                let ability = entry.ability_mut().expect(
-                    "DistributeAmong completion: pending_trigger_entry must reference a TriggeredAbility stack entry",
-                );
-                *ability = pending_trigger.ability.clone();
+                triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability);
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
                 // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred

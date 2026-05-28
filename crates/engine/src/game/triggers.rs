@@ -2153,6 +2153,63 @@ pub(crate) fn is_pending_trigger_construction_active(state: &GameState) -> bool 
     state.pending_trigger_entry.is_some()
 }
 
+/// CR 603.3c + CR 603.3d: Overwrite the in-construction stack entry's resolved
+/// ability with `source_ability`, leaving `pending_trigger_entry` untouched.
+/// Use for intermediate construction steps (e.g. a mode chosen while target
+/// selection is still outstanding) where the entry must remain non-resolvable.
+///
+/// Invariants (panic on violation — the push-first contract guarantees them):
+/// * `state.pending_trigger_entry` is `Some(_)`.
+/// * That id references a `TriggeredAbility` `StackEntry` in `state.stack`.
+pub(crate) fn mutate_pending_trigger_entry(
+    state: &mut GameState,
+    source_ability: &ResolvedAbility,
+) {
+    let entry_id = state
+        .pending_trigger_entry
+        .expect("mutate_pending_trigger_entry: pending_trigger_entry must be set under the push-first contract");
+    assign_pending_trigger_entry_ability(state, entry_id, source_ability);
+}
+
+/// CR 603.3c + CR 603.3d: Overwrite the in-construction stack entry's resolved
+/// ability with `source_ability` AND clear `pending_trigger_entry` —
+/// construction is complete, so the resolver is now free to fire this entry.
+///
+/// Invariants (panic on violation — no recovery path):
+/// * `state.pending_trigger_entry` is `Some(_)` (every caller pushed under the
+///   push-first contract).
+/// * That id references a `TriggeredAbility` `StackEntry` in `state.stack`.
+pub(crate) fn finalize_pending_trigger_entry(
+    state: &mut GameState,
+    source_ability: &ResolvedAbility,
+) {
+    let entry_id = state
+        .pending_trigger_entry
+        .take()
+        .expect("finalize_pending_trigger_entry: pending_trigger_entry must be set under the push-first contract");
+    assign_pending_trigger_entry_ability(state, entry_id, source_ability);
+}
+
+/// Locate the in-construction `TriggeredAbility` entry identified by `entry_id`
+/// (searching from the top of the stack down) and overwrite its resolved
+/// ability. Shared find-and-assign logic for `mutate`/`finalize` above.
+fn assign_pending_trigger_entry_ability(
+    state: &mut GameState,
+    entry_id: ObjectId,
+    source_ability: &ResolvedAbility,
+) {
+    let entry = state
+        .stack
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.id == entry_id)
+        .expect("pending_trigger_entry must reference a stack entry");
+    let ability = entry
+        .ability_mut()
+        .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
+    *ability = source_ability.clone();
+}
+
 /// CR 603.2 + CR 603.3b + CR 309.4c: Dispatch a synthetic
 /// single trigger (game-rule trigger queued mid-resolution, e.g. dungeon
 /// room ability from `effects::venture::queue_room_trigger`). Delegates

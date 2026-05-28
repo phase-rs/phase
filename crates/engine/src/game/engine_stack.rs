@@ -47,7 +47,7 @@ pub(super) fn finalize_trigger_target_selection(
                 // on the stack with empty `distribution`; mutate the on-stack
                 // ability's targets (so they match what was just chosen) and
                 // keep `pending_trigger_entry` set until division completes.
-                mutate_pending_trigger_entry(state, &trigger.ability);
+                triggers::mutate_pending_trigger_entry(state, &trigger.ability);
                 state.pending_trigger = Some(trigger);
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
@@ -65,7 +65,7 @@ pub(super) fn finalize_trigger_target_selection(
     // the stack (pushed by the pause-path that started selection); mutate its
     // ability with the resolved targets/distribution and clear
     // `pending_trigger_entry` so the resolver may now fire this entry.
-    finalize_pending_trigger_entry_on_stack(state, &trigger.ability);
+    triggers::finalize_pending_trigger_entry(state, &trigger.ability);
 
     state.priority_passes.clear();
     state.priority_pass_count = 0;
@@ -82,60 +82,6 @@ pub(super) fn finalize_trigger_target_selection(
         return waiting_for;
     }
     WaitingFor::Priority { player: controller }
-}
-
-/// CR 603.3c + CR 603.3d: Mutate the in-construction stack entry's resolved
-/// ability without clearing `pending_trigger_entry` — the entry is still
-/// awaiting further input (division-among after target selection).
-///
-/// Invariants (panic in debug; see `finalize_pending_trigger_entry_on_stack`):
-/// * `state.pending_trigger_entry` is `Some(_)`.
-/// * Entry id references a `TriggeredAbility` `StackEntry` in `state.stack`.
-fn mutate_pending_trigger_entry(state: &mut GameState, source_ability: &ResolvedAbility) {
-    let entry_id = state
-        .pending_trigger_entry
-        .expect("mutate_pending_trigger_entry: pending_trigger_entry must be set");
-    let entry = state
-        .stack
-        .iter_mut()
-        .rev()
-        .find(|entry| entry.id == entry_id)
-        .expect("mutate_pending_trigger_entry: pending_trigger_entry must reference a stack entry");
-    let ability = entry.ability_mut().expect(
-        "mutate_pending_trigger_entry: pending_trigger_entry must reference a TriggeredAbility",
-    );
-    *ability = source_ability.clone();
-}
-
-/// CR 603.3c + CR 603.3d: Mutate the in-construction stack entry's resolved
-/// ability AND clear `pending_trigger_entry` — construction is complete, the
-/// resolver is now free to fire this entry.
-///
-/// Invariants (no recovery path; violations panic in debug, otherwise leave
-/// the engine in an internally inconsistent state):
-/// * `state.pending_trigger_entry` is `Some(_)` (the "push first" contract
-///   means every code path that reaches this function pushed the entry
-///   already).
-/// * That entry id refers to a `TriggeredAbility` `StackEntry` somewhere in
-///   `state.stack` (the entry has not been popped between push and finalize).
-fn finalize_pending_trigger_entry_on_stack(
-    state: &mut GameState,
-    source_ability: &ResolvedAbility,
-) {
-    let entry_id = state
-        .pending_trigger_entry
-        .take()
-        .expect("finalize_pending_trigger_entry_on_stack: pending_trigger_entry must be set under the push-first contract");
-    let entry = state
-        .stack
-        .iter_mut()
-        .rev()
-        .find(|entry| entry.id == entry_id)
-        .expect("finalize_pending_trigger_entry_on_stack: pending_trigger_entry must reference a stack entry");
-    let ability = entry
-        .ability_mut()
-        .expect("finalize_pending_trigger_entry_on_stack: pending_trigger_entry must reference a TriggeredAbility stack entry");
-    *ability = source_ability.clone();
 }
 
 pub(super) fn handle_trigger_target_selection_select_targets(
