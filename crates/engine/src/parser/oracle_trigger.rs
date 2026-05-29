@@ -17056,6 +17056,71 @@ mod tests {
         );
     }
 
+    /// CR 513.1 + CR 603.4: Keeper of the Accord — opponent end-step token trigger
+    /// with intervening-if comparing that player's creatures to yours.
+    #[test]
+    fn keeper_of_the_accord_opponent_end_step_creature_token() {
+        let def = parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn)
+        );
+        match def.condition.as_ref() {
+            Some(TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: Comparator::GT,
+                rhs,
+            }) => {
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    } => {
+                        assert_eq!(tf.controller, Some(ControllerRef::ScopedPlayer));
+                    }
+                    other => panic!("expected scoped ObjectCount lhs, got {other:?}"),
+                }
+                match rhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    } => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                    }
+                    other => panic!("expected you-scoped ObjectCount rhs, got {other:?}"),
+                }
+            }
+            other => panic!("expected QuantityComparison intervening-if, got {other:?}"),
+        }
+        assert!(matches!(
+            def.execute.as_ref().map(|a| a.effect.as_ref()),
+            Some(Effect::Token { .. })
+        ));
+    }
+
+    /// CR 513.1 + CR 603.4: Keeper of the Accord — optional Plains search when
+    /// that player controls more lands.
+    #[test]
+    fn keeper_of_the_accord_opponent_end_step_plains_search() {
+        let def = parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more lands than you, you may search your library for a basic Plains card, put it onto the battlefield tapped, then shuffle.",
+            "Keeper of the Accord",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        assert!(def.optional);
+        assert!(def.condition.is_some());
+    }
+
     #[test]
     fn phase_trigger_each_combat_no_constraint() {
         let def = parse_trigger_line(

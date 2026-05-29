@@ -6566,6 +6566,77 @@ pub mod tests {
         );
     }
 
+    /// Issue #1304 — RUNTIME: Keeper of the Accord's intervening-if must compare
+    /// the active player's creatures to the source controller's at opponent end
+    /// step, not fail closed because the condition was never hoisted/parsed.
+    #[test]
+    fn keeper_of_the_accord_creature_intervening_if_true_when_opponent_ahead() {
+        let def = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        let condition = def
+            .condition
+            .expect("creature trigger must hoist intervening-if to def.condition");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        state.active_player = opponent;
+
+        let keeper = make_creature(&mut state, controller, "Keeper of the Accord", 3, 4);
+        let _opp_creature_a = make_creature(&mut state, opponent, "Opp A", 1, 1);
+        let _opp_creature_b = make_creature(&mut state, opponent, "Opp B", 1, 1);
+        let _opp_creature_c = make_creature(&mut state, opponent, "Opp C", 1, 1);
+
+        let phase_event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                controller,
+                Some(keeper),
+                Some(&phase_event),
+            ),
+            "opponent with three creatures vs controller with one (keeper) must satisfy intervening-if",
+        );
+    }
+
+    #[test]
+    fn keeper_of_the_accord_creature_intervening_if_false_when_tied() {
+        let def = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        let condition = def.condition.unwrap();
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        state.active_player = opponent;
+
+        let keeper = make_creature(&mut state, controller, "Keeper of the Accord", 3, 4);
+        let _self_b = make_creature(&mut state, controller, "Self B", 1, 1);
+        let _opp_a = make_creature(&mut state, opponent, "Opp A", 1, 1);
+        let _opp_b = make_creature(&mut state, opponent, "Opp B", 1, 1);
+
+        let phase_event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                controller,
+                Some(keeper),
+                Some(&phase_event),
+            ),
+            "two creatures each must not satisfy 'more creatures than you'",
+        );
+    }
+
     /// Non-Phase triggers must NOT have scoped_player auto-bound (preserves
     /// the existing convention that ETB/Dies/SpellCast triggers leave
     /// scoped_player None and resolve "that player" via event-context refs
