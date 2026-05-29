@@ -106,14 +106,16 @@ gh api graphql -f query="
       }
     }
   }
-}" > /tmp/polish_baseline_threads.json
+}" > "/tmp/polish_baseline_threads_${PR}.json"
 
-# Paginate if hasNextPage is true (use endCursor in subsequent after:"<...>" calls)
+# Paginate if hasNextPage is true (use endCursor in subsequent after:"<...>" calls).
+# Per-PR filenames keep concurrent polish runs (different PRs on the same
+# machine, or across users sharing /tmp) from clobbering each other's baselines.
 
 # Top-level reviews — count + latest id per non-empty review
 gh api "repos/phase-rs/phase/pulls/${PR}/reviews" --paginate \
   --jq '[.[] | select((.body // "") != "") | {id, user: .user.login, state, submitted_at}]' \
-  > /tmp/polish_baseline_reviews.json
+  > "/tmp/polish_baseline_reviews_${PR}.json"
 
 # Issue comments — count + latest id per non-bot, non-author comment.
 # Bots are filtered by .user.type == "Bot" (GitHub sets this for app/bot
@@ -124,7 +126,7 @@ gh api "repos/phase-rs/phase/issues/${PR}/comments" --paginate \
   --jq --arg author "$AUTHOR" \
       '[.[] | select(.user.type != "Bot" and .user.login != $author)
             | {id, user: .user.login, created_at}]' \
-  > /tmp/polish_baseline_issue_comments.json
+  > "/tmp/polish_baseline_issue_comments_${PR}.json"
 ```
 
 ### Diffing after a review
@@ -314,10 +316,12 @@ while true; do
   UNRESOLVED=$(( UNRESOLVED + $(echo "$PAGE" | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length') ))
   # `.author` is null for deleted GitHub users; `?` + `// "ghost"` keeps
   # jq from crashing with "cannot index null" when sniffing fake resolutions.
+  # `.body` can also be null for body-less review comments; default to "" so
+  # the test() at the end never sees null.
   PAGE_FAKES=$(echo "$PAGE" | jq '[.data.repository.pullRequest.reviewThreads.nodes[]
       | select(.isResolved == true)
-      | {body: .comments.nodes[0].body[:120], author: (.comments.nodes[0].author.login? // "ghost")}
-      | select(.body | test("Fixed in|Removed in|Addressed in") | not)]')
+      | {body: (.comments.nodes[0].body // ""), author: (.comments.nodes[0].author.login? // "ghost")}
+      | select(.body[0:120] | test("Fixed in|Removed in|Addressed in") | not)]')
   FAKE_RESOLUTIONS=$(echo "$FAKE_RESOLUTIONS $PAGE_FAKES" | jq -s 'add')
   HAS_NEXT=$(echo "$PAGE" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
   CURSOR=$(echo "$PAGE" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor')
