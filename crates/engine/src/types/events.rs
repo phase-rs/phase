@@ -455,6 +455,13 @@ pub enum GameEvent {
     CreatureSuspected {
         object_id: ObjectId,
     },
+    /// CR 701.35a: A permanent was detained — until the detaining player's next
+    /// turn it can't attack or block and its activated abilities can't be
+    /// activated. Display-relevant for mana sources: detaining a mana dork
+    /// makes its mana ability un-activatable.
+    Detained {
+        object_id: ObjectId,
+    },
     /// CR 702.xxx: Prepare (Strixhaven) — a creature became prepared.
     /// Emitted only when the toggle actually flips (idempotent resolvers).
     /// Assign when WotC publishes SOS CR update.

@@ -27,6 +27,8 @@ pub fn resolve(
 
             // CR 701.35a: Mark the permanent as detained by the controller of this effect.
             obj.detained_by.insert(ability.controller);
+
+            events.push(GameEvent::Detained { object_id: *obj_id });
         }
     }
 

@@ -706,25 +706,61 @@ pub(super) fn apply_pending_post_replacement_effect(
     waiting_for
 }
 
-/// CR 614.12a + CR 707.9: If `waiting_for` is `CopyTargetChoice`, clone any
-/// battlefield-entry `ZoneChanged` events for the entering source into
-/// `state.deferred_entry_events`. The original `events` vec is preserved so
-/// the frontend animates the entry as soon as the spell resolves; the deferred
-/// copy is replayed through `process_triggers` / `check_delayed_triggers` once
-/// `BecomeCopy` resolves in `handle_copy_target_choice`.
+/// CR 614.12a: True when every branch of a `ChooseOneOfBranch` is a self-targeted
+/// `PutCounter` — the signature of an "enters with your choice of counter"
+/// replacement (Denry Klin, Editor in Chief). When this holds, the choice is a
+/// pre-entry counter fold and the entering object's `ZoneChanged` event must be
+/// deferred until after the branch is chosen, so ETB observers see the chosen
+/// counter (CR 614.12a). Exhaustive — no wildcard accept.
+fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
+    branches.len() >= 2
+        && branches.iter().all(|b| {
+            matches!(
+                &*b.effect,
+                Effect::PutCounter {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        })
+}
+
+/// CR 614.12a + CR 707.9: If `waiting_for` is `CopyTargetChoice`, or a
+/// `ChooseOneOfBranch` that `is_enters_counter_choice` (the enters-with-choice-
+/// of-counter shape), clone any battlefield-entry `ZoneChanged` events for the
+/// entering source into `state.deferred_entry_events`. The original `events` vec
+/// is preserved so the frontend animates the entry as soon as the spell
+/// resolves; the deferred copy is replayed through `process_triggers` /
+/// `check_delayed_triggers` once the choice resolves (in
+/// `handle_copy_target_choice` for copies, in the `ChooseBranch` arm of
+/// `engine_resolution_choices.rs` for enters-counter choices).
 ///
-/// Defense in depth: clears any stale events from a prior `CopyTargetChoice`
-/// that exited abnormally (concede mid-choice, eliminate_player, error return
-/// before drain) so the replay never fires triggers against a phantom object.
+/// Defense in depth: clears any stale events from a prior choice that exited
+/// abnormally (concede mid-choice, eliminate_player, error return before drain)
+/// so the replay never fires triggers against a phantom object.
 fn capture_deferred_entry_events_if_copy_target_choice(
     state: &mut GameState,
     waiting_for: Option<&WaitingFor>,
     events: &[GameEvent],
 ) {
-    let Some(WaitingFor::CopyTargetChoice { source_id, .. }) = waiting_for else {
-        return;
+    let source_id = match waiting_for {
+        Some(WaitingFor::CopyTargetChoice { source_id, .. }) => *source_id,
+        // CR 614.12a: enters-with-your-choice-of-counter defers its entry event
+        // exactly like the copy-target choice does, so the watcher's ETB trigger
+        // observes the chosen counter as the permanent enters.
+        Some(WaitingFor::ChooseOneOfBranch {
+            source_id,
+            branches,
+            ..
+        }) if is_enters_counter_choice(branches) => *source_id,
+        _ => return,
     };
-    let source_id = *source_id;
+    // CR 614.12b boundary (inherited from the CopyTargetChoice path, NOT expanded
+    // here): mass-moving multiple pre-entry-choice permanents in one effect
+    // (`resolve_all` in change_zone.rs does not bail on a post-replacement choice)
+    // could let one object's capture `clear()`/overwrite another's deferred
+    // events. This already affects CopyTargetChoice today, is unreachable in real
+    // cards, and is the CR 614.12b simultaneous-entry boundary.
     state.deferred_entry_events.clear();
     for event in events {
         if matches!(
@@ -1854,6 +1890,273 @@ mod tests {
         assert!(
             trigger_fired,
             "Callidus's granted destroy-same-name trigger must fire from the deferred entry replay"
+        );
+    }
+
+    /// CR 614.12a + CR 608.2d: Drive the full "enters with your choice of
+    /// counter" path (Denry Klin, Editor in Chief line 1) through the production
+    /// pipeline — `replace_event` (Execute) → `move_to_zone` → `apply_etb_counters`
+    /// → `apply_pending_post_replacement_effect` (sets `ChooseOneOfBranch` +
+    /// captures the deferred entry event) → `ChooseBranch`.
+    ///
+    /// Discriminates pre- vs post-entry: a watcher ETB trigger observes "a
+    /// creature entered". The watcher must NOT have fired while paused on the
+    /// choice (the entry is deferred), and after `ChooseBranch` the chosen
+    /// counter must be present AS the watcher's deferred entry replays (proving
+    /// the counter was folded pre-entry per CR 614.12a, not added post-entry).
+    /// `index: 1` (first strike) and `index: 0` (+1/+1) yield different counters,
+    /// proving a real choice.
+    fn drive_denry_choice(branch_index: usize) -> (GameState, ObjectId) {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, FilterProp, TargetFilter, TriggerDefinition,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Watcher: "When a creature enters, its controller draws a card."
+        // Targetless to keep the assertion focused on the fire-with-counter
+        // ordering rather than target-selection plumbing.
+        let watcher_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ))
+            .valid_card(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::new(
+                    crate::types::ability::TypeFilter::Creature,
+                )
+                .properties(vec![FilterProp::Another]),
+            ))
+            .destination(Zone::Battlefield);
+        let watcher = make_creature(&mut state, PlayerId(1), "Soul Warden");
+        state
+            .objects
+            .get_mut(&watcher)
+            .unwrap()
+            .trigger_definitions
+            .push(watcher_trigger);
+
+        // Parse Denry Klin line 1 into the real ReplacementDefinition.
+        let repl = crate::parser::oracle_replacement::parse_replacement_line(
+            "Denry Klin enters with your choice of a +1/+1, first strike, or vigilance counter on it.",
+            "Denry Klin, Editor in Chief",
+        )
+        .expect("Denry Klin line 1 must parse to a replacement");
+        assert_eq!(repl.event, ReplacementEvent::Moved);
+
+        let denry = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Denry Klin, Editor in Chief".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&denry).unwrap();
+            obj.base_name = "Denry Klin, Editor in Chief".to_string();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.replacement_definitions.push(repl);
+        }
+
+        // ── Drive the production Stack→Battlefield pipeline ─────────────────
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::ZoneChange {
+            object_id: denry,
+            from: Zone::Stack,
+            to: Zone::Battlefield,
+            cause: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(event) = result else {
+            panic!("mandatory enters-with-choice must Execute, got {result:?}");
+        };
+        let crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, to, .. } = event
+        else {
+            panic!("expected ZoneChange execute event");
+        };
+        // Mirror engine.rs's Execute arm: move, then drain the post-replacement
+        // continuation (the ChooseOneOf execute).
+        crate::game::zones::move_to_zone(&mut state, object_id, to, &mut events);
+        assert!(
+            state.post_replacement_continuation.is_some(),
+            "ChooseOneOf execute must stash a post-replacement continuation"
+        );
+        let waiting = apply_pending_post_replacement_effect(
+            &mut state,
+            Some(object_id),
+            None,
+            Some(ReplacementEvent::Moved),
+            &mut events,
+        );
+
+        // ── Paused on the counter choice, entry deferred, watcher NOT fired ──
+        let Some(WaitingFor::ChooseOneOfBranch {
+            source_id,
+            branches,
+            ..
+        }) = waiting.clone()
+        else {
+            panic!("expected ChooseOneOfBranch, got {waiting:?}");
+        };
+        assert_eq!(source_id, denry, "choice source must be the entering Denry");
+        assert_eq!(branches.len(), 3, "three counter branches");
+        assert_eq!(
+            state.deferred_entry_events.len(),
+            1,
+            "Denry's battlefield-entry event must be deferred until the choice is made"
+        );
+        // CR 614.12a: the watcher must NOT have observed the entry yet (no
+        // trigger queued / on stack) — the entry is held back.
+        assert!(
+            state.pending_trigger.is_none()
+                && !state.stack.iter().any(|e| matches!(
+                    e.kind,
+                    crate::types::game_state::StackEntryKind::TriggeredAbility { .. }
+                )),
+            "watcher trigger must not fire before the counter choice (deferred entry)"
+        );
+        assert!(
+            state.objects[&denry].counters.is_empty(),
+            "no counter is present before the choice is made"
+        );
+        state.waiting_for = waiting.unwrap();
+        state.priority_player = PlayerId(0);
+
+        // ── Make the choice ────────────────────────────────────────────────
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseBranch {
+                index: branch_index,
+            },
+        )
+        .expect("choose counter branch");
+
+        (state, denry)
+    }
+
+    #[test]
+    fn denry_klin_enters_with_choice_folds_counter_pre_entry() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+
+        // index 1 → first strike: exactly one first strike counter, nothing else.
+        let (state, denry) = drive_denry_choice(1);
+        let counters = &state.objects[&denry].counters;
+        assert_eq!(
+            counters.get(&CounterType::Keyword(KeywordKind::FirstStrike)),
+            Some(&1),
+            "first strike counter must be present"
+        );
+        assert!(
+            !counters.contains_key(&CounterType::Plus1Plus1)
+                && !counters.contains_key(&CounterType::Keyword(KeywordKind::Vigilance)),
+            "no other counter may be present, got {counters:?}"
+        );
+        // CR 614.12a: the deferred entry was replayed, so the watcher observed
+        // Denry WITH the chosen counter (proves pre-entry, not post-entry).
+        assert!(
+            state.deferred_entry_events.is_empty(),
+            "deferred entry must drain on the ChooseBranch replay"
+        );
+        let watcher_fired = state.pending_trigger.is_some()
+            || state.stack.iter().any(|e| {
+                matches!(
+                    e.kind,
+                    crate::types::game_state::StackEntryKind::TriggeredAbility { .. }
+                )
+            });
+        assert!(
+            watcher_fired,
+            "watcher ETB trigger must fire from the deferred entry replay after the choice"
+        );
+
+        // index 0 → +1/+1: different counter, proving a real choice.
+        let (state0, denry0) = drive_denry_choice(0);
+        let counters0 = &state0.objects[&denry0].counters;
+        assert_eq!(
+            counters0.get(&CounterType::Plus1Plus1),
+            Some(&1),
+            "index 0 must place the +1/+1 counter"
+        );
+        assert!(
+            !counters0.contains_key(&CounterType::Keyword(KeywordKind::FirstStrike)),
+            "index 0 must NOT place first strike"
+        );
+    }
+
+    /// Negative guard: a normal (non-entry) `ChooseOneOf` resolved via
+    /// `ChooseBranch` with `state.deferred_entry_events` empty must NOT trigger
+    /// the deferred-entry replay — the disambiguator. This protects against the
+    /// enters-counter replay misrouting an unrelated branch choice.
+    #[test]
+    fn unrelated_choose_branch_does_not_replay_deferred_entry() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+
+        let mut state = GameState::new_two_player(42);
+        let source = make_creature(&mut state, PlayerId(0), "Source");
+        let p0_life = state.players[0].life;
+
+        // Two unrelated branches (gain 3 / lose 1) — NOT PutCounter/SelfRef, so
+        // the capture never deferred anything for this choice.
+        let branches = vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: crate::types::ability::GainLifePlayer::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: None,
+                },
+            ),
+        ];
+
+        state.waiting_for = WaitingFor::ChooseOneOfBranch {
+            player: PlayerId(0),
+            controller: PlayerId(0),
+            source_id: source,
+            branches,
+            branch_descriptions: Vec::new(),
+            parent_targets: Vec::new(),
+            context: Default::default(),
+            remaining_players: Vec::new(),
+        };
+        state.priority_player = PlayerId(0);
+        assert!(
+            state.deferred_entry_events.is_empty(),
+            "precondition: no deferred entry for an unrelated choice"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("resolve unrelated ChooseOneOf");
+
+        // Branch 0 (gain 3) applied normally; no replay side effects.
+        assert_eq!(
+            state.players[0].life,
+            p0_life + 3,
+            "gain-life branch applied"
+        );
+        assert!(
+            state.deferred_entry_events.is_empty(),
+            "deferred entry must remain empty for an unrelated choice"
         );
     }
 }

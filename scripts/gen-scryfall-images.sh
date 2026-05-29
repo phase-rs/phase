@@ -68,7 +68,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 # Scryfall API calls at runtime.
 NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
 
-jq -c --argjson exclude "$NON_PLAYABLE" '
+jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
   # Playable cards
   ([.[] |
     select(.layout as $l | $exclude | index($l) | not) |
@@ -76,9 +76,9 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
     {
       oracle_id: $card.oracle_id,
       face_names: (if $card.card_faces then
-        [$card.card_faces[] | .name | ascii_downcase]
+        [$card.card_faces[] | .name | js_downcase]
       else
-        [$card.name | ascii_downcase]
+        [$card.name | js_downcase]
       end),
       faces: (if $card.card_faces then
         [$card.card_faces[] | {
@@ -99,9 +99,9 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
     } as $entry |
     (
       [$card.oracle_id | ascii_downcase] +
-      [$card.name | ascii_downcase] +
+      [$card.name | js_downcase] +
       if $card.card_faces and ($card.card_faces[0].name != $card.name)
-      then [$card.card_faces[0].name | ascii_downcase]
+      then [$card.card_faces[0].name | js_downcase]
       else [] end
     ) | unique[] |
     {key: ., value: $entry}
@@ -113,7 +113,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
     . as $tok |
     {
       oracle_id: $tok.oracle_id,
-      face_names: [$tok.name | ascii_downcase],
+      face_names: [$tok.name | js_downcase],
       faces: [{normal: $tok.image_uris.normal, art_crop: $tok.image_uris.art_crop}],
       layout: $tok.layout,
       name: $tok.name,
@@ -126,7 +126,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
       power: ($tok.power // null),
       toughness: ($tok.toughness // null)
     } as $entry |
-    {key: ("token:" + ($tok.name | ascii_downcase)), value: $entry}
+    {key: ("token:" + ($tok.name | js_downcase)), value: $entry}
   ]) | from_entries
 ' "$ORACLE_FILE" > "$OUTPUT"
 

@@ -28,8 +28,8 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
-    FilterProp, ManaModification, ManaReplacementScope, PreventionAmount, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    FilterProp, ManaModification, ManaReplacementScope, PlayerFilter, PreventionAmount,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ReplacementPlayerScope, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1693,6 +1693,91 @@ fn parse_enters_with_counters(
     .parse(after_with)
     .map_or(after_with, |(rest, _)| rest);
 
+    // CR 614.12a + CR 608.2d: "~ enters with your choice of <counter-choice-list>
+    // on it" — the controller chooses WHICH counter as the permanent enters, and
+    // that choice is made before the permanent enters (CR 614.12a). Detect the
+    // "your choice of " marker, split off the trailing self-referential target
+    // ("on it" / "on ~"), classify the disjunctive list into typed counter
+    // entries, and build a `ChooseOneOf` of `PutCounter { target: SelfRef }`
+    // branches directly (no parent-target lift — the entering permanent is
+    // always the recipient). Runtime folds the chosen counter pre-entry via the
+    // deferred-entry-events capture in `engine_replacement.rs` /
+    // `engine_resolution_choices.rs`.
+    if let Some((choices, _on)) = strip_enters_with_choice_target(after_additional) {
+        if let Some(entries) =
+            crate::parser::oracle_effect::classify_and_parse_counter_choice_list(choices)
+        {
+            // `classify_and_parse_counter_choice_list` already requires len >= 2.
+            let branches: Vec<AbilityDefinition> = entries
+                .into_iter()
+                .map(|(counter_type, count)| {
+                    let mut def = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::PutCounter {
+                            counter_type: counter_type.clone(),
+                            count,
+                            // CR 614.12a: the entering permanent is the recipient.
+                            target: TargetFilter::SelfRef,
+                        },
+                    );
+                    def.description = Some(format!("a {} counter", counter_type.display_phrase()));
+                    def
+                })
+                .collect();
+
+            let choice = AbilityDefinition::new(
+                AbilityKind::Spell,
+                // CR 608.2d: resolution choice — controller picks the branch.
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches,
+                },
+            );
+            let mut choice = choice;
+            choice.description = Some("your choice of counter".to_string());
+
+            // Compose with "enters tapped" if present (mirrors the single-counter
+            // tail below).
+            let execute = if has_enters_tapped_phrase(work_text) {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Tap {
+                        target: TargetFilter::SelfRef,
+                    },
+                )
+                .sub_ability(choice)
+            } else {
+                choice
+            };
+
+            // CR 614.1c: "enters with" is a replacement effect on the Moved event.
+            let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(execute)
+                .valid_card(TargetFilter::SelfRef)
+                .description(original_text.to_string());
+
+            // Reuse the existing condition tail (escape / kicker / cast-from-zone
+            // / raid / web-slinging / generic only-if).
+            if is_escape {
+                def = def.condition(ReplacementCondition::CastViaEscape);
+            } else if let Some(cond) = kicker_condition {
+                def = def.condition(cond);
+            } else if let Some(zone) = extract_cast_from_zone_suffix(work_text) {
+                def = def.condition(ReplacementCondition::CastFromZone { zone });
+            } else if extract_you_attacked_this_turn_suffix(work_text) {
+                def = def.condition(ReplacementCondition::YouAttackedThisTurn);
+            } else if extract_cast_using_web_slinging_suffix(work_text) {
+                def = def.condition(ReplacementCondition::CastVariantPaid {
+                    variant: CastVariantPaid::WebSlinging,
+                });
+            } else if let Some(condition) = extract_enters_with_only_if_suffix(work_text) {
+                def = def.condition(condition);
+            }
+
+            return Some(def);
+        }
+    }
+
     let counter_entries = parse_enters_counter_entries(after_additional);
     // Detect dynamic count: "a number of [type] counters ... equal to [qty]"
     let after_prefix = tag::<_, _, OracleError<'_>>("a number of ")
@@ -2008,6 +2093,36 @@ fn parse_enters_counter_separator(input: &str) -> Option<&str> {
         .ok()?;
 
     Some(after_sep)
+}
+
+/// CR 614.12a: For "your choice of <list> on it", split off the trailing
+/// self-referential target. Given the text AFTER "your choice of " (e.g.
+/// "a +1/+1, first strike, or vigilance counter on it."), return
+/// `Some((choices, target))` where `choices` is the disjunctive counter list
+/// ("a +1/+1, first strike, or vigilance counter") and `target` is the
+/// self-reference ("it"). Returns `None` when the target is NOT a self-reference
+/// (so external-recipient phrasings fall through to other parsers).
+///
+/// Nom-only: `take_until(" on ")` splits the list from the trailing " on
+/// <target>", then the target (with trailing punctuation stripped) is validated
+/// against the self/object pronoun set (`it` / `~`).
+fn strip_enters_with_choice_target(after_choice: &str) -> Option<(&str, &str)> {
+    // Detect the "your choice of " marker via nom (no string dispatch).
+    let (after_marker, _) = tag::<_, _, OracleError<'_>>("your choice of ")
+        .parse(after_choice)
+        .ok()?;
+    // Split list from trailing " on <target>".
+    let (after_on, choices) = take_until::<_, _, OracleError<'_>>(" on ")
+        .parse(after_marker)
+        .ok()?;
+    let (target, _) = tag::<_, _, OracleError<'_>>(" on ").parse(after_on).ok()?;
+    let target_clean = target.trim().trim_end_matches('.').trim();
+    // CR 614.12a: the recipient must be the entering permanent itself.
+    if super::oracle_util::SELF_AND_OBJECT_PRONOUNS.contains(&target_clean) {
+        Some((choices, target_clean))
+    } else {
+        None
+    }
 }
 
 fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> AbilityDefinition {
@@ -6935,6 +7050,77 @@ mod tests {
             }
             other => panic!("Expected PutCounter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn enters_with_your_choice_of_counter_builds_selfref_choose_one_of() {
+        use crate::types::keywords::KeywordKind;
+
+        // CR 614.12a + CR 608.2d: "~ enters with your choice of <list> on it"
+        // should parse to a Moved replacement whose execute is a ChooseOneOf of
+        // self-targeted PutCounter branches — NOT a single Generic counter, and
+        // NO ParentTarget/TargetOnly lift (the entering permanent is always the
+        // recipient).
+        let assert_choice = |text: &str, expected: &[CounterType]| {
+            let def = parse_replacement_line(text, "Denry Klin, Editor in Chief")
+                .unwrap_or_else(|| panic!("should parse: {text}"));
+            assert_eq!(def.event, ReplacementEvent::Moved, "text: {text}");
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::SelfRef),
+                "valid_card should be SelfRef: {text}"
+            );
+            let Effect::ChooseOneOf { chooser, branches } = &*def.execute.as_ref().unwrap().effect
+            else {
+                panic!("expected ChooseOneOf execute, got {:?}", def.execute);
+            };
+            assert_eq!(*chooser, PlayerFilter::Controller);
+            assert_eq!(branches.len(), expected.len(), "branch count: {text}");
+            for (i, ct) in expected.iter().enumerate() {
+                match &*branches[i].effect {
+                    Effect::PutCounter {
+                        counter_type,
+                        target,
+                        ..
+                    } => {
+                        assert_eq!(counter_type, ct, "branch {i} counter_type: {text}");
+                        // CR 614.12a: every branch targets the entering permanent.
+                        assert_eq!(
+                            *target,
+                            TargetFilter::SelfRef,
+                            "branch {i} must be SelfRef (not ParentTarget/TargetOnly): {text}"
+                        );
+                    }
+                    other => panic!("branch {i} expected PutCounter, got {other:?}"),
+                }
+            }
+        };
+
+        let expected = [
+            CounterType::Plus1Plus1,
+            CounterType::Keyword(KeywordKind::FirstStrike),
+            CounterType::Keyword(KeywordKind::Vigilance),
+        ];
+
+        // SharedNoun shape (Denry Klin line 1).
+        assert_choice(
+            "Denry Klin enters with your choice of a +1/+1, first strike, or vigilance counter on it.",
+            &expected,
+        );
+        // Distributed shape.
+        assert_choice(
+            "Denry Klin enters with your choice of a +1/+1 counter, a first strike counter, or a vigilance counter on it.",
+            &expected,
+        );
+        // FromAmong shape (bare keywords).
+        assert_choice(
+            "Denry Klin enters with your choice of a counter from among first strike, vigilance, and lifelink on it.",
+            &[
+                CounterType::Keyword(KeywordKind::FirstStrike),
+                CounterType::Keyword(KeywordKind::Vigilance),
+                CounterType::Keyword(KeywordKind::Lifelink),
+            ],
+        );
     }
 
     #[test]

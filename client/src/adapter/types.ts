@@ -1508,6 +1508,7 @@ export type GameEvent =
   | { type: "CardsRevealed"; data: { player: PlayerId; card_ids?: ObjectId[]; card_names: string[] } }
   | { type: "Regenerated"; data: { object_id: ObjectId } }
   | { type: "CreatureSuspected"; data: { object_id: ObjectId } }
+  | { type: "Detained"; data: { object_id: ObjectId } }
   | { type: "CaseSolved"; data: { object_id: ObjectId } }
   | { type: "ClassLevelGained"; data: { object_id: ObjectId; level: number } }
   | { type: "RingTemptsYou"; data: { player_id: PlayerId } }
