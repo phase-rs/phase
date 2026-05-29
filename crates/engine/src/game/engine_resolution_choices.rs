@@ -317,9 +317,11 @@ pub(super) fn handle_resolution_choice(
             WaitingFor::RevealUntilKeptChoice {
                 player,
                 hit_card,
+                source_id,
                 accept_zone,
                 decline_zone,
                 enter_tapped,
+                enters_attacking,
                 revealed_misses,
                 rest_destination,
             },
@@ -333,6 +335,17 @@ pub(super) fn handle_resolution_choice(
                     if let Some(obj) = state.objects.get_mut(&hit_card) {
                         obj.tapped = true;
                     }
+                }
+                // CR 508.4: "...tapped and attacking" — place the accepted card
+                // in combat. `source_id` (the ability source / trigger attacker)
+                // supplies the defending player, matching the synchronous path.
+                if enters_attacking && accept_zone == Zone::Battlefield {
+                    let controller = state
+                        .objects
+                        .get(&hit_card)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(player);
+                    crate::game::combat::enter_attacking(state, hit_card, source_id, controller);
                 }
             } else if decline_zone == rest_destination {
                 misses.push(hit_card);

@@ -23,25 +23,34 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (player_filter, filter, kept_destination, rest_destination, enter_tapped, kept_optional_to) =
-        match &ability.effect {
-            Effect::RevealUntil {
-                player,
-                filter,
-                kept_destination,
-                rest_destination,
-                enter_tapped,
-                kept_optional_to,
-            } => (
-                player,
-                filter,
-                *kept_destination,
-                *rest_destination,
-                *enter_tapped,
-                *kept_optional_to,
-            ),
-            _ => return Err(EffectError::MissingParam("RevealUntil".to_string())),
-        };
+    let (
+        player_filter,
+        filter,
+        kept_destination,
+        rest_destination,
+        enter_tapped,
+        enters_attacking,
+        kept_optional_to,
+    ) = match &ability.effect {
+        Effect::RevealUntil {
+            player,
+            filter,
+            kept_destination,
+            rest_destination,
+            enter_tapped,
+            enters_attacking,
+            kept_optional_to,
+        } => (
+            player,
+            filter,
+            *kept_destination,
+            *rest_destination,
+            *enter_tapped,
+            *enters_attacking,
+            *kept_optional_to,
+        ),
+        _ => return Err(EffectError::MissingParam("RevealUntil".to_string())),
+    };
 
     // CR 109.5 + CR 701.20a: Resolve which player's library is revealed.
     // `Controller` → activator (Jalira-style "you reveal..."); `ParentTargetController`
@@ -111,9 +120,11 @@ pub fn resolve(
         state.waiting_for = WaitingFor::RevealUntilKeptChoice {
             player: revealing_player,
             hit_card: hit,
+            source_id: ability.source_id,
             accept_zone,
             decline_zone: kept_destination,
             enter_tapped,
+            enters_attacking,
             revealed_misses,
             rest_destination,
         };
@@ -132,6 +143,18 @@ pub fn resolve(
                     if let Some(obj) = state.objects.get_mut(&hit) {
                         obj.tapped = true;
                     }
+                }
+                // CR 508.4: "put that card onto the battlefield tapped and
+                // attacking" — place it in combat alongside the trigger source
+                // (Raph & Mikey, Fireflux Squad). `enter_attacking` derives the
+                // defending player from the source attacker.
+                if enters_attacking {
+                    let controller = state
+                        .objects
+                        .get(&hit)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(ability.controller);
+                    crate::game::combat::enter_attacking(state, hit, ability.source_id, controller);
                 }
             }
             other => {
@@ -249,6 +272,7 @@ mod tests {
                 kept_destination,
                 rest_destination,
                 enter_tapped: false,
+                enters_attacking: false,
                 kept_optional_to: None,
             },
             vec![],
@@ -272,6 +296,7 @@ mod tests {
                 kept_destination,
                 rest_destination,
                 enter_tapped: false,
+                enters_attacking: false,
                 kept_optional_to: None,
             },
             targets,
@@ -549,6 +574,7 @@ mod tests {
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
                     enter_tapped: false,
+                    enters_attacking: false,
                     kept_optional_to: Some(Zone::Battlefield),
                 },
                 vec![],
