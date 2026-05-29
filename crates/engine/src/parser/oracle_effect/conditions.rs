@@ -360,6 +360,12 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
 pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
 
+    // CR 603.12 + CR 608.2c: strip a leading reflexive-conditional connector
+    // ("if you do, ", "when you do, ", "if that player doesn't, ", ...) and
+    // return the corresponding AbilityCondition. Delegates to the shared
+    // `parse_reflexive_conditional_connector` combinator in `oracle_nom::condition`
+    // so the connector set stays in lockstep with the sequence-splitter's
+    // sticky-detection consumer.
     if let Some((condition, rest)) = nom_on_lower(text, &lower, |input| {
         crate::parser::oracle_nom::condition::parse_reflexive_conditional_connector(input)
     }) {
