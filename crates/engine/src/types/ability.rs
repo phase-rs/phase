@@ -66,7 +66,15 @@ pub enum CategoryChooserScope {
 }
 
 /// Additional selection constraints for tracked-set card picks during resolution.
+///
+/// Internally tagged (`{ "type": "DistinctCardTypes", "categories": [...] }`) to
+/// match the sibling [`SearchSelectionConstraint`] convention and the frontend's
+/// `ChooseFromZoneConstraint` type, which discriminates on the `type` field. The
+/// `CardChoiceModal` confirm gate reads `constraint.type`; without the tag the
+/// default external representation (`{ "DistinctCardTypes": {...} }`) leaves
+/// `type` undefined and the modal can never validate a selection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ChooseFromZoneConstraint {
     /// The chosen cards must admit an injective assignment to distinct card types
     /// from the listed categories.
@@ -408,6 +416,19 @@ pub struct DieResultBranch {
     pub min: u8,
     pub max: u8,
     pub effect: Box<AbilityDefinition>,
+}
+
+/// CR 706.2: Modifier applied to a die roll's natural result before the
+/// effect's result table is consulted. "Roll a d20 and add the number of
+/// cards in your hand" → `Add(QuantityExpr::Ref(HandSize { player: Controller }))`.
+/// "Roll a d20 and subtract the number of cards in your hand" → `Subtract(...)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DieRollModifier {
+    /// Add the resolved quantity to the natural roll.
+    Add { value: QuantityExpr },
+    /// Subtract the resolved quantity from the natural roll.
+    Subtract { value: QuantityExpr },
 }
 
 impl std::str::FromStr for Parity {
@@ -1981,13 +2002,15 @@ pub enum FilterProp {
     },
     /// CR 208 (Power/Toughness) + CR 208.4b (base vs current) + CR 613.4b
     /// (layer 7b: base P/T is set before counters/modifiers in 7c): Matches
-    /// objects whose power or toughness satisfies `comparator` against `value`.
+    /// objects whose power, toughness, or total power and toughness satisfies
+    /// `comparator` against `value`.
     ///
     /// Replaces the former `PowerLE`/`PowerGE`/`ToughnessLE`/`ToughnessGE`
     /// sibling cluster (a `stat × comparator` cross-product) with a single
     /// parameterized predicate, mirroring the `Cmc` and `Counters` refactors.
     /// Three orthogonal axes:
-    /// - `stat`: which characteristic to read — power (CR 208.1) or toughness.
+    /// - `stat`: which P/T metric to read — power (CR 208.1), toughness, or
+    ///   their total.
     /// - `scope`: `Current` reads the live `power`/`toughness` (after all layers);
     ///   `Base` reads `base_power`/`base_toughness` per CR 208.4b — the value
     ///   after CDAs and set effects (layers 7a/7b) but ignoring counters and
@@ -3150,6 +3173,15 @@ pub enum QuantityRef {
     /// mana ability. Composes with `ObjectCount`-style filter predicates and is
     /// the dual to `ManaProduction::DistinctColorsAmongPermanents`.
     DistinctColorsAmongPermanents { filter: TargetFilter },
+    /// CR 122.1: distinct counter kinds among filter-matched permanents
+    /// (controller-relative, CR 109.4). Counter-side dual of
+    /// `DistinctColorsAmongPermanents` — counts each distinct `CounterType`
+    /// appearing on at least one permanent matching `filter` exactly once.
+    /// Used by Bribe Taker's "for each kind of counter on permanents you
+    /// control" iteration source. Kept a separate variant from the color
+    /// dual because counters (CR 122.1) and colors (CR 105/106) are distinct
+    /// rule sections the engine resolves independently.
+    DistinctCounterKindsAmong { filter: TargetFilter },
 }
 
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.
@@ -3516,16 +3548,18 @@ impl Comparator {
     }
 }
 
-/// CR 208: Selects which creature characteristic a `FilterProp::PtComparison`
-/// reads. Power and toughness are both defined in CR 208 (Power/Toughness) and
-/// are read identically by a filter — only the field differs — so they are a
-/// leaf-level parameterization axis, not a cross-section conflation.
+/// CR 208: Selects which creature P/T metric a `FilterProp::PtComparison`
+/// reads. Power, toughness, and their total are all derived from the same CR
+/// 208 characteristic pair, so they are a leaf-level parameterization axis, not
+/// a cross-section conflation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PtStat {
     /// CR 208.1: The creature's power (first number).
     Power,
     /// CR 208.1: The creature's toughness (second number).
     Toughness,
+    /// CR 208.1: The sum of the creature's power and toughness.
+    TotalPowerToughness,
 }
 
 /// CR 208.4b: Selects whether a `FilterProp::PtComparison` reads the creature's
@@ -3832,6 +3866,18 @@ pub enum StaticCondition {
     /// Used by leveler-style cards (e.g., Figure of Fable) where each activated ability
     /// gates on the source's current type. Bridges to `AbilityCondition::SourceMatchesFilter`.
     SourceMatchesFilter {
+        filter: TargetFilter,
+    },
+    /// CR 611.3a: the recipient (effective subject) of the continuous effect matches
+    /// `filter`; re-evaluated per affected object each layer cycle (mirrors
+    /// `RecipientHasCounters`, the recipient analog of `HasCounters`). CR 611.3a: "A
+    /// continuous effect generated by a static ability isn't 'locked in'; it applies at
+    /// any given moment to whatever its text indicates" — so the anaphoric "it" in
+    /// "... as long as it's a Zombie" binds to whatever object is currently receiving the
+    /// effect: an Aura's enchanted creature, the source itself (SelfRef), or each affected
+    /// object in a per-recipient anthem. `filter` is a plain type/subtype/color/supertype
+    /// `TargetFilter::Typed` — no attachment prop, no recipient prop.
+    RecipientMatchesFilter {
         filter: TargetFilter,
     },
     /// CR 702.95b: True while the source object is paired with another creature.
@@ -4934,6 +4980,26 @@ impl StepSkipTarget {
     }
 }
 
+/// CR 115.1: Whether the `Bounce` effect selects its affected object at
+/// cast/activation time ("target", locked) or at resolution time (controller-
+/// scoped filter like "a creature you control" — Whitemane Lion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BounceSelection {
+    /// Default — target chosen at cast/activation via the targeting pipeline.
+    #[default]
+    Targeted,
+    /// CR 608.2c: Controller chooses an eligible object at resolution.
+    AtResolution,
+}
+
+impl BounceSelection {
+    /// Helper for `#[serde(skip_serializing_if = ...)]`.
+    pub fn is_targeted(&self) -> bool {
+        matches!(self, Self::Targeted)
+    }
+}
+
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
 // clippy::large_enum_variant: `Effect` is the engine's central 100+ variant
@@ -5368,6 +5434,12 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default)]
         destination: Option<Zone>,
+        /// CR 115.1 + Whitemane Lion ruling: Controls whether this effect uses
+        /// the targeting pipeline (`Targeted`) or selects at resolution
+        /// (`AtResolution` — Whitemane Lion class). Card-data.json records
+        /// predating this field deserialize as `Targeted` via the default.
+        #[serde(default, skip_serializing_if = "BounceSelection::is_targeted")]
+        selection: BounceSelection,
     },
     /// CR 400.7 + CR 611.2c: Mass-bounce — return every permanent matching
     /// `target` to its owner's hand (default) or `destination` if set. Mirrors
@@ -5501,6 +5573,16 @@ pub enum Effect {
         /// CR 707.10c: whether the controller may choose new targets for the copy.
         #[serde(default = "default_copy_keep_targets")]
         retarget: CopyRetargetPermission,
+    },
+    /// CR 707.12: Create a copy of a card/object in its zone and cast that
+    /// copy while the resolving spell or ability continues resolving.
+    CastCopyOfCard {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        /// CR 118.9 + CR 601.2f: Alternative mana cost used to cast the copy.
+        /// Mizzix's Mastery and Cipher use `ManaCost::zero()`.
+        #[serde(default)]
+        cost: ManaCost,
     },
     /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
     /// Copies copiable characteristics (name, mana cost, color, types, P/T, abilities, keywords)
@@ -6156,10 +6238,14 @@ pub enum Effect {
     WinTheGame,
     /// CR 706: Roll a die with the given number of sides.
     /// If `results` is non-empty, execute the matching branch.
+    /// CR 706.2: `modifier` adjusts the natural roll before result-branch lookup.
+    /// `None` means the natural result is used unchanged.
     RollDie {
         sides: u8,
         #[serde(default)]
         results: Vec<DieResultBranch>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifier: Option<DieRollModifier>,
     },
     /// CR 705: Flip a coin. Optionally execute different effects on win/lose.
     FlipCoin {
@@ -6627,6 +6713,21 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
         amount: QuantityExpr,
+    },
+    /// CR 701.12a: Exchange a player's life total with the source permanent's
+    /// power or toughness. The player's life total becomes the stat's current
+    /// value (CR 119.5 gain/lose-to-reach), and the source gains an indefinite
+    /// layer-7b continuous effect setting that stat to the player's previous
+    /// life total (CR 613.4b). All-or-nothing per CR 701.12a: if the life change
+    /// is forbidden (CR 119.7/119.8 can't-gain/can't-lose), no part occurs.
+    /// `player` selects the player (Controller for "your", Opponent for "target
+    /// opponent"); `stat` selects which of the source's stats is exchanged.
+    /// Tree of Redemption (your life ↔ toughness), Tree of Perdition (target
+    /// opponent's life ↔ toughness), Evra, Halcyon Witness (your life ↔ power).
+    ExchangeLifeWithStat {
+        #[serde(default = "default_target_filter_any")]
+        player: TargetFilter,
+        stat: PtStat,
     },
     /// CR 730.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
@@ -7240,6 +7341,7 @@ impl Effect {
             | Effect::Bounce { target, .. }
             | Effect::SwitchPT { target, .. }
             | Effect::CopySpell { target, .. }
+            | Effect::CastCopyOfCard { target, .. }
             | Effect::BecomeCopy { target, .. }
             | Effect::ChooseCard { target, .. }
             | Effect::PutCounter { target, .. }
@@ -7320,6 +7422,7 @@ impl Effect {
 
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
+            | Effect::ExchangeLifeWithStat { player, .. }
             | Effect::ExileFromTopUntil { player, .. } => Some(player),
 
             // CR 115.1a + CR 601.2c: "Create a [Role/Aura] token attached to
@@ -7528,6 +7631,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SeparateIntoPiles { .. } => "SeparateIntoPiles",
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
+        Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::Myriad => "Myriad",
         Effect::BecomeCopy { .. } => "BecomeCopy",
@@ -7635,6 +7739,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::BlightEffect { .. } => "BlightEffect",
         Effect::Seek { .. } => "Seek",
         Effect::SetLifeTotal { .. } => "SetLifeTotal",
+        Effect::ExchangeLifeWithStat { .. } => "ExchangeLifeWithStat",
         Effect::SetDayNight { .. } => "SetDayNight",
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
@@ -7707,6 +7812,7 @@ pub enum EffectKind {
     SeparateIntoPiles,
     SwitchPT,
     CopySpell,
+    CastCopyOfCard,
     CopyTokenOf,
     Myriad,
     BecomeCopy,
@@ -7810,6 +7916,7 @@ pub enum EffectKind {
     BlightEffect,
     Seek,
     SetLifeTotal,
+    ExchangeLifeWithStat,
     SetDayNight,
     GiveControl,
     RemoveFromCombat,
@@ -7885,6 +7992,7 @@ impl From<&Effect> for EffectKind {
             Effect::SeparateIntoPiles { .. } => EffectKind::SeparateIntoPiles,
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
+            Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::Myriad => EffectKind::Myriad,
             Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,
@@ -7992,6 +8100,7 @@ impl From<&Effect> for EffectKind {
             Effect::BlightEffect { .. } => EffectKind::BlightEffect,
             Effect::Seek { .. } => EffectKind::Seek,
             Effect::SetLifeTotal { .. } => EffectKind::SetLifeTotal,
+            Effect::ExchangeLifeWithStat { .. } => EffectKind::ExchangeLifeWithStat,
             Effect::SetDayNight { .. } => EffectKind::SetDayNight,
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
@@ -8416,6 +8525,13 @@ pub struct AbilityDefinition {
     /// `lower_effect_chain_ir` from the `ClauseBoundary` PRECEDING this clause.
     #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
+    /// CR 608.2c + CR 122.1: when this ability is a `ChooseOneOf` branch driven
+    /// by a counter-kind iteration (`repeat_for: DistinctCounterKindsAmong`),
+    /// `Some(RebindToIteratedKind)` marks the branch whose `PutCounter`
+    /// counter type must be rewritten to the current iteration's counter kind
+    /// before resolution. `None` (default) = branch is fixed (e.g. "+1/+1").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration_kind_binding: Option<IterationKindBinding>,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -8484,6 +8600,8 @@ struct AbilityDefinitionRepr<'a> {
     repeat_until: &'a Option<RepeatContinuation>,
     #[serde(skip_serializing_if = "SubAbilityLink::is_continuation")]
     sub_link: SubAbilityLink,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iteration_kind_binding: &'a Option<IterationKindBinding>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -8525,6 +8643,7 @@ impl Serialize for AbilityDefinition {
             target_selection_mode,
             repeat_until,
             sub_link,
+            iteration_kind_binding,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -8561,6 +8680,7 @@ impl Serialize for AbilityDefinition {
             target_selection_mode: *target_selection_mode,
             repeat_until,
             sub_link: *sub_link,
+            iteration_kind_binding,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` is the computed UI key (#506).
@@ -8627,6 +8747,20 @@ pub enum RepeatContinuation {
     ControllerChoice,
 }
 
+/// CR 608.2c + CR 122.1: tags a `ChooseOneOf` branch whose effect must be
+/// rebound to the current counter-kind iteration before resolving. Used when a
+/// `repeat_for: DistinctCounterKindsAmong` loop drives a "put your choice of a
+/// fixed counter or a counter of that kind" choice — the dynamic branch carries
+/// `RebindToIteratedKind` so the loop rewrites its `PutCounter` counter type to
+/// the iteration's kind. Typed (not a bool) so future binding modes can extend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum IterationKindBinding {
+    /// Rebind this branch's `PutCounter` counter type to the current iterated
+    /// counter kind.
+    RebindToIteratedKind,
+}
+
 impl fmt::Debug for AbilityDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // JSON serialization instead of field-by-field Debug — avoids stack overflow
@@ -8685,6 +8819,7 @@ impl AbilityDefinition {
             target_selection_mode: TargetSelectionMode::Chosen,
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
+            iteration_kind_binding: None,
         }
     }
 
@@ -9581,6 +9716,17 @@ pub enum TriggerCondition {
     /// returns `false` when the drawing player is the active player, the
     /// current phase is the draw step, AND `nth_in_step == 1`; otherwise `true`.
     ExceptFirstDrawInDrawStep,
+
+    /// CR 603.4 + CR 603.6a + CR 400.7: "if it was put onto the battlefield with
+    /// this ability" — true when the triggering zone-change object's
+    /// `entered_via_ability_source` equals the trigger's own source id (i.e. THIS
+    /// ability placed it). Used by anti-recursion ETB guards (Kodama of the East
+    /// Tree). The negation ("if it wasn't ... with this ability") wraps via
+    /// `Not { condition: Box::new(PlacedByAbilitySource) }`, mirroring
+    /// `Not(WasCast)` — no `negated: bool`. Resolves the entering object from the
+    /// `GameEvent::ZoneChanged` event, falling back to the trigger source for
+    /// self-referential cases.
+    PlacedByAbilitySource,
 
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")

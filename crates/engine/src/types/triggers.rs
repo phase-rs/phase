@@ -5,6 +5,155 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::AbilityTag;
+use crate::types::card_type::CoreType;
+use crate::types::phase::Phase;
+
+/// CR 603.2: Event-keyed bucket discriminator for the battlefield
+/// `TriggerIndex`. Indexes the small set of structural axes that statically
+/// constrain which event a battlefield trigger could match. A given event maps
+/// to one or more keys; a given trigger definition maps to one or more keys
+/// (or to the `unclassified` bucket via empty derivation).
+///
+/// CR 603.2 over-approximation invariant: it is correctness-preserving to emit
+/// MORE keys for an event or for a trigger definition than are strictly
+/// necessary; it is a silent trigger-drop bug to emit FEWER. The index's
+/// `unclassified` bucket is the safety net for any `TriggerMode` whose match
+/// shape is dynamic (filter depends on game state) or not yet classified here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TriggerEventKey {
+    /// CR 603.6a: A permanent entered the battlefield. `Some(core_type)` is
+    /// emitted for triggers whose `valid_card` filter narrows to exactly one
+    /// `CoreType`; `None` covers the unrestricted "whenever a permanent enters"
+    /// shape. The event-side deriver emits BOTH the broad `None` key AND one
+    /// `Some(ct)` per element of `ZoneChangeRecord.core_types` so narrow and
+    /// broad listeners both fire.
+    EnterBattlefield(Option<CoreType>),
+    /// CR 603.6c: A permanent moved from battlefield to any other zone
+    /// (death, exile, return-to-hand, library shuffle, library bottom).
+    LeaveBattlefield(Option<CoreType>),
+    /// CR 603.6c + CR 701.8 (Destroy) + CR 404 (graveyard zone): Subset of
+    /// `LeaveBattlefield` where the destination is the graveyard. Emitted on
+    /// the event side as BOTH `LeaveBattlefield` AND `Dies` so dies-triggers
+    /// (Blood Artist) and leaves-triggers (Skyclave Apparition) can coexist.
+    Dies(Option<CoreType>),
+    /// CR 601.2i: A spell was cast OR copied (CR 707.10). `Some(core_type)` is
+    /// emitted for triggers whose `valid_card` filter narrows to exactly one
+    /// `CoreType` (e.g. "whenever a player casts a creature spell").
+    SpellCast(Option<CoreType>),
+    /// CR 603.2 + CR 115.1: An object or player became the target of a spell
+    /// or ability.
+    BecomesTarget,
+    /// CR 508.1: One or more creatures were declared as attackers.
+    Attacks,
+    /// CR 509.1: A creature was declared as a blocker (or a creature became
+    /// blocked).
+    Blocks,
+    /// CR 119.1 + CR 120.1 (damage): Damage was dealt. Coarsely keyed — the
+    /// per-trigger matcher resolves source/target/amount/combat-vs-noncombat at
+    /// match time.
+    DealsDamage,
+    /// CR 615 (prevention): Damage was prevented.
+    DamagePrevented,
+    /// CR 121.1: One or more cards were drawn.
+    CardsDrawn,
+    /// CR 119.3 + CR 118.4 (life gain/loss): A player's life total changed.
+    LifeChanged,
+    /// CR 106 (mana) + CR 605 (mana abilities): Mana was added to a player's
+    /// mana pool, OR a permanent emitted a `TappedForMana` event. Coarse key —
+    /// the matcher distinguishes the two TriggerModes.
+    ManaProduced,
+    /// CR 700.14 (cost-paid context): cumulative mana spent on a spell.
+    ManaSpent,
+    /// CR 122.1 (counter rules): One or more counters were added to a permanent
+    /// or player. The bucket covers all `CounterAdded*` variants (the matcher
+    /// distinguishes per-counter-type at match time).
+    CounterAdded,
+    /// CR 122.1: One or more counters were removed.
+    CounterRemoved,
+    /// CR 603.2b: A phase or step began. Keyed by the specific `Phase` so
+    /// at-the-beginning-of-Upkeep triggers do not consult on every step.
+    BeginningOfPhase(Phase),
+    /// CR 701.26: A permanent became tapped.
+    Taps,
+    /// CR 605 (mana abilities): A permanent became tapped specifically for
+    /// mana.
+    TapsForMana,
+    /// CR 701.26: A permanent became untapped.
+    Untaps,
+    /// CR 701.21: A permanent was sacrificed.
+    Sacrificed,
+    /// CR 701.8: A permanent was destroyed.
+    Destroyed,
+    /// CR 611.3 (continuous-effect rules covering control-changing statics)
+    /// — a permanent's controller changed via a `GainControl` effect.
+    /// NOTE: Administrative control transfers on player elimination
+    /// (CR 800.4) do NOT produce an `EffectResolved { kind: GainControl }`
+    /// event and therefore do NOT flow through this bucket — they are not
+    /// caught by `TriggerMode::ChangesController` either (see
+    /// `match_changes_controller`).
+    ChangesController,
+    /// CR 701.9: A player discarded a card.
+    Discarded,
+    /// CR 701.17: A player put cards into their graveyard from their library.
+    Milled,
+    /// CR 111.1: A token was created (or a card was conjured).
+    TokenCreated,
+    /// CR 701.3 (Attach) + CR 702.6 (Equip): An Aura/Equipment/Fortification
+    /// became attached (or unattached).
+    AttachmentChanged,
+    /// CR 701.40 (Manifest) + CR 712 (face-down spells/permanents): A permanent
+    /// transformed or turned face up.
+    FaceOrTransform,
+    /// CR 122 (counters) + CR 704 / poison: A player counter (poison,
+    /// experience, energy, rad) changed.
+    PlayerCounterChanged,
+    /// CR 705 (flipping a coin) + CR 706 (rolling a die): A die was rolled or
+    /// a coin was flipped.
+    DieOrCoin,
+    /// CR 725 (Monarch) + CR 726 (Initiative): Designation changed hands.
+    MonarchOrInitiative,
+    /// CR 104.3: A player lost the game.
+    PlayerLost,
+    /// CR 701.30: A clash occurred.
+    Clashed,
+    /// CR 701.38: A vote was cast or resolved.
+    Voted,
+    /// CR 731: Day/Night designation flipped.
+    DayNightChanged,
+    /// CR 309 (Dungeon) + CR 716 (Class) + CR 719 (Case): Dungeon/Class/Case
+    /// state change (room entered, class level gained, case solved, dungeon
+    /// completed).
+    DungeonOrClassOrCase,
+    /// CR 701.22 (Scry) / CR 701.25 (Surveil) / CR 701.23 (Search) /
+    /// CR 701.59 (Collect Evidence) / CR 701.34 (Proliferate): generic
+    /// player-action events routed through `PlayerPerformedAction`.
+    PlayerActionPerformed,
+    /// Avatar crossover (no CR — set-specific mechanic): Bending events
+    /// (Firebend, Airbend, Earthbend, Waterbend, ElementalBend).
+    Bending,
+    /// CR 500 (turn structure) + CR 603.2b: `TurnStarted` event. Distinct from
+    /// `BeginningOfPhase` because `TurnBegin` triggers fire on the per-turn
+    /// boundary, not on any specific in-turn phase.
+    TurnStarted,
+    /// CR 701.13: An exile resolution event.
+    Exiled,
+    /// CR 701.20: A card was revealed.
+    Revealed,
+    /// CR 602.1 (activated abilities) + CR 603.1 (triggered abilities):
+    /// keyword-activated, ability-copy, and ninjutsu activation events.
+    AbilityOrCopyActivated,
+    /// CR 702.112: A creature became renowned.
+    Renowned,
+    /// CR 701.37: A creature became monstrous.
+    BecomesMonstrous,
+    /// CR 701.62: A manifest-dread resolution.
+    ManifestDreadResolved,
+    /// CR 701.44: An explore resolution.
+    Explored,
+    /// CR 701.14: A fight resolution (separate from generic deals-damage
+    /// because the matcher dispatches on `EffectResolved { kind: Fight }`).
+    Fight,
+}
 
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

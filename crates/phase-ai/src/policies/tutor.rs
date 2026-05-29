@@ -81,15 +81,19 @@ pub(crate) fn score_search_choice_cards(
     let available_mana = crate::zone_eval::available_mana(state, ai_player);
     let intent = crate::eval::strategic_intent(state, ai_player);
     let mana_constrained = materially_mana_constrained_state(state, ai_player);
+    let combo_targets = combo_missing_piece_names(state, ai_player);
 
     cards
         .iter()
         .filter_map(|&card_id| {
             let object = state.objects.get(&card_id)?;
-            Some((
-                card_id,
-                tutor_object_score(object, available_mana, intent, mana_constrained),
-            ))
+            let base = tutor_object_score(object, available_mana, intent, mana_constrained);
+            let combo_bonus = if combo_targets.contains(&object.name.as_str()) {
+                COMBO_PIECE_TUTOR_BONUS
+            } else {
+                0.0
+            };
+            Some((card_id, base + combo_bonus))
         })
         .collect()
 }
@@ -102,6 +106,7 @@ pub(crate) fn score_search_choice_selection(
     let available_mana = crate::zone_eval::available_mana(state, ai_player);
     let intent = crate::eval::strategic_intent(state, ai_player);
     let mana_constrained = materially_mana_constrained_state(state, ai_player);
+    let combo_targets = combo_missing_piece_names(state, ai_player);
     let mut seen_names = HashSet::new();
 
     chosen
@@ -110,6 +115,9 @@ pub(crate) fn score_search_choice_selection(
         .filter_map(|(index, object_id)| state.objects.get(object_id).map(|object| (index, object)))
         .map(|(index, object)| {
             let mut score = tutor_object_score(object, available_mana, intent, mana_constrained);
+            if combo_targets.contains(&object.name.as_str()) {
+                score += COMBO_PIECE_TUTOR_BONUS;
+            }
             if !seen_names.insert(object.name.clone()) {
                 score *= 0.7;
             }
@@ -119,6 +127,26 @@ pub(crate) fn score_search_choice_selection(
             score
         })
         .sum()
+}
+
+/// Score bump applied to a tutor target that closes a near-reachable combo
+/// line. Sized to dominate the existing `tutor_object_score` cap of `0.8`,
+/// so the combo-completing card is preferred over even the highest-EV
+/// generic creature. Kept as a module-level constant so the rationale stays
+/// adjacent to the call site rather than buried in [`super::PolicyPenalties`].
+const COMBO_PIECE_TUTOR_BONUS: f64 = 1.5;
+
+/// Returns the set of card names that, if tutored into the appropriate zone,
+/// would complete a registered cEDH combo line for `ai_player`. Empty for
+/// non-cEDH boards (combos with their normal pieces missing show up too,
+/// but the names match cEDH staples — false positives are bounded by the
+/// registry's curation).
+fn combo_missing_piece_names(state: &GameState, ai_player: PlayerId) -> HashSet<&'static str> {
+    let registry = crate::combo::ComboRegistry::default();
+    registry
+        .missing_pieces_for_near_reachable_lines(state, ai_player)
+        .into_iter()
+        .collect()
 }
 
 fn entry_score(
@@ -566,5 +594,78 @@ mod tests {
         let mixed_score = score_search_choice_selection(&state, PlayerId(0), &[first, removal]);
 
         assert!(mixed_score > duplicate_score);
+    }
+
+    /// Tutor target inference: when Heliod is on the AI's battlefield,
+    /// Walking Ballista in the library must outscore an otherwise-stronger
+    /// generic creature because grabbing it completes the registered
+    /// Heliod+Ballista combo line.
+    #[test]
+    fn search_choice_prefers_combo_piece_over_generic_threat() {
+        let mut state = GameState::new_two_player(42);
+
+        // Heliod, Sun-Crowned on the AI's battlefield → near-reachable line.
+        let heliod = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Heliod, Sun-Crowned".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&heliod)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // The library candidates: a generic flying 6/6 (high tutor score) and
+        // Walking Ballista (the missing combo piece, a 0/0 by default).
+        let titan = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Titan".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&titan).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(6);
+            obj.toughness = Some(6);
+            obj.keywords.push(Keyword::Flying);
+        }
+        let ballista = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Walking Ballista".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&ballista)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let scored = score_search_choice_cards(&state, PlayerId(0), &[titan, ballista]);
+        let titan_score = scored
+            .iter()
+            .find(|(id, _)| *id == titan)
+            .map(|(_, s)| *s)
+            .expect("titan score");
+        let ballista_score = scored
+            .iter()
+            .find(|(id, _)| *id == ballista)
+            .map(|(_, s)| *s)
+            .expect("ballista score");
+
+        assert!(
+            ballista_score > titan_score,
+            "expected combo-piece bonus to outscore generic threat; ballista={ballista_score}, titan={titan_score}"
+        );
     }
 }

@@ -112,7 +112,6 @@
   "landing": {
     "title": "Draft",
     "startNew": "Empezar nuevo",
-    "experimental": "Experimental",
     "quickDraft": {
       "title": "Quick Draft",
       "description": "Draftea 3 sobres con 7 drafteadores de IA, construye un mazo de 40 cartas y luego juega una partida Bo1 contra uno de ellos."

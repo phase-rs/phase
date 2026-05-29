@@ -58,5 +58,5 @@ pub use player::{Player, PlayerId};
 pub use proposed_event::{ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
 pub use statics::StaticMode;
-pub use triggers::TriggerMode;
+pub use triggers::{TriggerEventKey, TriggerMode};
 pub use zones::Zone;

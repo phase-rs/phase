@@ -55,6 +55,28 @@ scryfall_download() {
   mv -f "$tmp" "$file"
 }
 
+# jq prelude shared by the gen-scryfall-*.sh transforms. Prepend it to a jq
+# program with shell string adjacency: jq -c "$SCRYFALL_JQ_PRELUDE"'<program>'.
+#
+# js_downcase replicates JavaScript's String.prototype.toLowerCase() for the
+# character set MTG card names use. jq's built-in ascii_downcase only folds A-Z
+# (it leaves every byte >= 0x80 untouched), so an accented capital like É
+# (U+00C9) survives as-is in the generated lookup keys. But the frontend
+# resolves every image by `name.toLowerCase()` / `faceName.toLowerCase()`, and
+# JS folds É -> é (U+00E9). The two byte strings never match, so name-keyed
+# image lookups for Éomer / Éowyn (and any card with an uppercase accented
+# letter) silently miss. js_downcase folds ASCII via ascii_downcase, then the
+# Latin-1 Supplement uppercase block (À..Þ = U+00C0..U+00DE, excluding the
+# × sign at U+00D7) by +0x20 — the complete set of accented capitals in MTG's
+# English card names, verified to match JS toLowerCase byte-for-byte.
+SCRYFALL_JQ_PRELUDE='
+def js_downcase:
+  ascii_downcase
+  | explode
+  | map(if . >= 192 and . <= 222 and . != 215 then . + 32 else . end)
+  | implode;
+'
+
 # scryfall_fetch_bulk TYPE FILE — resolve a bulk-data download_uri by type
 # (e.g. oracle_cards, default_cards) and download it to FILE.
 scryfall_fetch_bulk() {

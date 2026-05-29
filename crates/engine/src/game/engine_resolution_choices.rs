@@ -1472,6 +1472,41 @@ pub(super) fn handle_resolution_choice(
                 events,
             )
             .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            // CR 614.12a: For an "enters with your choice of counter" replacement
+            // (Denry Klin), the entering permanent's battlefield-entry ZoneChanged
+            // event was deferred into `state.deferred_entry_events` by the ETB-
+            // replacement capture in `engine_replacement.rs` so observers don't
+            // fire before the choice is made. Now that `resolve_branch` has folded
+            // the chosen counter onto the still-entering permanent, replay the
+            // deferred entry through the trigger pipeline so ETB observers see the
+            // counter as the permanent enters (pre-entry per CR 614.12a, not a
+            // post-entry counter add). For a normal (non-entry) `ChooseOneOf`,
+            // `deferred_entry_events` is empty, so this is a no-op — the
+            // disambiguator. This is safe because `deferred_entry_events` is
+            // populated ONLY by the ETB-replacement capture (sole production
+            // write-site), and `CopyTargetChoice` drains it via its own
+            // `handle_copy_target_choice` handler, so it is never non-empty during
+            // an unrelated `ChooseBranch`.
+            let deferred = std::mem::take(&mut state.deferred_entry_events);
+            let source_still_on_bf = state
+                .objects
+                .get(&source_id)
+                .is_some_and(|o| o.zone == Zone::Battlefield);
+            if !deferred.is_empty() && source_still_on_bf {
+                super::triggers::process_triggers(state, &deferred);
+                let delayed = super::triggers::check_delayed_triggers(state, &deferred);
+                events.extend(delayed);
+            }
+            // CR 608.2c + CR 122.1: advance any paused resolution chain after the
+            // branch resolves. This is the standard post-resolution step every
+            // sibling choice handler runs. It no-ops when no `pending_continuation`
+            // / `pending_repeat_iteration` exists (each drain block is guarded by
+            // `if let Some(..) = ..take()`), so it is safe for existing `ChooseOneOf`
+            // consumers and for the deferred-entry replay above (mutually exclusive
+            // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop
+            // paused on `ChooseOneOfBranch` advances past the first counter kind to
+            // prompt for each remaining kind (Bribe Taker).
+            effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -2162,6 +2197,7 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             state.ring_bearer.insert(player, Some(target));
+            state.layers_dirty = true;
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {

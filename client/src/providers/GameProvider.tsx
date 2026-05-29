@@ -3,16 +3,20 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
+import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
 import { WebSocketAdapter } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
-import { loadActiveDeck } from "../constants/storage";
+import { ACTIVE_DECK_KEY, loadActiveDeck, loadSavedDeckBracket } from "../constants/storage";
+import type { CommanderBracket } from "../types/bracket";
+import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
+import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
@@ -170,11 +174,47 @@ function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
   return expandParsedDeck(deck);
 }
 
-type ExpandedDeck = { main_deck: string[]; sideboard: string[]; commander: string[] };
+/**
+ * Read the declared bracket for the currently active deck from localStorage.
+ * Returns `null` when no deck is selected or the deck carries no bracket tag.
+ * This is the sole call site for bracket → active-deck bridging so future
+ * bracket storage changes only need to update this function.
+ */
+function loadActiveDeckBracket(): CommanderBracket | null {
+  const name = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!name) return null;
+  return loadSavedDeckBracket(name);
+}
+
+/**
+ * Convert the numeric `CommanderBracket` (1–5) stored on deck metadata into the
+ * lowercase string tier the Rust engine expects on `PlayerDeckList.bracket_tier`.
+ *
+ * Uses the inverse of `BRACKET_TIER_NUMERIC` from `bracketEstimate.ts`.
+ * Returns `"core"` (the engine's `Default`) for any unrecognised value so
+ * that missing or invalid tags degrade safely.
+ */
+function bracketToEngineTier(bracket: CommanderBracket | null | undefined): CommanderBracketTier {
+  switch (bracket) {
+    case 1: return "exhibition";
+    case 2: return "core";
+    case 3: return "upgraded";
+    case 4: return "optimized";
+    case 5: return "cedh";
+    default: return "core";
+  }
+}
+
+type ExpandedDeckWithTier = { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier: CommanderBracketTier };
 type DeckListPayload = {
-  player: ExpandedDeck;
-  opponent: ExpandedDeck;
-  ai_decks: ExpandedDeck[];
+  player: ExpandedDeckWithTier;
+  opponent: ExpandedDeckWithTier;
+  ai_decks: ExpandedDeckWithTier[];
+  /** AI difficulty strings per seat (opponent first, then extra AI decks).
+   *  Passed through to the engine's `DeckList.ai_difficulties` field so the
+   *  WASM bridge can gate cEDH bracket validation on AI difficulty rather than
+   *  deck bracket tier. */
+  ai_difficulties: string[];
 };
 
 function candidatePassesFilters(
@@ -210,12 +250,14 @@ function pickOpponentDeck(
   return randomPickDistinct(filtered.length > 0 ? filtered : catalog, excludeIds);
 }
 
-function buildPlayerOnlyDeckList(deck: ParsedDeck): DeckListPayload {
-  const player = expandParsedDeck(deck);
+function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBracket | null): DeckListPayload {
+  const expanded = expandParsedDeck(deck);
+  const player: ExpandedDeckWithTier = { ...expanded, bracket_tier: bracketToEngineTier(playerBracket) };
   return {
     player,
-    opponent: { main_deck: [], sideboard: [], commander: [] },
+    opponent: { main_deck: [], sideboard: [], commander: [], bracket_tier: "core" },
     ai_decks: [],
+    ai_difficulties: [],
   };
 }
 
@@ -225,8 +267,9 @@ async function buildLocalAiDeckList(
   playerCount: number,
   formatConfig?: FormatConfig,
   selectedMatchType?: MatchType,
+  playerBracket?: CommanderBracket | null,
 ): Promise<DeckListPayload> {
-  const { aiSeats, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
+  const { aiSeats, cedhMode, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
   const catalog = await buildLegalAiDeckCatalog({
     selectedFormat: formatConfig?.format,
     selectedMatchType,
@@ -241,7 +284,7 @@ async function buildLocalAiDeckList(
 
   const opponentCount = Math.max(1, playerCount - 1);
   const excludeIds = new Set<string>();
-  const picks: ParsedDeck[] = [];
+  const picks: AiDeckCandidate[] = [];
   for (let i = 0; i < opponentCount; i++) {
     // Unconfigured seats default to Random — NOT to `aiSeats[0]`. Falling
     // through to seat 0 would re-introduce the original bug: if the user
@@ -255,13 +298,25 @@ async function buildLocalAiDeckList(
       aiArchetypeFilter,
       aiCoverageFloor,
     );
-    picks.push(result.deck);
+    picks.push(result);
     excludeIds.add(result.id);
   }
+
+  const playerExpanded = expandParsedDeck(deck);
+  const playerTier = bracketToEngineTier(playerBracket);
+  // Build ai_difficulties in the same order as the AI seats: opponent first,
+  // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
+  // to ai_decks. Missing seat prefs default to "Medium".
+  // cEDH is a table-wide toggle: every seat resolves to "CEDH" when it's on,
+  // regardless of the remembered per-seat difficulty.
+  const aiDifficulties = picks.map((_, i) =>
+    effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+  );
   return {
-    player: expandParsedDeck(deck),
-    opponent: expandParsedDeck(picks[0]),
-    ai_decks: picks.slice(1).map(expandParsedDeck),
+    player: { ...playerExpanded, bracket_tier: playerTier },
+    opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },
+    ai_decks: picks.slice(1).map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: bracketToEngineTier(c.bracket) })),
+    ai_difficulties: aiDifficulties,
   };
 }
 
@@ -347,7 +402,11 @@ export interface GameProviderProps {
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
   onCardDataMissing?: () => void;
-  onNoDeck?: (reason?: string) => void;
+  /** Called when the game cannot start. `bracketViolation` is `true` when the
+   *  engine rejected init because one or more decks are not bracket 5 at a
+   *  cEDH table — lets callers show a typed modal rather than matching by
+   *  string substring on the error message. */
+  onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
   /** Called when a saved game could not be resumed and a fresh game was started instead. */
   onResumeReset?: (reason: string) => void;
   children: ReactNode;
@@ -536,7 +595,7 @@ export function GameProvider({
 
       const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
-        const deckList = buildPlayerOnlyDeckList(parsedDeck);
+        const deckList = buildPlayerOnlyDeckList(parsedDeck, loadActiveDeckBracket());
         signal.throwIfAborted();
 
         // Resources that may need undoing on abort/error. `broker` is
@@ -1025,6 +1084,7 @@ export function GameProvider({
               playerCount ?? 2,
               formatConfig,
               matchConfig?.match_type,
+              loadActiveDeckBracket(),
             );
           } catch (deckErr) {
             onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1046,7 +1106,15 @@ export function GameProvider({
             audioManager.setContext("battlefield");
           } catch (initErr) {
             console.error("Deck validation failed:", initErr);
-            if (!cancelled) onNoDeckRef.current?.(initErr instanceof Error ? initErr.message : String(initErr));
+            if (!cancelled) {
+              const isBracketViolation =
+                initErr instanceof AdapterError &&
+                initErr.code === AdapterErrorCode.BRACKET_VIOLATION;
+              onNoDeckRef.current?.(
+                initErr instanceof Error ? initErr.message : String(initErr),
+                isBracketViolation,
+              );
+            }
           }
         }
         return;
@@ -1123,6 +1191,7 @@ export function GameProvider({
           playerCount ?? 2,
           formatConfig,
           matchConfig?.match_type,
+          loadActiveDeckBracket(),
         );
       } catch (deckErr) {
         onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1144,7 +1213,15 @@ export function GameProvider({
         audioManager.setContext("battlefield");
       } catch (err) {
         console.error("Deck validation failed:", err);
-        if (!cancelled) onNoDeckRef.current?.(err instanceof Error ? err.message : String(err));
+        if (!cancelled) {
+          const isBracketViolation =
+            err instanceof AdapterError &&
+            err.code === AdapterErrorCode.BRACKET_VIOLATION;
+          onNoDeckRef.current?.(
+            err instanceof Error ? err.message : String(err),
+            isBracketViolation,
+          );
+        }
       }
     };
 

@@ -62,6 +62,7 @@
   },
   "permanent": {
     "expandGroup": "Expandir el grupo de {{name}}",
+    "collapseGroup": "Contraer el grupo de {{name}}",
     "chooseToken": "Elegir la ficha {{name}}",
     "pick": "Elegir",
     "close": "cerrar",
@@ -74,7 +75,9 @@
     "underAttack_other": "Atacado por {{count}} criaturas",
     "target": "Objetivo",
     "copy": "Copia",
-    "copyTooltip": "Ficha copia de una carta real"
+    "copyTooltip": "Ficha copia de una carta real",
+    "ringBearer": "Anillo",
+    "ringBearerTooltip": "Portador del Anillo"
   },
   "player": {
     "opponent": "Op {{seat}}",
@@ -196,8 +199,15 @@
     "energyAriaLabel_one": "{{count}} contador de energía",
     "energyAriaLabel_other": "{{count}} contadores de energía",
     "energyTooltip": "Energía: {{count}}",
-    "ringAriaLabel": "El Anillo te tienta (nivel {{level}})",
+    "ringAriaLabel": "El Anillo te tienta (nivel {{level}}), portador del Anillo: {{bearer}}",
     "ringTooltip": "El Anillo te tienta — nivel {{level}}",
+    "ringBearerTooltip": "Portador del Anillo: {{name}}",
+    "noRingBearer": "ninguno",
+    "noRingBearerTooltip": "Sin portador del Anillo",
+    "ringLevel1": "1. El portador del Anillo es legendario y no puede ser bloqueado por criaturas con mayor fuerza.",
+    "ringLevel2": "2. Cuando ataca, roba una carta y luego descarta una carta.",
+    "ringLevel3": "3. Cuando sea bloqueado por una criatura, el controlador de esa criatura la sacrifica al final del combate.",
+    "ringLevel4": "4. Cuando haga daño de combate a un jugador, cada oponente pierde 3 vidas.",
     "radAriaLabel_one": "{{count}} contador rad",
     "radAriaLabel_other": "{{count}} contadores rad",
     "radTooltip": "Contadores rad: {{count}}",
@@ -634,6 +644,15 @@
       "keepTapped": "Mantener girado",
       "keepTappedDescription": "{{name}} permanece girado en este paso de enderezar."
     },
+    "exert": {
+      "creatureFallback": "Criatura",
+      "title": "¿Esforzar {{name}}?",
+      "subtitle": "Elige si quieres esforzar a este atacante. Una criatura esforzada no se endereza durante tu próximo paso de enderezar.",
+      "exert": "Esforzar",
+      "exertDescription": "{{name}} no se endereza el próximo turno y activa su habilidad de esfuerzo.",
+      "decline": "No esforzar",
+      "declineDescription": "{{name}} ataca normalmente y se endereza como de costumbre."
+    },
     "cost": {
       "discardCard": "descarta una carta",
       "life": "{{amount}} vidas",
@@ -686,6 +705,13 @@
     "startMatch": "Empezar partida",
     "startMatchWithOpponents": "Empezar partida ({{count}} op.)",
     "deckNotLegal": "El mazo no es legal en {{format}}.",
+    "cedhWarning": "Tu mazo es de bracket {{bracket}} contra una IA cEDH: prepárate para perder rápido.",
+    "cedhWarningUntagged": "sin etiqueta",
+    "bracketViolation": {
+      "title": "Bloqueo de bracket cEDH",
+      "body": "Todos los mazos en una mesa cEDH deben estar declarados como bracket 5. Actualiza el bracket de tu mazo en el creador de mazos e inténtalo de nuevo.",
+      "returnToSetup": "Volver a la configuración"
+    },
     "selectDeckPrompt": "Selecciona un mazo",
     "commanderNote": "Commander: singleton de 100 cartas, daño de comandante a {{threshold}}",
     "formatChip": {

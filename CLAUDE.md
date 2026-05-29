@@ -395,6 +395,7 @@ If you cannot find the rule number in `docs/MagicCompRules.txt`, do NOT write th
 - Frontend uses Tailwind CSS v4, Framer Motion for animations
 - Tests colocated in `__tests__/` directories (frontend) or inline `#[cfg(test)]` modules (Rust)
 - The `release` profile is optimized for WASM size: `opt-level = 'z'`, LTO, single codegen unit, stripped
+- **jq lookup keys consumed by JS must use `js_downcase`, never `ascii_downcase`.** jq's `ascii_downcase` folds only `A–Z`, so an uppercase accented letter (e.g. `É` in Éomer/Éowyn) survives in the key, but the frontend resolves every lookup with JS `.toLowerCase()` which folds `É → é` — the keys silently never match and name-keyed image/data lookups return nothing. The `gen-scryfall-*.sh` scripts share a `js_downcase` jq helper (`scripts/lib/scryfall-fetch.sh`) that matches JS `toLowerCase()` for the Latin-1 accented range. Engine-keyed files (`card-data.json`) are unaffected — Rust `to_lowercase()` is already Unicode-aware. `ascii_downcase` stays correct only for ASCII-only keys (oracle ids, set codes, Scryfall UUIDs). Note: these Scryfall data files are gitignored and served from R2 in prod, so fixing the script requires regenerating and redeploying the data.
 
 ## Releasing
 

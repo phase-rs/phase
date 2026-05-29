@@ -25,7 +25,7 @@ fi
 echo "Generating $OUTPUT..."
 mkdir -p "$(dirname "$OUTPUT")"
 
-jq -c '
+jq -c "$SCRYFALL_JQ_PRELUDE"'
   [.[] |
     select(.layout == "token" or .layout == "double_faced_token") |
     select(.id != null) |
@@ -34,9 +34,9 @@ jq -c '
       scryfall_id: $card.id,
       oracle_id: $card.oracle_id,
       face_names: (if $card.card_faces then
-        [$card.card_faces[] | .name | ascii_downcase]
+        [$card.card_faces[] | .name | js_downcase]
       else
-        [$card.name | ascii_downcase]
+        [$card.name | js_downcase]
       end),
       faces: (if $card.card_faces then
         [$card.card_faces[] | {

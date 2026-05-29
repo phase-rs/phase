@@ -154,6 +154,11 @@ pub fn parse_mana_symbol(input: &str) -> OracleResult<'_, ManaCostShard> {
 /// Parse the inner content of a mana symbol (between `{` and `}`).
 fn parse_mana_symbol_inner(input: &str) -> OracleResult<'_, ManaCostShard> {
     alt((
+        // Phyrexian-hybrid symbols (longest match first). These 3-part `{C1/C2/P}`
+        // symbols must be tried before the 2-part hybrid arms below — otherwise
+        // `alt` matches the `W/U` prefix of `{W/U/P}` and the trailing `/P`
+        // breaks the `}` delimiter, silently dropping the pip (issue #1416).
+        parse_phyrexian_hybrid_symbol_inner,
         // Hybrid symbols (longest match first)
         value(ManaCostShard::WhiteBlue, tag("W/U")),
         value(ManaCostShard::WhiteBlack, tag("W/B")),
@@ -255,6 +260,28 @@ fn parse_two_generic_hybrid_symbol_inner(input: &str) -> OracleResult<'_, ManaCo
     .parse(input)
 }
 
+/// CR 107.4f: Phyrexian-hybrid symbols `{C1/C2/P}` may be paid with one mana of
+/// either color or 2 life. Mirrors the 10 such symbols in
+/// `ManaCostShard::from_str`. Kept as a dedicated combinator (like
+/// `parse_two_generic_hybrid_symbol_inner`) so the 3-part forms can be matched
+/// ahead of the 2-part hybrid arms in `parse_mana_symbol_inner` — `alt` does not
+/// backtrack, so the longer form must be tried first.
+fn parse_phyrexian_hybrid_symbol_inner(input: &str) -> OracleResult<'_, ManaCostShard> {
+    alt((
+        value(ManaCostShard::PhyrexianWhiteBlue, tag("W/U/P")),
+        value(ManaCostShard::PhyrexianWhiteBlack, tag("W/B/P")),
+        value(ManaCostShard::PhyrexianBlueBlack, tag("U/B/P")),
+        value(ManaCostShard::PhyrexianBlueRed, tag("U/R/P")),
+        value(ManaCostShard::PhyrexianBlackRed, tag("B/R/P")),
+        value(ManaCostShard::PhyrexianBlackGreen, tag("B/G/P")),
+        value(ManaCostShard::PhyrexianRedWhite, tag("R/W/P")),
+        value(ManaCostShard::PhyrexianRedGreen, tag("R/G/P")),
+        value(ManaCostShard::PhyrexianGreenWhite, tag("G/W/P")),
+        value(ManaCostShard::PhyrexianGreenBlue, tag("G/U/P")),
+    ))
+    .parse(input)
+}
+
 /// Parse a color word: "white", "blue", "black", "red", "green".
 pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
     alt((
@@ -292,6 +319,33 @@ pub fn parse_counter_type_typed(input: &str) -> OracleResult<'_, CounterType> {
         // `CounterType::Generic`. Must be the LAST arm so the enumerated
         // alternatives win when they apply.
         map(take_till1(|c: char| c.is_whitespace()), |raw: &str| {
+            crate::types::counter::parse_counter_type(raw)
+        }),
+    ))
+    .parse(input)
+}
+
+/// Parse a *recognized* counter type, rejecting unknown tokens.
+///
+/// This is `parse_counter_type_typed` MINUS the open-ended `take_till1 →
+/// Generic` fallback arm. Only the three enumerated arms (P/T modifier,
+/// keyword counter, named counter) are tried, so an unrecognized token such as
+/// "red" or "blue creature" fails the parse instead of mapping to
+/// `CounterType::Generic`. Callers use this to validate that a list item names
+/// a real counter type before classifying a disjunctive list as a counter
+/// choice.
+///
+/// CR 122.1b: keyword counters (docs/MagicCompRules.txt:1180).
+/// CR 122.1: named counters (docs/MagicCompRules.txt:1176).
+pub(crate) fn parse_strict_counter_type(input: &str) -> OracleResult<'_, CounterType> {
+    alt((
+        map(parse_pt_modifier, |(power, toughness)| {
+            crate::types::counter::parse_counter_type(&format!("{power:+}/{toughness:+}"))
+        }),
+        map(parse_keyword_counter_name, |raw| {
+            crate::types::counter::parse_counter_type(raw)
+        }),
+        map(parse_named_counter_type, |raw| {
             crate::types::counter::parse_counter_type(raw)
         }),
     ))
@@ -901,6 +955,15 @@ mod tests {
         assert_eq!(parse_number("eighty").unwrap().1, 80);
         assert_eq!(parse_number("ninety").unwrap().1, 90);
         assert_eq!(parse_number("one hundred").unwrap().1, 100);
+    }
+
+    /// `parse_strict_counter_type` accepts recognized counter tokens (keyword
+    /// counters, named counters) and rejects unknown tokens — unlike
+    /// `parse_counter_type_typed`, which maps anything to `CounterType::Generic`.
+    #[test]
+    fn test_parse_strict_counter_type_rejects_unrecognized() {
+        assert!(parse_strict_counter_type("menace").is_ok());
+        assert!(parse_strict_counter_type("red").is_err());
     }
 
     /// "one hundred" must be tried BEFORE "one" so "one hundred cards"

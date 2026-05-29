@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
+use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
@@ -365,6 +366,7 @@ impl GameSession {
                 main_deck: deck.main_deck.clone(),
                 sideboard: deck.sideboard.clone(),
                 commander: deck.commander.clone(),
+                bracket_tier: deck.bracket_tier,
             };
             // The resolver (`ServerDeckResolver::resolve` in phase-server)
             // has already validated these names against the same `db`, so
@@ -407,26 +409,29 @@ impl GameSession {
         }
     }
 
-    pub fn start_game(&mut self, db: &CardDatabase) {
-        let player_deck = self.decks[0].clone().unwrap_or(PlayerDeckPayload {
-            main_deck: Vec::new(),
-            sideboard: Vec::new(),
-            commander: Vec::new(),
-        });
-        let opponent_deck = self.decks[1].clone().unwrap_or(PlayerDeckPayload {
-            main_deck: Vec::new(),
-            sideboard: Vec::new(),
-            commander: Vec::new(),
-        });
+    pub fn start_game(&mut self, db: &CardDatabase) -> Result<(), CedhBracketError> {
+        // Gate: if any AI seat is configured for cEDH difficulty, validate that
+        // every submitted deck is declared at the cEDH bracket tier before
+        // mutating any session state.
+        let is_cedh = self
+            .ai_configs
+            .values()
+            .any(|c| c.difficulty == AiDifficulty::CEDH);
+
+        if is_cedh {
+            let deck_refs = self
+                .decks
+                .iter()
+                .filter_map(|slot| slot.as_ref())
+                .collect::<Vec<_>>();
+            validate_cedh_bracket(&deck_refs)?;
+        }
+
+        let player_deck = self.decks[0].clone().unwrap_or_default();
+        let opponent_deck = self.decks[1].clone().unwrap_or_default();
         let ai_decks: Vec<PlayerDeckPayload> = self.decks[2..]
             .iter()
-            .map(|deck| {
-                deck.clone().unwrap_or(PlayerDeckPayload {
-                    main_deck: Vec::new(),
-                    sideboard: Vec::new(),
-                    commander: Vec::new(),
-                })
-            })
+            .map(|deck| deck.clone().unwrap_or_default())
             .collect();
 
         self.rebuild_pregame_state(self.player_count);
@@ -442,6 +447,11 @@ impl GameSession {
                 player: player_deck,
                 opponent: opponent_deck,
                 ai_decks,
+                // Multiplayer server does not enforce the cEDH gate at the
+                // session layer (it plumbs bracket tier through separately).
+                // Default to empty so old clients without ai_difficulties
+                // deserialize safely.
+                ai_difficulties: vec![],
             },
             Some(db),
         );
@@ -449,6 +459,7 @@ impl GameSession {
         let _ = start_game(&mut self.state);
         self.game_started = true;
         self.lobby_meta = None;
+        Ok(())
     }
 
     /// Run AI actions and return per-action broadcast data.
@@ -853,7 +864,9 @@ impl SessionManager {
         }
 
         session.state.all_card_names = card_names.into();
-        session.start_game(db);
+        session
+            .start_game(db)
+            .expect("start_game in tests should not hit cEDH validation");
 
         (game_code, player_token)
     }
@@ -1232,6 +1245,7 @@ mod tests {
             }],
             sideboard: Vec::new(),
             commander: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1737,6 +1751,70 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Sandbox"), "{err}");
+    }
+
+    #[test]
+    fn start_game_rejects_non_cedh_deck_when_any_ai_seat_is_cedh() {
+        use engine::database::legality::CedhBracketError;
+        use engine::game::bracket_estimate::CommanderBracketTier;
+
+        // Build an empty CardDatabase (no real card data needed — the cEDH
+        // bracket gate fires before any deck loading).
+        let db = engine::database::CardDatabase::default();
+
+        // Construct a two-seat session manually: host (seat 0) + AI (seat 1).
+        let pc = 2usize;
+        let state = engine::types::game_state::GameState::new(
+            engine::types::format::FormatConfig::commander(),
+            pc as u8,
+            0,
+        );
+        let ai_pid = PlayerId(1);
+        let cedh_config = phase_ai::config::create_config_for_players(
+            AiDifficulty::CEDH,
+            Platform::Native,
+            pc as u8,
+        );
+
+        let mut session = GameSession {
+            game_code: "TEST01".to_string(),
+            state,
+            player_tokens: vec!["host_token".to_string(), String::new()],
+            connected: vec![true, true],
+            // Both decks present but with non-cEDH bracket tier (Core is the default).
+            decks: vec![
+                Some(PlayerDeckPayload {
+                    bracket_tier: CommanderBracketTier::Core,
+                    ..Default::default()
+                }),
+                Some(PlayerDeckPayload {
+                    bracket_tier: CommanderBracketTier::Core,
+                    ..Default::default()
+                }),
+            ],
+            display_names: vec!["Host".to_string(), "AI (CEDH)".to_string()],
+            reservations: HashMap::new(),
+            timer_seconds: None,
+            player_count: pc as u8,
+            ai_seats: [ai_pid].into_iter().collect(),
+            ai_configs: [(ai_pid, cedh_config)].into_iter().collect(),
+            lobby_meta: None,
+            game_started: false,
+            start_when_full: true,
+        };
+
+        let game_started_before = session.game_started;
+        let result = session.start_game(&db);
+
+        // The gate must reject with DeckNotCedh.
+        assert!(
+            matches!(result, Err(CedhBracketError::DeckNotCedh { .. })),
+            "expected DeckNotCedh, got: {:?}",
+            result
+        );
+        // No session state should have been mutated — game_started stays false.
+        assert_eq!(session.game_started, game_started_before);
+        assert!(!session.game_started);
     }
 
     /// CR 701.22a / CR 701.25a: a reordered (and partial-2+) scry keep-on-top

@@ -372,37 +372,14 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
 pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
 
+    // CR 603.12 + CR 608.2c: strip a leading reflexive-conditional connector
+    // ("if you do, ", "when you do, ", "if that player doesn't, ", ...) and
+    // return the corresponding AbilityCondition. Delegates to the shared
+    // `parse_reflexive_conditional_connector` combinator in `oracle_nom::condition`
+    // so the connector set stays in lockstep with the sequence-splitter's
+    // sticky-detection consumer.
     if let Some((condition, rest)) = nom_on_lower(text, &lower, |input| {
-        alt((
-            value(AbilityCondition::WhenYouDo, tag("when you do, ")),
-            value(
-                AbilityCondition::effect_performed(),
-                tag("if a player does, "),
-            ),
-            value(AbilityCondition::effect_performed(), tag("if they do, ")),
-            value(
-                AbilityCondition::effect_performed(),
-                tag("if that player does, "),
-            ),
-            value(
-                AbilityCondition::effect_performed(),
-                tag("if the player does, "),
-            ),
-            value(
-                AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::effect_performed()),
-                },
-                tag("if that player doesn't, "),
-            ),
-            value(
-                AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::effect_performed()),
-                },
-                tag("if the player doesn't, "),
-            ),
-            value(AbilityCondition::effect_performed(), tag("if you do, ")),
-        ))
-        .parse(input)
+        crate::parser::oracle_nom::condition::parse_reflexive_conditional_connector(input)
     }) {
         return (Some(condition), rest.to_string());
     }
@@ -2149,6 +2126,7 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }
@@ -2253,6 +2231,10 @@ pub(super) fn try_nom_condition_as_ability_condition(
     }
 
     if let Some(condition) = parse_previous_effect_excess_damage_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_die_result_condition(lower.as_str()) {
         return Some(condition);
     }
 
@@ -2874,6 +2856,26 @@ fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityC
     })
 }
 
+/// CR 706.2 + CR 608.2c: "If the result is N or less / N or more / N or
+/// greater / less than N / greater than N / equal to N / N" — a comparator on
+/// the *actual* result of the most recent die roll in this resolution. Maps
+/// to `AbilityCondition::PreviousEffectAmount`, which reads
+/// `state.last_effect_amount` (populated for `Effect::RollDie` by
+/// `previous_effect_amount_from_events`). Covers Deck of Many Things' "If the
+/// result is 0 or less, discard your hand" and the analogous "is N or
+/// less/more" phrasings used by every dice-table rider in the corpus.
+fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
+    let rest = tag::<_, _, OracleError<'_>>("the result is ")
+        .parse(lower)
+        .ok()
+        .map(|(rest, _)| rest)?;
+    let (comparator, value) = parse_comparison_suffix(rest)?;
+    Some(AbilityCondition::PreviousEffectAmount {
+        comparator,
+        rhs: QuantityExpr::Fixed { value },
+    })
+}
+
 fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
     let (type_text, negated) = parse_zone_change_object_type_text(lower).ok()?.1;
     let (filter, leftover) = parse_type_phrase(type_text);
@@ -3148,6 +3150,41 @@ mod tests {
     use super::*;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::counter::{CounterMatch, CounterType};
+
+    /// CR 603.12: After refactoring `strip_if_you_do_conditional` to delegate to
+    /// the shared `parse_reflexive_conditional_connector` combinator, all eight
+    /// reflexive connectors must still strip to the same `(condition, rest)`.
+    #[test]
+    fn strip_if_you_do_conditional_reflexive_connectors_unchanged() {
+        let effect = AbilityCondition::effect_performed();
+        let not_effect = AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        };
+        let cases: &[(&str, Option<AbilityCondition>)] = &[
+            (
+                "when you do, draw a card",
+                Some(AbilityCondition::WhenYouDo),
+            ),
+            ("if a player does, draw a card", Some(effect.clone())),
+            ("if they do, draw a card", Some(effect.clone())),
+            ("if that player does, draw a card", Some(effect.clone())),
+            ("if the player does, draw a card", Some(effect.clone())),
+            (
+                "if that player doesn't, draw a card",
+                Some(not_effect.clone()),
+            ),
+            (
+                "if the player doesn't, draw a card",
+                Some(not_effect.clone()),
+            ),
+            ("if you do, draw a card", Some(effect.clone())),
+        ];
+        for (input, expected) in cases {
+            let (condition, rest) = strip_if_you_do_conditional(input);
+            assert_eq!(&condition, expected, "condition mismatch for {input:?}");
+            assert_eq!(rest, "draw a card", "rest mismatch for {input:?}");
+        }
+    }
 
     #[test]
     fn difference_expr_composes_unsigned_gap_from_quantity_check() {

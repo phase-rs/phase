@@ -62,6 +62,7 @@
   },
   "permanent": {
     "expandGroup": "Rozwiń grupę {{name}}",
+    "collapseGroup": "Zwiń grupę {{name}}",
     "chooseToken": "Wybierz token {{name}}",
     "pick": "Wybierz",
     "close": "zamknij",
@@ -74,7 +75,9 @@
     "underAttack_other": "Atakowany przez {{count}} stworów",
     "target": "Cel",
     "copy": "Kopia",
-    "copyTooltip": "Kopia tokenowa prawdziwej karty"
+    "copyTooltip": "Kopia tokenowa prawdziwej karty",
+    "ringBearer": "Pierścień",
+    "ringBearerTooltip": "Powiernik Pierścienia"
   },
   "player": {
     "opponent": "Przec {{seat}}",
@@ -196,8 +199,15 @@
     "energyAriaLabel_one": "{{count}} znacznik energii",
     "energyAriaLabel_other": "{{count}} znaczników energii",
     "energyTooltip": "Energia: {{count}}",
-    "ringAriaLabel": "Pierścień cię kusi (poziom {{level}})",
+    "ringAriaLabel": "Pierścień cię kusi (poziom {{level}}), powiernik Pierścienia: {{bearer}}",
     "ringTooltip": "Pierścień cię kusi — poziom {{level}}",
+    "ringBearerTooltip": "Powiernik Pierścienia: {{name}}",
+    "noRingBearer": "brak",
+    "noRingBearerTooltip": "Brak powiernika Pierścienia",
+    "ringLevel1": "1. Powiernik Pierścienia jest legendarny i nie może być blokowany przez stwory o większej sile.",
+    "ringLevel2": "2. Kiedy atakuje, dobierz kartę, a następnie odrzuć kartę.",
+    "ringLevel3": "3. Kiedy zostaje zablokowany przez stwora, kontroler tego stwora poświęca go na końcu walki.",
+    "ringLevel4": "4. Kiedy zada graczowi obrażenia bojowe, każdy przeciwnik traci 3 życia.",
     "radAriaLabel_one": "{{count}} znacznik promieniowania",
     "radAriaLabel_other": "{{count}} znaczników promieniowania",
     "radTooltip": "Znaczniki promieniowania: {{count}}",
@@ -634,6 +644,15 @@
       "keepTapped": "Zostaw obrócony",
       "keepTappedDescription": "{{name}} pozostaje obrócony w tym kroku odwracania."
     },
+    "exert": {
+      "creatureFallback": "Stworzenie",
+      "title": "Wysilić {{name}}?",
+      "subtitle": "Wybierz, czy chcesz wysilić tego atakującego. Wysilone stworzenie nie odwraca się w trakcie twojego następnego kroku odwracania.",
+      "exert": "Wysil",
+      "exertDescription": "{{name}} nie odwróci się w następnej turze, wyzwalając swoją zdolność wysilenia.",
+      "decline": "Nie wysilaj",
+      "declineDescription": "{{name}} atakuje normalnie i odwraca się jak zwykle."
+    },
     "cost": {
       "discardCard": "odrzuć kartę",
       "life": "{{amount}} życia",
@@ -686,6 +705,13 @@
     "startMatch": "Rozpocznij mecz",
     "startMatchWithOpponents": "Rozpocznij mecz ({{count}} przec.)",
     "deckNotLegal": "Talia nie jest dozwolona w formacie {{format}}.",
+    "cedhWarning": "Twoja talia to bracket {{bracket}} przeciwko SI cEDH — spodziewaj się szybkiej porażki.",
+    "cedhWarningUntagged": "bez bracketu",
+    "bracketViolation": {
+      "title": "Blokada bracketu cEDH",
+      "body": "Wszystkie talie przy stole cEDH muszą być zadeklarowane jako bracket 5. Zaktualizuj bracket swojej talii w kreatorze talii i spróbuj ponownie.",
+      "returnToSetup": "Powrót do ustawień"
+    },
     "selectDeckPrompt": "Wybierz talię",
     "commanderNote": "Commander: 100 kart singleton, obrażenia od dowódcy przy {{threshold}}",
     "formatChip": {

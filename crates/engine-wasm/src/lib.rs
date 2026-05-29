@@ -6,14 +6,15 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_actions_full};
+use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::{
-    estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
-    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list, start_game,
-    start_game_with_starting_player, validate_name_deck_for_format, BracketEstimate,
-    DeckCompatibilityRequest, DeckList, PlayerDeckList,
+    can_pair_commanders, estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer,
+    finalize_public_state, is_brawl_commander_eligible, is_commander_eligible,
+    is_tiny_leader_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db,
+    resolve_deck_list, start_game, start_game_with_starting_player, validate_name_deck_for_format,
+    BracketEstimate, DeckCompatibilityRequest, DeckList, PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::identifiers::ObjectId;
@@ -309,6 +310,32 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
     })
 }
 
+/// CR 702.124: Of `candidates`, which can legally pair with `first_commander`
+/// as a co-commander? Applies the full partner family (generic Partner, Partner
+/// with [Name], Friends Forever, Character Select, Doctor's Companion, Choose a
+/// Background) via the engine's single-authority `can_pair_commanders`. The
+/// frontend must not re-derive partner-pairing rules — it filters its candidate
+/// list through this. Returns an empty array if the database isn't loaded.
+#[wasm_bindgen(js_name = commanderPartnerCandidates)]
+pub fn commander_partner_candidates(
+    first_commander: String,
+    candidates: JsValue,
+) -> Result<JsValue, JsValue> {
+    let candidates: Vec<String> = serde_wasm_bindgen::from_value(candidates)
+        .map_err(|e| JsValue::from_str(&format!("Invalid candidate list: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Ok(to_js(&Vec::<String>::new()));
+        };
+        let eligible: Vec<String> = candidates
+            .into_iter()
+            .filter(|name| can_pair_commanders(db, &first_commander, name))
+            .collect();
+        Ok(to_js(&eligible))
+    })
+}
+
 /// Returns the hierarchical parse tree for a card face, with per-item support status.
 /// Each `ParsedItem` contains category, label, source_text, supported (bool), details
 /// (key-value pairs), and recursive children (sub-abilities, modal modes, costs).
@@ -352,6 +379,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             main_deck: names,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            bracket_tier: Default::default(),
         };
         let payload = resolve_player_deck_list(db, &list);
         let profile = DeckProfile::analyze(&payload.main_deck);
@@ -591,6 +619,36 @@ pub fn initialize_game(
                 "error": true,
                 "reasons": reasons,
             }));
+        }
+
+        // cEDH bracket lock: enforced only when an AI seat runs CEDH difficulty
+        // (not merely when a deck carries a bracket-5 tag — bringing a B5 deck
+        // against a non-cEDH AI is allowed by spec section 5.5). Gating on AI
+        // difficulty is the correct "is this a cEDH game?" signal. Surfaced with
+        // a dedicated `cedh_bracket_violation` flag so the adapter maps it to
+        // AdapterErrorCode.BRACKET_VIOLATION rather than a generic deck-validation
+        // failure. Re-resolves the deck list to read each seat's bracket_tier;
+        // this only runs on the cEDH path.
+        if any_ai_difficulty_is_cedh(&deck_list.ai_difficulties) {
+            let cedh_error: Option<Vec<String>> = CARD_DB.with(|cell| {
+                let borrow = cell.borrow();
+                let db = borrow.as_ref().expect("CARD_DB presence checked above");
+                let payload = resolve_deck_list(db, &deck_list);
+                let all_decks: Vec<_> = std::iter::once(&payload.player)
+                    .chain(std::iter::once(&payload.opponent))
+                    .chain(payload.ai_decks.iter())
+                    .collect();
+                validate_cedh_bracket(&all_decks)
+                    .err()
+                    .map(|e| vec![e.to_string()])
+            });
+            if let Some(reasons) = cedh_error {
+                return to_js(&serde_json::json!({
+                    "error": true,
+                    "cedh_bracket_violation": true,
+                    "reasons": reasons,
+                }));
+            }
         }
 
         // Defense-in-depth: every seat must have at least one library card
@@ -1064,18 +1122,12 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 }
 
 /// Get the AI's chosen action for the current game state.
-/// `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard".
+/// `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard",
+/// "CEDH" (case-insensitive; see `AiDifficulty::from_label`).
 /// `player_id` is the seat index of the AI player (0-based).
 #[wasm_bindgen]
 pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue> {
-    let ai_difficulty = match difficulty {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Medium,
-    };
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
 
     with_state(|state| {
         let config =
@@ -1102,14 +1154,7 @@ pub fn get_ai_scored_candidates(
     player_id: u8,
     rng_seed: u64,
 ) -> Result<JsValue, JsValue> {
-    let ai_difficulty = match difficulty {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Medium,
-    };
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
 
     with_state_mut(|state| {
         // Re-seed the state RNG so each parallel worker explores different
@@ -1135,14 +1180,7 @@ pub fn select_action_from_scores(
     difficulty: &str,
     rng_seed: u64,
 ) -> Result<JsValue, JsValue> {
-    let ai_difficulty = match difficulty {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Medium,
-    };
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
     let config = phase_ai::config::create_config(ai_difficulty, Platform::Wasm);
     let scored: Vec<(GameAction, f64)> = serde_json::from_str(scores_json)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize scores: {e}")))?;
@@ -1248,14 +1286,7 @@ pub fn resolve_all(
                 GameAction::PassPriority
             } else if let Some(seat) = ai_seats.iter().find(|s| PlayerId(s.player_id) == acting) {
                 // AI player — ask the AI what to do
-                let ai_difficulty = match seat.difficulty.as_str() {
-                    "VeryEasy" => AiDifficulty::VeryEasy,
-                    "Easy" => AiDifficulty::Easy,
-                    "Medium" => AiDifficulty::Medium,
-                    "Hard" => AiDifficulty::Hard,
-                    "VeryHard" => AiDifficulty::VeryHard,
-                    _ => AiDifficulty::Medium,
-                };
+                let ai_difficulty = AiDifficulty::from_label(&seat.difficulty);
                 let config = create_config_for_players(
                     ai_difficulty,
                     Platform::Wasm,
@@ -1332,11 +1363,13 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
             // Stay at the name-only layer — `wasm.initialize_game` re-resolves
             // against `CARD_DB` when the game actually starts, so resolving
             // here would be wasted work and would force a name-vs-resolved
-            // shape coercion at every JS boundary.
+            // shape coercion at every JS boundary. The declared bracket_tier is
+            // carried through so a cEDH seat's declaration survives the round-trip.
             Ok(PlayerDeckList {
                 main_deck: deck_data.main_deck,
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
+                bracket_tier: deck_data.bracket_tier,
             })
         }
     }
@@ -1406,6 +1439,7 @@ mod bracket_estimate_tests {
             commander: vec!["Atraxa, Praetors' Voice".into()],
             main_deck: vec!["Smothering Tithe".into(), "Forest".into()],
             sideboard: vec![],
+            bracket_tier: Default::default(),
         };
         let result = estimate_bracket_inner(&deck);
         let est = result.expect("estimate present");
@@ -1422,6 +1456,7 @@ mod bracket_estimate_tests {
             commander: vec!["Cmdr".into()],
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
+            bracket_tier: Default::default(),
         };
         assert!(estimate_bracket_inner(&deck).is_none());
     }

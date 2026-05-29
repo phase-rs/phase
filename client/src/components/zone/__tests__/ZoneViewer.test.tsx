@@ -135,7 +135,10 @@ describe("ZoneViewer", () => {
   it("dispatches an engine-provided graveyard CastSpell action", () => {
     render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /cast flame jab/i }));
+    // The castable card carries the purple "playable" affordance instead of a
+    // labeled button; clicking the card itself routes through handleCast and
+    // auto-dispatches the lone CastSpell action.
+    fireEvent.click(screen.getByTestId("card-image"));
 
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(dispatch).toHaveBeenCalledWith(

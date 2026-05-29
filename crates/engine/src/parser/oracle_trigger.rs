@@ -130,6 +130,7 @@ fn self_recursion_trigger_zone(
         crate::types::ability::Effect::Bounce {
             target: TargetFilter::SelfRef,
             destination,
+            ..
         } if destination.is_none_or(|zone| zone == Zone::Hand) => {
             parse_self_return_origin_zone(source_lower)
         }
@@ -397,8 +398,10 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
         return results;
     }
 
-    // Pattern 2: "whenever ~ [event1] or [event2]" — compound events sharing a subject.
-    if let Some(halves) = split_or_event_compound(&cond_lower, &condition) {
+    // Pattern 2: disjunctive shared-subject event list — "whenever ~ A, B, or C"
+    // (N-way serial) or "whenever ~ A or B" (2-way). CR 603.1: each listed event
+    // is its own trigger condition, all sharing the one subject.
+    if let Some(halves) = split_shared_subject_event_list(&cond_lower, &condition) {
         let mut results = Vec::with_capacity(halves.len());
         for (i, cond) in halves.into_iter().enumerate() {
             let trigger_text = if effect.is_empty() {
@@ -698,6 +701,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     } else if condition_introduces_scoped_phase_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
     }
+    // Snapshot the condition-established scope before body parsing (which may
+    // temporarily rebind it via `with_player_scope`) so lowering sees the scope
+    // the condition introduced, not a transient nested-clause value.
+    let relative_player_scope = effect_ctx.relative_player_scope.clone();
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
@@ -779,6 +786,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             constraint,
             has_up_to,
             effect_lower: effect_lower.to_string(),
+            relative_player_scope,
         },
         source_text: text.to_string(),
     }
@@ -827,6 +835,18 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         Some(TriggerBody::PreLowered(ability)) => Some(ability.clone()),
         None => None,
     };
+
+    // CR 603.7c + CR 120.3 + CR 506.2: For triggers that introduce an
+    // event-bound player ("deals combat damage to a player, they lose half
+    // their life"), rebind the body's `PlayerScope::Target` possessive
+    // quantities to `PlayerScope::ScopedPlayer` so they resolve against the
+    // damaged/attacked player rather than an absent chosen target.
+    let mut execute = execute;
+    if modifiers.relative_player_scope == Some(ControllerRef::TargetPlayer) {
+        if let Some(ability) = execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_event_player_quantity_refs_to_scoped(ability);
+        }
+    }
 
     def.execute = execute;
     def.optional = modifiers.optional;
@@ -2298,6 +2318,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone
@@ -2436,6 +2457,38 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::WasCast),
             }),
+        );
+    }
+
+    // CR 603.4 + CR 603.6a: "if it wasn't put onto the battlefield with this
+    // ability" — anti-recursion intervening-if (Kodama of the East Tree). The
+    // entering permanent must NOT have been placed by this very ability, so a
+    // permanent Kodama itself puts onto the battlefield does not re-trigger it.
+    // Ordered before the positive arm; the two phrases are disjoint ("wasn't put"
+    // does not contain "was put"), mirroring the WasCast/Not(WasCast) disjointness.
+    if let Some((prefix, _)) = scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("if it wasn't put onto the battlefield with this ability")
+            .parse(i)
+    }) {
+        let pat = "if it wasn't put onto the battlefield with this ability";
+        return (
+            strip_condition_clause(text, prefix.len(), pat.len()),
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::PlacedByAbilitySource),
+            }),
+        );
+    }
+
+    // CR 603.4 + CR 603.6a: positive "if it was put onto the battlefield with
+    // this ability" — the entering permanent was placed by this very ability.
+    if let Some((prefix, _)) = scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("if it was put onto the battlefield with this ability")
+            .parse(i)
+    }) {
+        let pat = "if it was put onto the battlefield with this ability";
+        return (
+            strip_condition_clause(text, prefix.len(), pat.len()),
+            Some(TriggerCondition::PlacedByAbilitySource),
         );
     }
 
@@ -2703,6 +2756,10 @@ fn parse_zone_change_object_filter_condition(input: &str) -> OracleResult<'_, Tr
 }
 
 fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
+    if let Ok((rest, condition)) = parse_zone_change_object_token_predicate(input) {
+        return Ok((rest, condition));
+    }
+
     let (rest, negated) = alt((
         value(false, tag("was ")),
         value(true, tag("wasn't ")),
@@ -2731,6 +2788,35 @@ fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, Tr
     } else {
         Ok((rest, condition))
     }
+}
+
+fn parse_zone_change_object_token_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, contracted_negation) = alt((
+        value(true, alt((tag("isn't"), tag("wasn't")))),
+        value(false, alt((tag("is"), tag("was")))),
+    ))
+    .parse(input)?;
+    let (rest, explicit_negation) = opt(preceded(space1, tag("not"))).parse(rest)?;
+    let (rest, _) = space1.parse(rest)?;
+    let (rest, _) = tag("a").parse(rest)?;
+    let (rest, _) = space1.parse(rest)?;
+    let (rest, _) = tag("token").parse(rest)?;
+
+    // CR 111.1: Tokens represent permanents that are not represented by cards.
+    let prop = if contracted_negation || explicit_negation.is_some() {
+        FilterProp::NonToken
+    } else {
+        FilterProp::Token
+    };
+
+    Ok((
+        rest,
+        TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![prop])),
+        },
+    ))
 }
 
 fn map_attachment_kind_filter_prop(input: &str) -> OracleResult<'_, FilterProp> {
@@ -3552,6 +3638,86 @@ fn normalize_compound_pronouns(text: &str) -> String {
     result
 }
 
+/// Split a disjunctive shared-subject event trigger into one reconstructed
+/// trigger line per event, with the subject shared across all of them. This is
+/// the single entry point for the whole class: the N-way serial form
+/// ("Whenever ~ A, B, or C") and the 2-way "or" form ("Whenever ~ A or B") are
+/// its two branches. CR 603.1: each listed event is an independent trigger
+/// condition. Dedicated 2-way compound `TriggerMode` variants (AttacksOrBlocks,
+/// EntersOrAttacks) are intentionally left unsplit by `split_or_event_compound`.
+///
+/// Serial is tried first so a comma list ("A, B, or C") is not mis-split by the
+/// 2-way scanner; this preserves the prior dispatch order exactly.
+fn split_shared_subject_event_list(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
+    split_serial_event_compound(cond_lower, condition)
+        .or_else(|| split_or_event_compound(cond_lower, condition))
+}
+
+/// Split serial compound events sharing one subject — the N-way branch of
+/// [`split_shared_subject_event_list`].
+///
+/// Example: "Whenever ~ attacks, blocks, or becomes the target of a spell"
+/// becomes three trigger conditions, each reusing the same subject.
+fn split_serial_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
+    use super::oracle_nom::primitives::split_once_on;
+
+    // Split the original and lowercase forms in lockstep on the same ASCII
+    // delimiters rather than slicing `condition` with byte offsets taken from
+    // `cond_lower`. `str::to_lowercase()` is not byte-position-preserving for
+    // non-ASCII input (e.g. `İ` grows, `ẞ` shrinks), so a lowercase-derived
+    // offset could land mid-`char` in the original and panic. The delimiters
+    // (`", or "`, `", "`) are pure punctuation and identical in both views, so
+    // parallel splits keep the two aligned without cross-case byte arithmetic.
+    let Ok((_, (before_or_lower, after_or_lower))) = split_once_on(cond_lower, ", or ") else {
+        return None;
+    };
+    let Ok((_, (before_or, after_or))) = split_once_on(condition, ", or ") else {
+        return None;
+    };
+    if parse_event_verb_start(after_or_lower.trim_start()).is_err() {
+        return None;
+    }
+
+    let Ok((_, (first_lower, rest_events_lower))) = split_once_on(before_or_lower, ", ") else {
+        return None;
+    };
+    let Ok((_, (first_original, rest_events_original))) = split_once_on(before_or, ", ") else {
+        return None;
+    };
+    let keyword_and_subject = extract_keyword_and_subject(first_lower.trim());
+    let mut results = vec![first_original.trim().to_string()];
+
+    let mut remaining_lower = rest_events_lower;
+    let mut remaining_original = rest_events_original;
+    loop {
+        if let Ok((_, (event_lower, tail_lower))) = split_once_on(remaining_lower, ", ") {
+            let Ok((_, (event_original, tail_original))) = split_once_on(remaining_original, ", ")
+            else {
+                return None;
+            };
+            if parse_event_verb_start(event_lower.trim()).is_err() {
+                return None;
+            }
+            results.push(format!("{keyword_and_subject} {}", event_original.trim()));
+            remaining_lower = tail_lower;
+            remaining_original = tail_original;
+        } else {
+            if parse_event_verb_start(remaining_lower.trim()).is_err() {
+                return None;
+            }
+            results.push(format!(
+                "{keyword_and_subject} {}",
+                remaining_original.trim()
+            ));
+            break;
+        }
+    }
+
+    results.push(format!("{keyword_and_subject} {}", after_or.trim()));
+
+    Some(results)
+}
+
 /// Split compound conditions where "or" joins two event verbs sharing the same subject.
 /// Returns `Some(vec![first_trigger, second_trigger])` with reconstructed trigger lines,
 /// or `None` if no compound event "or" is found.
@@ -3700,6 +3866,10 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("exploits"),
         parse_event_word("mutates"),
         parse_event_word("transforms"),
+        parse_event_phrase("becomes the target of a spell or ability"),
+        parse_event_phrase("become the target of a spell or ability"),
+        parse_event_phrase("becomes the target of an aura spell"),
+        parse_event_phrase("becomes the target of a spell"),
     ));
     let player_actions = alt((
         passive_player_actions,
@@ -3845,6 +4015,7 @@ fn find_effect_boundary(lower: &str) -> Option<usize> {
         let comma_pos = search_start + before.len();
         if !continues_player_action_list(after)
             && !continues_disjunctive_zone_change_condition(after)
+            && !continues_serial_event_condition(after)
         {
             return Some(comma_pos);
         }
@@ -3874,6 +4045,21 @@ fn continues_disjunctive_zone_change_condition(after_comma: &str) -> bool {
     parse_zone_change_clause(&subject, verb).is_some()
 }
 
+fn continues_serial_event_condition(after_comma: &str) -> bool {
+    use super::oracle_nom::primitives::split_once_on;
+
+    let trimmed = after_comma.trim_start();
+    if let Ok((after_or, ())) = value((), tag::<_, _, OracleError<'_>>("or ")).parse(trimmed) {
+        return parse_event_verb_start(after_or.trim_start()).is_ok();
+    }
+
+    let Ok((_, (first_event, after_or))) = split_once_on(trimmed, ", or ") else {
+        return false;
+    };
+    parse_event_verb_start(first_event.trim()).is_ok()
+        && parse_event_verb_start(after_or.trim_start()).is_ok()
+}
+
 fn continues_player_action_list(after_comma: &str) -> bool {
     let trimmed = after_comma.trim_start();
     let candidate = value((), tag::<_, _, OracleError<'_>>("or "))
@@ -3888,6 +4074,10 @@ fn continues_player_action_list(after_comma: &str) -> bool {
         return true;
     }
 
+    if type_phrase_continues_to_combat_damage_player_event(trimmed) {
+        return true;
+    }
+
     // Recognize type-phrase continuations in comma-separated type lists.
     // E.g. "a creature, planeswalker, or battle enters" — after ", " we see
     // "planeswalker" (a bare type word) or "or battle enters" ("or" + type word).
@@ -3898,12 +4088,16 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // E.g. "creatures you control get +1/+1" starts with "creatures" (type word) but
     // has "get" (predicate verb) — this is the effect, not a continuation.
     let after_conjunction = alt((
+        value((), tag::<_, _, OracleError<'_>>("and/or ")),
         value((), tag::<_, _, OracleError<'_>>("or ")),
         value((), tag("and ")),
     ))
     .parse(trimmed)
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed);
+    if type_phrase_continues_to_combat_damage_player_event(after_conjunction) {
+        return true;
+    }
     if !starts_with_type_word(after_conjunction) {
         return false;
     }
@@ -3911,6 +4105,30 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // A continuation has no predicate verb before the trigger event verb;
     // a new sentence has a subject + predicate verb ("creatures you control get").
     !is_new_sentence_not_type_continuation(after_conjunction)
+}
+
+fn type_phrase_continues_to_combat_damage_player_event(text: &str) -> bool {
+    let (filter, rest) = parse_type_phrase(text);
+    if matches!(filter, TargetFilter::Any) || rest.len() >= text.len() {
+        return false;
+    }
+    let rest = rest.trim_start();
+    parse_combat_damage_to_player(rest).is_ok()
+}
+
+fn parse_combat_damage_to_player(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((
+                tag::<_, _, OracleError<'_>>("deal"),
+                tag::<_, _, OracleError<'_>>("deals"),
+            )),
+            tag(" combat damage"),
+            tag(" to a player"),
+        ),
+    )
+    .parse(input)
 }
 
 /// Check if the text starting at a type word is a new subject-predicate sentence
@@ -5118,6 +5336,12 @@ fn try_parse_event(
         return Some(result);
     }
 
+    // CR 603.6c + CR 603.10a: "[subject] is/are returned to [possessive] hand" —
+    // bounce trigger. Maps to ChangesZone from Battlefield to Hand.
+    if let Some(result) = try_parse_returned_to_hand(subject, rest) {
+        return Some(result);
+    }
+
     // CR 701.13a: "[subject] is put into exile from [zone]" — explicit zone-change
     // form of the exile trigger (God-Eternal Oketra). Self-referential triggers
     // need trigger_zones beyond battlefield because the source is in exile when
@@ -5355,13 +5579,13 @@ fn try_parse_event(
             // CR 120.2: Plural form for batched "are dealt damage" triggers.
             value(SimpleEvent::DealtDamage, tag("are dealt damage")),
             value(SimpleEvent::BecomesTapped, tag("becomes tapped")),
-            // CR 701.21: Plural form for batched "one or more ... become tapped" triggers.
+            // CR 701.26: Plural form for batched "one or more ... become tapped" triggers.
             value(SimpleEvent::BecomesTapped, tag("become tapped")),
             value(SimpleEvent::TappedForMana, tag("is tapped for mana")),
         ))
         .or(alt((
             value(SimpleEvent::BecomesUntapped, tag("becomes untapped")),
-            // CR 701.21: Plural form for batched "one or more ... become untapped" triggers.
+            // CR 701.26: Plural form for batched "one or more ... become untapped" triggers.
             value(SimpleEvent::BecomesUntapped, tag("become untapped")),
             value(SimpleEvent::BecomesUntapped, tag("untaps")),
             value(SimpleEvent::TurnFaceUp, tag("is turned face up")),
@@ -7466,7 +7690,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::Drawn, def));
     }
 
-    // CR 701.21: "you tap an untapped creature an opponent controls"
+    // CR 701.26: "you tap an untapped creature an opponent controls"
     for prefix in [
         "whenever you tap an untapped creature an opponent controls",
         "when you tap an untapped creature an opponent controls",
@@ -9029,6 +9253,25 @@ fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
     .parse(input)
 }
 
+/// CR 400.3: Shared parser for possessive hand forms in zone-change triggers.
+/// Recognises "your hand", "an opponent's hand", "its owner's hand",
+/// "their owner's hand", "their owners' hands", "a player's hand", "a hand",
+/// and bare "hand". Returns `Some(controller)` when the possessive constrains
+/// the destination owner, `None` when any player's hand matches.
+fn parse_hand_possessive(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+    alt((
+        value(Some(ControllerRef::You), tag("your hand")),
+        value(Some(ControllerRef::Opponent), tag("an opponent's hand")),
+        value(None, tag("its owner's hand")),
+        value(None, tag("their owner's hand")),
+        value(None, tag("their owners' hands")),
+        value(None, tag("a player's hand")),
+        value(None, tag("a hand")),
+        value(None, tag("hand")),
+    ))
+    .parse(input)
+}
+
 /// Parse "[subject] is/are put into [possessive] hand from [zone]" — dredge-style
 /// zone-change triggers that fire when a card moves from graveyard (or library) to
 /// its owner's hand. Mirrors `try_parse_put_into_graveyard` with hand as the
@@ -9049,25 +9292,9 @@ fn try_parse_put_into_hand_from(
     .parse(rest)
     .ok()?;
 
-    fn parse_hand_possessive(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
-        alt((
-            value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
-                )),
-                tag("your hand"),
-            ),
-            value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
-                tag("an opponent's hand"),
-            ),
-            value(None, tag("a hand")),
-        ))
-        .parse(input)
-    }
-    let (after_hand, valid_target) = parse_hand_possessive.parse(after_verb).ok()?;
+    let (after_hand, hand_owner) = parse_hand_possessive.parse(after_verb).ok()?;
+    let valid_target =
+        hand_owner.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
 
     let after_hand = after_hand.trim_start();
     let origin = if let Ok((after_from, ())) =
@@ -9103,6 +9330,52 @@ fn try_parse_put_into_hand_from(
     // self-referential LTB pattern above.
     if filter_references_self(subject) {
         def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+    }
+    Some((TriggerMode::ChangesZone, def))
+}
+
+/// CR 603.6c + CR 603.10a: "[subject] is/are returned to [possessive] hand" —
+/// zone-change trigger for bounce effects. The verb "returned" implies the
+/// object moved from the battlefield to a player's hand. Examples:
+/// - Warped Devotion: "Whenever a permanent is returned to a player's hand"
+/// - Azorius Aethermage: "Whenever a permanent is returned to your hand"
+/// - Stormfront Riders: "Whenever … is returned to your hand"
+///
+/// Maps to `ChangesZone` with `origin: Battlefield`, `destination: Hand`.
+/// The hand-owner qualifier ("your"/"opponent's") is merged into `valid_card`
+/// via `add_controller` so that `match_changes_zone` correctly filters by
+/// the bounced permanent's controller.
+fn try_parse_returned_to_hand(
+    subject: &TargetFilter,
+    rest: &str,
+) -> Option<(TriggerMode, TriggerDefinition)> {
+    let (after_verb, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>("is returned to ")),
+        value((), tag("are returned to ")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let (_after_hand, hand_owner) = parse_hand_possessive.parse(after_verb).ok()?;
+
+    // CR 400.3: Objects always go to their owner's zone, so "your hand"
+    // means the bounced permanent was controlled by you. Merge the
+    // constraint into `valid_card` because `match_changes_zone` only
+    // inspects `valid_card`, not `valid_target`.
+    let valid_card = match hand_owner {
+        Some(ctrl) => add_controller(subject.clone(), ctrl),
+        None => subject.clone(),
+    };
+
+    let mut def = make_base();
+    def.mode = TriggerMode::ChangesZone;
+    def.origin = Some(Zone::Battlefield);
+    def.destination = Some(Zone::Hand);
+    def.valid_card = Some(valid_card);
+    // Self-referential bounce triggers (e.g. "when ~ is returned to your hand")
+    // must fire from hand because the source has already moved.
+    if filter_references_self(subject) {
+        def.trigger_zones = vec![Zone::Battlefield, Zone::Hand];
     }
     Some((TriggerMode::ChangesZone, def))
 }
@@ -9766,11 +10039,11 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, CastingPermission,
-        Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
-        DelayedTriggerCondition, Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope,
-        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, BounceSelection,
+        CastingPermission, Comparator, ContinuousModification, ControllerRef, CountScope,
+        DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp,
+        ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -9985,6 +10258,74 @@ mod tests {
     // SelfRef trigger the entering object IS the source, so the evaluator's
     // `source_id` fallback resolves to the same permanent.
     #[test]
+    fn parse_serial_attack_block_target_compound() {
+        let defs = parse_trigger_lines(
+            "Whenever this creature attacks, blocks, or becomes the target of a spell, \
+             it deals damage equal to its power to each opponent.",
+            "Giggling Skitterspike",
+        );
+
+        assert_eq!(defs.len(), 3, "expected three trigger branches: {defs:?}");
+        assert_eq!(defs[0].mode, TriggerMode::Attacks);
+        assert_eq!(defs[0].valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(defs[1].mode, TriggerMode::Blocks);
+        assert_eq!(defs[1].valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(defs[2].mode, TriggerMode::BecomesTarget);
+        assert_eq!(defs[2].valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(defs[2].valid_source, Some(TargetFilter::StackSpell));
+
+        fn has_damage_each_player(ability: &AbilityDefinition) -> bool {
+            matches!(*ability.effect, Effect::DamageEachPlayer { .. })
+                || ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|s| has_damage_each_player(s))
+        }
+        fn has_unimplemented(ability: &AbilityDefinition) -> bool {
+            matches!(*ability.effect, Effect::Unimplemented { .. })
+                || ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|s| has_unimplemented(s))
+        }
+        fn damage_each_player_amount(ability: &AbilityDefinition) -> Option<&QuantityExpr> {
+            match ability.effect.as_ref() {
+                Effect::DamageEachPlayer { amount, .. } => Some(amount),
+                _ => ability
+                    .sub_ability
+                    .as_ref()
+                    .and_then(|s| damage_each_player_amount(s)),
+            }
+        }
+
+        for def in &defs {
+            let execute = def.execute.as_ref().expect("execute ability");
+            assert!(
+                has_damage_each_player(execute),
+                "expected DamageEachPlayer effect, got {:?}",
+                execute.effect
+            );
+            assert!(
+                !has_unimplemented(execute),
+                "effect chain leaked Unimplemented: {:?}",
+                execute
+            );
+            assert!(
+                matches!(
+                    damage_each_player_amount(execute),
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
+                    })
+                ),
+                "expected damage amount to use source power, got {:?}",
+                damage_each_player_amount(execute)
+            );
+        }
+    }
+
+    #[test]
     fn trigger_etb_self_enters_untapped_attaches_condition() {
         let def = parse_trigger_line(
             "When this land enters untapped, create a Food token.",
@@ -10021,6 +10362,70 @@ mod tests {
                 condition: Box::new(TriggerCondition::WasPlayed)
             })
         );
+    }
+
+    #[test]
+    fn trigger_etb_self_if_not_token_attaches_zone_change_non_token_condition() {
+        let def = parse_trigger_line(
+            "When this creature enters, if it isn't a token, create two tokens that are copies of it.",
+            "Gruff Triplets",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+
+        match def.condition {
+            Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin,
+                destination,
+                filter: TargetFilter::Typed(typed),
+            }) => {
+                assert_eq!(origin, None);
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+                assert!(
+                    typed.properties.contains(&FilterProp::NonToken),
+                    "expected NonToken condition, got {typed:?}"
+                );
+            }
+            other => panic!("expected zone-change NonToken condition, got {other:?}"),
+        }
+
+        let execute = def.execute.as_ref().expect("execute ability");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::CopyTokenOf {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zone_change_token_predicate_parses_present_and_past_negation_forms() {
+        for (text, expected_prop) in [
+            ("is a token", FilterProp::Token),
+            ("was a token", FilterProp::Token),
+            ("isn't a token", FilterProp::NonToken),
+            ("is not a token", FilterProp::NonToken),
+            ("wasn't a token", FilterProp::NonToken),
+            ("was not a token", FilterProp::NonToken),
+        ] {
+            let (rest, condition) =
+                parse_zone_change_object_token_predicate(text).expect("token predicate parses");
+            assert_eq!(rest, "");
+
+            match condition {
+                TriggerCondition::ZoneChangeObjectMatchesFilter {
+                    filter: TargetFilter::Typed(typed),
+                    ..
+                } => assert!(
+                    typed.properties.contains(&expected_prop),
+                    "expected {expected_prop:?} for {text}, got {typed:?}"
+                ),
+                other => panic!("expected token filter condition for {text}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -10666,6 +11071,52 @@ mod tests {
             "expected ExileTop to bind to TriggeringPlayer, got {:?}",
             execute.effect
         );
+    }
+
+    /// Issue #594 — Maralen, Fae Ascendant's ETB trigger: the full Oracle
+    /// "Whenever Maralen or another Elf or Faerie you control enters, exile
+    /// the top two cards of target opponent's library." Verifies the
+    /// trigger-half end-to-end: mode is `ChangesZone` (ETB) with battlefield
+    /// destination, and the execute step lowers to `Effect::ExileTop` with
+    /// count = 2 (not silently dropped) and the target-opponent typed filter
+    /// (not the generic library-zone fallback).
+    ///
+    /// CR 603.2a + CR 400.12 + CR 115.1.
+    #[test]
+    fn trigger_maralen_etb_exile_top_two_of_target_opponents_library() {
+        let def = parse_trigger_line(
+            "Whenever Maralen or another Elf or Faerie you control enters, \
+             exile the top two cards of target opponent's library.",
+            "Maralen, Fae Ascendant",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("trigger should have execute step");
+        match execute.effect.as_ref() {
+            Effect::ExileTop {
+                player,
+                count,
+                face_down,
+            } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 2 },
+                    "count must survive the targeted-library lowering"
+                );
+                assert!(!*face_down);
+                assert_eq!(
+                    *player,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    "expected target-opponent filter, got {:?}",
+                    player
+                );
+            }
+            other => panic!("Expected ExileTop, got {other:?}"),
+        }
     }
 
     #[test]
@@ -11448,6 +11899,47 @@ mod tests {
         );
     }
 
+    /// CR 603.4 + CR 603.6a: "if it wasn't put onto the battlefield with this
+    /// ability" — Kodama of the East Tree anti-recursion guard. Must hoist to
+    /// `Not(PlacedByAbilitySource)` and excise the clause so no `Condition_If`
+    /// SwallowedClause warning is emitted.
+    #[test]
+    fn extract_if_condition_wasnt_put_with_this_ability() {
+        let (cleaned, cond) = extract_if_condition(
+            "if it wasn't put onto the battlefield with this ability, you may put a permanent card with equal or lesser mana value from your hand onto the battlefield.",
+        );
+        assert!(
+            matches!(
+                cond,
+                Some(TriggerCondition::Not { ref condition }) if matches!(**condition, TriggerCondition::PlacedByAbilitySource)
+            ),
+            "expected Not(PlacedByAbilitySource), got {cond:?}",
+        );
+        assert!(
+            // allow-noncombinator: test assertion verifying clause excision, not parsing dispatch
+            !cleaned.contains("put onto the battlefield with this ability"),
+            "intervening-if clause must be excised, got: {cleaned}",
+        );
+    }
+
+    /// CR 603.4 + CR 603.6a: positive "if it was put onto the battlefield with
+    /// this ability" → `PlacedByAbilitySource` (no negation wrapper).
+    #[test]
+    fn extract_if_condition_was_put_with_this_ability() {
+        let (cleaned, cond) = extract_if_condition(
+            "if it was put onto the battlefield with this ability, draw a card.",
+        );
+        assert!(
+            matches!(cond, Some(TriggerCondition::PlacedByAbilitySource)),
+            "expected PlacedByAbilitySource, got {cond:?}",
+        );
+        assert!(
+            // allow-noncombinator: test assertion verifying clause excision, not parsing dispatch
+            !cleaned.contains("put onto the battlefield with this ability"),
+            "intervening-if clause must be excised, got: {cleaned}",
+        );
+    }
+
     /// CR 603.4: Inline "then if" without a sentence boundary ("X then if Y,
     /// Z") — the condition still scopes to the then-clause sub_ability and
     /// must not be hoisted. Covers punctuation-free variants of the pattern.
@@ -11539,6 +12031,55 @@ mod tests {
                 );
             }
             other => panic!("sub_ability effect must be LoseLife, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7c + CR 120.3 + CR 119.3: Unstoppable Slasher — "Whenever this
+    /// creature deals combat damage to a player, they lose half their life,
+    /// rounded up." is an event-bound (non-targeted) trigger per CR 603.6f.
+    /// "they" must resolve to `TriggeringPlayer` (the damaged player), and the
+    /// half-life amount must read `PlayerScope::ScopedPlayer`, NOT the
+    /// targeting `PlayerScope::Target` (which has no chosen target on an
+    /// event-bound trigger and resolves to 0 — the reported silent no-op).
+    #[test]
+    fn parse_unstoppable_slasher_combat_damage_half_life() {
+        use crate::types::ability::{Effect, PlayerScope, QuantityExpr, QuantityRef, RoundingMode};
+
+        let def = parse_trigger_line(
+            "Whenever this creature deals combat damage to a player, they lose half their life, rounded up.",
+            "Unstoppable Slasher",
+        );
+
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        match &*execute.effect {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(
+                    target.as_ref(),
+                    Some(&TargetFilter::TriggeringPlayer),
+                    "LoseLife.target must be TriggeringPlayer (the damaged player), not ParentTarget",
+                );
+                match amount {
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => {
+                        assert_eq!(*divisor, 2, "half ⇒ divisor 2");
+                        assert_eq!(*rounding, RoundingMode::Up, "rounded up");
+                        assert_eq!(
+                            **inner,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::LifeTotal {
+                                    player: PlayerScope::ScopedPlayer,
+                                },
+                            },
+                            "inner amount must read the event player's life (ScopedPlayer), got {inner:?}",
+                        );
+                    }
+                    other => panic!("amount must be DivideRounded, got {other:?}"),
+                }
+            }
+            other => panic!("effect must be LoseLife, got {other:?}"),
         }
     }
 
@@ -12502,6 +13043,44 @@ mod tests {
         );
     }
 
+    /// CR 603.6c: "Whenever a permanent is returned to a player's hand" — Warped Devotion.
+    #[test]
+    fn trigger_returned_to_a_players_hand() {
+        let def = parse_trigger_line(
+            "Whenever a permanent is returned to a player's hand, that player discards a card.",
+            "Warped Devotion",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Hand));
+        // "a permanent" — any permanent, not self-referential.
+        assert!(def.valid_card.is_some());
+        // "a player's hand" — no owner constraint.
+        assert!(def.valid_target.is_none());
+    }
+
+    /// CR 603.6c: "Whenever a permanent is returned to your hand" — Azorius Aethermage.
+    #[test]
+    fn trigger_returned_to_your_hand() {
+        let def = parse_trigger_line(
+            "Whenever a permanent is returned to your hand, you may pay {1}. If you do, draw a card.",
+            "Azorius Aethermage",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Hand));
+        // "your hand" — controller constraint merged into valid_card.
+        let vc = def.valid_card.as_ref().expect("valid_card should be set");
+        match vc {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            _ => panic!("expected Typed filter with controller"),
+        }
+        // Owner constraint is on valid_card, not valid_target.
+        assert!(def.valid_target.is_none());
+    }
+
     #[test]
     fn trigger_becomes_blocked() {
         let def = parse_trigger_line(
@@ -12639,6 +13218,8 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageReceived);
         assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_target, None);
     }
 
     #[test]
@@ -12732,7 +13313,7 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
-    /// CR 701.21 + CR 603.2c: Batched plural form "become tapped" for
+    /// CR 701.26 + CR 603.2c: Batched plural form "become tapped" for
     /// "Whenever one or more nontoken Merfolk you control become tapped" —
     /// Deeproot Pilgrimage.
     #[test]
@@ -16081,6 +16662,7 @@ mod tests {
             Some(Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             })
         ));
     }
@@ -16100,6 +16682,7 @@ mod tests {
             Some(Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             })
         ));
     }
@@ -16123,6 +16706,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             }
         ));
         assert!(matches!(
@@ -16935,6 +17519,36 @@ mod tests {
         assert!(
             matches!(&def.valid_source, Some(TargetFilter::Or { filters }) if filters.len() == 2)
         );
+    }
+
+    #[test]
+    fn trigger_one_or_more_comma_and_or_subtypes_combat_damage() {
+        let def = parse_trigger_line(
+            "Whenever one or more Mutants, Ninjas, and/or Turtles you control deal combat damage to a player, put a +1/+1 counter on each of those creatures and draw a card.",
+            "Heroes in a Half Shell",
+        );
+
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert!(matches!(
+            &def.valid_source,
+            Some(TargetFilter::Or { filters }) if filters.len() == 3
+        ));
+
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutCounterAll {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ));
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("draw should be chained");
+        assert!(matches!(*sub.effect, Effect::Draw { .. }));
     }
 
     #[test]
@@ -21307,6 +21921,117 @@ mod tests {
             }
             other => panic!("expected BecomeCopy, got {other:?}"),
         }
+    }
+
+    /// CR 109.5 + CR 115.1 + CR 608.2c + CR 611.2c: Gogo, Mysterious Mime —
+    /// end-to-end trigger parse. The "you may have ~ become a copy ..." frame
+    /// produces a BecomeCopy execute with a SetName(Gogo) modification, and the
+    /// "If you do, Gogo and that creature each get +2/+0 and gain haste ... and
+    /// attack this turn if able" follow-up chains as a 4-link distribution
+    /// (SelfRef links then ParentTarget links) with NO Unimplemented anywhere.
+    ///
+    /// This test asserts the FULL desired spec, including that the pump links
+    /// carry the Haste keyword. The subjectless pump+keyword coalescing path
+    /// (`coalesce_pump_with_modifications` in `oracle_effect::imperative`) now
+    /// folds "get +2/+0 and gain haste until end of turn" into a single
+    /// `GenericEffect { AddPower, AddToughness, AddKeyword(Haste) }`, matching the
+    /// subject-bound form, so the Haste keyword survives distribution. The
+    /// "If you do," reflexive frame no longer hides the compound subject from the
+    /// chunk splitter (sticky-detection strips the leading reflexive connector
+    /// via the shared `parse_reflexive_conditional_connector` combinator).
+    #[test]
+    fn trigger_gogo_distributes_pump_haste_must_attack_to_both() {
+        let def = parse_trigger_line_with_index(
+            "At the beginning of combat on your turn, you may have ~ become a copy of another target creature you control until end of turn, except its name is ~. If you do, ~ and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able.",
+            "Gogo, Mysterious Mime",
+            Some(0),
+            &mut ParseContext::default(),
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+
+        let execute = def.execute.as_deref().expect("execute body must parse");
+
+        // Walk the entire ability tree and assert NO link is Unimplemented.
+        fn assert_no_unimplemented(node: &AbilityDefinition) {
+            assert!(
+                !matches!(*node.effect, Effect::Unimplemented { .. }),
+                "found Unimplemented link in Gogo chain: {:?}",
+                node.effect
+            );
+            if let Some(sub) = node.sub_ability.as_deref() {
+                assert_no_unimplemented(sub);
+            }
+        }
+        assert_no_unimplemented(execute);
+
+        // Primary effect: BecomeCopy with SetName(Gogo, Mysterious Mime).
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::SetName { name }
+                            if name == "Gogo, Mysterious Mime"
+                    )),
+                    "expected SetName(Gogo, Mysterious Mime), got {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected BecomeCopy primary effect, got {other:?}"),
+        }
+
+        // Collect every distribution-link recipient hanging off the BecomeCopy,
+        // and detect whether the Haste keyword survived on any link.
+        let mut recipients: Vec<TargetFilter> = Vec::new();
+        let mut haste_present = false;
+        let mut cursor = execute.sub_ability.as_deref();
+        while let Some(link) = cursor {
+            match link.effect.as_ref() {
+                Effect::Pump { target, .. } => recipients.push(target.clone()),
+                Effect::GenericEffect {
+                    target,
+                    static_abilities,
+                    ..
+                } => {
+                    recipients.push(target.clone().expect("GenericEffect needs a recipient"));
+                    for s in static_abilities {
+                        if s.modifications.iter().any(|m| {
+                            matches!(
+                                m,
+                                crate::types::ability::ContinuousModification::AddKeyword {
+                                    keyword: crate::types::keywords::Keyword::Haste
+                                }
+                            )
+                        }) {
+                            haste_present = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            cursor = link.sub_ability.as_deref();
+        }
+        // 4-link distribution: first half SelfRef, second half ParentTarget.
+        assert_eq!(
+            recipients,
+            vec![
+                TargetFilter::SelfRef,
+                TargetFilter::SelfRef,
+                TargetFilter::ParentTarget,
+                TargetFilter::ParentTarget,
+            ],
+            "expected SelfRef,SelfRef,ParentTarget,ParentTarget recipient order"
+        );
+        // The currently-blocking assertion: Haste must be retained on the pump.
+        assert!(
+            haste_present,
+            "Haste keyword must survive distribution across the coalesced \
+             pump+keyword GenericEffect links"
+        );
     }
 
     #[test]

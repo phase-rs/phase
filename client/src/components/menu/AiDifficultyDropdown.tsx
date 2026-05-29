@@ -18,6 +18,7 @@ export function AiDifficultyDropdown({
   compact = false,
 }: AiDifficultyDropdownProps) {
   const { t } = useTranslation("menu");
+
   return (
     <div className={`relative ${className ?? ""}`}>
       <label className="sr-only" htmlFor={`ai-difficulty-${compact ? "compact" : "full"}`}>
