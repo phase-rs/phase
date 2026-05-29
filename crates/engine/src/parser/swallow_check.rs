@@ -465,6 +465,10 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // "you may cast X as though it had flash if you pay Y" —
             // generalized cast-timing/keyword permission, always opt-in.
             | StaticMode::CastWithKeyword { .. }
+            // CR 118.9: "You may pay X rather than pay the mana cost for [filter]
+            // spells you cast" — opt-in alternative-mana-cost permission
+            // (Rooftop Storm, Fist of Suns, Jodah), structurally optional.
+            | StaticMode::CastWithAlternativeCost { .. }
             // CR 602.5e: "You may activate [abilities] any time you could
             // cast an instant" is an activation-timing permission, not an
             // optional effect to execute during resolution.

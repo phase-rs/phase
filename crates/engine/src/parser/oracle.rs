@@ -33,7 +33,8 @@ use super::oracle_classifier::{
     is_cant_win_lose_compound, is_compound_turn_limit, is_defiler_cost_pattern,
     is_enters_tapped_cant_untap_compound, is_flashback_equal_mana_cost, is_granted_static_line,
     is_instead_replacement_line, is_opening_hand_begin_game, is_replacement_pattern,
-    is_static_pattern, is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
+    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
+    should_defer_spell_to_effect,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
@@ -65,8 +66,8 @@ use super::oracle_special::{
 };
 use super::oracle_static::{
     lower_static_ir, parse_chosen_creature_type_static_prefix,
-    parse_every_creature_type_static_prefix, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    parse_every_creature_type_static_prefix, parse_spells_alternative_cost,
+    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -2128,6 +2129,20 @@ pub(crate) fn parse_oracle_ir(
             {
                 result.statics.push(static_def);
                 i += if consumes_next_line { 2 } else { 1 };
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost: CR 118.9 — "You may pay X rather than pay the mana
+        // cost for [filter] spells you cast." Mana-cost-alternative-grant static
+        // (Rooftop Storm, Fist of Suns, Jodah). Must run before Priority 7
+        // because `is_static_pattern` does not classify this shape, so the line
+        // would otherwise fall through to the imperative parser as
+        // Effect::PayCost.
+        if is_spells_alternative_cost_pattern(&lower) {
+            if let Some(static_def) = parse_spells_alternative_cost(&line) {
+                result.statics.push(static_def);
+                i += 1;
                 continue;
             }
         }

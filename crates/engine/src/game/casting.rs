@@ -699,6 +699,44 @@ fn granted_spell_keywords(
     keywords
 }
 
+/// CR 118.9 + CR 604.1: Collect the alternative MANA cost (if any) granted to
+/// `object_id` by a `CastWithAlternativeCost` static on the battlefield whose
+/// `affected` filter matches this spell. CR 118.9a: at most one alternative
+/// cost can be applied to a spell — return the FIRST matching grant in the
+/// deterministic battlefield scan order.
+pub(super) fn granted_spell_alternative_cost(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Option<AbilityCost> {
+    let spell_obj = state.objects.get(&object_id)?;
+    let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
+
+    // CR 604.1: Functioning gate owned by `game_active_statics`.
+    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
+        let StaticMode::CastWithAlternativeCost { cost } = &def.mode else {
+            continue;
+        };
+
+        let matches = def.affected.as_ref().is_none_or(|filter| {
+            super::filter::spell_object_matches_filter_from_state(
+                state,
+                spell_obj,
+                origin_zone,
+                caster,
+                filter,
+                source_obj.id,
+                &state.all_creature_types,
+            )
+        });
+        if matches {
+            return Some(AbilityCost::Mana { cost: cost.clone() });
+        }
+    }
+
+    None
+}
+
 pub(crate) fn effective_spell_keywords(
     state: &GameState,
     caster: PlayerId,
