@@ -4043,9 +4043,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, ObjectScope,
-        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr,
-        QuantityRef, ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation,
-        ShieldKind, StaticCondition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SharedQuality,
+        SharedQualityRelation, ShieldKind, StaticCondition, TargetFilter, TriggerCondition,
+        TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -4823,6 +4824,31 @@ mod tests {
         let r = parse("Destroy target creature.", "Murder", &[], &["Instant"], &[]);
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn cut_down_destroy_target_uses_total_power_toughness_filter() {
+        let r = parse(
+            "Destroy target creature with total power and toughness 5 or less.",
+            "Cut Down",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::Destroy { target, .. } = &*r.abilities[0].effect else {
+            panic!("expected Destroy effect");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::TotalPowerToughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 5 },
+        }));
     }
 
     #[test]

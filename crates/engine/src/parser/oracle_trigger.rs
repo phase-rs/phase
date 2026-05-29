@@ -10854,6 +10854,52 @@ mod tests {
         );
     }
 
+    /// Issue #594 — Maralen, Fae Ascendant's ETB trigger: the full Oracle
+    /// "Whenever Maralen or another Elf or Faerie you control enters, exile
+    /// the top two cards of target opponent's library." Verifies the
+    /// trigger-half end-to-end: mode is `ChangesZone` (ETB) with battlefield
+    /// destination, and the execute step lowers to `Effect::ExileTop` with
+    /// count = 2 (not silently dropped) and the target-opponent typed filter
+    /// (not the generic library-zone fallback).
+    ///
+    /// CR 603.2a + CR 400.12 + CR 115.1.
+    #[test]
+    fn trigger_maralen_etb_exile_top_two_of_target_opponents_library() {
+        let def = parse_trigger_line(
+            "Whenever Maralen or another Elf or Faerie you control enters, \
+             exile the top two cards of target opponent's library.",
+            "Maralen, Fae Ascendant",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("trigger should have execute step");
+        match execute.effect.as_ref() {
+            Effect::ExileTop {
+                player,
+                count,
+                face_down,
+            } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 2 },
+                    "count must survive the targeted-library lowering"
+                );
+                assert!(!*face_down);
+                assert_eq!(
+                    *player,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    "expected target-opponent filter, got {:?}",
+                    player
+                );
+            }
+            other => panic!("Expected ExileTop, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_battalion() {
         let def = parse_trigger_line(

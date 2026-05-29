@@ -278,6 +278,17 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "spells your opponents cast ",
     "you may look at the top card of your library",
     "once during each of your turns, you may cast",
+    // CR 601.3e: shorter sibling of "once during each of your turns, you may
+    // cast" — Maralen, Fae Ascendant prints "Once each turn, you may cast a
+    // creature spell from exile …". CR 601.3e governs static abilities that
+    // allow casting spells from non-hand zones (Garruk's Horde / Melek
+    // family). Routes the line into the static classifier so the cast-from-
+    // exile-permission handler (follow-up PR) can pick it up. With no
+    // handler implemented yet, `parse_static_line_multi` returns an empty
+    // Vec and dispatch falls through to the next priority, matching pre-
+    // change behavior — no regression today, correct preparatory routing
+    // for the follow-up.
+    "once each turn, you may cast",
     // CR 110.4 + CR 305.1 + CR 601.2a: Muldrotha — combined "play a land or
     // cast a permanent spell of each permanent type from your graveyard"
     // prefix. Routed to `parse_static_line` so the

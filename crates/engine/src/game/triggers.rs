@@ -13240,6 +13240,213 @@ pub mod tests {
         );
     }
 
+    /// RUNTIME REGRESSION — multiple suspended cards (Jhoira of the Ghitu).
+    /// CR 603.3b + CR 702.62a: When 2+ cards are suspended (each granted Suspend
+    /// while in exile), the controller's upkeep fires one "remove a time counter"
+    /// trigger per card. Two-or-more simultaneous same-controller triggers require
+    /// the controller to ORDER them (CR 603.3b) before any player gets priority.
+    ///
+    /// This drives the scenario through the real `apply` pipeline (turn-roll →
+    /// `auto_advance` → upkeep). The bug: the Upkeep arm of `auto_advance` called
+    /// `process_phase_triggers` (which set `waiting_for = OrderTriggers` and
+    /// populated `pending_trigger_order`) and then unconditionally returned
+    /// `WaitingFor::Priority`. `apply` wrote that returned `Priority` back over
+    /// `state.waiting_for`, discarding the prompt and stranding all queued triggers
+    /// in `pending_trigger_order` forever — so NONE of the cards (including the
+    /// first) ticked. A single suspended card took the `NoChoiceNeeded` path (no
+    /// prompt to clobber), which is exactly why one card worked but several didn't.
+    ///
+    /// Discriminator: without the fix, the upkeep is reached with
+    /// `waiting_for == Priority`, the `OrderTriggers` submission below fails, both
+    /// counters stay at 3, and `pending_trigger_order` is left orphaned.
+    #[test]
+    fn multiple_suspended_cards_all_tick_on_upkeep() {
+        use crate::types::counter::CounterType;
+
+        let mut state = setup();
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![],
+            valid_attack_targets: vec![],
+        };
+
+        // CR 104.3c: stock both libraries so neither player decks out while the
+        // turn loop drives real turn progression to P0's next upkeep.
+        for player in [PlayerId(0), PlayerId(1)] {
+            for i in 0..12u64 {
+                create_object(
+                    &mut state,
+                    CardId(8100 + u64::from(player.0) * 100 + i),
+                    player,
+                    format!("Filler {}-{i}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        // Jhoira of the Ghitu — the grant source on the battlefield. Each exiled
+        // card is granted Suspend via a permanent continuous effect affecting it
+        // specifically (mirrors the real `AddKeyword{Suspend}` transient effect
+        // Jhoira's activated ability installs per CR 604.1 + CR 702.62a).
+        let jhoira = make_creature(&mut state, PlayerId(0), "Jhoira of the Ghitu", 1, 3);
+
+        // Two suspended cards in exile, each with 3 time counters and empty
+        // base_keywords (so the off-zone synthesis path treats Suspend as
+        // *granted* and installs the companion upkeep triggers).
+        let mut suspended = Vec::new();
+        for (i, name) in ["Nezahal, Primal Tide", "Omniscience"].iter().enumerate() {
+            let card = create_object(
+                &mut state,
+                CardId(8200 + i as u64),
+                PlayerId(0),
+                (*name).to_string(),
+                Zone::Exile,
+            );
+            state
+                .objects
+                .get_mut(&card)
+                .unwrap()
+                .counters
+                .insert(CounterType::Time, 3);
+            // Grant Suspend to this specific exiled card via a permanent
+            // continuous effect sourced from Jhoira — exactly the
+            // `AddKeyword{Suspend}` transient effect Jhoira's activated ability
+            // installs in real play (CR 604.1 + CR 702.62a).
+            state.transient_continuous_effects.push_back(
+                crate::types::game_state::TransientContinuousEffect {
+                    id: 100 + i as u64,
+                    source_id: jhoira,
+                    controller: PlayerId(0),
+                    timestamp: 1 + i as u64,
+                    duration: Duration::Permanent,
+                    affected: TargetFilter::SpecificObject { id: card },
+                    modifications: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Suspend {
+                            count: 0,
+                            cost: ManaCost::Cost {
+                                generic: 0,
+                                shards: vec![],
+                            },
+                        },
+                    }],
+                    condition: None,
+                    source_name: "Jhoira of the Ghitu".to_string(),
+                },
+            );
+            suspended.push(card);
+        }
+        state.layers_dirty = true;
+
+        // Sanity: both cards must carry granted Suspend off-zone before we drive
+        // the turn — otherwise the upkeep triggers never synthesize.
+        for &card in &suspended {
+            assert!(
+                crate::game::off_zone_characteristics::effective_off_zone_keywords(&state, card)
+                    .iter()
+                    .any(|k| k.kind() == KeywordKind::Suspend),
+                "exiled card {card:?} must have granted Suspend before the upkeep"
+            );
+        }
+
+        // Drive real turn progression (through `apply`, the clobber site) to
+        // PlayerId(0)'s NEXT upkeep.
+        let start_turn = state.turn_number;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 300, "turn progression stalled before P0's upkeep");
+            if state.phase == Phase::Upkeep
+                && state.active_player == PlayerId(0)
+                && state.turn_number > start_turn
+            {
+                break;
+            }
+            if !state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority pass to resolve stack");
+                continue;
+            }
+            match &state.waiting_for {
+                WaitingFor::Priority { .. } => {
+                    crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("priority pass to advance the turn");
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareAttackers { attacks: vec![] },
+                    )
+                    .expect("declare no attackers");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                    )
+                    .expect("declare no blockers");
+                }
+                other => panic!("unexpected waiting state during turn progression: {other:?}"),
+            }
+        }
+
+        // CR 603.3b: at P0's upkeep the engine MUST surface the ordering prompt
+        // for the two suspend triggers — not a bare Priority. This is the
+        // assertion that fails without the `auto_advance` fix.
+        match &state.waiting_for {
+            WaitingFor::OrderTriggers { player, triggers } => {
+                assert_eq!(*player, PlayerId(0), "controller orders own triggers");
+                assert_eq!(
+                    triggers.len(),
+                    2,
+                    "both suspend upkeep triggers must be in the ordering prompt"
+                );
+            }
+            other => panic!(
+                "expected OrderTriggers prompt for the two suspend triggers, got {other:?} \
+                 (pending_trigger_order = {:?})",
+                state.pending_trigger_order.is_some()
+            ),
+        }
+
+        // Submit an order, then drain the two triggers off the stack.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::OrderTriggers { order: vec![0, 1] },
+        )
+        .expect("submit suspend trigger order");
+        let mut guard = 0;
+        while !state.stack.is_empty() {
+            guard += 1;
+            assert!(guard < 20, "suspend upkeep-trigger stack failed to drain");
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve a suspend upkeep trigger");
+        }
+
+        // CR 702.62a: BOTH cards must have ticked 3 → 2, and the ordering queue
+        // must be fully consumed (no orphan).
+        for &card in &suspended {
+            assert_eq!(
+                state.objects[&card]
+                    .counters
+                    .get(&CounterType::Time)
+                    .copied()
+                    .unwrap_or(0),
+                2,
+                "suspended card {card:?} must tick 3 → 2 on P0's upkeep"
+            );
+        }
+        assert!(
+            state.pending_trigger_order.is_none(),
+            "pending_trigger_order must be cleared after the ordered triggers resolve"
+        );
+    }
+
     /// RUNTIME TEST — issue #411. Drives Syr Konrad's `{1}{B}: Each player mills
     /// a card.` activated ability through the real `apply` pipeline four times.
     /// Both libraries are stacked deterministically: the controller's library

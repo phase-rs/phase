@@ -25665,6 +25665,54 @@ mod tests {
         );
     }
 
+    /// Issue #594 (Maralen, Fae Ascendant ETB; Court of Locthwain ETB) —
+    /// "exile the top N cards of target opponent's library" must preserve
+    /// the count (N) and lower the targeted-player phrase to a typed
+    /// `controller: Opponent` filter. Prior to the fix the count was
+    /// silently dropped and the entire library was exiled.
+    /// CR 400.12 + CR 115.1.
+    #[test]
+    fn exile_top_target_opponents_library() {
+        let effect = parse_effect("Exile the top two cards of target opponent's library.");
+        match &effect {
+            Effect::ExileTop {
+                player,
+                count,
+                face_down,
+            } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+                assert!(!*face_down);
+                assert_eq!(
+                    *player,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    "Expected target-opponent filter, got {:?}",
+                    player
+                );
+            }
+            other => panic!("Expected ExileTop, got {:?}", other),
+        }
+    }
+
+    /// Issue #594 sibling — "target player's library" path. Must lower to
+    /// `TargetFilter::Player` (the canonical leaf `parse_target("target
+    /// player")` already produces). Singular "card" → count 1.
+    #[test]
+    fn exile_top_target_players_library_singular() {
+        let effect = parse_effect("Exile the top card of target player's library.");
+        assert!(
+            matches!(
+                &effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Player,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "Expected ExileTop(Player, 1, face_down=false), got {:?}",
+            effect
+        );
+    }
+
     #[test]
     fn put_counter_where_x_is_lowers_to_speed_quantity() {
         let def = parse_effect_chain_with_context(

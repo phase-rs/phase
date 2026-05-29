@@ -33,6 +33,9 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
             match_spell_cast
         }
         TriggerMode::Attacks => match_attacks,
+        // CR 701.43d: linked "when you do" trigger fires when the source creature
+        // is exerted as it attacks.
+        TriggerMode::Exerted => match_exerted,
         TriggerMode::AttackersDeclared | TriggerMode::AttackersDeclaredOneTarget => {
             match_attackers_declared
         }
@@ -142,7 +145,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
         | TriggerMode::Championed
-        | TriggerMode::Exerted
         | TriggerMode::Enlisted
         | TriggerMode::Adapt
         | TriggerMode::Foretell
@@ -659,6 +661,7 @@ fn count_matching_trigger_event_subjects(
     let count_one = |id| u32::from(matches(id));
     match event {
         GameEvent::AttackersDeclared { attacker_ids, .. } => count_slice(attacker_ids),
+        GameEvent::CreatureExerted { object_id } => count_one(*object_id),
         GameEvent::ZoneChanged { object_id, .. }
         | GameEvent::Discarded { object_id, .. }
         | GameEvent::SpellCast { object_id, .. }
@@ -1119,6 +1122,19 @@ pub(super) fn match_attacks(
     state: &GameState,
 ) -> bool {
     !matching_attack_events(event, trigger, source_id, state).is_empty()
+}
+
+/// CR 701.43d: The linked "when you do" trigger fires when its source creature
+/// is exerted (the optional "exert as it attacks" cost was paid). The exert
+/// ability is self-referential, so the exerted object must be the trigger
+/// source.
+pub(super) fn match_exerted(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::CreatureExerted { object_id } if *object_id == source_id)
 }
 
 pub(super) fn matching_attack_events(

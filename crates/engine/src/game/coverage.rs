@@ -494,6 +494,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 let stat_str = match stat {
                     PtStat::Power => "power",
                     PtStat::Toughness => "toughness",
+                    PtStat::TotalPowerToughness => "total power and toughness",
                 };
                 let scope_str = match scope {
                     PtValueScope::Current => "",
@@ -1749,6 +1750,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 match stat {
                     PtStat::Power => "power".into(),
                     PtStat::Toughness => "toughness".into(),
+                    PtStat::TotalPowerToughness => "total power and toughness".into(),
                 },
             ));
         }

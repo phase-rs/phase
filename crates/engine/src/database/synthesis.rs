@@ -4253,11 +4253,19 @@ fn build_oracle_face_inner(
         keywords.retain(|kw| !matches!(kw, Keyword::Hexproof));
     }
 
+    // CR 202.1b: A card with no `manaCost` (lands, and suspend-only cards like
+    // Inevitable Betrayal / Ancestral Vision) has *no* mana cost where its cost
+    // would appear — not a payable {0} cost.
+    // CR 118.6: no mana cost is an unpayable cost. Map an absent manaCost to
+    // `NoCost`; `unwrap_or_default()` previously collapsed it to `Cost{0}`, which
+    // made such cards castable for free from hand (issue #827). Real `{0}` cards
+    // (Ornithopter, Mox) carry an explicit `"{0}"` manaCost and stay
+    // `Cost{ generic: 0 }` via `parse_mtgjson_mana_cost`.
     let mana_cost = mtgjson
         .mana_cost
         .as_deref()
         .map(parse_mtgjson_mana_cost)
-        .unwrap_or_default();
+        .unwrap_or(ManaCost::NoCost);
 
     let mana_derived_colors = derive_colors_from_mana_cost(&mana_cost);
     let mtgjson_colors: Vec<ManaColor> = mtgjson

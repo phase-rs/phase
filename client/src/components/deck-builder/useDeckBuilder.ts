@@ -29,9 +29,11 @@ import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import {
   getColorIdentityViolations,
   getSingletonViolations,
-  canAddPartner,
 } from "./commanderUtils";
-import { isCardCommanderEligibleForFormat } from "../../services/engineRuntime";
+import {
+  commanderPartnerCandidates,
+  isCardCommanderEligibleForFormat,
+} from "../../services/engineRuntime";
 
 const PRECON_PREFIX = "[Pre-built] ";
 
@@ -468,37 +470,42 @@ export function useDeckBuilder({
   const handleSetCommander = useCallback(
     (cardName: string) => {
       if (!commanderEligibleNames.has(cardName)) return;
-      setDirty(true);
-      const card = cardDataCache.get(cardName);
+      // CR 702.124: a second pick joins as a co-commander only when the engine
+      // confirms it legally pairs with the existing one; otherwise it swaps. The
+      // pairing decision is queried on demand (authoritative at click time) so a
+      // stale precomputed value can never misclassify an add as a swap.
+      void (async () => {
+        const isPartnerAdd =
+          commanders.length === 1 &&
+          (
+            await commanderPartnerCandidates(commanders[0], [cardName])
+          ).includes(cardName);
+        setDirty(true);
+        const displaced =
+          isPartnerAdd || commanders.length === 0 ? [] : commanders;
+        const nextCommanders = isPartnerAdd
+          ? [...commanders, cardName]
+          : [cardName];
 
-      const isPartnerAdd =
-        card !== undefined &&
-        commanders.length === 1 &&
-        canAddPartner(commanders, card, cardDataCache);
-      const displaced =
-        isPartnerAdd || commanders.length === 0 ? [] : commanders;
-      const nextCommanders = isPartnerAdd
-        ? [...commanders, cardName]
-        : [cardName];
-
-      setCommanders(nextCommanders);
-      setDeck((prev) => {
-        // Remove the new commander from main, then re-introduce any displaced
-        // commanders so they remain in the deck for the user to re-pick.
-        const filtered = prev.main.filter((e) => e.name !== cardName);
-        const restored = displaced.reduce<DeckEntry[]>((acc, name) => {
-          const existing = acc.find((e) => e.name === name);
-          if (existing) {
-            return acc.map((e) =>
-              e.name === name ? { ...e, count: e.count + 1 } : e,
-            );
-          }
-          return [...acc, { count: 1, name }];
-        }, filtered);
-        return { ...prev, main: restored };
-      });
+        setCommanders(nextCommanders);
+        setDeck((prev) => {
+          // Remove the new commander from main, then re-introduce any displaced
+          // commanders so they remain in the deck for the user to re-pick.
+          const filtered = prev.main.filter((e) => e.name !== cardName);
+          const restored = displaced.reduce<DeckEntry[]>((acc, name) => {
+            const existing = acc.find((e) => e.name === name);
+            if (existing) {
+              return acc.map((e) =>
+                e.name === name ? { ...e, count: e.count + 1 } : e,
+              );
+            }
+            return [...acc, { count: 1, name }];
+          }, filtered);
+          return { ...prev, main: restored };
+        });
+      })();
     },
-    [cardDataCache, commanderEligibleNames, commanders],
+    [commanderEligibleNames, commanders],
   );
 
   // Eligibility predicate consulted by each main-deck row. The set is loaded

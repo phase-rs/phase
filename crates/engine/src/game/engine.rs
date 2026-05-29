@@ -2880,6 +2880,38 @@ fn apply_action(
                 turns::auto_advance(state, &mut events)
             }
         }
+        // CR 508.1g + CR 701.43d: the active player decides whether to pay the
+        // optional "exert as it attacks" cost for the prompted attacker, one
+        // attacker at a time. Triggers are deferred to `finish_declare_attackers`
+        // (the buffered declaration + exert events fire together), so suppress
+        // the epilogue's trigger pass for every step of the loop.
+        (
+            WaitingFor::ExertChoice {
+                player,
+                attacker,
+                remaining,
+            },
+            GameAction::ChooseExert { exert },
+        ) => {
+            triggers_processed_inline = true;
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if exert {
+                engine_combat::apply_attack_exert(state, *attacker, &mut events);
+            }
+            if let Some((next, rest)) = remaining.split_first() {
+                WaitingFor::ExertChoice {
+                    player: *player,
+                    attacker: *next,
+                    remaining: rest.to_vec(),
+                }
+            } else {
+                engine_combat::finish_declare_attackers(state, &mut events, false)?
+            }
+        }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             engine_replacement::handle_replacement_choice(state, index, &mut events)?
         }

@@ -2178,6 +2178,22 @@ pub(crate) fn resolve_player_for_context_ref(
             return player;
         }
     }
+    // CR 115.1d + CR 608.2c: Parent-target controller/owner anaphors bind to
+    // targets inherited from the parent instruction when present (Assassin's
+    // Trophy, Amphin Mutineer). This must precede `resolve_event_context_target`:
+    // that helper's `ParentTargetController` arm resolves the *trigger event*
+    // source's controller (the entering permanent), not the parent ability's
+    // chosen target (the exiled creature).
+    if matches!(target_filter, TargetFilter::ParentTargetController) {
+        if let Some(player) = crate::game::ability_utils::parent_target_controller(ability, state) {
+            return player;
+        }
+    }
+    if matches!(target_filter, TargetFilter::ParentTargetOwner) {
+        if let Some(player) = crate::game::ability_utils::parent_target_owner(ability, state) {
+            return player;
+        }
+    }
     if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
         state,
         target_filter,
@@ -2205,31 +2221,9 @@ pub(crate) fn resolve_player_for_context_ref(
     if matches!(target_filter, TargetFilter::OriginalController) {
         return ability.original_controller.unwrap_or(ability.controller);
     }
-    // CR 115.1d: `ParentTargetController` resolves the controller of the parent
-    // ability's targeted object. In a spell-resolution chain (no
-    // `current_trigger_event` set, so `resolve_event_context_target` returns
-    // None for this filter), the parent's chosen Object lives in
-    // `ability.targets` from chain target propagation — read it here. This is
-    // the Assassin's Trophy-shape pattern: "Destroy target permanent. Its
-    // controller may search their library …" — the sub-ability's filter is
-    // `ParentTargetController`, and we resolve to the destroyed permanent's
-    // controller. Note we deliberately read AFTER the trigger-event path so
-    // an actual triggered context (where the helper at `targeting.rs:265`
-    // succeeds) wins over chain inheritance.
-    if matches!(target_filter, TargetFilter::ParentTargetController) {
-        if let Some(player) = crate::game::ability_utils::parent_target_controller(ability, state) {
-            return player;
-        }
-    }
-    // CR 108.3 + CR 608.2c: `ParentTargetOwner` mirrors `ParentTargetController`
-    // for the owner-axis ("its owner" anaphor). Resolves through
-    // `parent_target_owner` (parent target's owner), then via the unified
-    // event-context resolver (which falls back to the source's AttachedTo
-    // host for Aura phase triggers like Enslave).
+    // CR 108.3 + CR 608.2c: `ParentTargetOwner` AttachedTo fallback when no
+    // inherited targets and no trigger-event referent (Enslave phase trigger).
     if matches!(target_filter, TargetFilter::ParentTargetOwner) {
-        if let Some(player) = crate::game::ability_utils::parent_target_owner(ability, state) {
-            return player;
-        }
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         {
@@ -5780,6 +5774,57 @@ mod tests {
         assert_eq!(state.players[1].life, 18);
         // Controller drew a card
         assert_eq!(state.players[0].hand.len(), 1);
+    }
+
+    /// CR 115.1d: With inherited object targets, `ParentTargetController` must
+    /// not resolve to the trigger-event source's controller (issue #935).
+    #[test]
+    fn parent_target_controller_prefers_inherited_targets_over_trigger_source() {
+        let mut state = GameState::new_two_player(42);
+        let prey = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Prey".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Salamander Warrior".to_string(),
+                power: PtValue::Fixed(4),
+                toughness: PtValue::Fixed(3),
+                types: vec!["Salamander".to_string(), "Warrior".to_string()],
+                colors: vec![ManaColor::Blue],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::ParentTargetController,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(prey)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let trigger_source = ObjectId(100);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: trigger_source,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                trigger_source,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+
+        assert_eq!(
+            resolve_player_for_context_ref(&state, &ability, &TargetFilter::ParentTargetController,),
+            PlayerId(1),
+        );
     }
 
     #[test]

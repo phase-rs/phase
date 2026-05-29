@@ -644,6 +644,15 @@
       "keepTapped": "Mantieni TAPpato",
       "keepTappedDescription": "{{name}} rimane TAPpato in questo passo di STAP."
     },
+    "exert": {
+      "creatureFallback": "Creatura",
+      "title": "Sfruttare {{name}}?",
+      "subtitle": "Scegli se sfruttare questo attaccante. Una creatura sfruttata non si STAPpa durante il tuo prossimo passo di STAP.",
+      "exert": "Sfrutta",
+      "exertDescription": "{{name}} non si STAPpa il prossimo turno e attiva la sua abilità di sfruttamento.",
+      "decline": "Non sfruttare",
+      "declineDescription": "{{name}} attacca normalmente e si STAPpa come al solito."
+    },
     "cost": {
       "discardCard": "scarta una carta",
       "life": "{{amount}} punti vita",

@@ -644,6 +644,15 @@
       "keepTapped": "Keep tapped",
       "keepTappedDescription": "{{name}} stays tapped this untap step."
     },
+    "exert": {
+      "creatureFallback": "Creature",
+      "title": "Exert {{name}}?",
+      "subtitle": "Choose whether to exert this attacker. An exerted creature won't untap during your next untap step.",
+      "exert": "Exert",
+      "exertDescription": "{{name}} won't untap next turn, triggering its exert ability.",
+      "decline": "Don't exert",
+      "declineDescription": "{{name}} attacks normally and untaps as usual."
+    },
     "cost": {
       "discardCard": "discard a card",
       "life": "{{amount}} life",

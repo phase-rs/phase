@@ -2002,13 +2002,15 @@ pub enum FilterProp {
     },
     /// CR 208 (Power/Toughness) + CR 208.4b (base vs current) + CR 613.4b
     /// (layer 7b: base P/T is set before counters/modifiers in 7c): Matches
-    /// objects whose power or toughness satisfies `comparator` against `value`.
+    /// objects whose power, toughness, or total power and toughness satisfies
+    /// `comparator` against `value`.
     ///
     /// Replaces the former `PowerLE`/`PowerGE`/`ToughnessLE`/`ToughnessGE`
     /// sibling cluster (a `stat × comparator` cross-product) with a single
     /// parameterized predicate, mirroring the `Cmc` and `Counters` refactors.
     /// Three orthogonal axes:
-    /// - `stat`: which characteristic to read — power (CR 208.1) or toughness.
+    /// - `stat`: which P/T metric to read — power (CR 208.1), toughness, or
+    ///   their total.
     /// - `scope`: `Current` reads the live `power`/`toughness` (after all layers);
     ///   `Base` reads `base_power`/`base_toughness` per CR 208.4b — the value
     ///   after CDAs and set effects (layers 7a/7b) but ignoring counters and
@@ -3546,16 +3548,18 @@ impl Comparator {
     }
 }
 
-/// CR 208: Selects which creature characteristic a `FilterProp::PtComparison`
-/// reads. Power and toughness are both defined in CR 208 (Power/Toughness) and
-/// are read identically by a filter — only the field differs — so they are a
-/// leaf-level parameterization axis, not a cross-section conflation.
+/// CR 208: Selects which creature P/T metric a `FilterProp::PtComparison`
+/// reads. Power, toughness, and their total are all derived from the same CR
+/// 208 characteristic pair, so they are a leaf-level parameterization axis, not
+/// a cross-section conflation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PtStat {
     /// CR 208.1: The creature's power (first number).
     Power,
     /// CR 208.1: The creature's toughness (second number).
     Toughness,
+    /// CR 208.1: The sum of the creature's power and toughness.
+    TotalPowerToughness,
 }
 
 /// CR 208.4b: Selects whether a `FilterProp::PtComparison` reads the creature's

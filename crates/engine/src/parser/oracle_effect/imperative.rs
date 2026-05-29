@@ -4255,6 +4255,15 @@ pub(super) fn parse_exile_ast(
         // return `ScopedPlayer`; effect-chain lowering lifts that sentinel into
         // `player_scope: All` so the existing scoped resolver exiles from each
         // player's own library without target selection.
+        // CR 400.12 + CR 115.1: "target opponent's library" / "target player's
+        // library" are zone-as-operand phrases on a *chosen* player. They
+        // reuse the canonical leaves produced by `parse_target` for the
+        // bare phrases ("target opponent" → Typed{controller: Opponent},
+        // "target player" → TargetFilter::Player) so the runtime selector
+        // applies the same legality/targeting machinery used elsewhere
+        // (Maralen, Fae Ascendant ETB; Court of Locthwain ETB).
+        let target_opponent_filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
         for (pattern, player) in [
             ("card of your library", TargetFilter::Controller),
             ("cards of your library", TargetFilter::Controller),
@@ -4262,6 +4271,16 @@ pub(super) fn parse_exile_ast(
             ("cards of that player's library", that_player.clone()),
             ("card of their library", that_player.clone()),
             ("cards of their library", that_player.clone()),
+            (
+                "card of target opponent's library",
+                target_opponent_filter.clone(),
+            ),
+            (
+                "cards of target opponent's library",
+                target_opponent_filter.clone(),
+            ),
+            ("card of target player's library", TargetFilter::Player),
+            ("cards of target player's library", TargetFilter::Player),
             ("card of each player's library", TargetFilter::ScopedPlayer),
             ("cards of each player's library", TargetFilter::ScopedPlayer),
         ] {

@@ -4,19 +4,9 @@ import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
 
-/** CR 702.124: All partner-family keywords that allow co-commander pairing. */
-const PARTNER_KEYWORDS = new Set([
-  "Partner", "Partner with", "Friends forever",
-  "Choose a Background", "Doctor's companion",
-]);
-
-function hasPartner(card: ScryfallCard): boolean {
-  if (card.keywords) {
-    return card.keywords.some((kw) => PARTNER_KEYWORDS.has(kw));
-  }
-  // Fallback for cards without keywords array
-  return card.oracle_text?.toLowerCase().includes("partner") ?? false;
-}
+// CR 702.124: Partner-pairing legality (including Doctor's Companion / Choose a
+// Background) is owned by the engine (`can_pair_commanders`) and consumed via
+// `commanderPartnerCandidates` in engineRuntime — never re-derived here.
 
 export function getCombinedColorIdentity(
   commanders: string[],
@@ -64,15 +54,4 @@ export function getSingletonViolations(
   return deck
     .filter((e) => e.count > 1 && !BASIC_LAND_NAMES.has(e.name) && !hasUnlimitedCopies(cardDataCache.get(e.name)?.oracle_text))
     .map((e) => e.name);
-}
-
-export function canAddPartner(
-  commanders: string[],
-  card: ScryfallCard,
-  cardDataCache: Map<string, ScryfallCard>,
-): boolean {
-  if (commanders.length === 0) return true;
-  if (commanders.length >= 2) return false;
-  const firstCard = cardDataCache.get(commanders[0]);
-  return (firstCard ? hasPartner(firstCard) : false) && hasPartner(card);
 }

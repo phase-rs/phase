@@ -423,6 +423,10 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
+        // CR 701.43d: `TriggerMode::Exerted` is in the unclassified
+        // always-checked bucket (see `keys_from_trigger_def`), so no dedicated
+        // event key is needed — `match_exerted` filters by source.
+        GameEvent::CreatureExerted { .. } => {}
         GameEvent::SpellCast { object_id, .. } => {
             push(TriggerEventKey::SpellCast(None));
             if let Some(obj) = state.objects.get(object_id) {

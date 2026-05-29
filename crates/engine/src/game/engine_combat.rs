@@ -40,12 +40,113 @@ pub(super) fn handle_declare_attackers(
             },
         });
     }
+    let declaration_start = events.len();
     super::combat::declare_attackers(state, attacks, events).map_err(EngineError::InvalidAction)?;
 
-    triggers::process_triggers(state, events);
-    // CR 603.3b (#531): if process_triggers paused on OrderTriggers (the
-    // active player has 2+ simultaneous triggers awaiting their ordering
-    // choice), surface that prompt instead of overwriting it with Priority.
+    // CR 508.1g + CR 701.43d: before attack triggers are put on the stack, the
+    // active player pays any optional "exert this creature as it attacks" costs.
+    // Offer each eligible attacker one at a time; the post-declaration
+    // trigger/priority logic resumes via `finish_declare_attackers` once the
+    // exert queue is drained.
+    let candidates = exert_candidates(state, attacks);
+    if let Some((first, rest)) = candidates.split_first() {
+        // CR 508.2: defer the declaration triggers until after the exert
+        // sub-step so attack and exert "when you do" triggers are placed on the
+        // stack simultaneously.
+        state.pending_attack_trigger_events = events[declaration_start..].to_vec();
+        return Ok(WaitingFor::ExertChoice {
+            player,
+            attacker: *first,
+            remaining: rest.to_vec(),
+        });
+    }
+
+    finish_declare_attackers(state, events, attacks.is_empty())
+}
+
+/// CR 701.43d: Attackers carrying an "exert as it attacks" ability (a
+/// `TriggerMode::Exerted` triggered ability) that have not yet been exerted this
+/// turn, in declaration order. These attackers are offered the optional exert
+/// cost per CR 508.1g.
+fn exert_candidates(state: &GameState, attacks: &[(ObjectId, AttackTarget)]) -> Vec<ObjectId> {
+    attacks
+        .iter()
+        .map(|(attacker_id, _)| *attacker_id)
+        .filter(|attacker_id| {
+            !state.exerted_this_turn.contains(attacker_id)
+                && state.objects.get(attacker_id).is_some_and(|obj| {
+                    super::functioning_abilities::active_trigger_definitions(state, obj)
+                        .any(|(_, def)| def.mode == crate::types::triggers::TriggerMode::Exerted)
+                })
+        })
+        .collect()
+}
+
+/// CR 701.43a + CR 701.43c: Pay the optional exert cost for an attacking
+/// creature — record it as exerted this turn, add the "doesn't untap during your
+/// next untap step" effect (mirroring the `AbilityCost::Exert` cost path), and
+/// emit `CreatureExerted` so the linked "when you do" trigger (CR 701.43d)
+/// fires. No-op if the creature has left the battlefield since attackers were
+/// declared.
+pub(super) fn apply_attack_exert(
+    state: &mut GameState,
+    attacker: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(obj) = state.objects.get(&attacker) else {
+        return;
+    };
+    if obj.zone != Zone::Battlefield {
+        return;
+    }
+    let controller = obj.controller;
+    state.exerted_this_turn.insert(attacker);
+    state.add_transient_continuous_effect(
+        attacker,
+        controller,
+        crate::types::ability::Duration::UntilNextStepOf {
+            step: Phase::Untap,
+            player: crate::types::ability::PlayerScope::Controller,
+        },
+        crate::types::ability::TargetFilter::SpecificObject { id: attacker },
+        vec![
+            crate::types::ability::ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::CantUntap,
+            },
+        ],
+        None,
+    );
+    let exerted = GameEvent::CreatureExerted {
+        object_id: attacker,
+    };
+    // Buffer for deferred trigger matching (CR 508.2) and surface to the
+    // per-action event stream for the frontend.
+    state.pending_attack_trigger_events.push(exerted.clone());
+    events.push(exerted);
+}
+
+/// Post-declaration tail of `handle_declare_attackers`, shared with the exert
+/// prompt resumption: process attack/exert triggers, then route to trigger
+/// ordering, pending trigger-target selection, the no-attackers end-of-combat
+/// path, or priority.
+pub(super) fn finish_declare_attackers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    attacks_empty: bool,
+) -> Result<WaitingFor, EngineError> {
+    // CR 508.2: process the buffered declaration events together with any
+    // `CreatureExerted` events from the exert sub-step. In the common (no-exert)
+    // path the buffer is empty and the per-action `events` slice carries the
+    // declaration events.
+    let deferred = std::mem::take(&mut state.pending_attack_trigger_events);
+    if deferred.is_empty() {
+        triggers::process_triggers(state, events);
+    } else {
+        triggers::process_triggers(state, &deferred);
+    }
+    // CR 603.3b (#531): if process_triggers paused on OrderTriggers (the active
+    // player has 2+ simultaneous triggers awaiting their ordering choice),
+    // surface that prompt instead of overwriting it with Priority.
     if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
         return Ok(state.waiting_for.clone());
     }
@@ -53,7 +154,7 @@ pub(super) fn handle_declare_attackers(
         return Ok(waiting_for);
     }
 
-    if attacks.is_empty() {
+    if attacks_empty {
         state.phase = Phase::EndCombat;
         events.push(GameEvent::PhaseChanged {
             phase: Phase::EndCombat,

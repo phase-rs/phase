@@ -644,6 +644,15 @@
       "keepTapped": "Getappt lassen",
       "keepTappedDescription": "{{name}} bleibt diesen Enttappschritt getappt."
     },
+    "exert": {
+      "creatureFallback": "Kreatur",
+      "title": "{{name}} anstrengen?",
+      "subtitle": "Wähle, ob du diesen Angreifer anstrengen willst. Eine angestrengte Kreatur enttappt in deinem nächsten Enttappschritt nicht.",
+      "exert": "Anstrengen",
+      "exertDescription": "{{name}} enttappt nächste Runde nicht und löst die Anstrengen-Fähigkeit aus.",
+      "decline": "Nicht anstrengen",
+      "declineDescription": "{{name}} greift normal an und enttappt wie üblich."
+    },
     "cost": {
       "discardCard": "eine Karte abwerfen",
       "life": "{{amount}} Leben",

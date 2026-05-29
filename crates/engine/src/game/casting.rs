@@ -4245,7 +4245,26 @@ pub fn handle_cast_spell_with_payment_mode(
     // any keyword-choice prompts (Adventure, Warp, Evoke, Overload) that
     // would fire for hand-only objects.
     match obj.zone {
-        Zone::Hand => {} // Always castable from hand
+        Zone::Hand => {
+            // CR 202.1b: A card with no mana cost (Inevitable Betrayal and other
+            // suspend-only cards) has an unpayable cost.
+            // CR 118.6: it can't be cast from hand by paying that cost; its legal
+            // plays are via an effect/keyword (e.g. Suspend's exile activation),
+            // which are separate actions/zones.
+            // CR 118.6a: an effect that lets you cast it WITHOUT paying its mana
+            // cost may still cast it — the `Unlimited` `CastFromHandFree`
+            // permission (Omniscience) takes this normal path, so don't block it.
+            // Defense-in-depth — the candidate generator already excludes the
+            // no-permission case via `can_cast_object_now`.
+            if matches!(obj.mana_cost, ManaCost::NoCost)
+                && !hand_cast_free_permission_source(state, player, obj)
+                    .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited)
+            {
+                return Err(EngineError::InvalidAction(format!(
+                    "Cannot cast {object_id:?} from hand — it has no mana cost (CR 118.6)",
+                )));
+            }
+        }
         Zone::Command if state.format_config.command_zone && obj.is_commander => {}
         Zone::Exile | Zone::Graveyard | Zone::Library => {
             // These zones are allowed only with permission — defer the
@@ -5267,6 +5286,26 @@ fn can_cast_prepared_now(
     let Some(obj) = state.objects.get(&prepared.object_id) else {
         return false;
     };
+
+    // CR 202.1b: A card with no mana cost (suspend-only cards like Inevitable
+    // Betrayal) has an unpayable cost.
+    // CR 118.6: it therefore can't be cast from hand by paying that cost. Its
+    // only legal plays are via an effect/keyword — Suspend's exile activation,
+    // the free-cast from exile, or an effect-granted `CastSpellForFree` — none
+    // of which take this normal-hand-cast path.
+    // CR 118.6a: the exception is an effect that lets you cast it WITHOUT paying
+    // its mana cost. The only such effect routed through this normal-CastSpell
+    // path is an `Unlimited` `CastFromHandFree` permission (Omniscience / Tamiyo
+    // emblem), which `prepare_spell_cast` recognizes via the same predicate and
+    // zeroes the cost. `OncePerTurn` sources (Zaffai) opt in via the dedicated
+    // `CastSpellForFree` action instead. Block the normal hand cast otherwise.
+    if obj.zone == Zone::Hand
+        && matches!(obj.mana_cost, ManaCost::NoCost)
+        && !hand_cast_free_permission_source(state, player, obj)
+            .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited)
+    {
+        return false;
+    }
 
     // CR 601.3d: A cast authorized only by a target-dependent flash option is
     // illegal unless a condition-satisfying target exists. Pre-target FEASIBILITY
@@ -13545,7 +13584,10 @@ mod tests {
         {
             let obj = state.objects.get_mut(&spell).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.mana_cost = ManaCost::NoCost;
+            // Real {0} mana cost (payable), not NoCost: this fixture exercises the
+            // "pay X life" additional cost, so it must be a castable spell. CR
+            // 118.6 makes a true no-mana-cost (NoCost) card uncastable from hand.
+            obj.mana_cost = ManaCost::zero();
             obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::PayLife {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {

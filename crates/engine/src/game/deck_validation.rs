@@ -1903,6 +1903,20 @@ fn is_pauper_commander_eligible(face: &CardFace) -> bool {
     is_creature_or_vehicle && has_uncommon_printing
 }
 
+/// CR 702.124: Public entry point — can these two named cards form a legal
+/// co-commander pair? Resolves both faces in the database and applies the full
+/// partner-family rules. Returns false if either name is unknown.
+///
+/// This is the single authority for partner-pairing legality. Deck-builder UIs
+/// consume it through the WASM bridge rather than re-implementing the rules, so
+/// the engine and frontend can never disagree about a pairing.
+pub fn can_pair_commanders(db: &CardDatabase, name_a: &str, name_b: &str) -> bool {
+    match (db.get_face_by_name(name_a), db.get_face_by_name(name_b)) {
+        (Some(a), Some(b)) => are_valid_partners(a, b),
+        _ => false,
+    }
+}
+
 /// CR 702.124: Check if two cards form a valid partner pair for co-commanders.
 /// Handles the full partner family: Generic Partner, Partner with [Name],
 /// Friends Forever, Character Select, Doctor's Companion, and Choose a Background.
@@ -3546,6 +3560,41 @@ mod tests {
             vec![],
         );
         assert!(!are_valid_partners(&amy, &random));
+    }
+
+    // CR 702.124: the public `can_pair_commanders` seam (consumed by the WASM
+    // deck-builder bridge) must resolve both names through the database and apply
+    // the asymmetric Doctor's Companion rule in either selection order.
+    #[test]
+    fn can_pair_commanders_resolves_doctor_pairing_through_db() {
+        fn card_json(
+            name: &str,
+            subtypes: &[&str],
+            keywords: serde_json::Value,
+        ) -> serde_json::Value {
+            serde_json::json!({
+                "name": name,
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": subtypes },
+                "power": "2", "toughness": "2",
+                "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": keywords,
+                "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null, "legalities": {}
+            })
+        }
+        let db_json = serde_json::json!({
+            "amy pond": card_json("Amy Pond", &["Human"], serde_json::json!([{ "Partner": { "type": "DoctorsCompanion" } }])),
+            "the eleventh doctor": card_json("The Eleventh Doctor", &["Time Lord", "Doctor"], serde_json::json!([])),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+
+        assert!(can_pair_commanders(&db, "Amy Pond", "The Eleventh Doctor"));
+        assert!(can_pair_commanders(&db, "The Eleventh Doctor", "Amy Pond"));
+        // Unknown names resolve to no pairing rather than panicking.
+        assert!(!can_pair_commanders(&db, "Amy Pond", "Nonexistent Card"));
     }
 
     #[test]

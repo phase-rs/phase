@@ -1398,6 +1398,12 @@ function GamePageContent({
             <UntapChoiceModal />
           )}
 
+        {/* CR 701.43d: Optional "exert as it attacks" choice (Combat Celebrant). */}
+        {waitingFor?.type === "ExertChoice" &&
+          canActForWaitingState && (
+            <ExertChoiceModal />
+          )}
+
         {/* Unless payment choice ("Counter unless you pay {X}") */}
         {waitingFor?.type === "UnlessPayment" &&
           canActForWaitingState && (
@@ -2471,6 +2477,49 @@ function UntapChoiceModal() {
         dispatch({
           type: "ChooseUntap",
           data: { object_id: objectId, untap: id === "untap" },
+        })
+      }
+    />
+  );
+}
+
+// ── Exert Choice Modal (CR 701.43d: exert as it attacks) ────────────────
+
+function ExertChoiceModal() {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "ExertChoice") return null;
+
+  const objectId = waitingFor.data.attacker;
+  const object = objects?.[objectId];
+  const name = object?.name ?? t("gamePage.exert.creatureFallback");
+
+  return (
+    <ChoiceModal
+      title={t("gamePage.exert.title", { name })}
+      subtitle={t("gamePage.exert.subtitle")}
+      previewCardName={object?.name}
+      previewCardTypes={object?.card_types}
+      previewObjectId={objectId}
+      options={[
+        {
+          id: "exert",
+          label: t("gamePage.exert.exert"),
+          description: t("gamePage.exert.exertDescription", { name }),
+        },
+        {
+          id: "decline",
+          label: t("gamePage.exert.decline"),
+          description: t("gamePage.exert.declineDescription", { name }),
+        },
+      ]}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseExert",
+          data: { exert: id === "exert" },
         })
       }
     />
