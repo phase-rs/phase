@@ -5857,7 +5857,7 @@ mod tests {
         Arc::make_mut(&mut obj.base_abilities).extend(parsed.abilities);
     }
 
-    fn apply_oracle_to_object(
+    pub(super) fn apply_oracle_to_object(
         state: &mut GameState,
         object_id: ObjectId,
         name: &str,
@@ -13638,6 +13638,7 @@ mod exile_return_tests {
 mod phase_trigger_regression_tests {
     use std::sync::Arc;
 
+    use super::tests::apply_oracle_to_object;
     use super::*;
     use crate::game::combat::AttackTarget;
     use crate::game::zones::create_object;
@@ -15784,30 +15785,14 @@ mod phase_trigger_regression_tests {
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.base_card_types = obj.card_types.clone();
         }
-        let parsed = crate::parser::oracle::parse_oracle_text(
+        apply_oracle_to_object(
+            &mut state,
+            siege_id,
+            "Glacierwood Siege",
             "As this enchantment enters, choose Temur or Sultai.\n\
 • Temur — Whenever you cast an instant or sorcery spell, target player mills four cards.\n\
 • Sultai — You may play lands from your graveyard.",
-            "Glacierwood Siege",
-            &[],
-            &["Enchantment".to_string()],
-            &[],
         );
-        {
-            let obj = state.objects.get_mut(&siege_id).unwrap();
-            for trigger in parsed.triggers.clone() {
-                obj.trigger_definitions.push(trigger);
-            }
-            Arc::make_mut(&mut obj.base_trigger_definitions).extend(parsed.triggers);
-            for replacement in parsed.replacements.clone() {
-                obj.replacement_definitions.push(replacement);
-            }
-            Arc::make_mut(&mut obj.base_replacement_definitions).extend(parsed.replacements);
-            for static_def in parsed.statics.clone() {
-                obj.static_definitions.push(static_def);
-            }
-            Arc::make_mut(&mut obj.base_static_definitions).extend(parsed.statics);
-        }
 
         state.stack.push_back(StackEntry {
             id: siege_id,
