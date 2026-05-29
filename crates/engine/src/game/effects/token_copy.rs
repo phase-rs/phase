@@ -474,23 +474,30 @@ fn apply_token_modifications(
                     token.base_card_types.subtypes.retain(|s| s != subtype);
                 }
             }
+            // CR 707.9b: Copy exceptions that modify subtypes become copiable
+            // values of the token copy.
             ContinuousModification::RemoveAllSubtypes { set } => {
-                let all_creature_types = state.all_creature_types.clone();
-                if let Some(token) = state.objects.get_mut(&token_id) {
-                    remove_subtype_set(&mut token.card_types.subtypes, *set, &all_creature_types);
+                let all_creature_types = &state.all_creature_types;
+                let objects = &mut state.objects;
+                if let Some(token) = objects.get_mut(&token_id) {
+                    remove_subtype_set(&mut token.card_types.subtypes, *set, all_creature_types);
                     remove_subtype_set(
                         &mut token.base_card_types.subtypes,
                         *set,
-                        &all_creature_types,
+                        all_creature_types,
                     );
                 }
             }
+            // CR 707.9b: Copy exceptions that set color become copiable values
+            // of the token copy.
             ContinuousModification::SetColor { colors } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.color = colors.clone();
                     token.base_color = colors.clone();
                 }
             }
+            // CR 707.9b: Copy exceptions that add color become copiable values
+            // of the token copy.
             ContinuousModification::AddColor { color } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     if !token.color.contains(color) {

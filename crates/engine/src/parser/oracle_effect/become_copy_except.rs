@@ -391,6 +391,8 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     Some((rest, mods))
 }
 
+/// CR 707.9b: Copy exceptions that modify color or subtype become copiable
+/// values of the copy.
 fn append_color_and_type_modifications(
     type_text: &str,
     replace_creature_subtypes: bool,
