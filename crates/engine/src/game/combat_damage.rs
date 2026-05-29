@@ -850,10 +850,12 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, Comparator, ContinuousModification, ControllerRef, Effect, QuantityExpr,
-        QuantityRef, StaticCondition, StaticDefinition, TriggerDefinition, TypedFilter,
+        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::identifiers::CardId;
+    use crate::types::counter::CounterType;
+    use crate::types::identifiers::{CardId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -1674,6 +1676,102 @@ mod tests {
                     && source_ids.contains(&attacker_b)
             )
         }));
+    }
+
+    #[test]
+    fn one_or_more_combat_damage_trigger_tracks_matching_sources_for_those_creatures() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(550),
+            PlayerId(0),
+            "Heroes in a Half Shell".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&watcher)
+            .unwrap()
+            .trigger_definitions
+            .push({
+                let valid_source = TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::default()
+                                .subtype("Mutant".to_string())
+                                .controller(ControllerRef::You),
+                        ),
+                        TargetFilter::Typed(
+                            TypedFilter::default()
+                                .subtype("Ninja".to_string())
+                                .controller(ControllerRef::You),
+                        ),
+                        TargetFilter::Typed(
+                            TypedFilter::default()
+                                .subtype("Turtle".to_string())
+                                .controller(ControllerRef::You),
+                        ),
+                    ],
+                };
+                let mut trigger = TriggerDefinition::new(TriggerMode::DamageDoneOnceByController)
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Spell,
+                        Effect::PutCounterAll {
+                            counter_type: CounterType::Plus1Plus1,
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::TrackedSet {
+                                id: TrackedSetId(0),
+                            },
+                        },
+                    ));
+                trigger.valid_source = Some(valid_source);
+                trigger.valid_target = Some(TargetFilter::Player);
+                trigger
+            });
+
+        let mutant = create_creature(&mut state, PlayerId(0), "Mutant", 2, 2);
+        state
+            .objects
+            .get_mut(&mutant)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Mutant".to_string());
+        let human = create_creature(&mut state, PlayerId(0), "Human", 2, 2);
+        state
+            .objects
+            .get_mut(&human)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Human".to_string());
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(99), vec![human]);
+        setup_combat(&mut state, vec![mutant, human], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+        assert_eq!(state.stack.len(), 1);
+
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&mutant]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert_eq!(
+            state.objects[&human]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            0
+        );
     }
 
     #[test]

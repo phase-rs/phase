@@ -448,6 +448,13 @@ fn collect_matching_triggers(
                     .into_iter()
                     .map(|trigger_event| vec![trigger_event])
                     .collect()
+            } else if matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController) {
+                super::trigger_matchers::matching_damage_done_once_by_controller_event(
+                    event, trig_def, obj_id, state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else {
                 vec![vec![event.clone()]]
             };

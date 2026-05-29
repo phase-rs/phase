@@ -1007,6 +1007,46 @@ pub(super) fn match_damage_done_once_by_controller(
     source_ids.contains(&source_id)
 }
 
+pub(super) fn matching_damage_done_once_by_controller_event(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Option<GameEvent> {
+    // CR 603.2c + CR 608.2c: Preserve the single aggregate combat-damage
+    // trigger event while narrowing its source set to the objects that
+    // satisfied this trigger's source filter. Downstream "those creatures"
+    // effects read this filtered event context.
+    let GameEvent::CombatDamageDealtToPlayer {
+        player_id,
+        source_ids,
+    } = event
+    else {
+        return None;
+    };
+
+    let matching_sources = if let Some(filter) = &trigger.valid_source {
+        source_ids
+            .iter()
+            .copied()
+            .filter(|source| target_filter_matches_object(state, *source, filter, source_id))
+            .collect::<Vec<_>>()
+    } else if source_ids.contains(&source_id) {
+        vec![source_id]
+    } else {
+        Vec::new()
+    };
+
+    if matching_sources.is_empty() {
+        None
+    } else {
+        Some(GameEvent::CombatDamageDealtToPlayer {
+            player_id: *player_id,
+            source_ids: matching_sources,
+        })
+    }
+}
+
 /// CR 601.2a vs CR 707.10: whether an event placed a spell on the stack by
 /// *casting* it or by *copying* it. These are distinct game events — a copy
 /// isn't cast — so copy-sensitive and cast-only triggers must be told apart.

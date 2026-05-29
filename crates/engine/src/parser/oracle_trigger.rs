@@ -3955,6 +3955,10 @@ fn continues_player_action_list(after_comma: &str) -> bool {
         return true;
     }
 
+    if type_phrase_continues_to_combat_damage_player_event(trimmed) {
+        return true;
+    }
+
     // Recognize type-phrase continuations in comma-separated type lists.
     // E.g. "a creature, planeswalker, or battle enters" — after ", " we see
     // "planeswalker" (a bare type word) or "or battle enters" ("or" + type word).
@@ -3965,12 +3969,16 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // E.g. "creatures you control get +1/+1" starts with "creatures" (type word) but
     // has "get" (predicate verb) — this is the effect, not a continuation.
     let after_conjunction = alt((
+        value((), tag::<_, _, OracleError<'_>>("and/or ")),
         value((), tag::<_, _, OracleError<'_>>("or ")),
         value((), tag("and ")),
     ))
     .parse(trimmed)
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed);
+    if type_phrase_continues_to_combat_damage_player_event(after_conjunction) {
+        return true;
+    }
     if !starts_with_type_word(after_conjunction) {
         return false;
     }
@@ -3978,6 +3986,23 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // A continuation has no predicate verb before the trigger event verb;
     // a new sentence has a subject + predicate verb ("creatures you control get").
     !is_new_sentence_not_type_continuation(after_conjunction)
+}
+
+fn type_phrase_continues_to_combat_damage_player_event(text: &str) -> bool {
+    let (filter, rest) = parse_type_phrase(text);
+    if matches!(filter, TargetFilter::Any) || rest.len() >= text.len() {
+        return false;
+    }
+    let rest = rest.trim_start();
+    alt((
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("deal combat damage to a player"),
+        ),
+        value((), tag("deals combat damage to a player")),
+    ))
+    .parse(rest)
+    .is_ok()
 }
 
 /// Check if the text starting at a type word is a new subject-predicate sentence
@@ -17203,6 +17228,36 @@ mod tests {
         assert!(
             matches!(&def.valid_source, Some(TargetFilter::Or { filters }) if filters.len() == 2)
         );
+    }
+
+    #[test]
+    fn trigger_one_or_more_comma_and_or_subtypes_combat_damage() {
+        let def = parse_trigger_line(
+            "Whenever one or more Mutants, Ninjas, and/or Turtles you control deal combat damage to a player, put a +1/+1 counter on each of those creatures and draw a card.",
+            "Heroes in a Half Shell",
+        );
+
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert!(matches!(
+            &def.valid_source,
+            Some(TargetFilter::Or { filters }) if filters.len() == 3
+        ));
+
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutCounterAll {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ));
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("draw should be chained");
+        assert!(matches!(*sub.effect, Effect::Draw { .. }));
     }
 
     #[test]
