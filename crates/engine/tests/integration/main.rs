@@ -49,6 +49,7 @@ mod greater_good_activation;
 mod green_suns_zenith_regression;
 mod harrow_regression;
 mod hunters_insight_combat_draw;
+mod inevitable_betrayal_no_mana_cost;
 mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
