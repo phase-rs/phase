@@ -1527,6 +1527,10 @@ pub fn declare_attackers(
         .iter()
         .map(|a| a.defending_player)
         .collect();
+    // CR 613: Continuous effects must be re-evaluated when creatures become attacking
+    // so that static abilities with FilterProp::Attacking (e.g., Crossway Troublemakers)
+    // apply before combat damage is assigned.
+    state.layers_dirty = true;
     let attacker_count = combat.attackers.len();
 
     // Use the first attacker's defending player for the event

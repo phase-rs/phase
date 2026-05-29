@@ -21,6 +21,7 @@ mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
 mod combat_celebrant_exert;
 mod council_of_four_nth_per_turn;
+mod crossway_troublemakers_attacking_keywords;
 mod cr_annotations;
 mod cultivate_split_destination;
 mod dalkovan_encampment_attack_trigger;
