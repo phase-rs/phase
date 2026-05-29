@@ -8,6 +8,7 @@ use crate::types::ability::StaticCondition;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::statics::StaticMode;
+use crate::types::zones::Zone;
 
 /// Compute display-only derived fields (CR 302.6 summoning sickness, CR 700.5 devotion).
 ///
@@ -27,39 +28,84 @@ pub fn derive_display_state(state: &mut GameState) {
         dirty.dirty_objects.iter().copied().collect()
     };
     for id in object_ids {
-        let (unimplemented, summoning_sickness, mana_idx) = {
+        let (unimplemented, summoning_sickness) = {
             let Some(obj) = state.objects.get(&id) else {
                 continue;
             };
-            let mana_idx = obj
-                .abilities
-                .iter()
-                .enumerate()
-                .find(|(idx, ability)| {
-                    mana_abilities::is_mana_ability(ability)
-                        && mana_abilities::can_activate_mana_ability_now(
-                            state,
-                            obj.controller,
-                            obj.id,
-                            *idx,
-                            ability,
-                        )
-                })
-                .map(|(idx, _)| idx);
             (
                 unimplemented_mechanics(obj),
                 // CR 302.6: Creature must have been under controller's control since turn began to attack or {T}.
                 has_summoning_sickness(obj),
-                mana_idx,
             )
         };
 
         let obj = state.objects.get_mut(&id).expect("object exists");
         obj.unimplemented_mechanics = unimplemented;
         obj.has_summoning_sickness = summoning_sickness;
-        obj.has_mana_ability = mana_idx.is_some();
-        obj.mana_ability_index = mana_idx;
-        obj.available_mana_pips.clear();
+        // Mana availability is only meaningful for battlefield permanents
+        // (mana abilities are activated from the battlefield). For a dirty
+        // object NOT on the battlefield — e.g. a permanent that just left —
+        // reset its mana display fields here so a stale `has_mana_ability`
+        // does not linger; the active battlefield values are (re)computed by
+        // the board-wide mana sweep below. This is the cheap reset half; the
+        // expensive auto-tap simulation runs only in that sweep.
+        if obj.zone != Zone::Battlefield {
+            obj.has_mana_ability = false;
+            obj.mana_ability_index = None;
+            obj.available_mana_pips.clear();
+        }
+    }
+
+    // Mana availability (`has_mana_ability` / `mana_ability_index` /
+    // `available_mana_pips`) is BOARD-GLOBAL derived state, not per-object:
+    // `can_activate_mana_ability_now` runs an auto-tap payability simulation
+    // over the whole controller's pool and every untapped source, so one
+    // permanent's availability can flip when ANOTHER permanent taps, adds mana,
+    // or gains/loses a depletion counter. It must therefore be re-derived as a
+    // single battlefield-wide sweep gated on a mana-specific signal
+    // (`mana_display_dirty`), never per-`dirty_objects` — otherwise a land
+    // marked dirty by a non-mana event (Gemstone Mine depletion `CounterRemoved`,
+    // damage to a creature-land) or a pool/tap change that flips a sibling
+    // land's activatability leaves stale/blank mana display. The mana signal is
+    // mana-specific (not `battlefield_display_dirty`) so spawning a creature
+    // token never triggers this auto-tap sweep over every land.
+    if dirty.mana_display_dirty || dirty.all_objects_dirty {
+        let battlefield_ids: Vec<_> = state.battlefield.iter().copied().collect();
+        let mana_availability: Vec<(crate::types::identifiers::ObjectId, Option<usize>, _)> =
+            battlefield_ids
+                .into_iter()
+                .filter_map(|id| {
+                    let obj = state.objects.get(&id)?;
+                    let mana_idx = obj
+                        .abilities
+                        .iter()
+                        .enumerate()
+                        .find(|(idx, ability)| {
+                            mana_abilities::is_mana_ability(ability)
+                                && mana_abilities::can_activate_mana_ability_now(
+                                    state,
+                                    obj.controller,
+                                    obj.id,
+                                    *idx,
+                                    ability,
+                                )
+                        })
+                        .map(|(idx, _)| idx);
+                    let pips = if obj.card_types.core_types.contains(&CoreType::Land) {
+                        display_land_mana_pips(state, id, obj.controller)
+                    } else {
+                        Vec::new()
+                    };
+                    Some((id, mana_idx, pips))
+                })
+                .collect();
+        for (id, mana_idx, pips) in mana_availability {
+            if let Some(obj) = state.objects.get_mut(&id) {
+                obj.has_mana_ability = mana_idx.is_some();
+                obj.mana_ability_index = mana_idx;
+                obj.available_mana_pips = pips;
+            }
+        }
     }
 
     // Compute per-card devotion for cards with DevotionGE conditions
@@ -125,26 +171,10 @@ pub fn derive_display_state(state: &mut GameState) {
         }
     }
 
-    // Compute dynamic land frame pips from currently available mana options.
-    if dirty.all_objects_dirty || dirty.mana_display_dirty || dirty.battlefield_display_dirty {
-        let mana_pip_cards: Vec<_> = state
-            .battlefield
-            .iter()
-            .filter_map(|&id| {
-                let obj = state.objects.get(&id)?;
-                if !obj.card_types.core_types.contains(&CoreType::Land) {
-                    return None;
-                }
-                let pips = display_land_mana_pips(state, id, obj.controller);
-                Some((id, pips))
-            })
-            .collect();
-        for (id, pips) in mana_pip_cards {
-            if let Some(obj) = state.objects.get_mut(&id) {
-                obj.available_mana_pips = pips;
-            }
-        }
-    }
+    // (Dynamic land frame pips are computed together with `has_mana_ability` in
+    // the single battlefield-wide mana-availability sweep above, gated on
+    // `mana_display_dirty`, so the clear↔repopulate of `available_mana_pips`
+    // is atomic and never split across two differently-gated blocks.)
 
     // CR 903.4: Per-player commander color identity. Derived from
     // `commander_color_identity` (which inspects deck pools and command-zone

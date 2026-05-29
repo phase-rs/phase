@@ -62,6 +62,7 @@
   },
   "permanent": {
     "expandGroup": "Rozwiń grupę {{name}}",
+    "collapseGroup": "Zwiń grupę {{name}}",
     "chooseToken": "Wybierz token {{name}}",
     "pick": "Wybierz",
     "close": "zamknij",
@@ -642,6 +643,15 @@
       "untapDescription": "{{name}} odwraca się teraz.",
       "keepTapped": "Zostaw obrócony",
       "keepTappedDescription": "{{name}} pozostaje obrócony w tym kroku odwracania."
+    },
+    "exert": {
+      "creatureFallback": "Stworzenie",
+      "title": "Wysilić {{name}}?",
+      "subtitle": "Wybierz, czy chcesz wysilić tego atakującego. Wysilone stworzenie nie odwraca się w trakcie twojego następnego kroku odwracania.",
+      "exert": "Wysil",
+      "exertDescription": "{{name}} nie odwróci się w następnej turze, wyzwalając swoją zdolność wysilenia.",
+      "decline": "Nie wysilaj",
+      "declineDescription": "{{name}} atakuje normalnie i odwraca się jak zwykle."
     },
     "cost": {
       "discardCard": "odrzuć kartę",

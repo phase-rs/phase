@@ -50,7 +50,7 @@ use super::game_object::GameObject;
 /// `ZoneChanged` to graveyard with 3 core types emits 1 (broad LBF) + 3
 /// (narrow LBF) + 1 (broad Dies) + 3 (narrow Dies) = 8. Inline `[..; 8]`
 /// covers every observed shape without heap allocation in the hot path.
-type Keys = SmallVec<[TriggerEventKey; 8]>;
+pub(crate) type Keys = SmallVec<[TriggerEventKey; 8]>;
 
 /// CR 205: Narrow a trigger's `valid_card` filter to exactly one `CoreType`
 /// when the filter is `Typed { type_filters: [single CoreType-bearing filter] }`.
@@ -100,7 +100,7 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
 ///   unclassified TriggerModes)
 /// - both empty/false → object is NOT registered for this trigger (state
 ///   conditions, Unknown).
-fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
+pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
     let mut keys: Keys = SmallVec::new();
     let narrow = narrow_core_type(&def.valid_card);
 
@@ -423,6 +423,10 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
+        // CR 701.43d: `TriggerMode::Exerted` is in the unclassified
+        // always-checked bucket (see `keys_from_trigger_def`), so no dedicated
+        // event key is needed — `match_exerted` filters by source.
+        GameEvent::CreatureExerted { .. } => {}
         GameEvent::SpellCast { object_id, .. } => {
             push(TriggerEventKey::SpellCast(None));
             if let Some(obj) = state.objects.get(object_id) {
@@ -547,6 +551,7 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::PlayerPerformedAction { .. } => push(TriggerEventKey::PlayerActionPerformed),
         GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
+        | GameEvent::Detained { .. }
         | GameEvent::BecamePrepared { .. }
         | GameEvent::BecameUnprepared { .. } => {}
         GameEvent::CaseSolved { .. } | GameEvent::ClassLevelGained { .. } => {
@@ -893,6 +898,13 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
             out.extend(bucket.iter().copied());
         }
     }
+    // CR 702.26b: a phased-out permanent is treated as though it doesn't exist,
+    // so it never triggers. The legacy battlefield scan dropped these via
+    // `battlefield_phased_in_ids`; the index does not track phase status
+    // (phasing is not a zone change and does not touch the trigger index), so
+    // the filter must be reapplied here. Unknown ids are kept defensively and
+    // handled by the caller's per-candidate lookup.
+    out.retain(|id| state.objects.get(id).is_none_or(|obj| !obj.is_phased_out()));
     out.sort_unstable_by_key(|id| id.0);
     out.dedup();
     out

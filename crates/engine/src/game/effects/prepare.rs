@@ -198,6 +198,13 @@ fn synthesize_prepared_copy_object(
 ) -> Result<(ObjectId, crate::types::identifiers::CardId), String> {
     // CR 722.3c: As the player casts the prepared copy, synthesize a distinct
     // copy object of the prepare face in exile to feed through normal casting.
+    //
+    // DEFERRED (CR 722.3c): strictly, the copy is created in exile when the card
+    // becomes prepared, not at cast time. Materializing it here means exile-zone
+    // replacements/triggers (Containment Priest, Rest in Peace, Leyline of the
+    // Void) cannot observe the prepared copy before it is cast. No current card
+    // depends on that interaction; wiring prepare-time materialization is the
+    // remaining work to make this fully rules-correct.
     let (src_clone, card_id) = {
         let Some(src_obj) = state.objects.get(&source_id) else {
             return Err(format!("source {source_id:?} not found"));

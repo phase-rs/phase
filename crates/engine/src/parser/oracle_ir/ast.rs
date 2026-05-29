@@ -300,6 +300,9 @@ pub(crate) enum ContinuationAst {
     RevealUntilKept {
         destination: Zone,
         enter_tapped: bool,
+        /// CR 508.4: the kept card enters the battlefield attacking
+        /// ("tapped and attacking"). Absorbs into `enters_attacking`.
+        enters_attacking: bool,
         rest_destination: Option<Zone>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
         /// optional ("you may put that card onto the battlefield"). `destination`

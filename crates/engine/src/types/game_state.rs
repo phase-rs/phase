@@ -665,6 +665,13 @@ pub struct PendingRepeatIteration {
     pub ability: Box<crate::types::ability::ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracked_members: Vec<ObjectId>,
+    /// CR 122.1 + CR 608.2c: the per-iteration counter kinds snapshotted at
+    /// loop entry for a `repeat_for: DistinctCounterKindsAmong` loop. Indexed
+    /// by iteration number; each resumed iteration rebinds its tagged
+    /// `ChooseOneOf` branch to `iterated_counter_kinds[iteration]`. Empty when
+    /// the loop is not counter-kind-driven.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
 }
@@ -1538,6 +1545,18 @@ pub enum WaitingFor {
         candidates: Vec<ObjectId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         chosen_not_to_untap: Vec<ObjectId>,
+    },
+    /// CR 508.1g + CR 701.43d: As attackers are declared, the active player may
+    /// pay the optional "exert this creature as it attacks" cost on each
+    /// attacker that has an exert-as-attack ability and hasn't been exerted this
+    /// turn. `attacker` is the creature currently being decided; `remaining` is
+    /// the queue of further exert candidates this declaration. Mirrors the
+    /// one-at-a-time loop of `UntapChoice`.
+    ExertChoice {
+        player: PlayerId,
+        attacker: ObjectId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining: Vec<ObjectId>,
     },
     GameOver {
         winner: Option<PlayerId>,
@@ -2461,9 +2480,17 @@ pub enum WaitingFor {
     RevealUntilKeptChoice {
         player: PlayerId,
         hit_card: ObjectId,
+        /// CR 508.4: The ability source (e.g. the attacking creature whose
+        /// trigger revealed this card). Supplies the defending player when the
+        /// accepted card enters the battlefield attacking.
+        source_id: ObjectId,
         accept_zone: Zone,
         decline_zone: Zone,
         enter_tapped: bool,
+        /// CR 508.4: When the accepted card goes to the battlefield, it enters
+        /// attacking ("tapped and attacking"). Carried from `Effect::RevealUntil`.
+        #[serde(default)]
+        enters_attacking: bool,
         revealed_misses: Vec<ObjectId>,
         rest_destination: Zone,
     },
@@ -2940,6 +2967,7 @@ impl WaitingFor {
             | WaitingFor::DeclareAttackers { player, .. }
             | WaitingFor::DeclareBlockers { player, .. }
             | WaitingFor::UntapChoice { player, .. }
+            | WaitingFor::ExertChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
             | WaitingFor::OrderTriggers { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
@@ -3348,6 +3376,22 @@ pub enum CastingVariant {
         source: ObjectId,
         /// CR 601.2b: When `OncePerTurn`, casting consumes this source's slot in
         /// `hand_cast_free_permissions_used`.
+        frequency: super::statics::CastFrequency,
+    },
+    /// CR 601.2a + CR 113.6b + CR 118.9a: Cast from exile via a
+    /// `StaticMode::ExileCastPermission` source (Maralen, Fae Ascendant).
+    /// Stores the granting permanent's ObjectId for per-turn tracking; the
+    /// finalize-cast step zeroes the spell's mana cost when the static carries
+    /// `without_paying_mana_cost: true` (the only published shape today). The
+    /// resolution-time routing matches a normal cast — no on-resolve exile
+    /// behavior — so this is treated as a casting-context tag, not as an
+    /// alternative cost.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting the per-turn slot when the source leaves and re-enters play.
+    ExilePermission {
+        source: ObjectId,
+        /// CR 601.2a: When `OncePerTurn`, casting consumes this source's slot
+        /// in `exile_cast_permissions_used`. `Unlimited` skips tracking.
         frequency: super::statics::CastFrequency,
     },
     /// CR 702.190a: Cast from HAND via the Sneak alternative cost. Legal only
@@ -4048,6 +4092,25 @@ pub struct GameState {
     /// `planeswalker::can_activate_loyalty_ability`. Cleared at turn start.
     #[serde(default)]
     pub extra_loyalty_activations_this_turn: HashMap<PlayerId, u32>,
+    /// CR 701.43d: Permanents exerted this turn via the "you may exert it as it
+    /// attacks" optional attack cost (Combat Celebrant, Glory-Bound Initiate,
+    /// Exemplar of Strength, ...). Gates the linked "when you do" trigger to
+    /// fire at most once per turn ("if this creature hasn't been exerted this
+    /// turn") and prevents re-prompting in extra combat phases. Cleared at turn
+    /// start. Distinct from the exert *cost* path (a `CantUntap` transient), this
+    /// set is the authoritative "was exerted this turn" record.
+    #[serde(default)]
+    pub exerted_this_turn: std::collections::HashSet<ObjectId>,
+    /// CR 508.1g + CR 508.2: Declaration events (e.g. `AttackersDeclared`) held
+    /// while the active player resolves the optional "exert as it attacks"
+    /// sub-step. Because triggers are matched against the per-action event slice
+    /// (which does not persist across the interactive exert prompts), the
+    /// declaration events are buffered here and processed together with the
+    /// `CreatureExerted` events once the exert queue drains — so all
+    /// declaration/exert triggers go on the stack simultaneously per CR 508.2.
+    /// Empty except mid-declaration; drained by `finish_declare_attackers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_attack_trigger_events: Vec<crate::types::events::GameEvent>,
     /// CR 603.4: Per-ability per-turn resolution counter.
     /// Keyed by `(source_id, ability_index)` — identifies a specific printed
     /// ability on a specific source object. Incremented at the top of
@@ -4094,6 +4157,32 @@ pub struct GameState {
     /// consumed this turn. Keyed by the granting source's ObjectId.
     #[serde(default)]
     pub exile_play_permissions_used: HashSet<ObjectId>,
+    /// CR 601.2a + CR 113.6b: Tracks `OncePerTurn` `StaticMode::ExileCastPermission`
+    /// sources that have already had a spell cast through them this turn
+    /// (Maralen, Fae Ascendant — "Once each turn, you may cast …"). Keyed by
+    /// the granting permanent's ObjectId. `Unlimited` frequency permissions
+    /// never populate this set. Cleared at the start of each turn alongside
+    /// the other per-turn cast-permission slots.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting the slot when the source leaves and re-enters play.
+    #[serde(default)]
+    pub exile_cast_permissions_used: HashSet<ObjectId>,
+    /// CR 113.6b + CR 601.2a: Per-turn rolling list of cards that have been
+    /// exiled "with" each linked-exile source during the current turn. Keyed
+    /// by the source's `ObjectId`; the `Vec` is the list of card `ObjectId`s
+    /// exiled this turn by that source, in exile order. Populated by
+    /// `exile_links::push_exiled_with_source_this_turn` whenever a tracked
+    /// exile happens; cleared at the start of each turn so "cards exiled with
+    /// ~ this turn" cast permissions (Maralen, Fae Ascendant) only see the
+    /// current turn's pool.
+    ///
+    /// Distinct from `exile_links`: those persist for the lifetime of the
+    /// source-link contract (CR 610.3) and back the open-ended "cards exiled
+    /// with ~" filter. This map is the turn-scoped slice and is consulted
+    /// only by `StaticMode::ExileCastPermission` and similar per-turn
+    /// permissions.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub cards_exiled_with_source_this_turn: HashMap<ObjectId, Vec<ObjectId>>,
     /// CR 702.94a + CR 603.11: Per-player first-card-drawn-this-turn tracking for
     /// miracle's linked triggered ability. Populated by the draw pipeline on the
     /// first `CardDrawn` event each turn per player; reset at turn start. The
@@ -4798,12 +4887,16 @@ impl GameState {
             crew_activated_this_turn: HashSet::new(),
             loyalty_abilities_activated_this_turn: HashMap::new(),
             extra_loyalty_activations_this_turn: HashMap::new(),
+            exerted_this_turn: std::collections::HashSet::new(),
+            pending_attack_trigger_events: Vec::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
             graveyard_cast_permissions_used_per_type: HashSet::new(),
             pending_permanent_type_slot: None,
             hand_cast_free_permissions_used: HashSet::new(),
             exile_play_permissions_used: HashSet::new(),
+            exile_cast_permissions_used: HashSet::new(),
+            cards_exiled_with_source_this_turn: HashMap::new(),
             first_card_drawn_this_turn: HashMap::new(),
             cards_drawn_this_turn: HashMap::new(),
             pending_miracle_offers: Vec::new(),
@@ -5084,6 +5177,8 @@ impl PartialEq for GameState {
             && self.pending_permanent_type_slot == other.pending_permanent_type_slot
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.exile_play_permissions_used == other.exile_play_permissions_used
+            && self.exile_cast_permissions_used == other.exile_cast_permissions_used
+            && self.cards_exiled_with_source_this_turn == other.cards_exiled_with_source_this_turn
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn
             && self.cards_drawn_this_turn == other.cards_drawn_this_turn
             && self.pending_miracle_offers == other.pending_miracle_offers

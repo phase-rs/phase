@@ -157,6 +157,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // via player_has_cant_win(). Per CR 104.2a, the last-player-standing case
     // is not blocked by this static and is enforced by elimination::check_game_over.
     registry.insert(StaticMode::CantWinTheGame, handle_rule_mod);
+    // CR 704.5j: LegendRuleDoesntApply — affected permanents are excluded from
+    // the legend-rule SBA. Runtime enforcement is in sba.rs::legend_rule_exempt().
+    registry.insert(StaticMode::LegendRuleDoesntApply, handle_rule_mod);
     // CR 702.179e: Card-specific rule modification allowing speed to exceed 4.
     registry.insert(StaticMode::SpeedCanIncreaseBeyondFour, handle_rule_mod);
     // CR 609.4b: "You may spend mana as though it were mana of any color."

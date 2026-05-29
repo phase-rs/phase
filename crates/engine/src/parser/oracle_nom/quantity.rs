@@ -588,6 +588,25 @@ fn parse_number_of_distinct_colors_among_permanents_tail(
     Ok(("", QuantityRef::DistinctColorsAmongPermanents { filter }))
 }
 
+/// CR 122.1: Parse the iteration source "kind of counter on/among <filter>" →
+/// `QuantityRef::DistinctCounterKindsAmong { filter }`. Counter-side analogue of
+/// `parse_number_of_distinct_colors_among_permanents_tail`. Used by Bribe
+/// Taker's "for each kind of counter on permanents you control" — the filter is
+/// any controlled-permanent type phrase, so the combinator covers the whole
+/// class, not one card. Both "on" and "among" surface forms are accepted.
+fn parse_for_each_distinct_counter_kinds_among(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("kind of counter ").parse(input)?;
+    let (rest, _) = alt((tag("on "), tag("among "))).parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok(("", QuantityRef::DistinctCounterKindsAmong { filter }))
+}
+
 /// CR 201.2 + CR 603.4: Parse "differently named <type-phrase>" after
 /// "the number of" → `QuantityRef::ObjectCountDistinct { filter, qualities: [Name] }`.
 ///
@@ -1693,6 +1712,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_mana_spent_to_cast_ref,
+        // CR 122.1: "kind of counter on/among <filter>" (Bribe Taker). Placed
+        // before the generic `<type> you control` arm so the leading "kind"
+        // token does not commit to it.
+        parse_for_each_distinct_counter_kinds_among,
         parse_for_each_controlled_type,
     )))
     .parse(input)
@@ -3186,6 +3209,33 @@ mod tests {
             },
             other => panic!("expected DistinctColorsAmongPermanents, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_for_each_distinct_counter_kinds_among() {
+        // CR 122.1: "kind of counter on permanents you control" iteration source.
+        let (rest, q) =
+            parse_for_each_clause_ref("kind of counter on permanents you control").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctCounterKindsAmong { filter } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected typed permanent filter, got {other:?}"),
+            },
+            other => panic!("expected DistinctCounterKindsAmong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_each_distinct_counter_kinds_among_creatures() {
+        // "among" surface form + a non-permanent type phrase.
+        let (rest, q) =
+            parse_for_each_clause_ref("kind of counter among creatures you control").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
     }
 
     #[test]

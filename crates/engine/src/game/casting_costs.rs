@@ -257,7 +257,15 @@ pub(crate) fn payable_spell_alternative_cost(
         return None;
     }
 
-    obj.casting_options.iter().find_map(|option| {
+    // CR 118.9a: only one alternative cost is applied to a spell and the
+    // controller chooses which. The pipeline currently exposes a single
+    // alternative-vs-printed choice, so when a spell carries BOTH a
+    // self-referential casting option and a permanent grant it cannot offer
+    // both — it deterministically prefers the spell's own printed option. This
+    // is not a CR-mandated precedence; honoring full controller choice across a
+    // self-option and one or more grants needs a multi-alternative choice
+    // surface and is a known limitation tracked for follow-up.
+    let self_option = obj.casting_options.iter().find_map(|option| {
         if option.condition.as_ref().is_some_and(|condition| {
             !restrictions::evaluate_condition(state, player, object_id, condition)
         }) {
@@ -277,7 +285,15 @@ pub(crate) fn payable_spell_alternative_cost(
         } else {
             None
         }
-    })
+    });
+    if self_option.is_some() {
+        return self_option;
+    }
+
+    // CR 118.9 + CR 601.2f: A permanent-granted alternative MANA cost (Rooftop
+    // Storm, Fist of Suns, Jodah) applies when no self-referential option does.
+    let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
+    spell_alternative_cost_is_payable(state, player, object_id, &granted).then_some(granted)
 }
 
 fn spell_alternative_cost_is_payable(
@@ -1607,15 +1623,19 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         &ability,
         &mut target_adjusted_cost,
     );
-    // CR 601.2f: Cost-floor statics (Trinisphere) apply last, after all
-    // additive/subtractive modifiers including target-dependent ones.
-    super::casting::apply_cost_floor_with_selected_targets(
-        state,
-        player,
-        object_id,
-        &ability,
-        &mut target_adjusted_cost,
-    );
+    // CR 601.2b + CR 601.2f: Cost-floor statics (Trinisphere) apply last, after
+    // all additive/subtractive modifiers including target-dependent ones. For
+    // `{X}` costs the floor is deferred until X is concretized (mana value 0
+    // while symbolic would over-count) — see `apply_post_x_cost_floor`.
+    if !cost_has_x(&target_adjusted_cost) {
+        super::casting::apply_cost_floor_with_selected_targets(
+            state,
+            player,
+            object_id,
+            &ability,
+            &mut target_adjusted_cost,
+        );
+    }
     let cost = &target_adjusted_cost;
 
     let flash_additional =
@@ -3189,6 +3209,19 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             frequency: crate::types::statics::CastFrequency::OncePerTurn,
         } => {
             state.hand_cast_free_permissions_used.insert(source);
+        }
+        // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. Stamp
+        // the per-source slot when the static is `OncePerTurn`; `Unlimited`
+        // (no shipping printing yet) skips tracking so the slot never blocks.
+        CastingVariant::ExilePermission {
+            source,
+            frequency: crate::types::statics::CastFrequency::OncePerTurn,
+        }
+        | CastingVariant::ExilePermission {
+            source,
+            frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
+        } => {
+            state.exile_cast_permissions_used.insert(source);
         }
         _ => {}
     }
@@ -5174,6 +5207,100 @@ mod tests {
             },
             other => panic!("expected OptionalCostChoice, got {other:?}"),
         }
+    }
+
+    /// CR 118.9 + CR 604.1: A `CastWithAlternativeCost { {0} }` static on a
+    /// battlefield permanent (Rooftop Storm) grants its controller {0} as an
+    /// alternative cost for matching spells in hand — but only for the
+    /// controller's matching spells, never an opponent's or a non-matching one.
+    #[test]
+    fn granted_alternative_mana_cost_matches_controller_filter() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        // Rooftop Storm: {0} for Zombie creature spells you cast.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Rooftop Storm".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: ManaCost::zero(),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Zombie".to_string())
+                .controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        // Zombie creature in caster's hand → grant applies, {0} payable.
+        let zombie = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Test Zombie".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&zombie).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Zombie".to_string());
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, zombie),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "Zombie creature you cast must receive the {{0}} alternative cost"
+        );
+
+        // Non-Zombie creature in caster's hand → grant does not apply.
+        let nonzombie = create_object(
+            &mut state,
+            CardId(3),
+            caster,
+            "Test Elf".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&nonzombie).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, nonzombie),
+            None,
+            "non-Zombie spell must not receive the grant"
+        );
+
+        // Zombie creature in the OPPONENT's hand → controller gate blocks it.
+        let opp_zombie = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Opponent Zombie".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&opp_zombie).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Zombie".to_string());
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, PlayerId(1), opp_zombie),
+            None,
+            "opponent's Zombie must not receive the controller-You grant"
+        );
     }
 
     fn create_starting_town(state: &mut GameState, card_id: CardId) -> ObjectId {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { GameFormat, MatchType } from "../adapter/types";
+import { getSharedAdapter } from "../adapter/wasm-adapter";
 import { evaluateDeckCompatibility } from "./deckCompatibility";
 import {
   buildDeckCatalog,
@@ -8,8 +9,9 @@ import {
   type DeckCatalogSource,
 } from "./deckCatalog";
 import type { DeckArchetype } from "./engineRuntime";
-import type { ParsedDeck } from "./deckParser";
+import { expandParsedDeck, type ParsedDeck } from "./deckParser";
 import type { CommanderBracket } from "../types/bracket";
+import { BRACKET_TIER_NUMERIC, isCommanderFamilyFormat } from "../types/bracket";
 
 export type AiDeckSource = DeckCatalogSource;
 
@@ -37,6 +39,42 @@ export interface UseAiDeckCatalogResult extends AiDeckCatalogResult {
   error: string | null;
 }
 
+/**
+ * Resolve a candidate's bracket tier for the AI random-pool filter.
+ *
+ * Prefers an explicit human-declared tag (a curated precon entry, a bundled
+ * cEDH deck, or a user-saved bracket) when one exists. Otherwise falls back to
+ * the engine's computed bracket estimate — the same `estimate_bracket_for_deck`
+ * path the deck-builder audit panel and MyDecks chips use — so the filter has
+ * data for the decks that carry no manual tag (feed decks, untagged precons,
+ * most saved decks), which would otherwise all surface as `null` and be
+ * excluded by every bracket selection.
+ *
+ * Pre-game metadata only: the value filters the candidate pool and never
+ * reaches the Rust game loop. The estimate is meaningful only for the
+ * Commander family (CR 903), so non-Commander formats and decks with no
+ * commander short-circuit to `null`.
+ */
+async function resolveBracket(
+  deck: ParsedDeck,
+  staticBracket: CommanderBracket | null,
+  format: GameFormat | undefined,
+): Promise<CommanderBracket | null> {
+  if (staticBracket !== null) return staticBracket;
+  if (!isCommanderFamilyFormat(format)) return null;
+  const request = expandParsedDeck(deck);
+  if (request.commander.length === 0) return null;
+  try {
+    const estimate = await getSharedAdapter().estimateBracket(request);
+    return estimate ? BRACKET_TIER_NUMERIC[estimate.tier] : null;
+  } catch {
+    // Adapters without local estimation (Tauri/WebSocket/P2P/server-draft)
+    // throw BRACKET_ESTIMATION_UNSUPPORTED. Treat as untagged — the filter
+    // simply won't constrain these candidates in those builds.
+    return null;
+  }
+}
+
 async function legalCandidate(
   candidate: AiDeckCandidate & { knownFormat?: GameFormat },
   options: AiDeckCatalogOptions,
@@ -58,6 +96,7 @@ async function legalCandidate(
   if (result.selected_format_compatible !== true) return null;
   return {
     ...base,
+    bracket: await resolveBracket(candidate.deck, base.bracket, options.selectedFormat ?? undefined),
     coveragePct: result.coverage && result.coverage.total_unique > 0
       ? Math.round((result.coverage.supported_unique / result.coverage.total_unique) * 100)
       : base.coveragePct,

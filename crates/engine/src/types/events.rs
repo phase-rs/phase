@@ -223,6 +223,12 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ObjectId>,
     },
+    /// CR 701.43a + CR 701.43d: A creature was exerted as it attacked. Fires the
+    /// linked `TriggerMode::Exerted` "when you do" trigger (Combat Celebrant,
+    /// Glory-Bound Initiate, ...).
+    CreatureExerted {
+        object_id: ObjectId,
+    },
     PlayerLost {
         player_id: PlayerId,
     },
@@ -453,6 +459,13 @@ pub enum GameEvent {
     },
     /// CR 701.60a: A creature was suspected.
     CreatureSuspected {
+        object_id: ObjectId,
+    },
+    /// CR 701.35a: A permanent was detained — until the detaining player's next
+    /// turn it can't attack or block and its activated abilities can't be
+    /// activated. Display-relevant for mana sources: detaining a mana dork
+    /// makes its mana ability un-activatable.
+    Detained {
         object_id: ObjectId,
     },
     /// CR 702.xxx: Prepare (Strixhaven) — a creature became prepared.

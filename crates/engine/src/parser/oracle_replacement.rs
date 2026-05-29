@@ -28,8 +28,8 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
-    FilterProp, ManaModification, ManaReplacementScope, PreventionAmount, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    FilterProp, ManaModification, ManaReplacementScope, PlayerFilter, PreventionAmount,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ReplacementPlayerScope, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1693,6 +1693,91 @@ fn parse_enters_with_counters(
     .parse(after_with)
     .map_or(after_with, |(rest, _)| rest);
 
+    // CR 614.12a + CR 608.2d: "~ enters with your choice of <counter-choice-list>
+    // on it" — the controller chooses WHICH counter as the permanent enters, and
+    // that choice is made before the permanent enters (CR 614.12a). Detect the
+    // "your choice of " marker, split off the trailing self-referential target
+    // ("on it" / "on ~"), classify the disjunctive list into typed counter
+    // entries, and build a `ChooseOneOf` of `PutCounter { target: SelfRef }`
+    // branches directly (no parent-target lift — the entering permanent is
+    // always the recipient). Runtime folds the chosen counter pre-entry via the
+    // deferred-entry-events capture in `engine_replacement.rs` /
+    // `engine_resolution_choices.rs`.
+    if let Some((choices, _on)) = strip_enters_with_choice_target(after_additional) {
+        if let Some(entries) =
+            crate::parser::oracle_effect::classify_and_parse_counter_choice_list(choices)
+        {
+            // `classify_and_parse_counter_choice_list` already requires len >= 2.
+            let branches: Vec<AbilityDefinition> = entries
+                .into_iter()
+                .map(|(counter_type, count)| {
+                    let mut def = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::PutCounter {
+                            counter_type: counter_type.clone(),
+                            count,
+                            // CR 614.12a: the entering permanent is the recipient.
+                            target: TargetFilter::SelfRef,
+                        },
+                    );
+                    def.description = Some(format!("a {} counter", counter_type.display_phrase()));
+                    def
+                })
+                .collect();
+
+            let choice = AbilityDefinition::new(
+                AbilityKind::Spell,
+                // CR 608.2d: resolution choice — controller picks the branch.
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches,
+                },
+            );
+            let mut choice = choice;
+            choice.description = Some("your choice of counter".to_string());
+
+            // Compose with "enters tapped" if present (mirrors the single-counter
+            // tail below).
+            let execute = if has_enters_tapped_phrase(work_text) {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Tap {
+                        target: TargetFilter::SelfRef,
+                    },
+                )
+                .sub_ability(choice)
+            } else {
+                choice
+            };
+
+            // CR 614.1c: "enters with" is a replacement effect on the Moved event.
+            let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(execute)
+                .valid_card(TargetFilter::SelfRef)
+                .description(original_text.to_string());
+
+            // Reuse the existing condition tail (escape / kicker / cast-from-zone
+            // / raid / web-slinging / generic only-if).
+            if is_escape {
+                def = def.condition(ReplacementCondition::CastViaEscape);
+            } else if let Some(cond) = kicker_condition {
+                def = def.condition(cond);
+            } else if let Some(zone) = extract_cast_from_zone_suffix(work_text) {
+                def = def.condition(ReplacementCondition::CastFromZone { zone });
+            } else if extract_you_attacked_this_turn_suffix(work_text) {
+                def = def.condition(ReplacementCondition::YouAttackedThisTurn);
+            } else if extract_cast_using_web_slinging_suffix(work_text) {
+                def = def.condition(ReplacementCondition::CastVariantPaid {
+                    variant: CastVariantPaid::WebSlinging,
+                });
+            } else if let Some(condition) = extract_enters_with_only_if_suffix(work_text) {
+                def = def.condition(condition);
+            }
+
+            return Some(def);
+        }
+    }
+
     let counter_entries = parse_enters_counter_entries(after_additional);
     // Detect dynamic count: "a number of [type] counters ... equal to [qty]"
     let after_prefix = tag::<_, _, OracleError<'_>>("a number of ")
@@ -2008,6 +2093,36 @@ fn parse_enters_counter_separator(input: &str) -> Option<&str> {
         .ok()?;
 
     Some(after_sep)
+}
+
+/// CR 614.12a: For "your choice of <list> on it", split off the trailing
+/// self-referential target. Given the text AFTER "your choice of " (e.g.
+/// "a +1/+1, first strike, or vigilance counter on it."), return
+/// `Some((choices, target))` where `choices` is the disjunctive counter list
+/// ("a +1/+1, first strike, or vigilance counter") and `target` is the
+/// self-reference ("it"). Returns `None` when the target is NOT a self-reference
+/// (so external-recipient phrasings fall through to other parsers).
+///
+/// Nom-only: `take_until(" on ")` splits the list from the trailing " on
+/// <target>", then the target (with trailing punctuation stripped) is validated
+/// against the self/object pronoun set (`it` / `~`).
+fn strip_enters_with_choice_target(after_choice: &str) -> Option<(&str, &str)> {
+    // Detect the "your choice of " marker via nom (no string dispatch).
+    let (after_marker, _) = tag::<_, _, OracleError<'_>>("your choice of ")
+        .parse(after_choice)
+        .ok()?;
+    // Split list from trailing " on <target>".
+    let (after_on, choices) = take_until::<_, _, OracleError<'_>>(" on ")
+        .parse(after_marker)
+        .ok()?;
+    let (target, _) = tag::<_, _, OracleError<'_>>(" on ").parse(after_on).ok()?;
+    let target_clean = target.trim().trim_end_matches('.').trim();
+    // CR 614.12a: the recipient must be the entering permanent itself.
+    if super::oracle_util::SELF_AND_OBJECT_PRONOUNS.contains(&target_clean) {
+        Some((choices, target_clean))
+    } else {
+        None
+    }
 }
 
 fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> AbilityDefinition {
@@ -4655,6 +4770,12 @@ fn parse_damage_prevention_replacement(
     if let Some(sf) = damage_source_filter {
         def = def.damage_source_filter(sf);
     }
+    // Capture whether the recipient filter was event-driven (typed
+    // `valid_card`) before moving it onto `def` — the follow-up rewrite
+    // below uses this signal to distinguish the Vigor cohort (rewrite
+    // `ParentTarget` → `PostReplacementDamageTarget`) from the spell-driven
+    // cohort (keep `ParentTarget` for the real spell target).
+    let recipient_is_event_filter = valid_card_filter.is_some();
     if let Some(vc) = valid_card_filter {
         def = def.valid_card(vc);
     }
@@ -4670,14 +4791,29 @@ fn parse_damage_prevention_replacement(
     // consumes the damage. Class members: Phyrexian Hydra, Vigor, Stormwild
     // Capridor, Hostility.
     if let Some(followup) = extract_prevention_followup(original_text) {
-        // CR 608.2k: Static self-prevention replacements (Anti-Venom, Vigor,
-        // Phyrexian Hydra, Stormwild Capridor) host their followup on the
-        // shield-bearing permanent itself. Bare pronouns ("him"/"it"/"this
-        // creature"/"this enchantment") in the rider must bind to `SelfRef`
-        // so PutCounter targets the permanent, not a non-existent parent
-        // target. The rider parse runs through the standard chain pipeline
-        // with `subject: SelfRef` so `resolve_pronoun_target` returns
-        // `SelfRef` per its typed-subject carve-out.
+        // CR 608.2k: Static self-prevention replacements split into two
+        // anaphor cohorts depending on what the rider counter/effect targets:
+        //
+        // 1. Rider targets the shield-bearing permanent itself (Anti-Venom,
+        //    Phyrexian Hydra, Stormwild Capridor, Hostility). The rider's
+        //    bare pronouns ("him"/"it"/"this creature"/"this enchantment"/
+        //    "~") must bind to `SelfRef` so the counter lands on the source.
+        //    Threading `subject: SelfRef` makes `resolve_pronoun_target`
+        //    return `SelfRef` per its typed-subject carve-out.
+        //
+        // 2. Rider targets the prevented event's damage recipient (Vigor:
+        //    "If damage would be dealt to another creature you control,
+        //    prevent that damage. Put a +1/+1 counter on that creature ..."
+        //    — "that creature" is the recipient, not the source). The rider
+        //    parser lowers "that creature" to `TargetFilter::ParentTarget`
+        //    by the generic CR 608.2c anaphor path, but there is no parent
+        //    target slot in a passive replacement context, so the binding
+        //    is dangling. Post-parse rewrite (below) remaps it to
+        //    `PostReplacementDamageTarget`. Cohort 2 is detected by the
+        //    presence of a typed `valid_card` recipient filter — that's the
+        //    structural signal that the shield is event-driven (no spell
+        //    target), so any `ParentTarget` in the rider can only refer to
+        //    the event recipient.
         let mut followup_ctx = ParseContext {
             subject: Some(TargetFilter::SelfRef),
             in_replacement: true,
@@ -4695,12 +4831,35 @@ fn parse_damage_prevention_replacement(
         // avoids parser-context plumbing. Single building-block walker
         // (`each_target_filter_mut`) handles every target-bearing effect arm.
         rewrite_parent_target_controller_to_post_replacement_source(&mut followup_def);
+        // CR 615.5 + CR 608.2c: Object-anaphor rewrite for cohort 2 (Vigor
+        // class). When the shield is event-driven (signalled by a typed
+        // `valid_card_filter`), `ParentTarget` in the rider can only refer
+        // to the prevented event's damage recipient — there is no parent
+        // target slot. Remap dangling `ParentTarget` to
+        // `PostReplacementDamageTarget` so the runtime resolves it against
+        // `state.post_replacement_event_target`. Spell-driven prevention
+        // (Test of Faith — "prevent the next 3 damage that would be dealt to
+        // target creature this turn") has `valid_card_filter = None` because
+        // its all-consuming recipient terminator fails, so this rewrite
+        // does not fire and `ParentTarget` correctly inherits the spell's
+        // chosen target.
+        if recipient_is_event_filter {
+            rewrite_parent_target_to_post_replacement_damage_target(&mut followup_def);
+        }
         def = def.execute(followup_def);
     }
 
     Some(def)
 }
 
+/// CR 614.1a: Extract the typed event-recipient filter from a damage-prevention
+/// shield's "dealt to <filter>" clause. The clause may close at the end of the
+/// sentence (`.`, `this turn`, `until end of turn`, or input end) or continue
+/// into a sibling prevention imperative (`, prevent that damage. ...` — Vigor,
+/// Phyrexian Hydra, Stormwild Capridor class of static prevention shields with
+/// follow-up rider). The `peek(", prevent")` boundary keeps the filter scoped
+/// to the recipient phrase without consuming the comma + imperative, leaving
+/// the follow-up extractor (`extract_prevention_followup`) to claim it.
 fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<TargetFilter> {
     nom_primitives::scan_at_word_boundaries(working_lower, |input| {
         let (after_to, _) = tag::<_, _, OracleError<'_>>("dealt to ").parse(input)?;
@@ -4713,7 +4872,7 @@ fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<Targe
         }
 
         let rest = rest.trim_start();
-        if all_consuming(alt((
+        let fully_consumed = all_consuming(alt((
             value((), eof::<&str, OracleError<'_>>),
             value((), tag::<_, _, OracleError<'_>>(".")),
             value(
@@ -4732,8 +4891,16 @@ fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<Targe
             ),
         )))
         .parse(rest)
-        .is_ok()
-        {
+        .is_ok();
+        // CR 614.1a + CR 615.5: A static prevention shield with a same-sentence
+        // imperative ("if damage would be dealt to <filter>, prevent that damage")
+        // closes the recipient phrase at the clause boundary `, prevent`, not at
+        // sentence end. `peek` acknowledges the boundary without consuming so
+        // the follow-up extractor still claims the imperative and its rider.
+        let clause_boundary = peek(tag::<_, _, OracleError<'_>>(", prevent"))
+            .parse(rest)
+            .is_ok();
+        if fully_consumed || clause_boundary {
             Ok((rest, filter))
         } else {
             Err(nom::Err::Error(OracleError::new(
@@ -4759,6 +4926,37 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_parent_target_controller_to_post_replacement_source(else_branch);
+    }
+}
+
+/// CR 615.5 + CR 608.2c: In a prevention follow-up whose shield is event-driven
+/// (Vigor class: "If damage would be dealt to <typed filter>, prevent that
+/// damage. Put a +1/+1 counter on that creature ..."), the rider's anaphor
+/// "that creature" refers to the prevented event's damage recipient. The
+/// ordinary `parse_target` path lowers "that <type phrase>" to
+/// `TargetFilter::ParentTarget` per CR 608.2c, but in a passive replacement
+/// there is no parent target slot to bind against. Rewrite each dangling
+/// `ParentTarget` to `PostReplacementDamageTarget` so the runtime resolves
+/// it against `state.post_replacement_event_target`.
+///
+/// Sibling of `rewrite_damage_recipient_to_post_replacement_target` which
+/// handles the player-anaphor cohort ("that player draws cards ..."). Kept
+/// separate so the player walker stays scoped to player refs and this walker
+/// only fires when the caller has confirmed the shield is event-driven (via
+/// a typed `valid_card_filter` signal) — spell-driven prevention with a real
+/// `target creature` slot must keep its `ParentTarget` binding intact (Test
+/// of Faith).
+fn rewrite_parent_target_to_post_replacement_damage_target(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::ParentTarget) {
+            *f = TargetFilter::PostReplacementDamageTarget;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_parent_target_to_post_replacement_damage_target(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_parent_target_to_post_replacement_damage_target(else_branch);
     }
 }
 
@@ -5633,6 +5831,95 @@ mod tests {
                 target: TargetFilter::ParentTarget,
             } if *counter_type == CounterType::Plus1Plus1
         ));
+    }
+
+    /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
+    /// another creature you control, prevent that damage. Put a +1/+1 counter
+    /// on that creature for each 1 damage prevented this way."
+    ///
+    /// Three building-block assertions:
+    ///
+    /// 1. The recipient phrase parses through `parse_damage_recipient_valid_card_filter`
+    ///    even though it closes at `", prevent"` (the same-sentence clause
+    ///    boundary), and the resulting typed filter retains `controller: You`
+    ///    and `FilterProp::Another`. Previously the all-consuming terminator
+    ///    rejected the comma + imperative, silently dropping `valid_card` and
+    ///    causing the shield to fire on ANY creature (including opponents').
+    ///
+    /// 2. The rider's anaphor "that creature" (which `parse_target` lowers to
+    ///    `TargetFilter::ParentTarget` per CR 608.2c) is rewritten at the
+    ///    parser call site to `TargetFilter::PostReplacementDamageTarget` so
+    ///    the +1/+1 counter lands on the prevented event's damage recipient
+    ///    rather than dangling against a nonexistent parent target slot.
+    ///
+    /// 3. The rider count resolves to `QuantityRef::EventContextAmount` (the
+    ///    prevented amount), via the existing `for each 1 damage prevented
+    ///    this way` post-target suffix path.
+
+    #[test]
+    fn vigor_event_recipient_filter_and_counter_target_rewrite() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to another creature you control, prevent that damage. \
+             Put a +1/+1 counter on that creature for each 1 damage prevented this way.",
+            "Vigor",
+        )
+        .expect("Vigor should parse as a damage prevention replacement");
+
+        // (1) valid_card recipient filter — Typed Creature, controller=You, Another.
+        let valid_card = def
+            .valid_card
+            .as_ref()
+            .expect("Vigor's recipient filter must survive the parser");
+        match valid_card {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature type filter, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "expected controller=You, got {:?}",
+                    tf.controller
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "expected FilterProp::Another in {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed recipient filter, got {other:?}"),
+        }
+
+        // (2) + (3) rider PutCounter targets the event recipient with
+        // EventContextAmount on the `count` field.
+        let execute = def.execute.as_ref().expect("execute present");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+                // The suffix-form for-each ("... for each 1 damage prevented
+                // this way") lands the prevented amount on the PutCounter
+                // `count` field via `try_parse_for_each_effect`, so pin the
+                // exact field rather than accepting an either/or shape.
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }
+                    ),
+                    "expected count to be EventContextAmount; got count={count:?}, repeat_for={:?}",
+                    execute.repeat_for
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
     }
 
     #[test]
@@ -6935,6 +7222,77 @@ mod tests {
             }
             other => panic!("Expected PutCounter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn enters_with_your_choice_of_counter_builds_selfref_choose_one_of() {
+        use crate::types::keywords::KeywordKind;
+
+        // CR 614.12a + CR 608.2d: "~ enters with your choice of <list> on it"
+        // should parse to a Moved replacement whose execute is a ChooseOneOf of
+        // self-targeted PutCounter branches — NOT a single Generic counter, and
+        // NO ParentTarget/TargetOnly lift (the entering permanent is always the
+        // recipient).
+        let assert_choice = |text: &str, expected: &[CounterType]| {
+            let def = parse_replacement_line(text, "Denry Klin, Editor in Chief")
+                .unwrap_or_else(|| panic!("should parse: {text}"));
+            assert_eq!(def.event, ReplacementEvent::Moved, "text: {text}");
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::SelfRef),
+                "valid_card should be SelfRef: {text}"
+            );
+            let Effect::ChooseOneOf { chooser, branches } = &*def.execute.as_ref().unwrap().effect
+            else {
+                panic!("expected ChooseOneOf execute, got {:?}", def.execute);
+            };
+            assert_eq!(*chooser, PlayerFilter::Controller);
+            assert_eq!(branches.len(), expected.len(), "branch count: {text}");
+            for (i, ct) in expected.iter().enumerate() {
+                match &*branches[i].effect {
+                    Effect::PutCounter {
+                        counter_type,
+                        target,
+                        ..
+                    } => {
+                        assert_eq!(counter_type, ct, "branch {i} counter_type: {text}");
+                        // CR 614.12a: every branch targets the entering permanent.
+                        assert_eq!(
+                            *target,
+                            TargetFilter::SelfRef,
+                            "branch {i} must be SelfRef (not ParentTarget/TargetOnly): {text}"
+                        );
+                    }
+                    other => panic!("branch {i} expected PutCounter, got {other:?}"),
+                }
+            }
+        };
+
+        let expected = [
+            CounterType::Plus1Plus1,
+            CounterType::Keyword(KeywordKind::FirstStrike),
+            CounterType::Keyword(KeywordKind::Vigilance),
+        ];
+
+        // SharedNoun shape (Denry Klin line 1).
+        assert_choice(
+            "Denry Klin enters with your choice of a +1/+1, first strike, or vigilance counter on it.",
+            &expected,
+        );
+        // Distributed shape.
+        assert_choice(
+            "Denry Klin enters with your choice of a +1/+1 counter, a first strike counter, or a vigilance counter on it.",
+            &expected,
+        );
+        // FromAmong shape (bare keywords).
+        assert_choice(
+            "Denry Klin enters with your choice of a counter from among first strike, vigilance, and lifelink on it.",
+            &[
+                CounterType::Keyword(KeywordKind::FirstStrike),
+                CounterType::Keyword(KeywordKind::Vigilance),
+                CounterType::Keyword(KeywordKind::Lifelink),
+            ],
+        );
     }
 
     #[test]

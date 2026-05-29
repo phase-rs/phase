@@ -1838,6 +1838,28 @@ fn resolve_filter_threshold(
     }
 }
 
+fn pt_value_from_pair(stat: PtStat, power: Option<i32>, toughness: Option<i32>) -> i32 {
+    match stat {
+        PtStat::Power => power.unwrap_or(0),
+        PtStat::Toughness => toughness.unwrap_or(0),
+        PtStat::TotalPowerToughness => power.unwrap_or(0) + toughness.unwrap_or(0),
+    }
+}
+
+fn object_pt_value(obj: &GameObject, stat: PtStat, scope: PtValueScope) -> i32 {
+    match scope {
+        PtValueScope::Current => pt_value_from_pair(stat, obj.power, obj.toughness),
+        PtValueScope::Base => pt_value_from_pair(stat, obj.base_power, obj.base_toughness),
+    }
+}
+
+fn zone_change_pt_value(record: &ZoneChangeRecord, stat: PtStat, scope: PtValueScope) -> i32 {
+    match scope {
+        PtValueScope::Current => pt_value_from_pair(stat, record.power, record.toughness),
+        PtValueScope::Base => pt_value_from_pair(stat, record.base_power, record.base_toughness),
+    }
+}
+
 fn matches_last_chosen_land_or_nonland_kind(
     choice: &Option<ChoiceValue>,
     core_types: &[CoreType],
@@ -2193,10 +2215,11 @@ fn matches_filter_prop(
         // every object from individual match checks.
         FilterProp::OtherThanTriggerObject => true,
         FilterProp::HasColor { color } => obj.color.contains(color),
-        // CR 208 + CR 208.4b: Power/toughness comparison against a dynamic
-        // threshold. `scope = Base` reads `base_power`/`base_toughness` (the
-        // value after layer 7b, ignoring counters/modifiers per CR 208.4b);
-        // `scope = Current` reads the fully-modified `power`/`toughness`.
+        // CR 208 + CR 208.4b: Power/toughness metric comparison against a
+        // dynamic threshold. `scope = Base` reads `base_power`/`base_toughness`
+        // (the value after layer 7b, ignoring counters/modifiers per
+        // CR 208.4b); `scope = Current` reads the fully-modified
+        // `power`/`toughness`.
         // Dynamic thresholds (`QuantityRef::Variable { "X" }`) resolve against
         // the ability's `chosen_x` via `FilterContext::from_ability`.
         FilterProp::PtComparison {
@@ -2204,16 +2227,10 @@ fn matches_filter_prop(
             scope,
             comparator,
             value,
-        } => {
-            let lhs = match (stat, scope) {
-                (PtStat::Power, PtValueScope::Current) => obj.power,
-                (PtStat::Power, PtValueScope::Base) => obj.base_power,
-                (PtStat::Toughness, PtValueScope::Current) => obj.toughness,
-                (PtStat::Toughness, PtValueScope::Base) => obj.base_toughness,
-            }
-            .unwrap_or(0);
-            comparator.evaluate(lhs, resolve_filter_threshold(state, value, source))
-        }
+        } => comparator.evaluate(
+            object_pt_value(obj, *stat, *scope),
+            resolve_filter_threshold(state, value, source),
+        ),
         // Disjunctive composite: any inner prop matches.
         FilterProp::AnyOf { props } => props
             .iter()
@@ -2474,11 +2491,11 @@ fn zone_change_record_matches_property(
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
-        // CR 208 + CR 208.4b: Power/toughness threshold on the event-time
-        // object. A `None` value (non-creature in some zones) treats as 0,
-        // matching live-state behavior. The zone-change snapshot captures both
-        // the current (post-layer-7) and base (layer-7b, per CR 613.4b) values
-        // at move-time, so `scope = Base` reads `record.base_power`/
+        // CR 208 + CR 208.4b: Power/toughness metric threshold on the
+        // event-time object. A `None` value (non-creature in some zones) treats
+        // as 0, matching live-state behavior. The zone-change snapshot captures
+        // both the current (post-layer-7) and base (layer-7b, per CR 613.4b)
+        // values at move-time, so `scope = Base` reads `record.base_power`/
         // `record.base_toughness` while `scope = Current` reads
         // `record.power`/`record.toughness`. This makes the look-back
         // (leaves-the-battlefield / dies) path as precise as live-object
@@ -2489,16 +2506,10 @@ fn zone_change_record_matches_property(
             scope,
             comparator,
             value,
-        } => {
-            let lhs = match (stat, scope) {
-                (PtStat::Power, PtValueScope::Current) => record.power,
-                (PtStat::Power, PtValueScope::Base) => record.base_power,
-                (PtStat::Toughness, PtValueScope::Current) => record.toughness,
-                (PtStat::Toughness, PtValueScope::Base) => record.base_toughness,
-            }
-            .unwrap_or(0);
-            comparator.evaluate(lhs, resolve_filter_threshold(state, value, source))
-        }
+        } => comparator.evaluate(
+            zone_change_pt_value(record, *stat, *scope),
+            resolve_filter_threshold(state, value, source),
+        ),
         // CR 202.3: Mana value threshold on the event-time object.
         FilterProp::Cmc { comparator, value } => comparator.evaluate(
             record.mana_value as i32,
@@ -3339,6 +3350,49 @@ mod tests {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         assert!(matches_target_filter(&state, id, &TargetFilter::Any, id));
+    }
+
+    #[test]
+    fn pt_comparison_total_power_toughness_matches_sum() {
+        use crate::types::ability::{PtStat, PtValueScope, TypedFilter};
+
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Summed Bear");
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.power = Some(3);
+        obj.toughness = Some(3);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+
+        let total_filter = |scope, comparator, value| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::TotalPowerToughness,
+                    scope,
+                    comparator,
+                    value: QuantityExpr::Fixed { value },
+                },
+            ]))
+        };
+
+        assert!(!matches_target_filter(
+            &state,
+            id,
+            &total_filter(PtValueScope::Current, Comparator::LE, 5),
+            id,
+        ));
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &total_filter(PtValueScope::Current, Comparator::GE, 6),
+            id,
+        ));
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &total_filter(PtValueScope::Base, Comparator::LE, 4),
+            id,
+        ));
     }
 
     #[test]

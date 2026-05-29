@@ -1265,6 +1265,65 @@ pub fn synthesize_outlast(face: &mut CardFace) {
     face.abilities.extend(outlast_abilities);
 }
 
+/// CR 702.77a: Synthesize the Reinforce activated ability from `Keyword::Reinforce { count, cost }`.
+/// "Reinforce N—[cost]" means "[Cost], Discard this card: Put N +1/+1 counters on target creature."
+pub fn synthesize_reinforce(face: &mut CardFace) {
+    let reinforce_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            let Keyword::Reinforce { count, cost } = kw else {
+                return None;
+            };
+            // CR 702.77a: Composite cost — pay mana, then discard this card.
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    // CR 702.77a: "Discard this card" — self_ref=true so the
+                    // engine auto-discards the source card.
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        random: false,
+                        self_ref: true,
+                    },
+                ],
+            };
+            // CR 702.77a: "Put N +1/+1 counters on target creature."
+            // When count == 0, this is Reinforce X — use Variable("X") which
+            // resolves to chosen_x at runtime (the X in the mana cost).
+            let counter_count = if *count == 0 {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                }
+            } else {
+                QuantityExpr::Fixed {
+                    value: *count as i32,
+                }
+            };
+            let effect = Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: counter_count,
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            };
+            let def = AbilityDefinition::new(AbilityKind::Activated, effect).cost(composite_cost);
+            // CR 702.77a: Reinforce is activated from hand (discard as cost).
+            // No zone restriction needed — the discard cost implicitly requires the card
+            // to be in hand. The default activation zone (battlefield) won't apply since
+            // the card is never on the battlefield when this ability is relevant.
+            // Actually, per CR 702.77b: "A creature card with reinforce may also be cast
+            // as a spell." The ability functions from hand, so we set activation_zone.
+            let mut def = def;
+            def.activation_zone = Some(Zone::Hand);
+            Some(def)
+        })
+        .collect();
+
+    face.abilities.extend(reinforce_abilities);
+}
+
 /// Convert a typecycling subtype string to a `TargetFilter` for library search.
 ///
 /// Single subtypes (e.g., "Plains", "Forest") → subtype filter.
@@ -3851,6 +3910,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_cycling(face);
     synthesize_scavenge(face);
     synthesize_outlast(face);
+    synthesize_reinforce(face);
     synthesize_casualty(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
@@ -4253,11 +4313,19 @@ fn build_oracle_face_inner(
         keywords.retain(|kw| !matches!(kw, Keyword::Hexproof));
     }
 
+    // CR 202.1b: A card with no `manaCost` (lands, and suspend-only cards like
+    // Inevitable Betrayal / Ancestral Vision) has *no* mana cost where its cost
+    // would appear — not a payable {0} cost.
+    // CR 118.6: no mana cost is an unpayable cost. Map an absent manaCost to
+    // `NoCost`; `unwrap_or_default()` previously collapsed it to `Cost{0}`, which
+    // made such cards castable for free from hand (issue #827). Real `{0}` cards
+    // (Ornithopter, Mox) carry an explicit `"{0}"` manaCost and stay
+    // `Cost{ generic: 0 }` via `parse_mtgjson_mana_cost`.
     let mana_cost = mtgjson
         .mana_cost
         .as_deref()
         .map(parse_mtgjson_mana_cost)
-        .unwrap_or_default();
+        .unwrap_or(ManaCost::NoCost);
 
     let mana_derived_colors = derive_colors_from_mana_cost(&mana_cost);
     let mtgjson_colors: Vec<ManaColor> = mtgjson
@@ -12079,5 +12147,149 @@ mod for_mirrodin_synthesis_tests {
         synthesize_for_mirrodin(&mut face);
         let trigger = &face.triggers[0];
         assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+    }
+}
+
+#[cfg(test)]
+mod reinforce_synthesis_tests {
+    use super::*;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    fn face_with_reinforce(count: u32, cost: ManaCost) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Reinforce { count, cost });
+        face
+    }
+
+    /// CR 702.77a: Reinforce synthesis produces exactly one activated ability whose
+    /// shape matches the reminder text — hand activation, composite cost of mana +
+    /// self-discard, +1/+1 counters on target creature scaled by the fixed count.
+    #[test]
+    fn synthesize_reinforce_builds_activated_ability_with_correct_shape() {
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+        let mut face = face_with_reinforce(3, cost.clone());
+        synthesize_reinforce(&mut face);
+
+        assert_eq!(face.abilities.len(), 1, "exactly one reinforce ability");
+        let def = &face.abilities[0];
+        assert_eq!(def.kind, AbilityKind::Activated);
+        assert_eq!(def.activation_zone, Some(Zone::Hand));
+        // Reinforce is instant-speed (no sorcery restriction).
+        assert!(!def.sorcery_speed);
+
+        // CR 118.3: Composite cost — mana + discard-self.
+        match def.cost.as_ref().expect("reinforce must have a cost") {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(&costs[0], AbilityCost::Mana { cost: c } if *c == cost));
+                assert!(matches!(
+                    &costs[1],
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        random: false,
+                        self_ref: true,
+                    }
+                ));
+            }
+            other => panic!("expected Composite cost, got {:?}", other),
+        }
+
+        // CR 702.77a: Effect is N +1/+1 counters on target creature.
+        match def.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
+                assert_eq!(count, &QuantityExpr::Fixed { value: 3 });
+                assert!(
+                    matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                );
+            }
+            other => panic!("expected PutCounter effect, got {:?}", other),
+        }
+    }
+
+    /// Reinforce with zero-cost mana (e.g., {0}) still produces a well-formed ability.
+    #[test]
+    fn synthesize_reinforce_handles_zero_cost() {
+        let cost = ManaCost::zero();
+        let mut face = face_with_reinforce(2, cost);
+        synthesize_reinforce(&mut face);
+        assert_eq!(face.abilities.len(), 1);
+    }
+
+    /// Cards without Reinforce are unaffected.
+    #[test]
+    fn synthesize_reinforce_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_reinforce(&mut face);
+        assert!(face.abilities.is_empty());
+    }
+
+    /// Idempotent: calling synthesize_reinforce twice doubles the abilities
+    /// (synthesis is additive, caller is responsible for single invocation).
+    #[test]
+    fn synthesize_reinforce_is_additive() {
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 2,
+        };
+        let mut face = face_with_reinforce(1, cost);
+        synthesize_reinforce(&mut face);
+        synthesize_reinforce(&mut face);
+        assert_eq!(face.abilities.len(), 2);
+    }
+
+    /// CR 702.77a: Reinforce X (count=0) uses Variable("X") for counter quantity,
+    /// resolved at runtime via chosen_x from the X in the mana cost.
+    #[test]
+    fn synthesize_reinforce_x_uses_variable_quantity() {
+        // Swell of Courage: Reinforce X—{X}{W}{W}
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::White, ManaCostShard::White],
+            generic: 0,
+        };
+        let mut face = face_with_reinforce(0, cost.clone());
+        synthesize_reinforce(&mut face);
+        assert_eq!(face.abilities.len(), 1, "exactly one reinforce ability");
+        let def = &face.abilities[0];
+        assert_eq!(def.kind, AbilityKind::Activated);
+        assert_eq!(def.activation_zone, Some(Zone::Hand));
+        // Verify the counter count is Variable("X"), not Fixed(0).
+        match def.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string()
+                        }
+                    }
+                );
+                assert!(
+                    matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                );
+            }
+            other => panic!("expected PutCounter effect, got {:?}", other),
+        }
+        // Verify the mana cost contains X shard (triggers ChooseXValue at runtime).
+        match def.cost.as_ref().expect("reinforce must have a cost") {
+            AbilityCost::Composite { costs } => {
+                assert!(matches!(&costs[0], AbilityCost::Mana { cost: c } if *c == cost));
+            }
+            other => panic!("expected Composite cost, got {:?}", other),
+        }
     }
 }

@@ -244,9 +244,18 @@ impl DraftSessionManager {
             .get_mut(draft_code)
             .ok_or_else(|| format!("Draft not found: {}", draft_code))?;
 
-        let _seat = session
+        let seat = session
             .seat_for_token(token)
             .ok_or_else(|| "Invalid player token".to_string())?;
+
+        // The WebSocket wire surface is untrusted: the client supplies the
+        // action's `seat` field, but the only authority for "who is acting" is
+        // the token → seat mapping resolved above. Bind seat-scoped actions to
+        // that seat and gate table-authority actions to the host (seat 0).
+        // `apply_system_action` deliberately bypasses this for trusted
+        // server-internal actions (auto-pick on timer expiry, GameOver
+        // auto-report), so bot/auto picks are unaffected.
+        let action = authorize_client_draft_action(seat, action)?;
 
         let _deltas = draft_core::session::apply(&mut session.session, action, pack_source)
             .map_err(|e| {
@@ -460,6 +469,52 @@ pub fn draft_grace_period(status: &DraftStatus) -> Duration {
         DraftStatus::Paused => Duration::from_secs(600),
         DraftStatus::Pairing => Duration::from_secs(600),
         DraftStatus::Complete | DraftStatus::Abandoned => Duration::from_secs(60),
+    }
+}
+
+/// The draft host occupies seat 0 (`create_draft` assigns the creator seat 0).
+const DRAFT_HOST_SEAT: usize = 0;
+
+/// Authorize a client-originated draft action against the authenticated seat.
+///
+/// The client controls the action's payload `seat`, but a player may only act
+/// for the seat their token maps to, and only the host may drive table-wide
+/// state. This is the single authority for that check; it runs in
+/// `handle_draft_action` (the client path) and is intentionally NOT applied by
+/// `apply_system_action` (trusted server-internal actions). The transport-layer
+/// `client_forbidden_draft_action_reason` in phase-server is a complementary
+/// earlier gate that blocks actions never permitted from any client.
+fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<DraftAction, String> {
+    match action {
+        // Seat-scoped: overwrite the client-supplied seat with the authenticated
+        // seat so a player cannot pick from or submit a deck for another seat.
+        DraftAction::Pick {
+            card_instance_id, ..
+        } => Ok(DraftAction::Pick {
+            seat: seat as u8,
+            card_instance_id,
+        }),
+        DraftAction::SubmitDeck { main_deck, .. } => Ok(DraftAction::SubmitDeck {
+            seat: seat as u8,
+            main_deck,
+        }),
+        // Table authority: only the host may start the draft, advance rounds,
+        // generate pairings, report results, or replace a seat with a bot.
+        DraftAction::StartDraft
+        | DraftAction::AdvanceRound
+        | DraftAction::GeneratePairings { .. }
+        | DraftAction::ReportMatchResult { .. }
+        | DraftAction::ReplaceSeatWithBot { .. } => {
+            if seat == DRAFT_HOST_SEAT {
+                Ok(action)
+            } else {
+                Err("Only the draft host can perform this action".to_string())
+            }
+        }
+        // Server-internal only — never accepted from a client wire surface.
+        DraftAction::SetSeatConnected { .. } => {
+            Err("SetSeatConnected is server-internal".to_string())
+        }
     }
 }
 
@@ -732,5 +787,84 @@ mod tests {
             draft_grace_period(&DraftStatus::Complete),
             Duration::from_secs(60)
         );
+    }
+
+    #[test]
+    fn authorize_rebinds_pick_seat_to_authenticated_seat() {
+        // A non-host (seat 2) picks but spoofs seat 0's pack: the seat is
+        // overwritten with the authenticated seat, never the payload's value.
+        let action = authorize_client_draft_action(
+            2,
+            DraftAction::Pick {
+                seat: 0,
+                card_instance_id: "abc".to_string(),
+            },
+        )
+        .expect("seat-scoped action is allowed for any seat");
+        assert_eq!(
+            action,
+            DraftAction::Pick {
+                seat: 2,
+                card_instance_id: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn authorize_rebinds_submit_deck_seat() {
+        let action = authorize_client_draft_action(
+            3,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: vec!["x".to_string()],
+            },
+        )
+        .expect("submit deck is allowed for any seat");
+        assert_eq!(
+            action,
+            DraftAction::SubmitDeck {
+                seat: 3,
+                main_deck: vec!["x".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn authorize_rejects_host_actions_from_non_host() {
+        for action in [
+            DraftAction::StartDraft,
+            DraftAction::AdvanceRound,
+            DraftAction::ReportMatchResult {
+                match_id: "m".to_string(),
+                winner_seat: Some(1),
+            },
+            DraftAction::ReplaceSeatWithBot {
+                seat: 1,
+                name: None,
+            },
+        ] {
+            assert!(
+                authorize_client_draft_action(1, action).is_err(),
+                "non-host (seat 1) must not drive table-authority actions"
+            );
+        }
+    }
+
+    #[test]
+    fn authorize_allows_host_actions_from_host() {
+        assert!(authorize_client_draft_action(DRAFT_HOST_SEAT, DraftAction::StartDraft).is_ok());
+        assert!(authorize_client_draft_action(DRAFT_HOST_SEAT, DraftAction::AdvanceRound).is_ok());
+    }
+
+    #[test]
+    fn authorize_rejects_set_seat_connected_from_client() {
+        assert!(authorize_client_draft_action(
+            DRAFT_HOST_SEAT,
+            DraftAction::SetSeatConnected {
+                seat: 1,
+                connected: false,
+            },
+        )
+        .is_err());
     }
 }

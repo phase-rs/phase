@@ -147,6 +147,12 @@ pub enum GameAction {
         object_id: ObjectId,
         untap: bool,
     },
+    /// CR 508.1g + CR 701.43d: The active player's decision whether to pay the
+    /// optional "exert this creature as it attacks" cost for the attacker named
+    /// in the pending `WaitingFor::ExertChoice`. `exert: false` declines.
+    ChooseExert {
+        exert: bool,
+    },
     /// CR 103.5 + 103.5b: A player's decision at a `WaitingFor::MulliganDecision`
     /// prompt. See [`MulliganChoice`] for the three branches.
     MulliganDecision {
@@ -1108,6 +1114,7 @@ impl GameAction {
             GameAction::CastParadigmCopy { source } => Some(*source),
             // Actions with no per-permanent anchor.
             GameAction::PassPriority
+            | GameAction::ChooseExert { .. }
             | GameAction::DeclareAttackers { .. }
             | GameAction::DeclareBlockers { .. }
             | GameAction::MulliganDecision { .. }
