@@ -3114,9 +3114,11 @@ mod tests {
     /// CR 702.173a: Freerunning keyword_from_tagged deserialization.
     #[test]
     fn freerunning_keyword_from_tagged() {
+        // ManaCost is serde-tagged with "type": "Cost", shards as enum variants, generic as u32.
         let data = serde_json::json!({
-            "white": 0, "blue": 0, "black": 2, "red": 0, "green": 0,
-            "colorless": 3, "generic": 0
+            "type": "Cost",
+            "shards": ["Black", "Black"],
+            "generic": 3
         });
         let kw = keyword_from_tagged("Freerunning", &data).unwrap();
         assert_eq!(kw.kind(), KeywordKind::Freerunning);
