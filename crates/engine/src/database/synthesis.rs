@@ -652,6 +652,99 @@ pub fn synthesize_changeling_cda(face: &mut CardFace) {
 /// If the card has Kicker and no additional_cost was already parsed from Oracle text
 /// (blight takes precedence since it's parsed from the "as an additional cost" line),
 /// set `additional_cost = Some(AdditionalCost::Kicker { ... })`.
+// CR 702.148a: Cleave — paying the cleave cost removes bracketed restrictions from
+// the spell's text while it is on the stack. Parser emits the full restriction on
+// the base spell ability; synthesis attaches an `AdditionalCostPaidInstead` branch
+// with CMC (and other bracket-only) properties stripped from the reveal-hand choice.
+pub fn synthesize_cleave(face: &mut CardFace) {
+    if !face
+        .keywords
+        .iter()
+        .any(|kw| matches!(kw, Keyword::Cleave(_)))
+    {
+        return;
+    }
+    for ability in &mut face.abilities {
+        wrap_cleave_reveal_hand_branch(ability);
+    }
+}
+
+fn reveal_hand_filter_has_cmc(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::Cmc { .. })),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(reveal_hand_filter_has_cmc)
+        }
+        TargetFilter::Not { filter } => reveal_hand_filter_has_cmc(filter),
+        _ => false,
+    }
+}
+
+fn reveal_hand_chain_has_cmc_filter(def: &AbilityDefinition) -> bool {
+    match def.effect.as_ref() {
+        Effect::RevealHand { card_filter, .. } if reveal_hand_filter_has_cmc(card_filter) => true,
+        _ => def
+            .sub_ability
+            .as_deref()
+            .is_some_and(reveal_hand_chain_has_cmc_filter),
+    }
+}
+
+fn strip_cmc_from_reveal_hand_filter(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties
+                .retain(|prop| !matches!(prop, FilterProp::Cmc { .. }));
+            TargetFilter::Typed(tf)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(strip_cmc_from_reveal_hand_filter)
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(strip_cmc_from_reveal_hand_filter)
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(strip_cmc_from_reveal_hand_filter(*filter)),
+        },
+        other => other,
+    }
+}
+
+fn strip_cmc_from_reveal_hand_chain(mut def: AbilityDefinition) -> AbilityDefinition {
+    if let Effect::RevealHand {
+        ref mut card_filter,
+        ..
+    } = def.effect.as_mut()
+    {
+        *card_filter = strip_cmc_from_reveal_hand_filter(card_filter.clone());
+    }
+    if let Some(sub) = def.sub_ability.take() {
+        def.sub_ability = Some(Box::new(strip_cmc_from_reveal_hand_chain(*sub)));
+    }
+    def
+}
+
+fn wrap_cleave_reveal_hand_branch(def: &mut AbilityDefinition) {
+    if def.condition == Some(AbilityCondition::AdditionalCostPaidInstead) {
+        return;
+    }
+    if !reveal_hand_chain_has_cmc_filter(def) {
+        return;
+    }
+    let mut paid = strip_cmc_from_reveal_hand_chain(def.clone());
+    paid.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+    def.sub_ability = Some(Box::new(paid));
+}
+
 pub fn synthesize_kicker(face: &mut CardFace) {
     if face.additional_cost.is_some() {
         return;
@@ -3890,6 +3983,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_ninjutsu_family(face);
     synthesize_changeling_cda(face);
     synthesize_kicker(face);
+    synthesize_cleave(face);
     synthesize_buyback(face);
     synthesize_bargain(face);
     synthesize_gift(face);
@@ -4387,6 +4481,54 @@ mod kicker_synthesis_tests {
     use crate::types::mana::ManaCostShard;
 
     #[test]
+    #[test]
+    fn synthesize_cleave_splits_reveal_hand_cmc_branch() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Cleave(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Black],
+            })],
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RevealHand {
+                    target: TargetFilter::Player,
+                    card_filter: TargetFilter::Typed(
+                        TypedFilter::card()
+                            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                            .properties(vec![FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: QuantityExpr::Fixed { value: 2 },
+                            }]),
+                    ),
+                    count: None,
+                    random: false,
+                    choice_optional: false,
+                },
+            )],
+            ..CardFace::default()
+        };
+
+        synthesize_cleave(&mut face);
+
+        let base = &face.abilities[0];
+        assert!(
+            reveal_hand_chain_has_cmc_filter(base),
+            "base branch should keep CMC restriction"
+        );
+        let paid = base
+            .sub_ability
+            .as_deref()
+            .expect("cleave paid branch");
+        assert_eq!(
+            paid.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        );
+        assert!(
+            !reveal_hand_chain_has_cmc_filter(paid),
+            "cleave-paid branch should drop CMC restriction"
+        );
+    }
+
     fn synthesize_kicker_sets_typed_kicker_additional_cost() {
         let mut face = CardFace {
             keywords: vec![Keyword::Kicker(ManaCost::Cost {

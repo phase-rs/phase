@@ -10736,6 +10736,41 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
     (target, remainder)
 }
 
+/// Split a post-"choose" clause into the card-description phrase and any trailing
+/// cleave-style bracket suffix after `"from it"` (e.g. `[with mana value 2 or less]`).
+fn choose_filter_parts(text: &str) -> (&str, &str) {
+    const ANCHORS: [&str; 3] = [" from it", " from among them", " from among those"];
+    for anchor in ANCHORS {
+        if let Some(pos) = text.find(anchor) {
+            return (text[..pos].trim(), text[pos + anchor.len()..].trim());
+        }
+    }
+    (text.trim(), "")
+}
+
+/// Merge the pre-`from it` card phrase with an optional bracketed restriction suffix.
+fn combine_choose_filter_parts(filter_part: &str, suffix_part: &str) -> String {
+    let filter_part = filter_part
+        .trim()
+        .trim_start_matches("a ")
+        .trim_start_matches("an ")
+        .trim();
+    let suffix = suffix_part.trim();
+    // allow-noncombinator: cleave bracket delimiter normalization, not parse dispatch
+    let suffix = suffix
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .map(str::trim)
+        .unwrap_or(suffix);
+    if suffix.is_empty() {
+        filter_part.to_string()
+    } else if filter_part.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{filter_part} {suffix}")
+    }
+}
+
 fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
     // Extract type info between "choose" and "card from it"
     // Handle both "choose X" and "you choose X" forms
@@ -10756,17 +10791,22 @@ fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
         return TargetFilter::ParentTarget;
     }
 
-    let before_card = after_choose.split("card").next().unwrap_or("");
-    let cleaned = before_card
-        .trim()
-        .trim_start_matches("a ")
-        .trim_start_matches("an ")
-        .trim();
+    let (filter_part, suffix_part) = choose_filter_parts(after_choose);
+    let combined = combine_choose_filter_parts(filter_part, suffix_part);
 
     // Intentional: bare article "a [card]" or empty string means any card — not a parse failure
-    if cleaned.is_empty() || cleaned == "a" {
+    if combined.is_empty() || combined == "a" {
         return TargetFilter::Any;
     }
+
+    // CR 202.3: Delegate full card restrictions (type + mana value bounds, etc.) to the
+    // shared search-filter parser — cleave bracket suffixes after "from it" are merged above.
+    let search_filter = parse_search_filter(&combined, ctx);
+    if !matches!(search_filter, TargetFilter::Any) {
+        return search_filter;
+    }
+
+    let cleaned = filter_part;
 
     // structural: not dispatch — segmenting pre-extracted type string on comma separator
     // Comma-separated negation: "noncreature, nonland" → intersection of negations
@@ -10943,11 +10983,31 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
             return TargetFilter::Any;
         }
     };
-    // The word immediately before "card from" is the type descriptor
-    let word = before_card.trim().rsplit(' ').next().unwrap_or("");
-    if word.is_empty() || matches!(word, "a" | "an") {
+    // Use the full type phrase before "card from" (e.g. "nonland", "creature with mana
+    // value 3 or less"), not only the last word.
+    let trimmed = before_card.trim();
+    let phrase = if let Some(idx) = trimmed.rfind(" an ") {
+        &trimmed[idx + 4..]
+    } else if let Some(idx) = trimmed.rfind(" a ") {
+        &trimmed[idx + 3..]
+    } else {
+        trimmed
+    }
+    .trim();
+    if phrase.is_empty() || phrase == "a" {
         return TargetFilter::Any;
     }
+    let search_text = if phrase.contains("card") {
+        phrase.to_string()
+    } else {
+        format!("{phrase} card")
+    };
+    let filter = parse_search_filter(&search_text, ctx);
+    if !matches!(filter, TargetFilter::Any) {
+        return filter;
+    }
+    // Legacy single-word fallback for short descriptors ("nonland", "creature").
+    let word = phrase.rsplit(' ').next().unwrap_or(phrase);
     if let Some(negated) = word.strip_prefix("non") {
         if let Some(TargetFilter::Typed(tf)) = type_str_to_target_filter(negated) {
             if let Some(primary) = tf.get_primary_type().cloned() {
@@ -10960,7 +11020,7 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
     type_str_to_target_filter(word).unwrap_or_else(|| {
         ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized choose-from-sentence type".into(),
-            text: word.into(),
+            text: phrase.into(),
             line_index: 0,
         });
         TargetFilter::Any
@@ -29227,6 +29287,41 @@ mod tests {
         assert!(
             def.sub_ability.is_some(),
             "Expected sub_ability for discard continuation"
+        );
+    }
+
+    #[test]
+    fn dread_fugue_choose_from_revealed_hand_includes_cmc_leq_2() {
+        let def = parse_effect_chain(
+            "Target player reveals their hand. You choose a nonland card from it [with mana value 2 or less]. That player discards that card.",
+            AbilityKind::Spell,
+        );
+
+        fn reveal_hand_filter(def: &AbilityDefinition) -> Option<&TargetFilter> {
+            match def.effect.as_ref() {
+                Effect::RevealHand { card_filter, .. } => Some(card_filter),
+                _ => def
+                    .sub_ability
+                    .as_deref()
+                    .and_then(reveal_hand_filter),
+            }
+        }
+
+        let card_filter = reveal_hand_filter(&def).expect("RevealHand in chain");
+        assert!(
+            matches!(
+                card_filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land))
+                    && tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 2 }
+                        }
+                    ))
+            ),
+            "expected nonland + CMC<=2 reveal choice filter, got {card_filter:?}"
         );
     }
 
