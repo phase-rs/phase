@@ -4825,7 +4825,8 @@ fn damage_recipient_phrase_rest_complete(rest: &str) -> bool {
     if rest.is_empty() {
         return true;
     }
-    if rest.starts_with(',') {
+    // Comma may precede the prevention result without ending the string (Vigor).
+    if char::<_, OracleError<'_>>(',').parse(rest).is_ok() {
         return true;
     }
     all_consuming(alt((
