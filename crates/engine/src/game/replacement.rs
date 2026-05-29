@@ -227,7 +227,7 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
     }
 }
 
-fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
+pub(crate) fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
     matches!(
         mode,
         ReplacementMode::Optional { .. } | ReplacementMode::MayCost { .. }
@@ -3603,7 +3603,7 @@ fn apply_single_replacement(
 /// shapes default to MATERIAL — never auto-resolve a possibly order-sensitive
 /// set; this conservative default also covers self-replacement effects
 /// (CR 616.1a / CR 614.15).
-fn replacement_ordering_is_material(
+pub(crate) fn replacement_ordering_is_material(
     state: &GameState,
     candidates: &[ReplacementId],
     proposed: &ProposedEvent,

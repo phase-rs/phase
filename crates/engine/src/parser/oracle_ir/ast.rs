@@ -2,11 +2,11 @@ use serde::Serialize;
 
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, ControllerRef,
-    CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost, PlayerFilter, PtValue,
-    QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition,
-    TargetFilter,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, BounceSelection, CastingPermission,
+    ControllerRef, CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost,
+    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -348,6 +348,14 @@ pub(crate) enum ImperativeFamilyAst {
         target_a: TargetFilter,
         target_b: TargetFilter,
     },
+    /// CR 701.12a: Exchange a player's life total with the source's power or
+    /// toughness (Tree of Perdition, Tree of Redemption, Evra). `player` is the
+    /// player whose life is exchanged (`Controller` for "your", an opponent
+    /// filter for "target opponent's"); `stat` selects which source stat.
+    ExchangeLifeWithStat {
+        player: TargetFilter,
+        stat: PtStat,
+    },
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
     Investigate,
@@ -381,8 +389,12 @@ pub(crate) enum ImperativeFamilyAst {
     /// CR 104.3a: "[you/target player] win(s) the game"
     WinTheGame,
     /// CR 706: Roll a die with N sides.
+    /// CR 706.2: Optional additive/subtractive modifier applied to the natural
+    /// result before result-table lookup ("Roll a d20 and add the number of
+    /// cards in your hand").
     RollDie {
         sides: u8,
+        modifier: Option<crate::types::ability::DieRollModifier>,
     },
     /// CR 705: Flip a coin.
     FlipCoin,
@@ -602,6 +614,13 @@ pub(crate) enum TargetedImperativeAst {
     /// CR 701.3: Return to hand (bounce).
     Return {
         target: TargetFilter,
+        /// CR 115.1 + Whitemane Lion ruling: Captured at parse time from the
+        /// `TargetSyntax` discriminator. `Descriptor` Oracle text without
+        /// "target" (e.g. "return a creature you control to its owner's hand")
+        /// becomes `BounceSelection::AtResolution`; the resolver picks the
+        /// eligible permanent at resolution via `EffectZoneChoice` rather than
+        /// the targeting pipeline.
+        selection: BounceSelection,
     },
     /// CR 400.7 + CR 611.2c: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
     /// for "return all/each [filter] to their owners' hands" Oracle text.

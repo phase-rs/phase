@@ -112,7 +112,6 @@
   "landing": {
     "title": "Draft",
     "startNew": "Começar Novo",
-    "experimental": "Experimental",
     "quickDraft": {
       "title": "Quick Draft",
       "description": "Drafte 3 boosters com 7 draftadores de IA, monte um deck de 40 cartas e jogue uma partida Bo1 contra um deles."
@@ -269,7 +268,11 @@
     "loadingPool": "Carregando dados do pool da coleção...",
     "roomCode": "Código da Sala",
     "roomCodePlaceholder": "Insira o código da sala...",
-    "joinPod": "Entrar no Pod"
+    "joinPod": "Entrar no Pod",
+    "tabs": {
+      "set": "Coleção",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Confrontos do Torneio",

@@ -9,8 +9,7 @@
     "combat": "Ritmo",
     "audio": "Áudio",
     "multiplayer": "Multijogador",
-    "data": "Dados",
-    "experimental": "Experimental"
+    "data": "Dados"
   },
   "gameplay": {
     "title": "Jogabilidade",
@@ -84,13 +83,6 @@
     "displayName": "Nome de Exibição",
     "displayNamePlaceholder": "Digite seu nome",
     "serverSelectionNote": "A seleção de servidor foi movida para o lobby — abra o Multijogador e use o chip de servidor (ou \"Escolher servidor\" no modo P2P) para trocar de região, configurar uma instância auto-hospedada ou testar a conectividade."
-  },
-  "experimental": {
-    "title": "Experimental",
-    "description": "Esses recursos ainda estão em desenvolvimento. Eles podem estar incompletos, ter bugs ou mudar sem aviso. Ative-os para experimentar as novidades antecipadamente.",
-    "draftExperiments": "Experimentos de Draft",
-    "enableDraftFeatures": "Ativar recursos experimentais de draft",
-    "draftFeaturesDescription": "Desbloqueia o Cube Draft e o Pod Draft. O Quick Draft contra IA está sempre disponível."
   },
   "sync": {
     "title": "Sincronização na nuvem",

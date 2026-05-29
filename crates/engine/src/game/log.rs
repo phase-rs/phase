@@ -106,6 +106,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
+        | GameEvent::CreatureExerted { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. } => LogCategory::Combat,
 
         GameEvent::DamageDealt { is_combat, .. } => {
@@ -147,6 +148,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
+        | GameEvent::Detained { .. }
         | GameEvent::BecamePrepared { .. }
         | GameEvent::BecameUnprepared { .. }
         | GameEvent::CaseSolved { .. }
@@ -301,6 +303,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" becomes plotted for "),
             player_seg(state, *player_id),
         ],
+
+        GameEvent::CreatureExerted { object_id } => {
+            vec![card_seg(state, *object_id), text(" is exerted")]
+        }
 
         GameEvent::StackPushed { object_id } => {
             vec![card_seg(state, *object_id), text(" added to stack")]
@@ -639,6 +645,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::CreatureSuspected { object_id } => {
             vec![card_seg(state, *object_id), text(" becomes suspected")]
+        }
+
+        GameEvent::Detained { object_id } => {
+            vec![card_seg(state, *object_id), text(" is detained")]
         }
 
         GameEvent::BecamePrepared { object_id } => {

@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 
 import type { ManaCost, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
@@ -109,6 +110,7 @@ function CombatTaxContent({ data }: { data: CombatTaxPayment["data"] }) {
 }
 
 function CreatureCostRow({
+  objectId,
   cost,
   name,
 }: {
@@ -116,8 +118,12 @@ function CreatureCostRow({
   cost: ManaCost;
   name: string;
 }) {
+  const hoverProps = useInspectHoverProps();
   return (
-    <div className="flex items-center justify-between py-1 text-sm">
+    <div
+      {...hoverProps(objectId)}
+      className="flex items-center justify-between py-1 text-sm"
+    >
       <span className="truncate text-slate-200">{name}</span>
       <ManaCostSymbols cost={cost} />
     </div>

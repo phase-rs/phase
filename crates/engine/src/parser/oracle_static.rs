@@ -47,7 +47,8 @@ use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::phase::Phase;
 use crate::types::statics::{
     ActivationExemption, BlockExceptionKind, CastFrequency, CastingProhibitionCondition,
-    CostPaymentProhibition, HandSizeModification, ProhibitionScope, StaticMode, TriggerCause,
+    CostPaymentProhibition, ExileCastCost, HandSizeModification, ProhibitionScope, StaticMode,
+    TriggerCause,
 };
 use crate::types::zones::Zone;
 
@@ -831,6 +832,45 @@ fn collect_source_in_zones(cond: &StaticCondition, out: &mut Vec<crate::types::z
     }
 }
 
+/// CR 702.5 + CR 702.6 + CR 613.4c: Shared subject dispatch for attached-subject
+/// grant lines ("enchanted creature ...", "equipped creature ...", etc.).
+///
+/// Returns the `EnchantedBy`/`EquippedBy` `TargetFilter` plus the remaining
+/// predicate (the original-case slice after the subject prefix), or `None` when
+/// the line has no recognized attached-subject prefix. Longest-prefix-first so
+/// "enchanted permanent " is tried before "enchanted creature " cannot win
+/// erroneously — each prefix is distinct, but ordering keeps intent explicit.
+///
+/// "enchanted land is a " is intentionally NOT handled here; that type-changing
+/// branch has its own dedicated dispatch in `parse_static_line_inner`.
+fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFilter, &'a str)> {
+    if let Some(rest) = nom_tag_tp(tp, "enchanted creature ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            rest.original,
+        ));
+    }
+    if let Some(rest) = nom_tag_tp(tp, "enchanted permanent ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy])),
+            rest.original,
+        ));
+    }
+    if let Some(rest) = nom_tag_tp(tp, "enchanted land ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy])),
+            rest.original,
+        ));
+    }
+    if let Some(rest) = nom_tag_tp(tp, "equipped creature ") {
+        return Some((
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
+            rest.original,
+        ));
+    }
+    None
+}
+
 fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<StaticDefinition> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
@@ -978,6 +1018,15 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 
     // CR 604.3 + CR 601.2a: "Once during each of your turns, you may cast [filter] from your graveyard."
     if let Some(result) = try_parse_graveyard_cast_permission(&text, &lower) {
+        return Some(result);
+    }
+
+    // CR 601.2a + CR 113.6b + CR 118.9: "Once each turn, you may cast [filter]
+    // from among cards exiled with ~ this turn [without paying its mana cost]."
+    // Maralen, Fae Ascendant is the type specimen; the handler accepts the
+    // wider class (any frequency, any mana-value comparator) so future
+    // printings slot in without parser changes.
+    if let Some(result) = try_parse_exile_cast_permission(&text, &lower) {
         return Some(result);
     }
 
@@ -1136,7 +1185,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(rest) = nom_tag_tp(&tp, "enchanted creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
+        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
+            .into_iter()
+            .next()
+        {
             return Some(def);
         }
     }
@@ -1145,7 +1197,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(rest) = nom_tag_tp(&tp, "enchanted permanent ") {
         let filter =
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
+        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
+            .into_iter()
+            .next()
+        {
             return Some(def);
         }
     }
@@ -1186,7 +1241,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(rest) = nom_tag_tp(&tp, "enchanted land ") {
         let filter =
             TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
+        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
+            .into_iter()
+            .next()
+        {
             return Some(def);
         }
     }
@@ -1195,7 +1253,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(rest) = nom_tag_tp(&tp, "equipped creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
+        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
+            .into_iter()
+            .next()
+        {
             return Some(def);
         }
     }
@@ -1305,6 +1366,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 
     // --- "Enchanted/Equipped creature's controller may have it assign..." ---
     if let Some(def) = parse_attached_creature_assign_damage_as_though_unblocked(&tp, &text) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_contextual_continuous_subject_static(&tp, &text) {
         return Some(def);
     }
 
@@ -2411,6 +2476,13 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
+    // --- "the \"legend rule\" doesn't apply [to <scope> you control]" (CR 704.5j) ---
+    // Mirror Gallery (global), Sakashima of a Thousand Faces / Mirror Box
+    // ("permanents you control"), Sliver Gravemother / Spider-Verse (subtype).
+    if let Some(def) = parse_legend_rule_exemption(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "as though it/they had flash" (CR 702.8a) ---
     if nom_primitives::scan_contains(tp.lower, "as though it had flash")
         || nom_primitives::scan_contains(tp.lower, "as though they had flash")
@@ -2852,6 +2924,28 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     // A single `StaticDefinition` cannot carry both modes, so decompose them.
     if let Some(defs) = try_split_and_must_attack_block(&stripped) {
         return defs;
+    }
+
+    // CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Attached-subject grant lines
+    // ("enchanted creature ...", "equipped creature ...") may decompose into more
+    // than one StaticDefinition (e.g. CantBeBlocked + Continuous{AddKeyword}).
+    // `parse_enchanted_equipped_predicate` is the single mechanism for all such
+    // compound forms; simple lines flow back as a length-1 Vec. The single-return
+    // `parse_static_line` path keeps only the first def, so the multi path must
+    // dispatch here before the fallback.
+    //
+    // CR 205.1a + CR 613.1d: "enchanted creature is a [type] ..." type-change
+    // lines (Darksteel Mutation) are owned by `parse_enchanted_is_type`, which
+    // the single-return fallback dispatches BEFORE the attached-subject grant
+    // branch. Defer those to the fallback so the type-line decomposition is not
+    // pre-empted by the continuous-grant parser.
+    if parse_enchanted_is_type(&tp, &stripped).is_none() {
+        if let Some((filter, rest)) = attached_subject_filter(&tp) {
+            let defs = parse_enchanted_equipped_predicate(rest, filter, &stripped);
+            if !defs.is_empty() {
+                return defs;
+            }
+        }
     }
 
     // Fall back to the single-return parser.
@@ -3306,13 +3400,13 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::IsCommander]),
                     )
-                // CR 111.1 / CR 205.3: A `non`/`non-` negation descriptor
-                // ("Nontoken creatures you control") is a type/token-identity
-                // negation, NOT a subtype. Bail so dispatch falls through to
-                // `parse_subject_additive_type_static`, which routes the
-                // subject through `parse_type_phrase` and yields the correct
-                // `FilterProp::NonToken`.
-                } else if descriptor_is_negation(descriptor) {
+                // CR 111.1 / CR 205.3 / CR 205.4a: A `non`/`non-` negation
+                // descriptor ("Nontoken creatures you control") or supertype
+                // descriptor ("Legendary creatures you control") is NOT a
+                // subtype. Bail so dispatch falls through to the subject parser,
+                // which routes the full phrase through `parse_type_phrase`.
+                } else if descriptor_is_negation(descriptor) || descriptor_is_supertype(descriptor)
+                {
                     return None;
                 } else if is_capitalized_words(descriptor) {
                     TargetFilter::Typed(
@@ -3333,9 +3427,12 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             p
                         }),
                 )
-            } else if descriptor_is_negation(desc_remaining) {
-                // CR 111.1 / CR 205.3: negation descriptor after a combat-status
-                // prefix — not a subtype; fall through to additive-type dispatch.
+            } else if descriptor_is_negation(desc_remaining)
+                || descriptor_is_supertype(desc_remaining)
+            {
+                // CR 111.1 / CR 205.3 / CR 205.4a: negation/supertype descriptor
+                // after a combat-status prefix — not a subtype; fall through to
+                // full subject parsing.
                 return None;
             } else if is_capitalized_words(desc_remaining) {
                 // Combat-status prefix found + remaining is a subtype
@@ -4129,12 +4226,72 @@ fn contextual_continuous_subject_filter(
     }
 
     let subject_tp = TextPair::new(subject_original, subject_lower);
+    if let Some(filter) = parse_controlled_compound_continuous_subject_filter(&subject_tp) {
+        return Some(filter);
+    }
+
     let group_subject_tp = nom_tag_tp(&subject_tp, "~ and ")
         .or_else(|| nom_tag_tp(&subject_tp, "this creature and "))?;
     let group_filter = parse_continuous_subject_filter(group_subject_tp.original)?;
     Some(TargetFilter::Or {
         filters: vec![TargetFilter::SelfRef, group_filter],
     })
+}
+
+/// CR 613.1: A single continuous static may name multiple controlled subjects
+/// before one shared predicate ("Skeletons you control and other Zombies you
+/// control get ..."). Parse each complete subject phrase and union them rather
+/// than letting the first subject consume the whole predicate.
+fn parse_controlled_compound_continuous_subject_filter(
+    subject: &TextPair<'_>,
+) -> Option<TargetFilter> {
+    let (left_lower, _, right_lower) = nom_primitives::scan_preceded(subject.lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("and ")).parse(input)
+    })?;
+    let right_start = subject.lower.len() - right_lower.len();
+    let left_original = subject.original[..left_lower.len()].trim();
+    let right_original = &subject.original[right_start..];
+
+    let left_filter = parse_continuous_subject_filter(left_original)?;
+    let right_filter = if let Some(filter) = parse_controlled_compound_continuous_subject_filter(
+        &TextPair::new(right_original, right_lower),
+    ) {
+        filter
+    } else {
+        parse_continuous_subject_filter(right_original)?
+    };
+
+    if !filter_has_source_or_controller_anchor(&left_filter)
+        || !filter_has_source_or_controller_anchor(&right_filter)
+    {
+        return None;
+    }
+
+    let mut filters = Vec::new();
+    push_or_filter_branch(&mut filters, left_filter);
+    push_or_filter_branch(&mut filters, right_filter);
+    Some(TargetFilter::Or { filters })
+}
+
+fn push_or_filter_branch(filters: &mut Vec<TargetFilter>, filter: TargetFilter) {
+    match filter {
+        TargetFilter::Or { filters: inner } => filters.extend(inner),
+        other => filters.push(other),
+    }
+}
+
+fn filter_has_source_or_controller_anchor(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SelfRef | TargetFilter::Controller => true,
+        TargetFilter::Typed(typed) => matches!(
+            typed.controller,
+            Some(ControllerRef::You | ControllerRef::Opponent)
+        ),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_has_source_or_controller_anchor)
+        }
+        _ => false,
+    }
 }
 
 fn exactly_one_creature_you_control_filter(condition: &StaticCondition) -> Option<&TargetFilter> {
@@ -5284,6 +5441,10 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return parse_continuous_subject_filter(rest_tp.original.trim());
     }
 
+    if let Some(filter) = parse_controlled_compound_continuous_subject_filter(&tp) {
+        return Some(filter);
+    }
+
     if let Some(rest_tp) = nom_tag_tp(&tp, "other ") {
         return parse_continuous_subject_filter(rest_tp.original.trim()).map(add_another_filter);
     }
@@ -5323,6 +5484,10 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(filter);
     }
 
+    if let Some(filter) = parse_typed_you_control_subject_filter(&tp) {
+        return Some(filter);
+    }
+
     // CR 903.3d: "commander(s) you control" / "commander(s)" subject phrase.
     // Must run before parse_creature_subject_filter because the bare token
     // "Commanders" otherwise falls into the capitalized-subtype fallback and
@@ -5341,6 +5506,105 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     }
 
     parse_rule_static_subject_filter(trimmed)
+}
+
+/// CR 109.5: In a static ability, "you" and "your" refer to the current
+/// controller of the object with that ability.
+fn parse_typed_you_control_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
+    if let Some(descriptor) = parse_subject_suffix(subject, " creatures you control") {
+        let descriptor = descriptor.trim_end();
+        if descriptor.is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ));
+        }
+        return typed_you_control_descriptor_filter(descriptor, true);
+    }
+
+    let descriptor = parse_subject_suffix(subject, " you control")?.trim_end();
+    if descriptor.is_empty() {
+        return None;
+    }
+    typed_you_control_descriptor_filter(descriptor, false)
+}
+
+/// CR 109.5: Keep the subject descriptor paired with its "you control" suffix
+/// so controller-scoped subjects can lower to the source controller.
+fn parse_subject_suffix<'a>(subject: &TextPair<'a>, suffix: &str) -> Option<TextPair<'a>> {
+    let (_, descriptor_lower) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(suffix),
+        tag::<_, _, OracleError<'_>>(suffix),
+    ))
+    .parse(subject.lower)
+    .ok()?;
+    Some(TextPair::new(
+        &subject.original[..descriptor_lower.len()],
+        descriptor_lower,
+    ))
+}
+
+/// CR 109.5 + CR 205.3 + CR 205.4a: Controller-scoped subject descriptors
+/// may name object types, colors, subtypes, or supertypes controlled by the
+/// source's controller.
+fn typed_you_control_descriptor_filter(
+    descriptor: TextPair<'_>,
+    creature_subject: bool,
+) -> Option<TargetFilter> {
+    if descriptor_is_negation(descriptor.original) || descriptor_is_supertype(descriptor.original) {
+        return None;
+    }
+
+    if matches!(descriptor.lower, "creature" | "creatures") {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+    }
+
+    if let Some(color) = parse_named_color(descriptor.original) {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::HasColor { color }]),
+        ));
+    }
+
+    if let Some(filter) = try_parse_compound_subtypes(descriptor.original, &[], false) {
+        return Some(filter);
+    }
+
+    let singular_core_descriptor = strip_one_trailing_ascii_s(descriptor.lower);
+    if let Some(core_type) = try_parse_core_type_descriptor(descriptor.lower)
+        .or_else(|| try_parse_core_type_descriptor(singular_core_descriptor))
+    {
+        let typed = if creature_subject {
+            TypedFilter::creature().with_type(core_type)
+        } else {
+            TypedFilter::new(core_type)
+        };
+        return Some(TargetFilter::Typed(typed.controller(ControllerRef::You)));
+    }
+
+    if is_capitalized_words(descriptor.original) {
+        let subtype_name = parse_subtype(descriptor.original)
+            .map(|(canonical, _)| canonical)
+            .unwrap_or_else(|| descriptor.original.to_string());
+        return Some(TargetFilter::Typed(
+            typed_filter_for_subtype(&subtype_name).controller(ControllerRef::You),
+        ));
+    }
+
+    None
+}
+
+/// CR 205.2a: Core card type descriptors may appear in singular or regular
+/// plural form in Oracle subject phrases; remove at most one ASCII plural `s`
+/// for core-type lookup only.
+fn strip_one_trailing_ascii_s(text: &str) -> &str {
+    if text.as_bytes().last() == Some(&b's') {
+        &text[..text.len() - 1]
+    } else {
+        text
+    }
 }
 
 /// CR 205.3m: Parse "creature [you control] that's a Wolf or a Werewolf" subjects.
@@ -5771,6 +6035,17 @@ fn descriptor_is_negation(descriptor: &str) -> bool {
     after_non.chars().next().is_some_and(|c| !c.is_whitespace())
 }
 
+/// CR 205.4a: Supertype descriptors include legendary, basic, snow, and world;
+/// parse supported supertype words through the shared target combinator so they
+/// fall through to `parse_type_phrase` instead of becoming fabricated subtypes.
+fn descriptor_is_supertype(descriptor: &str) -> bool {
+    let lower = descriptor.to_lowercase();
+    let is_supertype = all_consuming(nom_target::parse_supertype_word)
+        .parse(lower.as_str())
+        .is_ok();
+    is_supertype
+}
+
 fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
@@ -5853,14 +6128,13 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(TargetFilter::Typed(typed));
     }
 
-    // CR 111.1 / CR 205.3: A `non`/`non-` negation descriptor (e.g. "Nontoken
-    // creatures") is a type phrase with a token-identity / type negation, NOT a
-    // subtype. `is_capitalized_words` below would otherwise fabricate a bogus
-    // `Subtype("Nontoken")` for a sentence-leading capitalized "Nontoken". Bail
-    // so `parse_continuous_subject_filter` falls through to its own
-    // `parse_type_phrase` call, whose negation loop maps `nontoken` →
-    // `FilterProp::NonToken` via `classify_negation`.
-    if descriptor_is_negation(descriptor) {
+    // CR 111.1 / CR 205.3 / CR 205.4a: A `non`/`non-` negation descriptor
+    // (e.g. "Nontoken creatures") or a supertype descriptor (e.g. "Legendary
+    // creatures") is NOT a subtype. `is_capitalized_words` below would
+    // otherwise fabricate a bogus subtype. Bail so `parse_continuous_subject_filter`
+    // falls through to its own `parse_type_phrase` call, whose typed grammar
+    // maps these descriptors onto properties.
+    if descriptor_is_negation(descriptor) || descriptor_is_supertype(descriptor) {
         return None;
     }
 
@@ -6271,6 +6545,79 @@ fn lower_rule_static(
                 .description(description.to_string())
         }
     }
+}
+
+/// CR 704.5j: Parse a "the \"legend rule\" doesn't apply [to <scope> you control]"
+/// static-ability line into a `LegendRuleDoesntApply` definition.
+///
+/// - Global form ("the legend rule doesn't apply.") → `affected: None`
+///   (Mirror Gallery).
+/// - Scoped form ("... doesn't apply to <scope> you control.") → a
+///   controller-scoped `affected` filter derived from `<scope>`.
+///
+/// Anchored on the canonical opening, so conditional / compound forms that do
+/// not begin with the exemption clause — "If there are exactly two permanents
+/// named …" (Brothers Yamazaki), "As long as you control …" (Mothers Yamazaki),
+/// "Numot … have vigilance and haste, and the legend rule doesn't apply to
+/// them" (The Herald of Numot) — fall through and remain Unimplemented rather
+/// than being misparsed.
+fn parse_legend_rule_exemption(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    let rest = nom_tag_tp(tp, "the \"legend rule\" doesn't apply")?;
+
+    // Global form: nothing (or just the sentence terminator) follows.
+    if rest.lower.trim().trim_end_matches('.').trim().is_empty() {
+        return Some(
+            StaticDefinition::new(StaticMode::LegendRuleDoesntApply).description(text.to_string()),
+        );
+    }
+
+    // Scoped form: "... to <scope> you control."
+    let scope = nom_tag_tp(&rest, " to ")?;
+    let affected = parse_legend_rule_scope(&scope)?;
+    Some(
+        StaticDefinition::new(StaticMode::LegendRuleDoesntApply)
+            .affected(affected)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 704.5j: Resolve the `<scope>` noun phrase of a legend-rule exemption
+/// ("permanents you control", "Slivers you control", ...) into a
+/// controller-scoped `affected` filter. Returns `None` for scopes this parser
+/// cannot resolve precisely ("tokens", "commanders", "creature tokens", "them"),
+/// so those cards are deferred rather than given a filter that silently matches
+/// nothing.
+/// CR 109.5: "you control" resolves to the source's controller.
+fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilter> {
+    // Drop the trailing sentence terminator so the combinator suffix split sees
+    // a clean "<descriptor> you control" phrase. allow-noncombinator: punctuation
+    // cleanup on a pre-tokenized chunk, not parsing dispatch.
+    let lower = scope.lower.trim_end().trim_end_matches('.').trim_end();
+    let cleaned = TextPair::new(&scope.original[..lower.len()], lower);
+    let base = parse_subject_suffix(&cleaned, " you control")?;
+
+    // "permanents you control" — every permanent the controller controls
+    // (Sakashima of a Thousand Faces, Mirror Box).
+    if base.lower == "permanents" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::You),
+        ));
+    }
+
+    // "<Subtype>s you control" — permanents of a single subtype (Sliver
+    // Gravemother, Spider-Verse). Require the subtype to consume the whole base
+    // so multi-word scopes ("creature tokens") are deferred, not truncated.
+    if let Some((canonical, consumed)) = parse_subtype(base.original) {
+        if consumed == base.original.len() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .subtype(canonical)
+                    .controller(ControllerRef::You),
+            ));
+        }
+    }
+
+    None
 }
 
 /// Determine player scope for "can't [verb]" patterns based on subject phrasing.
@@ -7821,39 +8168,227 @@ fn parse_activate_abilities_as_though_haste(
     )
 }
 
+/// CR 604.1 + CR 611.3a + CR 613.1f: a non-Continuous restriction primary
+/// (e.g. `CantBeBlocked`) may be conjoined with a trailing keyword grant
+/// ("can't be blocked and has shroud."). A single `StaticDefinition` can carry
+/// only one `StaticMode`, so when the primary is NON-Continuous and a trailing
+/// "and has <kw-list>" clause is present, emit a companion `Continuous` def for
+/// the recovered keyword(s), inheriting the primary's suffix condition.
+///
+/// GAP-1 guard: only appends a companion when the primary is non-Continuous —
+/// benign Continuous lines ("gets +1/+1 and has trample and lifelink") are
+/// already merged into one def by `parse_continuous_modifications` and must NOT
+/// be split.
+fn with_keyword_companion(
+    primary: StaticDefinition,
+    predicate: &str,
+    affected: &TargetFilter,
+    description: &str,
+    suffix_cond: Option<&StaticCondition>,
+) -> Vec<StaticDefinition> {
+    if matches!(primary.mode, StaticMode::Continuous) {
+        return vec![primary];
+    }
+    let mut companion_mods = Vec::new();
+    if let Some(keyword_text) = extract_keyword_clause(predicate) {
+        for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
+            push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
+        }
+    }
+    if companion_mods.is_empty() {
+        return vec![primary];
+    }
+    let mut companion = StaticDefinition::continuous()
+        .affected(affected.clone())
+        .modifications(companion_mods)
+        .description(description.to_string());
+    if let Some(cond) = suffix_cond {
+        companion.condition = Some(cond.clone());
+    }
+    vec![primary, companion]
+}
+
+/// CR 613.1f + CR 611.3a: Parse a comma-and list of "<keyword> if <condition>"
+/// clauses (Multiclass Baldric: "lifelink if you control a Cleric, deathtouch
+/// if you control a Rogue, ..."). The successful parse IS the detector — no
+/// `contains`. The leading "has " prefix is stripped by the caller.
+fn parse_conditional_keyword_list(
+    input: &str,
+) -> OracleResult<'_, Vec<(Keyword, StaticCondition)>> {
+    separated_list1(
+        // Oxford-comma tolerant: longest separator first.
+        alt((tag(", and "), tag(" and "), tag(", "))),
+        nom::sequence::pair(
+            map_keyword_run,
+            preceded(tag(" if "), parse_attached_condition_run),
+        ),
+    )
+    .parse(input)
+}
+
+/// Parse a single keyword spelled as a run of alphabetic words, returning the
+/// mapped `Keyword`. Consumes greedily up to (but not including) " if ".
+fn map_keyword_run(input: &str) -> OracleResult<'_, Keyword> {
+    let (rest, word) = take_until::<_, _, OracleError<'_>>(" if ").parse(input)?;
+    match map_keyword(word.trim()) {
+        Some(kw) => Ok((rest, kw)),
+        None => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::MapRes,
+        ))),
+    }
+}
+
+/// Parse a condition run up to the next list separator (", " / " and ") or the
+/// end of input, delegating the recovered text to `parse_attached_static_condition`.
+///
+/// `take_until(", ")` is tried before `take_until(" and ")` and both before the
+/// `rest` fallback: a `, ` separator (also the prefix of `, and `) terminates the
+/// clause first; the bare ` and ` form is the joiner of the final two members;
+/// `rest` captures the last member, which has no trailing separator. The
+/// recovered span is a single subtype-presence condition with no embedded
+/// separators, so the shortest non-empty match is always the correct boundary.
+fn parse_attached_condition_run(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (remaining, cond_span) = alt((
+        take_until::<_, _, OracleError<'_>>(", "),
+        take_until(" and "),
+        rest,
+    ))
+    .parse(input)?;
+    let cond_text = cond_span.trim().trim_end_matches('.');
+    match parse_attached_static_condition(cond_text) {
+        Some(cond) => Ok((remaining, cond)),
+        None => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::MapRes,
+        ))),
+    }
+}
+
 /// Parse the predicate of an enchanted/equipped grant, handling:
 /// - Non-standard keyword phrasings: "can attack as though it had haste", "can't be blocked"
 /// - Conditional grants: "gets +1/+1 as long as you control a Wizard"
+/// - Compound restriction + keyword grants: "can't be blocked and has shroud"
+/// - Per-subtype conditional keyword lists: "lifelink if you control a Cleric, ..."
+/// - Turn-gated alternatives: "has deathtouch during your turn. Otherwise, it has reach."
 /// - Standard continuous grants: "gets +N/+M", "has keyword", "for each", "where X is"
 ///
-/// CR 702.10 + CR 509.1b + CR 613.4c: Enchanted/equipped predicate dispatch.
+/// Returns a `Vec` because compound forms produce more than one
+/// `StaticDefinition` (a single `StaticDefinition` carries only one
+/// `StaticMode`). Simple lines return a length-1 vec; unparsed lines an empty
+/// vec.
+///
+/// CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Enchanted/equipped predicate dispatch.
 fn parse_enchanted_equipped_predicate(
     predicate: &str,
     affected: TargetFilter,
     description: &str,
-) -> Option<StaticDefinition> {
+) -> Vec<StaticDefinition> {
     let pred_lower = predicate.to_lowercase();
     let pred_tp = TextPair::new(predicate, &pred_lower);
+
+    // --- PATTERN 3b: ". Otherwise, [it] has <kw>" turn-gated alternative ---
+    // CR 604.1 + CR 611.3a + CR 613.1f: head clause gated DuringYourTurn (via the
+    // standard predicate path's `strip_suffix_turn_condition`), companion gated
+    // Not(DuringYourTurn). Hunter's Blowgun: "Equipped creature has deathtouch
+    // during your turn. Otherwise, it has reach."
+    type VE<'a> = OracleError<'a>;
+    if let Some((head_tp, tail_tp)) = pred_tp
+        .split_around(". otherwise, ")
+        .or_else(|| pred_tp.split_around(". otherwise "))
+    {
+        let head = head_tp.original.trim();
+        // CR 604.1: the head carries the gating turn condition
+        // ("has deathtouch during your turn"). Strip it to DuringYourTurn, then
+        // parse the bare keyword grant.
+        let (head_predicate, turn_condition) = strip_suffix_turn_condition(head);
+        if let Some(mut primary) =
+            parse_continuous_gets_has(&head_predicate, affected.clone(), description)
+        {
+            // Recover the head's EFFECTIVE gating condition (CR 611.3a — the
+            // companion must be the strict complement of whatever gates the head):
+            //   (a) a trailing turn condition ("during your turn") stripped above
+            //       → DuringYourTurn (Hunter's Blowgun); or
+            //   (b) an "as long as <cond>" condition carried on the parsed head def
+            //       (e.g. Clutch of Undeath "gets +3/+3 as long as it's a Zombie");
+            //       `parse_continuous_gets_has` populates `primary.condition` from
+            //       its own " as long as " split.
+            // If neither is present there is no recoverable head condition: do NOT
+            // emit an unconditional companion (that would apply both clauses at
+            // once). Bail out of PATTERN 3b so the line falls through to the
+            // single-def path, preventing any regression on unanticipated
+            // "otherwise" phrasings.
+            let head_condition = turn_condition.clone().or_else(|| primary.condition.clone());
+            if let Some(head_condition) = head_condition {
+                // The head def retains its own gating condition: for the turn case
+                // re-assert it; for the as-long-as case it is already preserved.
+                primary.condition = Some(head_condition.clone());
+                // The tail may start with "it " / "it has " — strip both to reach the
+                // bare continuous predicate, then re-add "has " so
+                // `parse_continuous_gets_has` sees a verb.
+                let tail_lower = tail_tp.lower;
+                let tail_orig = tail_tp.original;
+                let tail_predicate =
+                    if let Some(rest) = nom_tag_lower(tail_orig, tail_lower, "it has ") {
+                        format!("has {rest}")
+                    } else if let Some(rest) = nom_tag_lower(tail_orig, tail_lower, "it ") {
+                        rest.to_string()
+                    } else {
+                        tail_orig.trim().to_string()
+                    };
+                if let Some(mut companion) =
+                    parse_continuous_gets_has(&tail_predicate, affected.clone(), description)
+                {
+                    // CR 611.3a + CR 613.1f: companion is the strict complement gate
+                    // of the head's effective condition. Mutually exclusive so the
+                    // two clauses never apply simultaneously.
+                    companion.condition = Some(StaticCondition::Not {
+                        condition: Box::new(head_condition),
+                    });
+                    return vec![primary, companion];
+                }
+            }
+        }
+    }
+
+    // --- PATTERN 3a: "[has ]<kw> if <cond>, <kw> if <cond>, ..." list ---
+    // CR 613.1f + CR 611.3a: per-subtype conditional keyword grants. Each clause
+    // becomes a Continuous{AddKeyword} gated on its own condition. The combinator
+    // parse IS the detector (no contains). Multiclass Baldric.
+    {
+        let list_input = nom_tag_lower(&pred_lower, &pred_lower, "has ").unwrap_or(&pred_lower);
+        if let Ok((rest, pairs)) = parse_conditional_keyword_list(list_input) {
+            if rest.trim().trim_end_matches('.').is_empty() && pairs.len() > 1 {
+                return pairs
+                    .into_iter()
+                    .map(|(kw, cond)| {
+                        StaticDefinition::continuous()
+                            .affected(affected.clone())
+                            .modifications(vec![ContinuousModification::AddKeyword { keyword: kw }])
+                            .condition(cond)
+                            .description(description.to_string())
+                    })
+                    .collect();
+            }
+        }
+    }
 
     // --- Non-standard keyword phrasings (check before continuous grants) ---
 
     // CR 702.10: "can attack as though it had haste" → AddKeyword(Haste)
     if nom_primitives::scan_contains(&pred_lower, "can attack as though it had haste") {
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddKeyword {
-                    keyword: Keyword::Haste,
-                }])
-                .description(description.to_string()),
-        );
+        return vec![StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }])
+            .description(description.to_string())];
     }
 
     // CR 702.3b: "can attack as though <pronoun> didn't have defender" →
     // CanAttackWithDefender. Accepts both pronoun forms so plural subjects
     // ("Creatures you control …they didn't…") routed through the
     // creatures-you-control prefix handler (line ~620) land here.
-    type VE<'a> = OracleError<'a>;
     if alt((
         tag::<_, _, VE>("can attack as though it didn't have defender"),
         tag::<_, _, VE>("can attack as though they didn't have defender"),
@@ -7861,11 +8396,9 @@ fn parse_enchanted_equipped_predicate(
     .parse(pred_lower.as_str())
     .is_ok()
     {
-        return Some(
-            StaticDefinition::new(StaticMode::CanAttackWithDefender)
-                .affected(affected)
-                .description(description.to_string()),
-        );
+        return vec![StaticDefinition::new(StaticMode::CanAttackWithDefender)
+            .affected(affected)
+            .description(description.to_string())];
     }
 
     // CR 509.1b: "can't be blocked" on enchanted/equipped creature
@@ -7891,12 +8424,18 @@ fn parse_enchanted_equipped_predicate(
             let mut def = StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
                 kind: classify_block_exception(rest),
             })
-            .affected(affected)
+            .affected(affected.clone())
             .description(description.to_string());
-            if let Some(condition) = suffix_condition {
-                def.condition = Some(condition);
+            if let Some(condition) = &suffix_condition {
+                def.condition = Some(condition.clone());
             }
-            return Some(def);
+            return with_keyword_companion(
+                def,
+                body_tp.original,
+                &affected,
+                description,
+                suffix_condition.as_ref(),
+            );
         }
         // CR 509.1b: "can't be blocked by <filter>" → CantBeBlockedBy
         if let Some(rest) = nom_tag_lower(body_lower, body_lower, "can't be blocked by ") {
@@ -7910,21 +8449,33 @@ fn parse_enchanted_equipped_predicate(
             });
             if !matches!(filter, TargetFilter::Any) {
                 let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
-                    .affected(affected)
+                    .affected(affected.clone())
                     .description(description.to_string());
-                if let Some(condition) = suffix_condition {
-                    def.condition = Some(condition);
+                if let Some(condition) = &suffix_condition {
+                    def.condition = Some(condition.clone());
                 }
-                return Some(def);
+                return with_keyword_companion(
+                    def,
+                    body_tp.original,
+                    &affected,
+                    description,
+                    suffix_condition.as_ref(),
+                );
             }
         }
         let mut def = StaticDefinition::new(StaticMode::CantBeBlocked)
-            .affected(affected)
+            .affected(affected.clone())
             .description(description.to_string());
-        if let Some(condition) = suffix_condition {
-            def.condition = Some(condition);
+        if let Some(condition) = &suffix_condition {
+            def.condition = Some(condition.clone());
         }
-        return Some(def);
+        return with_keyword_companion(
+            def,
+            body_tp.original,
+            &affected,
+            description,
+            suffix_condition.as_ref(),
+        );
     }
 
     // --- Conditional grants: split "as long as" before passing to continuous parser ---
@@ -7941,12 +8492,18 @@ fn parse_enchanted_equipped_predicate(
                 },
             );
             def.condition = Some(condition);
-            return Some(def);
+            return vec![def];
         }
     }
 
-    // --- Standard continuous grants (gets/has/for each/where X) ---
-    parse_continuous_gets_has(predicate, affected, description)
+    // --- STANDARD DEFAULT (GAP-1 regression guard): whole-predicate continuous
+    // parse. "gets +N/+M and has trample and lifelink" is merged into ONE
+    // Continuous def by `parse_continuous_modifications`, so it returns here and
+    // is NEVER split. ---
+    match parse_continuous_gets_has(predicate, affected, description) {
+        Some(def) => vec![def],
+        None => vec![],
+    }
 }
 
 /// Parse "gets +N/+M [and has {keyword}]" after the subject.
@@ -8283,6 +8840,25 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
                 part.as_ref(),
                 where_x_expression.as_deref(),
             );
+        }
+    }
+
+    // CR 613.1f: Pre-quote keyword recovery for compound lines like Swashbuckler's
+    // Whip: 'has reach, "{2}, {T}: ...," and "{8}, {T}: ...".' Stripping the quoted
+    // segments can mangle the boundary between the leading bare keyword and the
+    // first quote, so the keyword clause above may miss "reach". Scan the slice
+    // BEFORE the first quote independently. GUARD: only run when the post-strip
+    // path produced no AddKeyword (prevents double-adding a keyword).
+    if !modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddKeyword { .. }))
+    {
+        if let Ok((_, pre_quote)) = take_until::<_, _, OracleError<'_>>("\"").parse(text_stripped) {
+            if let Some(keyword_text) = extract_keyword_clause(pre_quote) {
+                for part in split_keyword_list(keyword_text.trim().trim_end_matches(',').trim()) {
+                    push_grant_clause_modifications(&mut modifications, part.as_ref(), None);
+                }
+            }
         }
     }
 
@@ -9721,6 +10297,111 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
     Some(def)
 }
 
+/// CR 601.2a + CR 113.6b + CR 118.9: Parse the Maralen-class exile cast
+/// permission line: "Once each turn, you may cast [filter] from among cards
+/// exiled with ~ this turn [without paying its mana cost]." Mirrors
+/// `try_parse_graveyard_cast_permission` for the exile-pool sibling.
+///
+/// Accepted shapes:
+/// - "once each turn, you may cast a spell with mana value less than or equal
+///   to <quantity_ref> from among cards exiled with ~ this turn without paying
+///   its mana cost." (Maralen, Fae Ascendant)
+/// - The longer "once during each of your turns, you may cast …" synonym.
+/// - Unlimited shape ("you may cast …") is left for a future printing — Maralen
+///   is the only shipping card today so the `Unlimited` branch is not gated on
+///   any anchor; adding it requires an Oracle-confirmed sibling printing first.
+///
+/// Returns `None` for shapes outside this class (graveyard/top-of-library/hand
+/// permissions all anchor on different phrases earlier in the dispatch chain).
+fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+    // CR 601.2a: Frequency prefix. Both "once each turn" (Maralen) and the
+    // longer "once during each of your turns" synonym map to `OncePerTurn`.
+    // Both prefixes are tried via the file-wide `or_else` chain — adding an
+    // `Unlimited` ("you may cast …") sibling needs an Oracle-confirmed
+    // printing to disambiguate from the existing graveyard / hand handlers.
+    let rest = nom_tag_lower(lower, lower, "once each turn, you may cast ").or_else(|| {
+        nom_tag_lower(
+            lower,
+            lower,
+            "once during each of your turns, you may cast ",
+        )
+    })?;
+    let frequency = CastFrequency::OncePerTurn;
+
+    // Strip the leading article — `parse_type_phrase` expects the bare noun.
+    let rest = nom_tag_lower(rest, rest, "a ")
+        .or_else(|| nom_tag_lower(rest, rest, "an "))
+        .unwrap_or(rest);
+
+    // CR 113.6b: Anchor on " from among cards exiled with " — the
+    // class-defining phrase. Anything before is the affected filter; anything
+    // after is the source self-reference plus optional alt-cost / "this turn"
+    // markers.
+    let (filter_text, trailing) =
+        nom_primitives::split_once_on(rest, " from among cards exiled with ")
+            .ok()
+            .map(|(_, pair)| pair)?;
+
+    // Drop trailing " spell"/" spells" so `parse_type_phrase` sees the bare
+    // type. Mirrors the graveyard / top-of-library / hand sibling parsers.
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
+        Cow::Owned(filter_text.replacen(" spells", "", 1))
+    } else if nom_primitives::scan_contains(filter_text, "spell") {
+        Cow::Owned(filter_text.replacen(" spell", "", 1))
+    } else {
+        Cow::Borrowed(filter_text)
+    };
+
+    // `parse_type_phrase` already composes the dynamic "with mana value …"
+    // suffix through `parse_mana_value_suffix`, so Maralen's filter
+    // ("spell with mana value less than or equal to the number of Elves and
+    // Faeries you control") resolves through one call — no bespoke combinator
+    // chain needed here.
+    let (filter, remainder) = parse_type_phrase(&cleaned);
+    if !remainder.trim().is_empty() {
+        // Strict: any unconsumed remainder is a filter shape we don't yet
+        // model. Decline so the line either dispatches to the next handler or
+        // surfaces as Unimplemented (which the swallow detector picks up as a
+        // coverage gap rather than a misparse).
+        return None;
+    }
+
+    // CR 113.6b + CR 201.5: The source reference is normalized to `~` for
+    // `SELF_REF_TYPE_PHRASES` (this creature, this permanent, …) but left
+    // verbatim for `SELF_REF_PARSE_ONLY_PHRASES` ("this card"). Accept either
+    // form so the static covers future cards that lean on the parse-only set.
+    let after_source = std::iter::once("~")
+        .chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied())
+        .find_map(|phrase| nom_tag_lower(trailing, trailing, phrase))?;
+
+    // CR 113.6b: The "this turn" suffix is structural — without it the
+    // permission would not be per-turn-scoped and would belong to the
+    // open-ended `ExiledBySource` class instead.
+    let after_this_turn = nom_tag_lower(after_source, after_source, " this turn")?;
+
+    // CR 118.9a: Optional " without paying its mana cost" / "their mana costs"
+    // alt-cost rider selects the `WithoutPayingManaCost` shape; absence leaves
+    // the static at `PayNormalCost`. The `scan_contains` is the same idiom the
+    // sibling graveyard parser uses for its trailing alt-cost detection.
+    let cost = if nom_primitives::scan_contains(after_this_turn, "without paying its mana cost")
+        || nom_primitives::scan_contains(after_this_turn, "without paying their mana cost")
+    {
+        ExileCastCost::WithoutPayingManaCost
+    } else {
+        ExileCastCost::PayNormalCost
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency,
+            play_mode: CardPlayMode::Cast,
+            cost,
+        })
+        .affected(filter)
+        .description(text.to_string()),
+    )
+}
+
 /// CR 601.3 + CR 113.6b: Parse the affected-card filter of a graveyard
 /// cast-permission ability. When the filter text is a self-reference phrase
 /// ("this card", "this creature", "this permanent", ...), the permission
@@ -10379,6 +11060,25 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
                 Ok((_, (before, _))) => (before, true),
                 Err(_) => (without_from, false),
             };
+        // CR 205.2a + CR 601.2f: Strip the "of the chosen type" / "of that type"
+        // qualifier (Cloud Key, Umori, Stenn, Herald's Horn: "Spells you cast of
+        // the chosen type cost {1} less"). A "you cast" infix sits between the
+        // type word and this qualifier, so the trim chain below can't reach the
+        // type word and `parse_type_phrase` never extracts the chosen-type
+        // discriminator. Strip it here and re-attach IsChosenCardType /
+        // IsChosenCreatureType after the base type is parsed — mirrors the
+        // "with the chosen name" handling above.
+        let (without_chosen, has_chosen_type) = if let Ok((_, (before, _))) =
+            nom_primitives::split_once_on(without_chosen, " of the chosen type")
+        {
+            (before, true)
+        } else if let Ok((_, (before, _))) =
+            nom_primitives::split_once_on(without_chosen, " of that type")
+        {
+            (before, true)
+        } else {
+            (without_chosen, false)
+        };
         let type_desc = without_chosen
             .trim_end_matches(" you cast")
             .trim_end_matches(" your opponents cast")
@@ -10411,6 +11111,32 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
                     })
                 }
             }
+        };
+        // CR 205.2a: Re-attach the chosen-type discriminator stripped above. A
+        // creature-typed base ("Creature spells ... of the chosen type",
+        // Herald's Horn) pairs with a chosen CREATURE type; a bare-spells base
+        // ("Spells ... of the chosen type", Cloud Key / Umori / Stenn) pairs
+        // with a chosen CARD type. Resolved at cast time against the source
+        // permanent's `ChosenAttribute` (CR 601.2f).
+        let typed_filter = if has_chosen_type {
+            match typed_filter {
+                Some(TargetFilter::Typed(mut tf))
+                    if tf.type_filters.contains(&TypeFilter::Creature) =>
+                {
+                    tf.properties.push(FilterProp::IsChosenCreatureType);
+                    Some(TargetFilter::Typed(tf))
+                }
+                Some(TargetFilter::Typed(mut tf)) => {
+                    tf.properties.push(FilterProp::IsChosenCardType);
+                    Some(TargetFilter::Typed(tf))
+                }
+                None => Some(TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::IsChosenCardType]),
+                )),
+                other => other,
+            }
+        } else {
+            typed_filter
         };
         // Compose chosen-name constraint with the typed prefix (if any). Bare
         // "Spells with the chosen name" → `HasChosenName` alone; typed
@@ -11641,6 +12367,110 @@ mod tests {
     }
 
     #[test]
+    fn static_controlled_compound_subject_shares_continuous_predicate() {
+        let def = parse_static_line(
+            "Skeletons you control and other Zombies you control get +1/+1 and have deathtouch.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Or { ref filters })
+                if filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.controller == Some(ControllerRef::You)
+                            && typed.type_filters.iter().any(|type_filter| matches!(
+                                type_filter,
+                                TypeFilter::Subtype(subtype) if subtype == "Skeleton"
+                            ))
+                            && !typed.properties.contains(&FilterProp::Another)
+                ))
+                    && filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(typed)
+                            if typed.controller == Some(ControllerRef::You)
+                                && typed.type_filters.iter().any(|type_filter| matches!(
+                                    type_filter,
+                                    TypeFilter::Subtype(subtype) if subtype == "Zombie"
+                                ))
+                                && typed.properties.contains(&FilterProp::Another)
+                    ))
+        ));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Deathtouch,
+            }));
+    }
+
+    #[test]
+    fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
+        let def = parse_static_line(
+            "Skeletons your opponents control and other Zombies your opponents control get -1/-1.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Or { ref filters })
+                if filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.controller == Some(ControllerRef::Opponent)
+                            && typed.type_filters.iter().any(|type_filter| matches!(
+                                type_filter,
+                                TypeFilter::Subtype(subtype) if subtype == "Skeleton"
+                            ))
+                            && !typed.properties.contains(&FilterProp::Another)
+                ))
+                    && filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(typed)
+                            if typed.controller == Some(ControllerRef::Opponent)
+                                && typed.type_filters.iter().any(|type_filter| matches!(
+                                    type_filter,
+                                    TypeFilter::Subtype(subtype) if subtype == "Zombie"
+                                ))
+                                && typed.properties.contains(&FilterProp::Another)
+                    ))
+        ));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: -1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: -1 }));
+    }
+
+    #[test]
+    fn static_custom_capitalized_subtype_you_control_preserves_s_suffix() {
+        let affected = parse_continuous_subject_filter("Anubis you control")
+            .expect("subject should produce a filter");
+        let TargetFilter::Typed(typed) = affected else {
+            panic!("expected typed subject filter");
+        };
+
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(
+            typed.type_filters.iter().any(|type_filter| matches!(
+                type_filter,
+                TypeFilter::Subtype(subtype) if subtype == "Anubis"
+            )),
+            "expected Anubis subtype, got {:?}",
+            typed.type_filters
+        );
+    }
+
+    #[test]
     fn static_cant_block() {
         let def = parse_static_line("Ragavan can't block.").unwrap();
         assert_eq!(def.mode, StaticMode::CantBlock);
@@ -12229,6 +13059,68 @@ mod tests {
                 _ => panic!("Expected Typed filter"),
             }
         }
+    }
+
+    #[test]
+    fn static_spells_of_chosen_type_cost_less_carries_chosen_card_type() {
+        // Issue #930 — Cloud Key / Umori / Stenn:
+        // "Spells you cast of the chosen type cost {1} less to cast."
+        // CR 205.2a: the "of the chosen type" qualifier must narrow the
+        // reduction to the chosen card type, not every spell. The "you cast"
+        // infix previously prevented the discriminator from being extracted.
+        let def =
+            parse_static_line("Spells you cast of the chosen type cost {1} less to cast.").unwrap();
+        let StaticMode::ReduceCost {
+            spell_filter: Some(TargetFilter::Typed(ref tf)),
+            ..
+        } = def.mode
+        else {
+            panic!(
+                "expected ReduceCost with a Typed spell_filter, got {:?}",
+                def.mode
+            );
+        };
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenCardType)),
+            "chosen-type cost reduction must carry IsChosenCardType, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn static_creature_spells_of_chosen_type_cost_less_carries_chosen_creature_type() {
+        // Issue #930 — Herald's Horn:
+        // "Creature spells you cast of the chosen type cost {1} less to cast."
+        // CR 205.2a: a creature-typed base pairs with a chosen CREATURE type.
+        let def =
+            parse_static_line("Creature spells you cast of the chosen type cost {1} less to cast.")
+                .unwrap();
+        let StaticMode::ReduceCost {
+            spell_filter: Some(TargetFilter::Typed(ref tf)),
+            ..
+        } = def.mode
+        else {
+            panic!(
+                "expected ReduceCost with a Typed spell_filter, got {:?}",
+                def.mode
+            );
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)),
+            "expected Creature type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenCreatureType)),
+            "creature chosen-type reduction must carry IsChosenCreatureType, got {:?}",
+            tf.properties
+        );
     }
 
     #[test]
@@ -14186,6 +15078,81 @@ mod tests {
     }
 
     #[test]
+    fn static_legend_rule_global_exemption() {
+        // CR 704.5j: Mirror Gallery — "The legend rule doesn't apply." (global).
+        let def = parse_static_line("The \"legend rule\" doesn't apply.").unwrap();
+        assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+        assert_eq!(def.affected, None);
+    }
+
+    #[test]
+    fn static_legend_rule_permanents_you_control() {
+        // CR 704.5j: Sakashima of a Thousand Faces / Mirror Box — controller scope.
+        let def = parse_static_line("The \"legend rule\" doesn't apply to permanents you control.")
+            .unwrap();
+        assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn static_legend_rule_subtype_scope() {
+        // CR 704.5j: Sliver Gravemother — "doesn't apply to Slivers you control."
+        let def =
+            parse_static_line("The \"legend rule\" doesn't apply to Slivers you control.").unwrap();
+        assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+        match def.affected {
+            Some(TargetFilter::Typed(ref typed)) => {
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(typed.type_filters.iter().any(|t| matches!(
+                    t,
+                    crate::types::ability::TypeFilter::Subtype(s) if s == "Sliver"
+                )));
+            }
+            other => panic!("expected typed subtype filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_legend_rule_routes_through_classifier() {
+        // The classifier must route exemption lines to the static parser.
+        assert!(crate::parser::oracle_classifier::is_static_pattern(
+            "the \"legend rule\" doesn't apply to permanents you control."
+        ));
+        assert!(crate::parser::oracle_classifier::is_static_pattern(
+            "the \"legend rule\" doesn't apply."
+        ));
+    }
+
+    #[test]
+    fn static_legend_rule_defers_unparseable_scopes() {
+        // CR 704.5j: scopes this parser cannot resolve precisely, and conditional
+        // forms, must NOT be emitted as a LegendRuleDoesntApply static — they are
+        // deferred (left Unimplemented), never misparsed into a no-op exemption.
+        for text in [
+            "The \"legend rule\" doesn't apply to tokens you control.", // Cadric
+            "The \"legend rule\" doesn't apply to commanders you control.", // Try-My-Deck Elemental
+            "If there are exactly two permanents named Brothers Yamazaki on the battlefield, the \"legend rule\" doesn't apply to them.",
+        ] {
+            assert!(
+                !matches!(
+                    parse_static_line(text),
+                    Some(StaticDefinition {
+                        mode: StaticMode::LegendRuleDoesntApply,
+                        ..
+                    })
+                ),
+                "scope must be deferred, not misparsed: {text}"
+            );
+        }
+    }
+
+    #[test]
     fn static_opponents_cant_gain_life() {
         // CR 119.7: Lifegain prevention — opponent scope
         let def = parse_static_line("Your opponents can't gain life.").unwrap();
@@ -14646,6 +15613,265 @@ mod tests {
                 }
             )),
             "missing CantBeBlocked grant in {mods:?}"
+        );
+    }
+
+    /// Extract the subtype string from a single-subtype `IsPresent` filter, for
+    /// asserting per-subtype conditional keyword grants.
+    fn is_present_subtype(cond: &StaticCondition) -> Option<String> {
+        let StaticCondition::IsPresent { filter: Some(f) } = cond else {
+            return None;
+        };
+        let TargetFilter::Typed(tf) = f else {
+            return None;
+        };
+        tf.type_filters.iter().find_map(|tfilter| match tfilter {
+            TypeFilter::Subtype(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    fn add_keyword_mods(def: &StaticDefinition) -> Vec<Keyword> {
+        def.modifications
+            .iter()
+            .filter_map(|m| match m {
+                ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 509.1b + CR 613.1f + CR 702.18a: Whispersilk Cloak — a `CantBeBlocked`
+    /// restriction conjoined with a keyword grant must emit BOTH a
+    /// `CantBeBlocked` def and a `Continuous{AddKeyword(Shroud)}` companion, each
+    /// affecting the equipped creature.
+    #[test]
+    fn attached_compound_cant_be_blocked_and_keyword() {
+        let defs = parse_static_line_multi("Equipped creature can't be blocked and has shroud.");
+        assert_eq!(defs.len(), 2, "expected 2 defs, got {defs:?}");
+
+        let restriction = defs
+            .iter()
+            .find(|d| matches!(d.mode, StaticMode::CantBeBlocked))
+            .expect("missing CantBeBlocked def");
+        let keyword_def = defs
+            .iter()
+            .find(|d| matches!(d.mode, StaticMode::Continuous))
+            .expect("missing Continuous keyword companion");
+
+        assert_eq!(
+            keyword_def.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Shroud
+            }],
+            "companion must grant exactly Shroud"
+        );
+        let equipped =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]));
+        assert_eq!(restriction.affected.as_ref(), Some(&equipped));
+        assert_eq!(keyword_def.affected.as_ref(), Some(&equipped));
+    }
+
+    /// CR 613.1f + CR 702.17a: Swashbuckler's Whip — "has reach" plus two quoted
+    /// granted abilities must merge into ONE `Continuous` def carrying
+    /// `AddKeyword(Reach)` and two `GrantAbility` modifications.
+    #[test]
+    fn attached_compound_keyword_and_quoted_abilities() {
+        let defs = parse_static_line_multi(
+            "Equipped creature has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\"",
+        );
+        assert_eq!(defs.len(), 1, "expected 1 merged def, got {defs:?}");
+        let def = &defs[0];
+        assert!(
+            matches!(def.mode, StaticMode::Continuous),
+            "expected Continuous mode"
+        );
+        assert!(
+            add_keyword_mods(def).contains(&Keyword::Reach),
+            "missing AddKeyword(Reach) in {:?}",
+            def.modifications
+        );
+        let grant_count = def
+            .modifications
+            .iter()
+            .filter(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+            .count();
+        assert_eq!(grant_count, 2, "expected 2 GrantAbility mods in {def:?}");
+    }
+
+    /// CR 613.1f + CR 611.3a: Multiclass Baldric — four per-subtype conditional
+    /// keyword grants, each its own `Continuous{AddKeyword}` gated on
+    /// `IsPresent{<subtype>}`.
+    #[test]
+    fn attached_conditional_keyword_list() {
+        let defs = parse_static_line_multi(
+            "Equipped creature has lifelink if you control a Cleric, deathtouch if you control a Rogue, haste if you control a Warrior, and flying if you control a Wizard.",
+        );
+        assert_eq!(defs.len(), 4, "expected 4 defs, got {defs:?}");
+
+        let expected = [
+            (Keyword::Lifelink, "Cleric"),
+            (Keyword::Deathtouch, "Rogue"),
+            (Keyword::Haste, "Warrior"),
+            (Keyword::Flying, "Wizard"),
+        ];
+        for (def, (kw, subtype)) in defs.iter().zip(expected.iter()) {
+            assert!(matches!(def.mode, StaticMode::Continuous));
+            assert_eq!(add_keyword_mods(def), vec![kw.clone()]);
+            let cond = def.condition.as_ref().expect("missing condition");
+            assert_eq!(
+                is_present_subtype(cond).as_deref(),
+                Some(*subtype),
+                "condition {cond:?} should be IsPresent {subtype}"
+            );
+        }
+    }
+
+    /// CR 604.1 + CR 611.3a + CR 613.1f: Hunter's Blowgun — a turn-gated keyword
+    /// alternative emits `AddKeyword(Deathtouch)` gated `DuringYourTurn` and
+    /// `AddKeyword(Reach)` gated `Not(DuringYourTurn)`.
+    #[test]
+    fn attached_otherwise_turn_gated_keywords() {
+        let defs = parse_static_line_multi(
+            "Equipped creature has deathtouch during your turn. Otherwise, it has reach.",
+        );
+        assert_eq!(defs.len(), 2, "expected 2 defs, got {defs:?}");
+
+        let deathtouch = &defs[0];
+        assert_eq!(add_keyword_mods(deathtouch), vec![Keyword::Deathtouch]);
+        assert_eq!(
+            deathtouch.condition.as_ref(),
+            Some(&StaticCondition::DuringYourTurn)
+        );
+
+        let reach = &defs[1];
+        assert_eq!(add_keyword_mods(reach), vec![Keyword::Reach]);
+        assert_eq!(
+            reach.condition.as_ref(),
+            Some(&StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn)
+            })
+        );
+    }
+
+    /// CR 611.3a: the ". Otherwise" split must work for an "as long as <cond>"
+    /// head condition (not only the turn-gated case). Clutch of Undeath-style
+    /// "gets +3/+3 as long as it's a Zombie. Otherwise, it gets -3/-3." must emit
+    /// two MUTUALLY EXCLUSIVE defs: the head gated on its own condition and the
+    /// companion gated on `Not(<head condition>)`. A companion with `condition ==
+    /// None` would apply both clauses at once (net +0/+0) — the regression this
+    /// guards against.
+    #[test]
+    fn attached_otherwise_as_long_as_gated() {
+        let defs = parse_static_line_multi(
+            "Enchanted creature gets +3/+3 as long as it's a Zombie. Otherwise, it gets -3/-3.",
+        );
+        assert_eq!(defs.len(), 2, "expected 2 defs, got {defs:?}");
+
+        // The head carries its own "as long as" gating condition.
+        let head_condition = defs[0]
+            .condition
+            .clone()
+            .expect("head def must retain its as-long-as condition");
+
+        // The companion must be the strict complement of the head condition,
+        // never unconditional.
+        assert_eq!(
+            defs[1].condition.as_ref(),
+            Some(&StaticCondition::Not {
+                condition: Box::new(head_condition)
+            }),
+            "companion must be Not(<head condition>), not None"
+        );
+    }
+
+    /// CR 509.1b + CR 702.18a: the compound restriction+keyword split applies to
+    /// all attached-subject prefixes, with the correct `EnchantedBy`/`EquippedBy`
+    /// filter.
+    #[test]
+    fn attached_compound_split_all_subjects() {
+        let cases = [
+            (
+                "Enchanted creature can't be blocked and has shroud.",
+                TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                ),
+            ),
+            (
+                "Enchanted permanent can't be blocked and has shroud.",
+                TargetFilter::Typed(
+                    TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
+                ),
+            ),
+            (
+                "Enchanted land can't be blocked and has shroud.",
+                TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy])),
+            ),
+        ];
+        for (line, expected_filter) in cases {
+            let defs = parse_static_line_multi(line);
+            assert_eq!(defs.len(), 2, "{line}: expected 2 defs, got {defs:?}");
+            assert!(
+                defs.iter()
+                    .any(|d| matches!(d.mode, StaticMode::CantBeBlocked)),
+                "{line}: missing CantBeBlocked"
+            );
+            let kw_def = defs
+                .iter()
+                .find(|d| matches!(d.mode, StaticMode::Continuous))
+                .expect("missing keyword companion");
+            assert_eq!(
+                kw_def.modifications,
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Shroud
+                }]
+            );
+            assert_eq!(kw_def.affected.as_ref(), Some(&expected_filter));
+        }
+    }
+
+    /// GAP-1 regression: benign continuous lines must NOT split. A "gets +N/+M
+    /// and has <keywords>" line is merged into ONE Continuous def by
+    /// `parse_continuous_modifications` and must return as a single def.
+    #[test]
+    fn attached_continuous_gets_and_keywords_no_split() {
+        let defs =
+            parse_static_line_multi("Equipped creature gets +1/+1 and has trample and lifelink.");
+        assert_eq!(defs.len(), 1, "expected exactly 1 def, got {defs:?}");
+        assert_eq!(
+            defs[0].modifications,
+            vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Lifelink
+                },
+            ]
+        );
+
+        // Loxodon Warhammer's grant line.
+        let warhammer =
+            parse_static_line_multi("Equipped creature gets +3/+0 and has trample and lifelink.");
+        assert_eq!(
+            warhammer.len(),
+            1,
+            "Warhammer: expected 1 def, got {warhammer:?}"
+        );
+        assert_eq!(
+            warhammer[0].modifications,
+            vec![
+                ContinuousModification::AddPower { value: 3 },
+                ContinuousModification::AddToughness { value: 0 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Lifelink
+                },
+            ]
         );
     }
 
@@ -15127,6 +16353,107 @@ mod tests {
         }
     }
 
+    /// Issue #594 (Maralen, Fae Ascendant) — parser test for the new exile
+    /// cast permission class. The full static line must lower to
+    /// `StaticMode::ExileCastPermission { OncePerTurn, Cast, without_paying }`
+    /// with the affected filter carrying the dynamic CMC cap. Anchored on
+    /// `parse_static_line` so the dispatch routing through `is_static_pattern`
+    /// → `parse_static_line_multi` → `parse_static_line_inner` is exercised
+    /// end-to-end.
+    #[test]
+    fn exile_cast_permission_maralen_fae_ascendant() {
+        let text = "Once each turn, you may cast a spell with mana value \
+                    less than or equal to the number of Elves and Faeries \
+                    you control from among cards exiled with ~ this turn \
+                    without paying its mana cost.";
+        let def = parse_static_line(text).expect("Maralen static must parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::WithoutPayingManaCost,
+            },
+            "expected ExileCastPermission, got {:?}",
+            def.mode
+        );
+        let affected = def.affected.as_ref().expect("affected filter present");
+        let TargetFilter::Typed(tf) = affected else {
+            panic!("expected typed filter, got {affected:?}");
+        };
+        let has_cmc_le = tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                }
+            )
+        });
+        assert!(
+            has_cmc_le,
+            "Maralen filter must carry a Cmc(LE, ObjectCount) predicate: {:?}",
+            tf.properties
+        );
+    }
+
+    /// Issue #594 sibling — the parser must accept the longer "once during
+    /// each of your turns" synonym, leaving the rest of the lowering
+    /// unchanged. No card prints this shape today, but `add-engine-variant`
+    /// requires the class be built for the pattern, not the single card.
+    #[test]
+    fn exile_cast_permission_during_each_of_your_turns_synonym() {
+        let text = "Once during each of your turns, you may cast a spell \
+                    with mana value 3 or less from among cards exiled with \
+                    ~ this turn without paying its mana cost.";
+        let def = parse_static_line(text).expect("synonym shape must parse");
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ExileCastPermission {
+                    frequency: CastFrequency::OncePerTurn,
+                    play_mode: CardPlayMode::Cast,
+                    cost: ExileCastCost::WithoutPayingManaCost,
+                }
+            ),
+            "expected ExileCastPermission(OncePerTurn, Cast, free), got {:?}",
+            def.mode
+        );
+    }
+
+    /// CR 113.6b: The "this turn" suffix is structural. A line that names
+    /// "cards exiled with ~" but omits "this turn" must NOT match this
+    /// permission class — that would belong to the open-ended
+    /// `ExiledBySource` family (Court of Locthwain, Bag of Holding, etc.)
+    /// and is parsed elsewhere.
+    #[test]
+    fn exile_cast_permission_rejects_missing_this_turn_suffix() {
+        let text = "Once each turn, you may cast a spell with mana value 3 \
+                    or less from among cards exiled with ~ without paying \
+                    its mana cost.";
+        let lower = text.to_lowercase();
+        assert!(
+            try_parse_exile_cast_permission(text, &lower).is_none(),
+            "Open-ended exile filter must not match the per-turn class"
+        );
+    }
+
+    /// CR 601.2a: The graveyard sibling handler must NOT intercept the
+    /// exile-cast permission line. Regression guard against accidentally
+    /// over-anchoring the graveyard branch on "you may cast" alone.
+    #[test]
+    fn exile_cast_permission_not_intercepted_by_graveyard_branch() {
+        let text = "Once each turn, you may cast a spell with mana value \
+                    less than or equal to the number of Elves and Faeries \
+                    you control from among cards exiled with ~ this turn \
+                    without paying its mana cost.";
+        let lower = text.to_lowercase();
+        assert!(try_parse_graveyard_cast_permission(text, &lower).is_none());
+        assert!(try_parse_exile_cast_permission(text, &lower).is_some());
+    }
+
     #[test]
     fn graveyard_cast_permission_no_rider_leaves_filter_clean() {
         // Lurrus / Muldrotha / Karador / Conduit / Yawgmoth's Will regression:
@@ -15386,6 +16713,69 @@ mod tests {
             tf.properties
         );
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn continuous_subject_filter_legendary_is_supertype_not_subtype() {
+        // CR 205.4a: "Legendary creatures you control" names the legendary
+        // supertype plus the creature card type, not a creature subtype named
+        // "Legendary". This is the Jodah, the Unifier anthem subject shape.
+        let filter = super::parse_continuous_subject_filter("Legendary creatures you control")
+            .expect("legendary creature subject should parse");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {:?}", filter);
+        };
+        assert!(
+            tf.get_subtype().is_none(),
+            "must NOT fabricate a subtype, got {:?}",
+            tf.get_subtype()
+        );
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }),
+            "expected HasSupertype(Legendary), got {:?}",
+            tf.properties
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn static_jodah_anthem_affected_filter_uses_legendary_supertype() {
+        // CR 205.4a + CR 613.4c: Jodah, the Unifier's anthem affects
+        // legendary creatures you control and scales by that same population.
+        let def = parse_static_line(
+            "Legendary creatures you control get +X/+X, where X is the number of legendary creatures you control.",
+        )
+        .expect("Jodah anthem static should parse");
+        let Some(TargetFilter::Typed(tf)) = &def.affected else {
+            panic!("Expected Typed affected filter, got {:?}", def.affected);
+        };
+        assert!(
+            tf.get_subtype().is_none(),
+            "must NOT fabricate Legendary as a subtype, got {:?}",
+            tf.get_subtype()
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }),
+            "expected affected filter to use HasSupertype(Legendary), got {:?}",
+            tf.properties
+        );
+        assert!(def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })));
+        assert!(def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })));
     }
 
     #[test]

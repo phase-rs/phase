@@ -32,6 +32,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
         WaitingFor::UntapChoice { .. } => DecisionKind::ActivateAbility,
+        // CR 508.1g: exert-as-attack is part of the attack declaration; route it
+        // to the attack policy population.
+        WaitingFor::ExertChoice { .. } => DecisionKind::DeclareAttackers,
         // CR 508.1d + CR 509.1c: Combat tax — route by context so the attack-tax
         // policy sees `DeclareAttackers` candidates and the block-tax policy sees
         // `DeclareBlockers` candidates.

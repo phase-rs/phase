@@ -17,7 +17,8 @@ use crate::types::mana::{
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    ActivationExemption, CastFrequency, CastingProhibitionCondition, ProhibitionScope, StaticMode,
+    ActivationExemption, CastFrequency, CastingProhibitionCondition, ExileCastCost,
+    ProhibitionScope, StaticMode,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -33,6 +34,7 @@ use super::ability_utils::{
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
+use super::game_object::PreparedState;
 use super::mana_payment;
 use super::quantity::resolve_quantity;
 use super::restrictions;
@@ -404,6 +406,21 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                 .collect();
         objects.extend(permission_ids);
     }
+
+    // CR 601.2a + CR 113.6b + CR 118.9: Cards in exile castable via a
+    // `StaticMode::ExileCastPermission` static from a battlefield permanent
+    // (Maralen, Fae Ascendant). Restricted to cards exiled "with" the source
+    // *this turn* (per the per-turn rolling list); the static's `affected`
+    // filter further constrains the eligible cards (type, mana value, etc.).
+    // CR 117.1c: per-turn frequency is enforced inside the helper, not by
+    // active-player gating, so the same logic covers the rare case of an
+    // `Unlimited` printing on either player's turn.
+    let exile_permission_ids: HashSet<ObjectId> =
+        exile_objects_castable_by_permission(state, player)
+            .iter()
+            .map(|(obj_id, _source_id, _freq)| *obj_id)
+            .collect();
+    objects.extend(exile_permission_ids);
 
     // CR 401.5 + CR 118.9 + CR 601.2a: Top card of library castable via a
     // `TopOfLibraryCastPermission` static (Realmwalker, Future Sight, Bolas's
@@ -803,6 +820,13 @@ fn has_exile_cast_permission(
                 obj.owner == player && turn_number > *turn_foretold
             }
         })
+        // CR 601.2a + CR 113.6b: A `StaticMode::ExileCastPermission` static on a
+        // battlefield permanent controlled by `player` may authorize this exile
+        // card without any object-attached `CastingPermission`. Detected via the
+        // per-turn pool + per-source filter; the helper performs the same checks
+        // (per-turn frequency, pool membership, affected filter) used by
+        // `exile_objects_castable_by_permission`.
+        || exile_cast_permission_source(state, player, obj.id).is_some()
 }
 
 fn cast_permission_constraint_allows_cast(
@@ -1095,6 +1119,196 @@ struct GraveyardPermissionSource<'a> {
     filter: &'a TargetFilter,
     frequency: CastFrequency,
     graveyard_destination_replacement: Option<Zone>,
+}
+
+/// CR 601.2a + CR 113.6b + CR 118.9: An active battlefield permanent carrying
+/// `StaticMode::ExileCastPermission`. Captured during the "which permanents
+/// grant a cast-from-exile permission to `player`?" scan so the caller can
+/// (a) walk the per-turn rolling exile pool keyed on `source_id`, and (b)
+/// stamp the per-source frequency slot at cast finalization.
+#[derive(Clone, Copy)]
+struct ExilePermissionSource<'a> {
+    source_id: ObjectId,
+    filter: &'a TargetFilter,
+    frequency: CastFrequency,
+    /// CR 118.9a: How the spell's mana cost is paid when cast via this
+    /// permission. `WithoutPayingManaCost` is the Maralen shape (the printed
+    /// mana cost is zeroed by `casting_costs`). `PayNormalCost` casts at the
+    /// spell's normal cost — no shipping card uses this shape today, but the
+    /// static keeps the axis available.
+    cost: ExileCastCost,
+}
+
+/// CR 601.2a + CR 113.6b: Enumerate every battlefield permanent controlled by
+/// `player` whose `StaticMode::ExileCastPermission` static is currently
+/// functioning. The returned filter is owned by the static definition (via
+/// `active_static_definitions`) and lives at least as long as the inferred
+/// borrow.
+///
+/// Mirrors `graveyard_permission_sources` for the graveyard family — the
+/// per-source pool then carves out the eligible cards.
+fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePermissionSource<'_>> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter_map(|source_id| {
+            let obj = state.objects.get(&source_id)?;
+            if obj.controller != player {
+                return None;
+            }
+            active_static_definitions(state, obj).find_map(|definition| match definition.mode {
+                // CR 305.1: All currently shipping cards in this class use
+                // `CardPlayMode::Cast`. `Play` is permitted for symmetry — the
+                // `spell_objects_available_to_cast` path covers cast mode; a
+                // future land-play sibling would extend a Play-mode helper
+                // analogous to `graveyard_lands_playable_by_permission`.
+                StaticMode::ExileCastPermission {
+                    frequency,
+                    play_mode: CardPlayMode::Cast | CardPlayMode::Play,
+                    cost,
+                } => definition
+                    .affected
+                    .as_ref()
+                    .map(|filter| ExilePermissionSource {
+                        source_id,
+                        filter,
+                        frequency,
+                        cost,
+                    }),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+/// CR 601.2a + CR 113.6b + CR 118.9: Cards in exile castable via a
+/// `StaticMode::ExileCastPermission` static from a battlefield permanent
+/// (Maralen, Fae Ascendant). Returns `(exiled_object_id, source_permanent_id,
+/// frequency)` so the caller can stamp the per-turn slot at finalize-cast time.
+///
+/// The candidate pool is `state.cards_exiled_with_source_this_turn[source_id]`
+/// — only cards exiled "with" the source during the current turn qualify. The
+/// static's `affected: TargetFilter` then constrains the eligible cards by
+/// type, mana value, etc. Per-source frequency is enforced before filter
+/// evaluation so a consumed `OncePerTurn` slot prunes the source out cheaply.
+fn exile_objects_castable_by_permission(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<(ObjectId, ObjectId, CastFrequency)> {
+    // Hot-path fast exit: this runs once per legal-actions computation (and so
+    // once per AI-search node). When nothing was exiled "with" a source this
+    // turn, no `ExileCastPermission` static can offer a card — short-circuit
+    // before `exile_permission_sources` scans the whole battlefield and
+    // allocates an `active_static_definitions` iterator per controlled
+    // permanent. Equivalent to the empty-pool `else { continue }` below, but
+    // pays a single `HashMap::is_empty()` instead in the ~100% of board states
+    // with no Maralen-class permanent in play.
+    if state.cards_exiled_with_source_this_turn.is_empty() {
+        return Vec::new();
+    }
+    let mut results = Vec::new();
+    let sources = exile_permission_sources(state, player);
+    for source in &sources {
+        if !exile_cast_frequency_available(state, source.source_id, source.frequency) {
+            continue;
+        }
+        let Some(pool) = state
+            .cards_exiled_with_source_this_turn
+            .get(&source.source_id)
+        else {
+            continue;
+        };
+        let ctx =
+            super::filter::FilterContext::from_source_with_controller(source.source_id, player);
+        for &exiled_id in pool {
+            // CR 400.7: An exiled card may have left exile since being tagged
+            // (e.g. milled into a graveyard by another effect). Re-check zone
+            // before offering it for cast.
+            let Some(obj) = state.objects.get(&exiled_id) else {
+                continue;
+            };
+            if obj.zone != Zone::Exile {
+                continue;
+            }
+            // CR 305.1: Land cards are never offered through the `Cast` path —
+            // they are "played", not "cast" (CR 116.1). The land-play sibling
+            // (analogous to `graveyard_lands_playable_by_permission`) does not
+            // yet exist; once a printing requires it, route through there.
+            if obj
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+            {
+                continue;
+            }
+            if super::filter::matches_target_filter(state, exiled_id, source.filter, &ctx) {
+                results.push((exiled_id, source.source_id, source.frequency));
+            }
+        }
+    }
+    results
+}
+
+/// CR 601.2a: Returns true if the `source_id`'s per-turn exile-cast slot is
+/// still available under `frequency`. `Unlimited` is always available;
+/// `OncePerTurn` consults `state.exile_cast_permissions_used`.
+fn exile_cast_frequency_available(
+    state: &GameState,
+    source_id: ObjectId,
+    frequency: CastFrequency,
+) -> bool {
+    match frequency {
+        CastFrequency::Unlimited => true,
+        CastFrequency::OncePerTurn => !state.exile_cast_permissions_used.contains(&source_id),
+        // CR 110.4 is graveyard-permission-only — Maralen-style exile-cast
+        // permissions have no per-permanent-type axis. Treat as a single
+        // OncePerTurn slot if the variant ever appears.
+        CastFrequency::OncePerTurnPerPermanentType => {
+            !state.exile_cast_permissions_used.contains(&source_id)
+        }
+    }
+}
+
+/// CR 601.2a + CR 113.6b: Find the (source, frequency, cost) triple
+/// authorizing `player` to cast `exiled_id` via a
+/// `StaticMode::ExileCastPermission`, or `None` when no functioning static
+/// authorizes the cast. Used by `prepare_spell_cast` / `casting_costs` to tag
+/// the `CastingVariant::ExilePermission` context and zero out the mana cost
+/// when the static is the `WithoutPayingManaCost` shape.
+pub(crate) fn exile_cast_permission_source(
+    state: &GameState,
+    player: PlayerId,
+    exiled_id: ObjectId,
+) -> Option<(ObjectId, CastFrequency, ExileCastCost)> {
+    let obj = state.objects.get(&exiled_id)?;
+    if obj.zone != Zone::Exile {
+        return None;
+    }
+    // Same empty-pool fast exit as `exile_objects_castable_by_permission`: with
+    // nothing exiled-with-a-source this turn, no static can authorize the cast,
+    // so skip the battlefield scan in `exile_permission_sources`.
+    if state.cards_exiled_with_source_this_turn.is_empty() {
+        return None;
+    }
+    let sources = exile_permission_sources(state, player);
+    sources.into_iter().find_map(|source| {
+        if !exile_cast_frequency_available(state, source.source_id, source.frequency) {
+            return None;
+        }
+        let pool = state
+            .cards_exiled_with_source_this_turn
+            .get(&source.source_id)?;
+        if !pool.contains(&exiled_id) {
+            return None;
+        }
+        let ctx =
+            super::filter::FilterContext::from_source_with_controller(source.source_id, player);
+        if !super::filter::matches_target_filter(state, exiled_id, source.filter, &ctx) {
+            return None;
+        }
+        Some((source.source_id, source.frequency, source.cost))
+    })
 }
 
 fn graveyard_permission_sources(
@@ -1642,11 +1856,17 @@ fn casting_variant_candidates(
             .casting_permissions
             .iter()
             .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. }));
+        // CR 702.62a: Suspend candidate selection. Runtime-granted Suspend
+        // (CR 604.1, e.g. Jhoira of the Ghitu / The Tenth Doctor) lives in
+        // the effective off-zone keyword set, not `obj.keywords`, so query
+        // through the off-zone-aware helper to match Flashback/Retrace/
+        // Aftermath/Escape recognition in this file.
         if has_alt_cost
-            && obj
-                .keywords
-                .iter()
-                .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }))
+            && super::keywords::object_has_effective_keyword_kind(
+                state,
+                object_id,
+                KeywordKind::Suspend,
+            )
         {
             candidates.push(CastingVariant::Suspend);
         }
@@ -1663,6 +1883,17 @@ fn casting_variant_candidates(
             .any(|p| matches!(p, CastingPermission::Foretold { .. }))
         {
             candidates.push(CastingVariant::Foretell);
+        }
+        // CR 601.2a + CR 113.6b + CR 118.9a: Cast-from-exile via a
+        // `StaticMode::ExileCastPermission` source (Maralen, Fae Ascendant).
+        // Detection is by per-source pool lookup, not by an on-object permission
+        // — the static issues no `CastingPermission` decoration; eligibility is
+        // re-derived each cast preparation from the per-turn pool plus the
+        // static's `affected` filter.
+        if let Some((source, frequency, _without_paying)) =
+            exile_cast_permission_source(state, player, object_id)
+        {
+            candidates.push(CastingVariant::ExilePermission { source, frequency });
         }
     }
 
@@ -1940,12 +2171,16 @@ fn prepare_spell_cast_with_variant_override_inner(
     // cast is the suspend "play it without paying its mana cost" path. Mirrors
     // Warp/Flashback's keyword-presence detection and avoids coupling
     // `Effect::CastFromZone` to a cast-variant override field.
+    // CR 702.62a: Suspend cast detection. Reads the effective off-zone keyword
+    // set so Suspend granted at runtime by Jhoira of the Ghitu / The Tenth Doctor
+    // (CR 604.1) is recognized alongside printed Suspend.
     let is_suspend_cast = obj.zone == Zone::Exile
         && alt_cost_from_exile.is_some()
-        && obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }));
+        && super::keywords::object_has_effective_keyword_kind(
+            state,
+            object_id,
+            KeywordKind::Suspend,
+        );
 
     // CR 702.170d: Plot free-cast detection — when casting an exile-zone card
     // with a `CastingPermission::Plotted { turn_plotted }` (on a later turn
@@ -2092,6 +2327,19 @@ fn prepare_spell_cast_with_variant_override_inner(
     // no mana cost — the granting static replaces the mana cost with nothing.
     let is_hand_permission_variant =
         matches!(casting_variant, CastingVariant::HandPermission { .. });
+    // CR 601.2a + CR 118.9a: ExilePermission variant (Maralen, Fae Ascendant).
+    // Pays no mana cost when the granting static carries
+    // `cost: ExileCastCost::WithoutPayingManaCost`. Re-derived from
+    // `exile_cast_permission_source` — the variant itself does not carry the
+    // cost shape because that would let the override side bypass the static's
+    // authoritative shape.
+    let is_exile_permission_free_cast =
+        if let CastingVariant::ExilePermission { .. } = casting_variant {
+            exile_cast_permission_source(state, player, object_id)
+                .is_some_and(|(_, _, cost)| matches!(cost, ExileCastCost::WithoutPayingManaCost))
+        } else {
+            false
+        };
     // CR 702.94a: Miracle alternative cost — pulled from `Keyword::Miracle(cost)`
     // on the hand object. Only honored when the caller explicitly opted into the
     // Miracle variant via the reveal prompt.
@@ -2153,6 +2401,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || is_hand_permission_variant
+        || is_exile_permission_free_cast
         || pure_non_mana_flashback
         || pure_non_mana_evoke
         || casting_variant == CastingVariant::Plot
@@ -4234,7 +4483,26 @@ pub fn handle_cast_spell_with_payment_mode(
     // any keyword-choice prompts (Adventure, Warp, Evoke, Overload) that
     // would fire for hand-only objects.
     match obj.zone {
-        Zone::Hand => {} // Always castable from hand
+        Zone::Hand => {
+            // CR 202.1b: A card with no mana cost (Inevitable Betrayal and other
+            // suspend-only cards) has an unpayable cost.
+            // CR 118.6: it can't be cast from hand by paying that cost; its legal
+            // plays are via an effect/keyword (e.g. Suspend's exile activation),
+            // which are separate actions/zones.
+            // CR 118.6a: an effect that lets you cast it WITHOUT paying its mana
+            // cost may still cast it — the `Unlimited` `CastFromHandFree`
+            // permission (Omniscience) takes this normal path, so don't block it.
+            // Defense-in-depth — the candidate generator already excludes the
+            // no-permission case via `can_cast_object_now`.
+            if matches!(obj.mana_cost, ManaCost::NoCost)
+                && !hand_cast_free_permission_source(state, player, obj)
+                    .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited)
+            {
+                return Err(EngineError::InvalidAction(format!(
+                    "Cannot cast {object_id:?} from hand — it has no mana cost (CR 118.6)",
+                )));
+            }
+        }
         Zone::Command if state.format_config.command_zone && obj.is_commander => {}
         Zone::Exile | Zone::Graveyard | Zone::Library => {
             // These zones are allowed only with permission — defer the
@@ -5256,6 +5524,26 @@ fn can_cast_prepared_now(
     let Some(obj) = state.objects.get(&prepared.object_id) else {
         return false;
     };
+
+    // CR 202.1b: A card with no mana cost (suspend-only cards like Inevitable
+    // Betrayal) has an unpayable cost.
+    // CR 118.6: it therefore can't be cast from hand by paying that cost. Its
+    // only legal plays are via an effect/keyword — Suspend's exile activation,
+    // the free-cast from exile, or an effect-granted `CastSpellForFree` — none
+    // of which take this normal-hand-cast path.
+    // CR 118.6a: the exception is an effect that lets you cast it WITHOUT paying
+    // its mana cost. The only such effect routed through this normal-CastSpell
+    // path is an `Unlimited` `CastFromHandFree` permission (Omniscience / Tamiyo
+    // emblem), which `prepare_spell_cast` recognizes via the same predicate and
+    // zeroes the cost. `OncePerTurn` sources (Zaffai) opt in via the dedicated
+    // `CastSpellForFree` action instead. Block the normal hand cast otherwise.
+    if obj.zone == Zone::Hand
+        && matches!(obj.mana_cost, ManaCost::NoCost)
+        && !hand_cast_free_permission_source(state, player, obj)
+            .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited)
+    {
+        return false;
+    }
 
     // CR 601.3d: A cast authorized only by a target-dependent flash option is
     // illegal unless a condition-satisfying target exists. Pre-target FEASIBILITY
@@ -7908,6 +8196,17 @@ pub fn handle_cancel_cast(
             state.stack.remove(pos);
             state.stack_paid_facts.remove(&pending.object_id);
         }
+    }
+
+    if let Some(source_id) = pending.cancel_restore_prepared_source {
+        // CR 601.2i + CR 722.3c: Prepare-copy cast cancellation must restore
+        // the source's prepared marker and clear the synthetic copy object.
+        if let Some(source) = state.objects.get_mut(&source_id) {
+            if source.zone == Zone::Battlefield {
+                source.prepared = Some(PreparedState);
+            }
+        }
+        state.objects.remove(&pending.object_id);
     }
 }
 
@@ -12184,6 +12483,294 @@ mod tests {
         );
     }
 
+    /// Issue #863 — cast-variant tag discriminator. Mirrors the
+    /// `granted_suspend_upkeep_trigger_ticks_counter_in_exile` setup (exiled
+    /// sorcery + permanent-duration granted Suspend), then resolves the
+    /// last-counter `CastFromZone` payload directly (the synthesized trigger's
+    /// body per `build_suspend_last_counter_cast_trigger`). This installs the
+    /// `ExileWithAltCost` permission. Finally, asks the casting pipeline what
+    /// variant the spell would be cast under — the granted (off-zone) Suspend
+    /// keyword must be visible to `casting_variant_candidates` /
+    /// `prepare_spell_cast_with_variant_override_inner` so the variant
+    /// resolves to `CastingVariant::Suspend`, not `CastingVariant::Normal`.
+    ///
+    /// Reverted-fix discriminator: with both predicates reading `obj.keywords`
+    /// instead of `object_has_effective_keyword_kind`, the granted Suspend is
+    /// invisible (printed-Suspend only populates `obj.keywords` for
+    /// battlefield/hand zones via `evaluate_layers`), the variant misroutes
+    /// to `CastingVariant::Normal`, and the assertion below fails.
+    // CR 702.62a: Suspend granted at runtime (CR 604.1) must produce the Suspend cast variant tag.
+    #[test]
+    fn jhoira_granted_suspend_last_counter_cast_tags_suspend_variant() {
+        use crate::types::ability::{
+            CardPlayMode, ContinuousModification, Duration, Effect, ResolvedAbility, TargetRef,
+        };
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup_game_at_main_phase();
+
+        // An exiled sorcery owned by PlayerId(0). The last upkeep tick has
+        // already happened conceptually — only one time counter remains, and
+        // it is the one the `CounterRemoved` trigger will key off of when the
+        // last-counter cast resolves.
+        let suspended = create_object(
+            &mut state,
+            CardId(5001),
+            PlayerId(0),
+            "Suspended Sorcery".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::generic(3);
+        }
+        // Battlefield grant source carrying the permanent-duration granted
+        // Suspend continuous effect (mirrors a Jhoira-style "it gains
+        // suspend" effect with Duration::Permanent).
+        let grant_source = create_object(
+            &mut state,
+            CardId(5002),
+            PlayerId(0),
+            "Suspend Granter".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            grant_source,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: suspended },
+            vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 0,
+                    },
+                },
+            }],
+            None,
+        );
+
+        // Sanity: the granted keyword is effective on the off-zone card.
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                suspended,
+                crate::types::keywords::KeywordKind::Suspend,
+            ),
+            "the exiled card must have the permanent granted Suspend"
+        );
+
+        // Resolve the synthesized last-counter trigger's `CastFromZone` body
+        // directly. This is the exact effect the suspend last-counter trigger
+        // synthesis (`build_suspend_last_counter_cast_trigger`) executes when
+        // the final time counter is removed (CR 702.62a). Resolving it
+        // installs `CastingPermission::ExileWithAltCost { cost: zero, .. }`
+        // on the exiled card via `cast_from_zone::resolve`.
+        let cast_trigger_ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![TargetRef::Object(suspended)],
+            suspended,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &cast_trigger_ability,
+            &mut events,
+            0,
+        )
+        .expect("CastFromZone must install ExileWithAltCost on the suspended card");
+
+        assert!(
+            state.objects[&suspended]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(
+                    p,
+                    CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()
+                )),
+            "CastFromZone must grant a zero-cost ExileWithAltCost permission \
+             on the exiled card (CR 702.62a synthesized trigger body)"
+        );
+
+        // The discriminator: ask the casting pipeline what variant would be
+        // selected. With the fix the granted off-zone Suspend keyword feeds
+        // both `casting_variant_candidates` and
+        // `prepare_spell_cast_with_variant_override_inner` through
+        // `object_has_effective_keyword_kind`, so the variant is Suspend.
+        let prepared =
+            prepare_spell_cast_with_variant_override(&state, PlayerId(0), suspended, None)
+                .expect("prepare_spell_cast must succeed with granted Suspend + ExileWithAltCost");
+        assert_eq!(
+            prepared.casting_variant,
+            CastingVariant::Suspend,
+            "granted Suspend (CR 604.1) must produce CastingVariant::Suspend, \
+             not Normal — the off-zone effective keyword set must be consulted"
+        );
+    }
+
+    /// Issue #863 — behavioral discriminator for CR 702.62a's creature-haste
+    /// branch. Same setup as the cast-variant test, but the exiled card is a
+    /// Creature. After installing `ExileWithAltCost` and casting the spell
+    /// through the real pipeline, the resolving permanent must gain Haste via
+    /// the transient continuous effect that `stack::resolve_top` installs on
+    /// the Suspend-cast resolution branch.
+    ///
+    /// Reverted-fix discriminator: with both predicates reading `obj.keywords`,
+    /// the cast misroutes to `CastingVariant::Normal`, the
+    /// `casting_variant == CastingVariant::Suspend` branch in `stack::resolve_top`
+    /// is never entered, no haste TCE is installed, and the assertion below
+    /// fails.
+    // CR 702.62a: "If you cast a creature spell this way, it gains haste until
+    // you lose control of the spell or the permanent it becomes." This must
+    // apply to granted-Suspend casts (CR 604.1) too.
+    #[test]
+    fn jhoira_granted_suspend_creature_cast_gains_haste() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{
+            CardPlayMode, ContinuousModification, Duration, Effect, ResolvedAbility, TargetRef,
+        };
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup_game_at_main_phase();
+
+        // An exiled creature owned by PlayerId(0).
+        let suspended = create_object(
+            &mut state,
+            CardId(6001),
+            PlayerId(0),
+            "Suspended Creature".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::generic(4);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.base_power = obj.power;
+            obj.base_toughness = obj.toughness;
+        }
+        let grant_source = create_object(
+            &mut state,
+            CardId(6002),
+            PlayerId(0),
+            "Suspend Granter".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            grant_source,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: suspended },
+            vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 0,
+                    },
+                },
+            }],
+            None,
+        );
+
+        // Resolve the synthesized last-counter trigger body to install
+        // `ExileWithAltCost { cost: zero, .. }` on the exiled creature.
+        let cast_trigger_ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![TargetRef::Object(suspended)],
+            suspended,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &cast_trigger_ability,
+            &mut events,
+            0,
+        )
+        .expect("CastFromZone must install ExileWithAltCost on the suspended card");
+
+        // Cast the spell through the real pipeline. The casting pipeline must
+        // pick `CastingVariant::Suspend` (the discriminator covered by the
+        // cast-variant test above), the spell goes to the stack at zero cost,
+        // and resolution enters `stack::resolve_top`'s Suspend branch which
+        // tags `cast_variant_paid` and installs the haste TCE for creatures.
+        let card_id = state.objects[&suspended].card_id;
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: suspended,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .expect("granted-Suspend creature must cast at zero cost through the real pipeline");
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Suspend cast must place the spell on the stack"
+        );
+
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&suspended].zone,
+            Zone::Battlefield,
+            "the resolving Suspend creature must enter the battlefield"
+        );
+
+        // CR 613.1: Re-evaluate continuous effects so the haste TCE installed
+        // by `stack::resolve_top`'s Suspend branch lands in `obj.keywords` for
+        // the battlefield-zone `effective_keyword` query below.
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // The behavioral assertion: the resolving creature must have Haste
+        // (CR 702.62a's "until you lose control of the spell or the permanent
+        // it becomes" branch). Effective off-zone / battlefield keyword query
+        // covers the layer-6 grant installed by `stack::resolve_top`.
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                suspended,
+                crate::types::keywords::KeywordKind::Haste,
+            ),
+            "Suspend-cast creature must gain Haste while its caster still \
+             controls it (CR 702.62a)"
+        );
+
+        // Audit trail: the cast variant tag must be Suspend.
+        assert!(
+            matches!(
+                state.objects[&suspended].cast_variant_paid,
+                Some((CastVariantPaid::Suspend, _))
+            ),
+            "Suspend-cast creature must carry cast_variant_paid = Suspend \
+             (audit trail for CR 702.62a)"
+        );
+    }
+
     /// Building-block test for `TargetFilter::CostPaidObject` as an effect
     /// target: a `PutCounter` whose target is `CostPaidObject` resolves the
     /// counters onto `ability.cost_paid_object`, independent of any card.
@@ -13235,7 +13822,10 @@ mod tests {
         {
             let obj = state.objects.get_mut(&spell).unwrap();
             obj.card_types.core_types.push(CoreType::Sorcery);
-            obj.mana_cost = ManaCost::NoCost;
+            // Real {0} mana cost (payable), not NoCost: this fixture exercises the
+            // "pay X life" additional cost, so it must be a castable spell. CR
+            // 118.6 makes a true no-mana-cost (NoCost) card uncastable from hand.
+            obj.mana_cost = ManaCost::zero();
             obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::PayLife {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
@@ -13283,6 +13873,70 @@ mod tests {
         assert_eq!(state.objects[&own_creature].toughness, Some(2));
         assert_eq!(state.objects[&opposing_creature].power, Some(2));
         assert_eq!(state.objects[&opposing_creature].toughness, Some(2));
+    }
+
+    #[test]
+    fn toxic_deluge_style_x_life_additional_cost_still_pays_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_object(
+            &mut state,
+            CardId(12363),
+            PlayerId(0),
+            "Toxic Deluge Style Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 2,
+            };
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PumpAll {
+                    power: PtValue::Variable("-X".to_string()),
+                    toughness: PtValue::Variable("-X".to_string()),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ));
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CardId(12363),
+            &mut Vec::new(),
+        )
+        .expect("X life additional cost should prompt before mana payment");
+        state.waiting_for = waiting;
+        match state.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 20),
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 5 }).unwrap();
+
+        assert_eq!(state.players[0].life, 15);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.stack.len(), 1);
+        match &state.stack[0].kind {
+            StackEntryKind::Spell {
+                ability: Some(ability),
+                ..
+            } => assert_eq!(ability.chosen_x, Some(5)),
+            other => panic!("expected spell on stack, got {other:?}"),
+        }
     }
 
     #[test]
@@ -26703,5 +27357,143 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #594 (Maralen, Fae Ascendant) — ExileCastPermission end-to-end.
+    //
+    // These tests exercise the new `StaticMode::ExileCastPermission` runtime
+    // path: source detection, per-turn pool membership, affected-filter
+    // gating, per-source OncePerTurn frequency tracking, and turn-cleanup
+    // reset. The parser-side tests live in
+    // `parser::oracle_static::tests::exile_cast_permission_*`.
+    // ---------------------------------------------------------------------
+
+    /// Build a battlefield permanent controlled by `player` carrying a single
+    /// `StaticMode::ExileCastPermission` static definition. Mirrors the shape
+    /// the parser emits for Maralen, Fae Ascendant — `affected: Any` keeps
+    /// the helper test-focused (the filter-gating axis is covered in a
+    /// dedicated test below).
+    fn add_exile_cast_permission_source(
+        state: &mut GameState,
+        player: PlayerId,
+        name: &str,
+        affected: TargetFilter,
+    ) -> ObjectId {
+        use crate::types::ability::StaticDefinition;
+        // Test scaffolding: CardId is opaque — `next_object_id` is monotonic
+        // so reusing it for the card id keeps each call unique without
+        // touching `state.card_db`.
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let source = create_object(state, card_id, player, name.to_string(), Zone::Battlefield);
+        let def = StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency: CastFrequency::OncePerTurn,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::WithoutPayingManaCost,
+        })
+        .affected(affected);
+        let obj = state.objects.get_mut(&source).unwrap();
+        // CR 613.1: `static_definitions` is the runtime (post-layers) view —
+        // the `Definitions` wrapper lets us push the printed definition without
+        // rebuilding the Arc-backed `base_static_definitions`. For the scope of
+        // these tests, only the runtime view is consulted by the cast-permission
+        // helpers (`active_static_definitions(obj)` walks the live set).
+        obj.static_definitions.push(def);
+        source
+    }
+
+    /// Add a vanilla creature card directly into exile owned by `player` —
+    /// no casting permissions, no link metadata. The caller is expected to
+    /// stamp the per-turn `cards_exiled_with_source_this_turn` map.
+    fn add_exiled_card(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {
+        // Test scaffolding: CardId is opaque — `next_object_id` is monotonic
+        // so reusing it for the card id keeps each call unique without
+        // touching `state.card_db`.
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let object_id = create_object(state, card_id, player, name.to_string(), Zone::Exile);
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        };
+        object_id
+    }
+
+    /// CR 601.2a + CR 113.6b + CR 118.9: With Maralen on the battlefield, the
+    /// per-turn exile pool, and a card matching the static's affected filter,
+    /// `spell_objects_available_to_cast` must surface the exiled card.
+    #[test]
+    fn exile_cast_permission_surfaces_pool_card() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source_id =
+            add_exile_cast_permission_source(&mut state, player, "Maralen", TargetFilter::Any);
+        let exiled = add_exiled_card(&mut state, player, "Exiled Bear");
+        state
+            .cards_exiled_with_source_this_turn
+            .insert(source_id, vec![exiled]);
+
+        let available = spell_objects_available_to_cast(&state, player);
+        assert!(
+            available.contains(&exiled),
+            "exiled card should be castable via Maralen's static"
+        );
+    }
+
+    /// CR 601.2a: The per-source `OncePerTurn` slot must prune the static
+    /// from `spell_objects_available_to_cast` after a single cast through it
+    /// this turn, then come back at turn cleanup.
+    #[test]
+    fn exile_cast_permission_once_per_turn_frequency_gates_offer() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source_id =
+            add_exile_cast_permission_source(&mut state, player, "Maralen", TargetFilter::Any);
+        let exiled = add_exiled_card(&mut state, player, "Exiled Bear");
+        state
+            .cards_exiled_with_source_this_turn
+            .insert(source_id, vec![exiled]);
+
+        let before = spell_objects_available_to_cast(&state, player);
+        assert!(before.contains(&exiled), "card available pre-consumption");
+
+        // Consume the OncePerTurn slot.
+        state.exile_cast_permissions_used.insert(source_id);
+        let after_consumed = spell_objects_available_to_cast(&state, player);
+        assert!(
+            !after_consumed.contains(&exiled),
+            "card must be pruned once the slot is consumed"
+        );
+
+        // Turn cleanup resets the slot — same exile pool, available again.
+        state.exile_cast_permissions_used.clear();
+        let after_reset = spell_objects_available_to_cast(&state, player);
+        assert!(
+            after_reset.contains(&exiled),
+            "card returns after slot reset"
+        );
+    }
+
+    /// CR 113.6b: Cards exiled in a previous turn (not present in the
+    /// per-turn map) must not surface. Mirrors Maralen's "this turn"
+    /// scoping — the persistent `exile_links` pool is intentionally NOT
+    /// consulted by this static.
+    #[test]
+    fn exile_cast_permission_rejects_card_outside_per_turn_pool() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let _source_id =
+            add_exile_cast_permission_source(&mut state, player, "Maralen", TargetFilter::Any);
+        let stale_exile = add_exiled_card(&mut state, player, "Stale Exile");
+        // Intentionally do NOT add `stale_exile` to
+        // `cards_exiled_with_source_this_turn` — simulates a card exiled by
+        // Maralen on a prior turn that survived turn cleanup.
+
+        let available = spell_objects_available_to_cast(&state, player);
+        assert!(
+            !available.contains(&stale_exile),
+            "previous-turn exile card must not be surfaced by the static"
+        );
     }
 }

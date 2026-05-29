@@ -415,6 +415,12 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut paren_depth = 0usize;
     let mut in_single_quote = false;
     let mut in_double_quote = false;
+    // CR 109.5 + CR 115.1: once a compound-subject-each head ("you and" / "~ and"
+    // followed by "<noun> each") is detected, keep the WHOLE distributed body
+    // intact for the rest of the current chunk — its internal " and "s
+    // ("get +2/+0 and gain haste ... and attack this turn if able") are body
+    // delimiters owned by `try_parse_compound_subject_each`, not clause splits.
+    let mut compound_subject_each_sticky = false;
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -455,6 +461,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 {
                     push_clause_chunk(&mut chunks, &current, Some(boundary));
                     current.clear();
+                    compound_subject_each_sticky = false;
                     for _ in 0..chars_to_skip {
                         chars.next();
                     }
@@ -465,6 +472,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             '.' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
+                compound_subject_each_sticky = false;
                 while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
                     chars.next();
                 }
@@ -555,14 +563,31 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // distribution logic; here we must keep the text as one chunk so
                     // the combinator sees the full prefix.
                     //
-                    // The detection is tight: the chunk-so-far must be exactly "you"
-                    // (so we do not suppress mid-sentence "you draw a card and that
-                    // player draws a card" — those are two clauses). The remainder
+                    // The detection is tight: the chunk-so-far must be exactly the
+                    // first-subject token — "you" (player axis) or "~" (the
+                    // self-reference, object axis; e.g. Gogo's "~ and that creature
+                    // each ...") — so we do not suppress mid-sentence "you draw a
+                    // card and that player draws a card" (two clauses). The remainder
                     // must start with a compound-subject noun phrase followed by
                     // " each " — distinguishing it from the standard clause-starter
                     // "that player <verb>" (which is a separate clause).
-                    let compound_subject_each = before_lower.trim_end() == "you"
+                    // CR 603.12 + CR 109.5 + CR 115.1: strip leading reflexive
+                    // connector ("if you do, ", "when you do, ", ...) so the
+                    // compound-subject body stays intact even when introduced by
+                    // an "If you do," reflexive frame (Gogo, Mysterious Mime).
+                    let trimmed = before_lower.trim_end();
+                    let first_subject_token =
+                        crate::parser::oracle_nom::condition::parse_reflexive_conditional_connector(
+                            trimmed,
+                        )
+                        .map(|(rest, _)| rest.trim())
+                        .unwrap_or(trimmed);
+                    let compound_subject_each = (first_subject_token == "you"
+                        || first_subject_token == "~")
                         && remainder_trimmed_starts_with_compound_subject_each(remainder_trimmed);
+                    if compound_subject_each {
+                        compound_subject_each_sticky = true;
+                    }
                     // CR 608.2c: "Otherwise, X and Y" — the body following an
                     // "otherwise" prefix is a single Otherwise branch even when
                     // it contains an internal " and ". Without this guard the
@@ -605,6 +630,19 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             ))
                             .parse(remainder_trimmed)
                             .is_ok();
+                    // CR 706.2: "roll a d{N} and (add|subtract) {quantity}" —
+                    // the modifier clause is part of the same RollDie effect
+                    // (it shifts the natural result) and must NOT be peeled
+                    // off as a sibling clause. Without this suppression
+                    // "Roll a d20 and add the number of cards in your hand"
+                    // would split into ["Roll a d20", "add ..."] and the
+                    // modifier silently becomes an Unimplemented sub_ability
+                    // — bypassing the typed modifier path on every D&D-set
+                    // d20 card.
+                    let roll_die_modifier_continuation = ends_with_roll_die_phrase(&before_lower)
+                        && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
+                            .parse(remainder_trimmed)
+                            .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -613,12 +651,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || inside_except_clause
                         || choice_partition_remainder
                         || compound_subject_each
+                        || compound_subject_each_sticky // CR 109.5 + CR 115.1: keep the whole compound-subject body intact
                         || inside_otherwise_body
                         || have_base_pt_continuation
-                        || continuous_modifier_conjunct;
+                        || continuous_modifier_conjunct
+                        || roll_die_modifier_continuation;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
+                        compound_subject_each_sticky = false;
                     } else if !suppress {
                         // CR 508.1d / CR 509.1c: "<subj> gains <keyword> until end
                         // of turn and <attack|must-be-blocked> ... if able" — the
@@ -636,6 +677,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                             current.clear();
+                            compound_subject_each_sticky = false;
                             current.push_str(&prepend);
                         }
                     }
@@ -862,6 +904,47 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
     starts_clause_text_lower(&deconjugated)
 }
 
+/// CR 706.2: True iff `before_lower` ends with a "roll a d{N}" phrase (with
+/// the standard set of polyhedral side counts) or the word-form variants
+/// "six-sided die", "twenty-sided die", etc. Used by the bare-and splitter to
+/// keep "roll a d20 and add/subtract X" intact so the typed modifier path
+/// fires instead of producing a stray Unimplemented sub_ability.
+fn ends_with_roll_die_phrase(before_lower: &str) -> bool {
+    let trimmed = before_lower.trim_end();
+    // Numeric form: any "roll a d<digits>" tail. allow-noncombinator:
+    // structural rsplit on a runtime ' ' separator (not a literal dispatch
+    // token) followed by a char-class digit scan — no string-method dispatch
+    // against any literal phrase.
+    if let Some(last_word) = trimmed.rsplit(' ').next() {
+        // allow-noncombinator: CR 706.1a "d{digits}" structural shape — single-char prefix `d` followed by an ASCII-digit run on a pre-tokenized last-word slice; this is a CR-spec character-class scan, not dispatch against any literal phrase.
+        if let Some(digits) = last_word.strip_prefix('d') {
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    // Word-form: "...-sided die". The tail must match one of the polyhedral
+    // phrases. Take the last three space-separated tokens (`<N>-sided die`)
+    // and parse them with nom alternatives.
+    let tail = trimmed.rsplitn(3, ' ').collect::<Vec<_>>();
+    if tail.len() != 3 {
+        return false;
+    }
+    // tail is reversed; reconstruct "<N>-sided die" by re-joining.
+    let candidate = format!("{} {}", tail[1], tail[0]);
+    let parsed: Result<((), ()), nom::Err<OracleError<'_>>> = alt((
+        value((), tag::<_, _, OracleError<'_>>("four-sided die")),
+        value((), tag("six-sided die")),
+        value((), tag("eight-sided die")),
+        value((), tag("ten-sided die")),
+        value((), tag("twelve-sided die")),
+        value((), tag("twenty-sided die")),
+    ))
+    .parse(candidate.as_str())
+    .map(|(_, v)| ((), v));
+    parsed.is_ok()
+}
+
 fn starts_you_control_subject_predicate(s: &str) -> bool {
     let Ok((after_subject, subject)) =
         take_until::<_, _, OracleError<'_>>(" you control ").parse(s)
@@ -1003,22 +1086,31 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
     .is_ok()
 }
 
-/// CR 109.5 + CR 608.2c + CR 800.4g: Detect that the remainder after "you and"
-/// starts a compound-subject distribution clause: "<player-noun> each <body>".
+/// CR 109.5 + CR 115.1 + CR 608.2c: Detect that the remainder after the first
+/// subject ("you and" / "~ and") starts a compound-subject distribution clause:
+/// "<noun> each <body>".
 ///
 /// Used by the chunk splitter to suppress " and " splitting when the entire
-/// phrase is a single compound subject ("you and that player each Y") rather
-/// than two clauses joined by "and". The recognized noun phrases mirror the
-/// expansion axis in `try_parse_compound_subject_each`; new compound forms
-/// are added by extending both sites in lockstep.
+/// phrase is a single compound subject ("you and that player each Y", "~ and
+/// that creature each Y") rather than two clauses joined by "and". The
+/// recognized noun phrases mirror the expansion axis in
+/// `try_parse_compound_subject_each`; new compound forms are added by extending
+/// both sites in lockstep.
 ///
-/// Recognized forms mirror `try_parse_compound_subject_each`.
+/// Recognized second-subject axes (mirror `try_parse_compound_subject_each`):
+/// - "that player each" — the player-axis form (Council's-dilemma "for each
+///   player who chose <choice>" body).
+/// - "target opponent each" / "target player each" — targeted player-axis forms.
+/// - "that creature each" — the object-axis form (CR 115.1 parent-target
+///   binding; e.g. Gogo, Mysterious Mime's "~ and that creature each get
+///   +2/+0 and gain haste ... and attack this turn if able").
 fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool {
     let lower = remainder.to_ascii_lowercase();
     let result: nom::IResult<&str, (), OracleError<'_>> = alt((
         value((), tag("that player each ")),
         value((), tag("target opponent each ")),
         value((), tag("target player each ")),
+        value((), tag("that creature each ")),
     ))
     .parse(lower.as_str());
     result.is_ok()
@@ -1197,6 +1289,12 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
 /// `ParentTarget` (one shared target, not a second slot). For a non-targeted
 /// set-scoped subject ("all Revelers ...") it returns the literal subject text
 /// so `inject_subject_target` threads the typed filter onto conjunct 2.
+///
+/// Anchor-start case: when `before_and` itself BEGINS with the gain/get verb at
+/// offset 0 (the subject was already lifted by an enclosing compound-subject
+/// distribution, e.g. Gogo's "~ and that creature each get +2/+0 and gain haste
+/// ... and attack this turn if able"), there is no subject to thread — return
+/// `Some("")` so the conjunct splits with no prepend.
 fn combat_requirement_conjunct_prepend(
     before_and: &str,
     remainder_trimmed: &str,
@@ -1208,6 +1306,23 @@ fn combat_requirement_conjunct_prepend(
         return None;
     }
     let before_lower = before_and.to_ascii_lowercase();
+    // CR 508.1d / CR 509.1c: chunk begins with the gain/get verb at offset 0
+    // (subject already lifted by the enclosing compound-subject distribution);
+    // emit an empty subject so the trailing combat-requirement conjunct splits.
+    // This anchor-start check has PRIORITY over the interior `take_until` arms
+    // below — those scan for the FIRST " gain"/" get" in the chunk, which would
+    // spuriously bind an interior verb (e.g. "get +2/+0 and gain haste ..." has
+    // " gain" mid-string) and return a bogus non-empty subject. A verb at
+    // offset 0 unambiguously means the subject was already lifted.
+    let anchor_start = {
+        let r: nom::IResult<&str, &str, OracleError<'_>> =
+            alt((tag("gain "), tag("gains "), tag("get "), tag("gets ")))
+                .parse(before_lower.as_str());
+        r.is_ok()
+    };
+    if anchor_start {
+        return Some(String::new());
+    }
     // Conjunct 1 must be a continuous predicate: locate the gain/get verb.
     let subject_text = take_until::<_, _, OracleError<'_>>(" gain")
         .parse(before_lower.as_str())
@@ -2486,6 +2601,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
         | Effect::BecomeCopy { .. }
@@ -2589,6 +2705,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::BlightEffect { .. }
         | Effect::Seek { .. }
         | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
@@ -4870,5 +4987,114 @@ mod tests {
             "The same is true for flying when you attack."
         )
         .is_none());
+    }
+
+    // --- combat_requirement_conjunct_prepend: anchor-start arm (CR 508.1d / 509.1c) ---
+
+    /// A chunk that BEGINS with the gain/get verb at offset 0 (subject already
+    /// lifted by the enclosing compound-subject distribution) yields an empty
+    /// prepend so the trailing combat-requirement conjunct still splits.
+    #[test]
+    fn combat_requirement_anchor_start_gain_haste() {
+        assert_eq!(
+            combat_requirement_conjunct_prepend(
+                "gain haste until end of turn",
+                "attack this turn if able"
+            ),
+            Some(String::new())
+        );
+    }
+
+    /// Anchor-start with a "gains"-conjugated verb and a "must be blocked"
+    /// standalone combat requirement remainder.
+    #[test]
+    fn combat_requirement_anchor_start_gains_must_be_blocked() {
+        assert_eq!(
+            combat_requirement_conjunct_prepend(
+                "gains lifelink until end of turn",
+                "must be blocked this turn"
+            ),
+            Some(String::new())
+        );
+    }
+
+    /// Regression: a leading-space subject case still returns a non-empty
+    /// prepend (targeted subject → anaphor "it ").
+    #[test]
+    fn combat_requirement_leading_space_subject_unchanged() {
+        assert_eq!(
+            combat_requirement_conjunct_prepend(
+                "target creature gets +1/+1",
+                "attacks this turn if able"
+            ),
+            Some("it ".to_string())
+        );
+    }
+
+    /// Negative: a non-gain/get verb head with a combat-requirement remainder
+    /// does not match (no continuous predicate to anchor on).
+    #[test]
+    fn combat_requirement_anchor_start_rejects_non_pump_verb() {
+        assert_eq!(
+            combat_requirement_conjunct_prepend("draw a card", "attack this turn if able"),
+            None
+        );
+    }
+
+    // --- split_clause_sequence: compound-subject-each sticky suppression (CR 109.5 / 115.1) ---
+
+    /// The object-axis compound subject "~ and that creature each <body>" stays
+    /// as a SINGLE chunk even though the body has internal " and "s.
+    #[test]
+    fn compound_subject_each_object_axis_one_chunk() {
+        let input = "~ and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able";
+        let chunks = clause_texts(input);
+        assert_eq!(chunks.len(), 1, "expected one chunk, got {chunks:?}");
+        assert_eq!(chunks[0], input);
+    }
+
+    /// Negative control: a normal "you <verb> ... and <verb> ..." compound where
+    /// the remainder does NOT start with a "<noun> each " distribution head must
+    /// still split at the bare " and " — the sticky suppression must not engage.
+    #[test]
+    fn compound_subject_each_negative_control_splits() {
+        let chunks = clause_texts("you draw a card and create a Treasure token");
+        assert!(
+            chunks.len() > 1,
+            "expected a split (sticky must not engage), got single chunk: {chunks:?}"
+        );
+    }
+
+    /// CR 603.12 + CR 115.1: an object-axis compound subject introduced by an
+    /// "if you do," reflexive connector still stays one chunk — the
+    /// sticky-detection strips the leading connector before the subject test.
+    #[test]
+    fn compound_subject_each_reflexive_connector_object_axis_one_chunk() {
+        let input = "if you do, ~ and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able";
+        let chunks = clause_texts(input);
+        assert_eq!(chunks.len(), 1, "expected one chunk, got {chunks:?}");
+        assert_eq!(chunks[0], input);
+    }
+
+    /// CR 603.12 + CR 109.5: a player-axis compound subject introduced by a
+    /// "when you do," connector stays one chunk despite the internal " and ".
+    #[test]
+    fn compound_subject_each_reflexive_connector_player_axis_one_chunk() {
+        let input = "when you do, you and that player each draw a card and lose 1 life";
+        let chunks = clause_texts(input);
+        assert_eq!(chunks.len(), 1, "expected one chunk, got {chunks:?}");
+        assert_eq!(chunks[0], input);
+    }
+
+    /// Negative: a reflexive "if you do," frame whose body is NOT a compound
+    /// subject distribution still splits at the bare " and " — the connector
+    /// strip must not spuriously engage the sticky suppression.
+    #[test]
+    fn compound_subject_each_reflexive_connector_negative_splits() {
+        let chunks = clause_texts("if you do, draw a card and create a Treasure token");
+        assert!(
+            chunks.len() > 1,
+            "expected a split (sticky must not engage), got single chunk: {chunks:?}"
+        );
     }
 }

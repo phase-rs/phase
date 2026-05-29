@@ -9,6 +9,7 @@ import type {
   WaitingFor,
 } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
@@ -39,6 +40,7 @@ export function MoveCountersDistributionModal({
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
   const availableCounters = useMemo(
     () =>
       data.available
@@ -152,6 +154,7 @@ export function MoveCountersDistributionModal({
                 return (
                   <div
                     key={`${key}-${destinationId}`}
+                    {...hoverProps(destinationId)}
                     className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3"
                   >
                     <span className="text-sm font-medium text-gray-200">

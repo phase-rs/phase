@@ -15,6 +15,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import { CardPreview } from "../components/card/CardPreview";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
 import { DraftProgress } from "../components/draft/DraftProgress";
@@ -55,6 +56,9 @@ function PodSetup() {
   const joinPod = useDraftPodStore((s) => s.joinPod);
   const configError = useDraftPodStore((s) => s.configError);
   const loadingPool = useDraftPodStore((s) => s.loadingPool);
+  const poolMode = useDraftPodStore((s) => s.poolMode);
+  const setPoolMode = useDraftPodStore((s) => s.setPoolMode);
+  const setCubeForm = useDraftPodStore((s) => s.setCubeForm);
   const kindDescription = config.kind === "Premier"
     ? t("podSetup.kindPremierDesc")
     : t("podSetup.kindTraditionalDesc");
@@ -251,16 +255,54 @@ function PodSetup() {
           <p className="text-xs text-white/40">{podSizeDescription}</p>
         </div>
 
-        {/* Set selector — reuse the Quick Draft component */}
-        <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
-          {t("podSetup.setSelectorHint")}
+        {/* Pool source: Set vs Cube tab switch */}
+        <div className="flex gap-2 border-b border-white/10">
+          <button
+            type="button"
+            onClick={() => setPoolMode("set")}
+            className={
+              poolMode === "set"
+                ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
+                : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
+            }
+          >
+            {t("podSetup.tabs.set")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setPoolMode("cube")}
+            className={
+              poolMode === "cube"
+                ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
+                : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
+            }
+          >
+            {t("podSetup.tabs.cube")}
+          </button>
         </div>
-        <SetSelector
-          onStartDraft={(setCode) => {
-            setConfig({ setCode });
-            void createPod();
-          }}
-        />
+
+        {poolMode === "set" ? (
+          <>
+            {/* Set selector — reuse the Quick Draft component */}
+            <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
+              {t("podSetup.setSelectorHint")}
+            </div>
+            <SetSelector
+              onStartDraft={(setCode) => {
+                setConfig({ setCode });
+                void createPod();
+              }}
+            />
+          </>
+        ) : (
+          <CubeSetupPanel
+            onStart={({ cubeName, cubeListText, settings }) => {
+              setCubeForm({ cubeName, cubeListText, settings });
+              void createPod();
+            }}
+            disabled={loadingPool}
+          />
+        )}
 
         {/* Error */}
         {configError && (

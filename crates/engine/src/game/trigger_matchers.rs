@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::types::ability::{
     AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DestinationConstraint, EffectKind,
@@ -32,6 +33,9 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
             match_spell_cast
         }
         TriggerMode::Attacks => match_attacks,
+        // CR 701.43d: linked "when you do" trigger fires when the source creature
+        // is exerted as it attacks.
+        TriggerMode::Exerted => match_exerted,
         TriggerMode::AttackersDeclared | TriggerMode::AttackersDeclaredOneTarget => {
             match_attackers_declared
         }
@@ -97,6 +101,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::RolledDie | TriggerMode::RolledDieOnce => match_rolled_die,
         TriggerMode::FlippedCoin => match_flipped_coin,
         TriggerMode::Clashed => match_clash,
+        TriggerMode::Vote => match_vote_resolved,
         TriggerMode::RingTemptsYou => match_ring_tempts_you,
         TriggerMode::DungeonCompleted => match_dungeon_completed,
         TriggerMode::RoomEntered => match_room_entered,
@@ -140,7 +145,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
         | TriggerMode::Championed
-        | TriggerMode::Exerted
         | TriggerMode::Enlisted
         | TriggerMode::Adapt
         | TriggerMode::Foretell
@@ -151,7 +155,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::ChaosEnsues
         | TriggerMode::Copied
         | TriggerMode::ConjureAll
-        | TriggerMode::Vote
         | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
@@ -179,6 +182,23 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
 // ---------------------------------------------------------------------------
 
 /// Build a registry mapping every TriggerMode to its matcher function.
+/// Process-wide cached trigger-matcher registry.
+///
+/// The registry is a pure constant (`TriggerMode` → fn-pointer) with no
+/// per-call state, so it is built exactly once. `unimplemented_mechanics`
+/// consults it for every battlefield object on every `apply()`; rebuilding
+/// the map per call (619 objects × every action) was the dominant cost in
+/// display derivation. Callers on hot paths must use [`trigger_registry`];
+/// `build_trigger_registry` remains for the `LazyLock` initializer and tests
+/// that need an owned copy.
+static TRIGGER_REGISTRY: LazyLock<HashMap<TriggerMode, TriggerMatcher>> =
+    LazyLock::new(build_trigger_registry);
+
+/// Cached accessor for the trigger-matcher registry. Built once on first use.
+pub fn trigger_registry() -> &'static HashMap<TriggerMode, TriggerMatcher> {
+    &TRIGGER_REGISTRY
+}
+
 pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     let mut r: HashMap<TriggerMode, TriggerMatcher> = HashMap::new();
 
@@ -318,6 +338,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 701.30: Clash trigger
     r.insert(TriggerMode::Clashed, match_clash);
 
+    // CR 701.38: Vote trigger
+    r.insert(TriggerMode::Vote, match_vote_resolved);
+
     // CR 701.54: Ring tempts you trigger
     r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
 
@@ -385,7 +408,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ChaosEnsues,
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
-        TriggerMode::Vote,
         TriggerMode::Abandoned,
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
@@ -639,6 +661,7 @@ fn count_matching_trigger_event_subjects(
     let count_one = |id| u32::from(matches(id));
     match event {
         GameEvent::AttackersDeclared { attacker_ids, .. } => count_slice(attacker_ids),
+        GameEvent::CreatureExerted { object_id } => count_one(*object_id),
         GameEvent::ZoneChanged { object_id, .. }
         | GameEvent::Discarded { object_id, .. }
         | GameEvent::SpellCast { object_id, .. }
@@ -707,6 +730,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PlayerPerformedAction { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
+        | GameEvent::Detained { .. }
         | GameEvent::BecamePrepared { .. }
         | GameEvent::BecameUnprepared { .. }
         | GameEvent::CaseSolved { .. }
@@ -1100,6 +1124,19 @@ pub(super) fn match_attacks(
     !matching_attack_events(event, trigger, source_id, state).is_empty()
 }
 
+/// CR 701.43d: The linked "when you do" trigger fires when its source creature
+/// is exerted (the optional "exert as it attacks" cost was paid). The exert
+/// ability is self-referential, so the exerted object must be the trigger
+/// source.
+pub(super) fn match_exerted(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::CreatureExerted { object_id } if *object_id == source_id)
+}
+
 pub(super) fn matching_attack_events(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -1427,7 +1464,7 @@ pub(super) fn match_taps(
             if !valid_card_matches(trigger, state, *object_id, source_id) {
                 return false;
             }
-            // CR 701.21: "you tap an untapped creature an opponent controls" requires
+            // CR 701.26: "you tap an untapped creature an opponent controls" requires
             // an external cause. Only apply caused_by gating when the trigger explicitly
             // filters for opponent-controlled objects.
             let requires_opponent = matches!(
@@ -1668,11 +1705,9 @@ pub(super) fn match_becomes_target(
     // CR 115.1a + CR 115.1b: Trigger text like "of a spell" and "of an Aura spell"
     // constrains the targeting source to matching stack spell characteristics.
     if let Some(source_filter) = &trigger.valid_source {
-        let Some(targeting_entry) = state
-            .stack
-            .iter()
-            .find(|entry| entry.id == *targeting_spell_id)
-        else {
+        let Some(targeting_entry) = state.stack.iter().find(|entry| {
+            entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
+        }) else {
             return false;
         };
         let trigger_controller = state
@@ -2684,6 +2719,18 @@ pub(super) fn match_clash(
         }
         _ => false,
     }
+}
+
+/// CR 701.38: Match vote-resolved events.
+/// "Whenever players finish voting" fires once when all votes for a vote
+/// instruction have been cast and tallied.
+pub(super) fn match_vote_resolved(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::VoteResolved { .. })
 }
 
 /// CR 309.7: Match dungeon completion events.
@@ -6537,6 +6584,32 @@ mod tests {
     }
 
     #[test]
+    fn becomes_target_spell_only_matches_spell_source_object_id() {
+        let (mut state, spell_id) = setup_with_spell_on_stack(false);
+        let stack_entry_id = ObjectId(600);
+        let Some(entry) = state.stack.front_mut() else {
+            panic!("expected spell on stack");
+        };
+        entry.id = stack_entry_id;
+        entry.source_id = spell_id;
+
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: spell_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
     fn becomes_target_spell_only_rejects_ability() {
         let (state, ability_id) = setup_with_ability_on_stack();
         let trigger_owner = ObjectId(5);
@@ -8604,6 +8677,75 @@ mod tests {
             match_clash(&event2, &trigger, source, &state),
             "clash trigger must fire when controller is the opponent participant"
         );
+    }
+
+    /// CR 701.38: match_vote_resolved fires once on VoteResolved events.
+    #[test]
+    fn vote_resolved_trigger_fires_on_vote_resolved() {
+        let state = setup();
+        let trigger = make_trigger(TriggerMode::Vote);
+        let source = ObjectId(701);
+
+        let event = GameEvent::VoteResolved {
+            source_id: source,
+            tallies: vec![("friend".to_string(), 2), ("foe".to_string(), 1)],
+        };
+        assert!(
+            match_vote_resolved(&event, &trigger, source, &state),
+            "vote trigger must fire on VoteResolved"
+        );
+
+        let other = GameEvent::PlayerLost {
+            player_id: PlayerId(0),
+        };
+        assert!(
+            !match_vote_resolved(&other, &trigger, source, &state),
+            "vote trigger must not fire on unrelated events"
+        );
+    }
+
+    /// CR 603.2 + CR 701.38: parsed vote triggers must route through the
+    /// production trigger registry when a vote procedure finishes.
+    #[test]
+    fn parsed_vote_resolved_trigger_queues_from_process_triggers() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Model of Unity".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever players finish voting, draw a card.",
+            "Model of Unity",
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        crate::game::triggers::process_triggers(
+            &mut state,
+            &[GameEvent::VoteResolved {
+                source_id: source,
+                tallies: vec![("unity".to_string(), 2)],
+            }],
+        );
+
+        assert_eq!(state.stack.len(), 1);
+        let entry = state.stack.front().expect("expected queued trigger");
+        assert_eq!(entry.source_id, source);
+        assert_eq!(entry.controller, PlayerId(0));
+        assert!(matches!(
+            entry.kind,
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(GameEvent::VoteResolved { .. }),
+                ..
+            }
+        ));
     }
 
     /// Issue #311 end-to-end: parse the Undead Alchemist trigger line and

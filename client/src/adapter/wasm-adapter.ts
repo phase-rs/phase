@@ -699,8 +699,17 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           firstPlayer ?? undefined,
         );
         if (r && typeof r === "object" && "error" in r && r.error) {
-          const reasons = (r as { reasons?: string[] }).reasons ?? [];
-          throw new Error(`Deck validation failed: ${reasons.join("; ")}`);
+          const envelope = r as { reasons?: string[]; cedh_bracket_violation?: boolean };
+          const reasons = envelope.reasons ?? [];
+          const message = `Deck validation failed: ${reasons.join("; ")}`;
+          if (envelope.cedh_bracket_violation) {
+            throw new AdapterError(
+              AdapterErrorCode.BRACKET_VIOLATION,
+              envelope.reasons?.join("; ") ?? "cEDH bracket violation",
+              false,
+            );
+          }
+          throw new Error(message);
         }
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),

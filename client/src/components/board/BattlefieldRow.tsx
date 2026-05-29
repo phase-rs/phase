@@ -237,7 +237,11 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
           onExpand={() => {
             setExpandedGroupIds((previous) => {
               const next = new Set(previous);
-              next.add(group.ids[0]);
+              if (next.has(group.ids[0])) {
+                next.delete(group.ids[0]);
+              } else {
+                next.add(group.ids[0]);
+              }
               return next;
             });
           }}

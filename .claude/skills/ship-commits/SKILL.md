@@ -26,7 +26,7 @@ A worktree based on `origin/main` gives a clean branch we cherry-pick into, isol
 ## When NOT to use
 
 - Work is uncommitted. Run `/commit` first (commit by pathspec — your memory's `feedback_shared_index_commit_pathspec`).
-- A PR for these commits already exists. Use `gh pr merge <N> --squash --auto` directly to enqueue.
+- A PR for these commits already exists. Use `gh pr merge <N> --auto` directly to enqueue.
 - The commits are already on `origin/main`. Nothing to do.
 - Repo isn't `phase-rs/phase`. This skill encodes phase.rs-specific conventions.
 
@@ -119,7 +119,7 @@ Capture the PR number from `gh pr create` output for the next step.
 ### 6. Enqueue
 
 ```bash
-gh pr merge "$PR_NUMBER" --squash --auto
+gh pr merge "$PR_NUMBER" --auto
 ```
 
 Do NOT wait — the queue is async. Move on.

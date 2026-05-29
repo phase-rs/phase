@@ -2,6 +2,7 @@ use crate::types::ability::{EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
 /// CR 701.54: The Ring tempts you.
@@ -60,6 +61,7 @@ pub fn resolve(
     if candidates.len() == 1 {
         // Only one creature — auto-select as ring-bearer.
         state.ring_bearer.insert(controller, Some(candidates[0]));
+        state.layers_dirty = true;
         return Ok(());
     }
 
@@ -72,13 +74,77 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 701.54e: A player's Ring-bearer designation is valid only while that
+/// creature remains on the battlefield under that player's control.
+pub(crate) fn is_current_ring_bearer(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    if state.ring_bearer.get(&player).copied().flatten() != Some(object_id) {
+        return false;
+    }
+    state.objects.get(&object_id).is_some_and(|obj| {
+        obj.zone == Zone::Battlefield
+            && obj.controller == player
+            && obj.card_types.core_types.contains(&CoreType::Creature)
+    })
+}
+
+pub(crate) fn ring_bearer_for(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+) -> Option<ObjectId> {
+    let object_id = state.ring_bearer.get(&player).copied().flatten()?;
+    is_current_ring_bearer(state, player, object_id).then_some(object_id)
+}
+
+pub(crate) fn clear_ring_bearer_if_object(state: &mut GameState, object_id: ObjectId) {
+    let mut changed = false;
+    state.ring_bearer.retain(|_, bearer| {
+        if matches!(bearer, Some(id) if *id == object_id) {
+            changed = true;
+            false
+        } else {
+            true
+        }
+    });
+    if changed {
+        state.layers_dirty = true;
+    }
+}
+
+pub(crate) fn normalize_ring_bearers(state: &mut GameState) -> bool {
+    let stale: Vec<_> = state
+        .ring_bearer
+        .iter()
+        .filter_map(|(&player, bearer)| {
+            let object_id = bearer.as_ref().copied()?;
+            (!is_current_ring_bearer(state, player, object_id)).then_some(player)
+        })
+        .collect();
+
+    if stale.is_empty() {
+        return false;
+    }
+
+    for player in stale {
+        state.ring_bearer.remove(&player);
+    }
+    state.layers_dirty = true;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility};
-    use crate::types::card_type::{CardType, CoreType};
+    use crate::game::{combat, layers, triggers, zones};
+    use crate::types::ability::{Effect, PlayerFilter, ResolvedAbility, TargetFilter};
+    use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
 
     fn make_creature(state: &mut GameState, card_id: u64, controller: PlayerId) -> ObjectId {
@@ -172,5 +238,154 @@ mod tests {
 
         assert_eq!(state.ring_level[&PlayerId(0)], 1);
         assert_eq!(state.ring_bearer.get(&PlayerId(0)), None);
+    }
+
+    #[test]
+    fn ring_bearer_is_legendary_from_the_ring_emblem() {
+        let mut state = GameState::new_two_player(42);
+        let creature_id = make_creature(&mut state, 1, PlayerId(0));
+        state.ring_level.insert(PlayerId(0), 1);
+        state.ring_bearer.insert(PlayerId(0), Some(creature_id));
+        state.layers_dirty = true;
+
+        layers::evaluate_layers(&mut state);
+
+        assert!(state.objects[&creature_id]
+            .card_types
+            .supertypes
+            .contains(&Supertype::Legendary));
+    }
+
+    #[test]
+    fn ring_bearer_cant_be_blocked_by_greater_power_creature() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = make_creature(&mut state, 1, PlayerId(0));
+        let blocker = make_creature(&mut state, 2, PlayerId(1));
+        state.objects.get_mut(&attacker).unwrap().power = Some(2);
+        state.objects.get_mut(&blocker).unwrap().power = Some(3);
+        state.ring_level.insert(PlayerId(0), 1);
+        state.ring_bearer.insert(PlayerId(0), Some(attacker));
+
+        assert!(!combat::can_block_pair(&state, blocker, attacker));
+
+        state.objects.get_mut(&blocker).unwrap().power = Some(2);
+        assert!(combat::can_block_pair(&state, blocker, attacker));
+    }
+
+    #[test]
+    fn ring_bearer_designation_clears_when_object_leaves_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        let creature_id = make_creature(&mut state, 1, PlayerId(0));
+        state.ring_level.insert(PlayerId(0), 1);
+        state.ring_bearer.insert(PlayerId(0), Some(creature_id));
+        let mut events = Vec::new();
+
+        zones::move_to_zone(&mut state, creature_id, Zone::Graveyard, &mut events);
+
+        assert_eq!(state.ring_bearer.get(&PlayerId(0)), None);
+    }
+
+    #[test]
+    fn ring_level_two_attack_queues_draw_then_discard_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let bearer = make_creature(&mut state, 1, PlayerId(0));
+        state.ring_level.insert(PlayerId(0), 2);
+        state.ring_bearer.insert(PlayerId(0), Some(bearer));
+
+        triggers::process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![bearer],
+                defending_player: PlayerId(1),
+                attacks: Vec::new(),
+            }],
+        );
+
+        let ability = state.stack.last().unwrap().ability().unwrap();
+        assert!(matches!(ability.effect, Effect::Draw { .. }));
+        assert!(matches!(
+            ability.sub_ability.as_ref().map(|sub| &sub.effect),
+            Some(Effect::Discard { .. })
+        ));
+    }
+
+    #[test]
+    fn ring_level_three_blocked_queues_delayed_sacrifice_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let bearer = make_creature(&mut state, 1, PlayerId(0));
+        let blocker = make_creature(&mut state, 2, PlayerId(1));
+        state.ring_level.insert(PlayerId(0), 3);
+        state.ring_bearer.insert(PlayerId(0), Some(bearer));
+
+        triggers::process_triggers(
+            &mut state,
+            &[GameEvent::BlockersDeclared {
+                assignments: vec![(blocker, bearer)],
+            }],
+        );
+
+        let ability = state.stack.last().unwrap().ability().unwrap().clone();
+        assert_eq!(ability.controller, PlayerId(0));
+        let Effect::CreateDelayedTrigger { effect, .. } = &ability.effect else {
+            panic!("expected The Ring level 3 to create a delayed trigger");
+        };
+        let Effect::Sacrifice { target, .. } = effect.effect.as_ref() else {
+            panic!("expected delayed trigger to sacrifice the blocker");
+        };
+        let TargetFilter::And { filters } = target else {
+            panic!("expected delayed trigger to scope sacrifice by blocker controller");
+        };
+        assert!(filters
+            .iter()
+            .any(|filter| filter == &TargetFilter::SpecificObject { id: blocker }));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(state.delayed_triggers[0].controller, PlayerId(0));
+        assert_eq!(state.delayed_triggers[0].ability.controller, PlayerId(0));
+        assert_eq!(
+            state.delayed_triggers[0].ability.scoped_player,
+            Some(PlayerId(1))
+        );
+
+        triggers::check_delayed_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::EndCombat,
+            }],
+        );
+
+        let delayed_ability = state.stack.last().unwrap().ability().unwrap().clone();
+        assert_eq!(delayed_ability.controller, PlayerId(0));
+        assert_eq!(delayed_ability.scoped_player, Some(PlayerId(1)));
+        resolve_ability_chain(&mut state, &delayed_ability, &mut events, 0).unwrap();
+        assert_eq!(state.objects[&blocker].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn ring_level_four_combat_damage_queues_each_opponent_loses_life_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let bearer = make_creature(&mut state, 1, PlayerId(0));
+        state.ring_level.insert(PlayerId(0), 4);
+        state.ring_bearer.insert(PlayerId(0), Some(bearer));
+
+        triggers::process_triggers(
+            &mut state,
+            &[GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_ids: vec![bearer],
+            }],
+        );
+
+        let ability = state.stack.last().unwrap().ability().unwrap();
+        assert!(matches!(
+            ability.effect,
+            Effect::LoseLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
+        assert_eq!(ability.player_scope, Some(PlayerFilter::Opponent));
     }
 }

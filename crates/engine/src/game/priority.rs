@@ -44,14 +44,17 @@ pub fn handle_priority_pass(
             turns::advance_phase(state, events);
             turns::auto_advance(state, events)
         } else {
-            // CR 117.4: Non-empty stack — resolve top object.
-            super::stack::resolve_top(state, events);
+            // CR 117.4: Non-empty stack — resolve the next object. A batch-safe
+            // run of identical token triggers collapses into one step that
+            // consumes K entries (Tier 3); otherwise exactly one entry resolves.
+            let consumed = super::stack::resolve_next(state, events);
 
-            // After resolve_top: the stack should have shrunk by 1.
-            // Update auto-pass baselines so trigger-growth detection works across apply() calls.
+            // After resolve_next: the stack shrank by `consumed` entries.
+            // Update auto-pass baselines by the SAME amount so trigger-growth
+            // detection stays accurate across apply() calls (§7.2 / R6).
             for mode in state.auto_pass.values_mut() {
                 if let AutoPassMode::UntilStackEmpty { initial_stack_len } = mode {
-                    *initial_stack_len = initial_stack_len.saturating_sub(1);
+                    *initial_stack_len = initial_stack_len.saturating_sub(consumed as usize);
                 }
             }
 

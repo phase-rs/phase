@@ -49,7 +49,7 @@ describe("draftPersistence", () => {
       draftStarted: true,
       draftCode: "draft-12345678",
       draftSessionJson: '{"status":"Drafting"}',
-      setPoolJson: '{"code":"TST"}',
+      poolInput: { type: "Set", data: { set_pool_json: '{"code":"TST"}' } },
     };
 
     it("saves and loads a host session", async () => {
@@ -76,6 +76,46 @@ describe("draftPersistence", () => {
       await saveDraftHostSession("test-draft-1", updated);
       const loaded = await loadDraftHostSession("test-draft-1");
       expect(loaded!.draftStarted).toBe(false);
+    });
+
+    it("returns null for legacy snapshots missing poolInput (C6 shape guard)", async () => {
+      // Simulate a pre-#1253 snapshot with the flat setPoolJson field.
+      const legacy = {
+        ...testSession,
+        // Intentionally drop poolInput; carry the legacy field instead.
+        setPoolJson: '{"code":"LEGACY"}',
+      } as unknown as PersistedDraftHostSession;
+      // Bypass the typed write — direct mockStore population mirrors how a
+      // pre-migration snapshot would have been written to IDB.
+      mockStore.set("phase-draft-host:legacy", legacy);
+      delete (mockStore.get("phase-draft-host:legacy") as Record<string, unknown>).poolInput;
+
+      const loaded = await loadDraftHostSession("legacy");
+      expect(loaded).toBeNull();
+    });
+
+    it("loads a Cube poolInput snapshot intact", async () => {
+      const cubeSession: PersistedDraftHostSession = {
+        ...testSession,
+        poolInput: {
+          type: "Cube",
+          data: {
+            cube_list_text: "1 Lightning Bolt\n",
+            cube_name: "Test Cube",
+            cube_draft_settings: {
+              pod_size: 2,
+              pack_count: 1,
+              cards_per_pack: 2,
+              min_deck_size: 4,
+              addable_cards: { policy: "StandardBasics", custom: [] },
+            },
+          },
+        },
+      };
+      await saveDraftHostSession("cube-1", cubeSession);
+      const loaded = await loadDraftHostSession("cube-1");
+      expect(loaded).toEqual(cubeSession);
+      expect(loaded?.poolInput.type).toBe("Cube");
     });
 
     it("saves and loads active host resume metadata", () => {

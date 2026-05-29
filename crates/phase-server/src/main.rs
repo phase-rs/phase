@@ -412,6 +412,42 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
     }
 }
 
+/// Returns `Some(reason)` if `action` cannot legitimately come from a client
+/// over the WebSocket draft protocol, or `None` if it is a valid client action.
+///
+/// **Exhaustive by design.** Every `DraftAction` variant is explicitly listed
+/// so adding a new variant is a compile error until the author decides its
+/// client-trust policy. A catch-all `_ => None` would default-allow future
+/// variants, which is the wrong default for a security-relevant gate.
+///
+/// Rejected variants:
+/// - `GeneratePairings`: server-hosted draft match play is not yet implemented;
+///   pairings will be computed server-internal once that path lands.
+/// - `SetSeatConnected`: engine state plumbing. The server-internal runtime in
+///   `server-core/src/draft_session.rs` broadcasts connection state via
+///   `draft_core::session::apply` directly. Accepting it from a client would
+///   let a malicious authenticated player forge another seat's connection
+///   state (GH #1254). Caller-binding at `draft_session.rs:247-249` resolves
+///   the authenticated seat from the token but discards it (`let _seat = ...`),
+///   so the payload's `seat: u8` is otherwise unchecked.
+fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction) -> Option<String> {
+    use draft_core::types::DraftAction;
+    match action {
+        DraftAction::GeneratePairings { .. } => {
+            Some("Server-hosted draft match play is not available yet".to_string())
+        }
+        DraftAction::SetSeatConnected { .. } => {
+            Some("SetSeatConnected is server-internal; not allowed from client".to_string())
+        }
+        DraftAction::StartDraft
+        | DraftAction::Pick { .. }
+        | DraftAction::SubmitDeck { .. }
+        | DraftAction::ReportMatchResult { .. }
+        | DraftAction::AdvanceRound
+        | DraftAction::ReplaceSeatWithBot { .. } => None,
+    }
+}
+
 impl SocketIdentity {
     /// Set identity and create a tracing span for field inheritance.
     fn set_session(&mut self, game_code: String, player_id: PlayerId, player_token: String) {
@@ -1741,6 +1777,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
             main_deck: deck.main_deck,
             sideboard: deck.sideboard,
             commander: deck.commander,
+            bracket_tier: deck.bracket_tier,
         })
     }
 }
@@ -1785,6 +1822,35 @@ async fn require_host(identity: &SocketIdentity, socket: &mut WebSocket) -> Resu
         return Err(());
     }
     Ok(())
+}
+
+fn is_joining_current_game(identity: &SocketIdentity, target_game_code: &str) -> bool {
+    identity
+        .game_code
+        .as_deref()
+        .is_some_and(|active| active == target_game_code)
+        || identity
+            .lobby_host_game
+            .as_deref()
+            .is_some_and(|hosted| hosted == target_game_code)
+}
+
+async fn reject_joining_current_game(
+    identity: &SocketIdentity,
+    target_game_code: &str,
+    socket: &mut WebSocket,
+) -> Result<(), ()> {
+    if !is_joining_current_game(identity, target_game_code) {
+        return Ok(());
+    }
+
+    let msg = ServerMessage::Error {
+        message: "You are already in this game.".to_string(),
+    };
+    if let Ok(json) = serde_json::to_string(&msg) {
+        let _ = socket.send(Message::text(json)).await;
+    }
+    Err(())
 }
 
 async fn draft_pack_generator_for_start(
@@ -1953,6 +2019,13 @@ async fn handle_client_message(
 
         ClientMessage::JoinGame { game_code, deck } => {
             info!(game = %game_code, deck_size = deck.main_deck.len(), "JoinGame");
+            if reject_joining_current_game(identity, &game_code, socket)
+                .await
+                .is_err()
+            {
+                return;
+            }
+
             let resolved = match resolve_deck(db, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
@@ -2777,6 +2850,13 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, "LookupJoinTarget");
 
+            if reject_joining_current_game(identity, &game_code, socket)
+                .await
+                .is_err()
+            {
+                return;
+            }
+
             let mut reservation_token = None;
             let mut reservation_expires_at_ms = None;
 
@@ -3017,6 +3097,13 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, joiner = %display_name, "JoinGameWithPassword");
 
+            if reject_joining_current_game(identity, &game_code, socket)
+                .await
+                .is_err()
+            {
+                return;
+            }
+
             // --- Lobby-only broker path ------------------------------
             //
             // The broker runs the build-commit + password gates, the
@@ -3122,6 +3209,10 @@ async fn handle_client_message(
                 },
             }
 
+            // Collects a bracket-violation message to broadcast after the state lock releases and
+            // after the joiner receives their direct error (mirrors the seat-delta path).
+            let mut bracket_broadcast: Option<String> = None;
+
             let join_outcome = {
                 let mut mgr = state.lock().await;
                 match mgr.join_game_with_name_and_reservation(
@@ -3146,19 +3237,31 @@ async fn handle_client_message(
                         let public_before =
                             session.lobby_meta.as_ref().is_some_and(|meta| meta.public);
                         if should_start {
-                            session.start_game(db.as_ref());
-                        }
-
-                        // Persist updated session (now has the new player)
-                        persist_session_async(game_db, &game_code, session);
-
-                        if should_start {
-                            Ok(JoinOutcome::Started {
-                                player_token,
-                                joiner,
-                                public_before,
-                            })
+                            if let Err(bracket_err) = session.start_game(db.as_ref()) {
+                                // start_game guarantees no mutation on Err, so the session still
+                                // holds the joining player. We keep them seated — rolling back
+                                // would require deleting their deck/token which is more invasive.
+                                // The host can correct the deck(s) and trigger a new start.
+                                persist_session_async(game_db, &game_code, session);
+                                // Capture the message so we can fan it out to all connected
+                                // players after the state lock releases (mirrors seat-delta path).
+                                bracket_broadcast =
+                                    Some(format!("Cannot start cEDH game: {bracket_err}"));
+                                // Evaluate to Err so the outer match join_outcome sends an Error
+                                // message to the client via the existing Err(e) arm.
+                                Err(format!("Cannot start cEDH game: {bracket_err}"))
+                            } else {
+                                // Persist updated session (now has the new player and is started)
+                                persist_session_async(game_db, &game_code, session);
+                                Ok(JoinOutcome::Started {
+                                    player_token,
+                                    joiner,
+                                    public_before,
+                                })
+                            }
                         } else {
+                            // Persist updated session (now has the new player, not yet started)
+                            persist_session_async(game_db, &game_code, session);
                             Ok(JoinOutcome::Waiting {
                                 player_token,
                                 joiner,
@@ -3268,6 +3371,20 @@ async fn handle_client_message(
                     let msg = ServerMessage::Error { message: e };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+            }
+
+            // If a cEDH bracket violation blocked the auto-start, fan the error out to all
+            // players already connected to the room. The joiner's socket is not yet registered
+            // in `connections` (registration only happens on Ok arms above), so this broadcast
+            // naturally excludes them — they already received the direct error above.
+            if let Some(err_msg) = bracket_broadcast {
+                let conns = connections.lock().await;
+                if let Some(players) = conns.get(&game_code) {
+                    let msg = ServerMessage::Error { message: err_msg };
+                    for sender in players.values() {
+                        let _ = sender.send(msg.clone());
                     }
                 }
             }
@@ -3408,7 +3525,15 @@ async fn handle_client_message(
                 return;
             };
 
-            let (slot_info, kicked_players, started, current_players, max_players, public_before) = {
+            let (
+                slot_info,
+                kicked_players,
+                started,
+                current_players,
+                max_players,
+                public_before,
+                bracket_error,
+            ) = {
                 let mut mgr = state.lock().await;
                 let Some(session) = mgr.sessions.get_mut(&game_code) else {
                     let msg = ServerMessage::Error {
@@ -3454,11 +3579,21 @@ async fn handle_client_message(
                     .collect::<Vec<_>>();
 
                 session.apply_seat_delta(seat_state, &delta, db.as_ref());
-                let started = delta.now_started
+                let mut started = delta.now_started
                     || (session.is_full() && session.start_when_full && session.is_pregame());
-                if started {
-                    session.start_game(db.as_ref());
-                }
+                // Collect a bracket-violation message to broadcast after releasing the state lock.
+                // start_game guarantees no mutation on Err, so session state is untouched.
+                let bracket_error: Option<String> = if started {
+                    match session.start_game(db.as_ref()) {
+                        Ok(()) => None,
+                        Err(bracket_err) => {
+                            started = false;
+                            Some(format!("Cannot start cEDH game: {bracket_err}"))
+                        }
+                    }
+                } else {
+                    None
+                };
                 let slot_info = session.player_slot_info();
                 let current_players = session.current_player_count();
                 let max_players = session.player_count;
@@ -3470,6 +3605,7 @@ async fn handle_client_message(
                     current_players,
                     max_players,
                     public_before,
+                    bracket_error,
                 )
             };
 
@@ -3481,6 +3617,16 @@ async fn handle_client_message(
                             let _ = sender.send(ServerMessage::Error {
                                 message: "You were removed from the room by the host.".to_string(),
                             });
+                        }
+                    }
+
+                    // If the start was blocked by a bracket violation, notify all players.
+                    if let Some(ref err_msg) = bracket_error {
+                        let msg = ServerMessage::Error {
+                            message: err_msg.clone(),
+                        };
+                        for sender in players.values() {
+                            let _ = sender.send(msg.clone());
                         }
                     }
 
@@ -3635,6 +3781,7 @@ async fn handle_client_message(
                         draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
                             set_code,
                             draft_kind: format!("{kind:?}"),
+                            cube_name: None,
                         }),
                     },
                     &SysEnv,
@@ -3751,13 +3898,8 @@ async fn handle_client_message(
 
             debug!(draft = %draft_code, action = ?action, "DraftAction");
 
-            if matches!(
-                action,
-                draft_core::types::DraftAction::GeneratePairings { .. }
-            ) {
-                let msg = ServerMessage::DraftActionRejected {
-                    reason: "Server-hosted draft match play is not available yet".to_string(),
-                };
+            if let Some(reason) = client_forbidden_draft_action_reason(&action) {
+                let msg = ServerMessage::DraftActionRejected { reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
                 }
@@ -3946,6 +4088,7 @@ mod mode_gate_tests {
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
             commander: vec![],
+            bracket_tier: Default::default(),
         }
     }
 
@@ -4089,11 +4232,31 @@ mod handshake_tests {
     use engine::types::actions::GameAction;
     use server_core::protocol::DeckData;
 
+    fn empty_identity() -> SocketIdentity {
+        SocketIdentity {
+            game_code: None,
+            player_id: None,
+            player_token: None,
+            lobby_subscribed: false,
+            session_span: None,
+            client_hello: None,
+            lobby_host_game: None,
+            seat_reservations: Vec::new(),
+            lobby_reservations: Vec::new(),
+            draft_code: None,
+            draft_seat: None,
+            draft_token: None,
+            spectator_draft_code: None,
+            spectator_visibility: None,
+        }
+    }
+
     fn empty_deck() -> DeckData {
         DeckData {
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
             commander: vec![],
+            bracket_tier: Default::default(),
         }
     }
 
@@ -4278,5 +4441,102 @@ mod handshake_tests {
                 guest: "def5678".into(),
             }
         );
+    }
+
+    #[test]
+    fn joining_current_game_is_rejected_by_helper() {
+        let mut identity = empty_identity();
+        identity.game_code = Some("GAME01".to_string());
+        identity.player_id = Some(PlayerId(0));
+
+        assert!(is_joining_current_game(&identity, "GAME01"));
+        assert!(!is_joining_current_game(&identity, "GAME02"));
+
+        let mut lobby_identity = empty_identity();
+        lobby_identity.lobby_host_game = Some("GAME01".to_string());
+        assert!(is_joining_current_game(&lobby_identity, "GAME01"));
+        assert!(!is_joining_current_game(&lobby_identity, "GAME02"));
+    }
+
+    #[test]
+    fn joining_without_active_game_is_allowed_by_helper() {
+        let identity = empty_identity();
+        assert!(!is_joining_current_game(&identity, "GAME01"));
+    }
+
+    // ------------------------------------------------------------------
+    // GH #1254: MP wire-trust — client cannot forge another seat's
+    // connection state via DraftAction::SetSeatConnected.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn client_forbidden_draft_action_rejects_set_seat_connected() {
+        // The forged payload: a malicious authenticated client passes
+        // *another* seat's index. The handler currently discards the
+        // token-resolved seat (`let _seat = ...` at draft_session.rs:247),
+        // so the payload's `seat` would flow through unchecked without
+        // this filter. Reject the variant outright — it's engine state
+        // plumbing, not user intent.
+        let action = draft_core::types::DraftAction::SetSeatConnected {
+            seat: 3,
+            connected: true,
+        };
+        let reason = client_forbidden_draft_action_reason(&action);
+        assert!(
+            reason.is_some(),
+            "SetSeatConnected MUST be rejected when sent from a client"
+        );
+        let msg = reason.unwrap();
+        assert!(
+            msg.contains("server-internal"),
+            "rejection reason should explain why: got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn client_forbidden_draft_action_rejects_generate_pairings() {
+        // Regression coverage: this rejection predates GH #1254 and must
+        // continue to fire. The user-facing reason ("not available yet")
+        // is distinct from SetSeatConnected ("server-internal"); both
+        // are forbidden but for different reasons.
+        let action = draft_core::types::DraftAction::GeneratePairings { round: 1 };
+        let reason = client_forbidden_draft_action_reason(&action);
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("not available yet"));
+    }
+
+    #[test]
+    fn client_forbidden_draft_action_allows_legitimate_variants() {
+        // Every variant that IS allowed from a client must return None.
+        // If a new DraftAction variant lands and the helper's exhaustive
+        // match doesn't handle it, this test fails at compile time on
+        // the function — and the security-relevant decision is made
+        // explicitly, not by default-allow.
+        let allowed = [
+            draft_core::types::DraftAction::StartDraft,
+            draft_core::types::DraftAction::Pick {
+                seat: 0,
+                card_instance_id: "x".into(),
+            },
+            draft_core::types::DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: vec![],
+            },
+            draft_core::types::DraftAction::ReportMatchResult {
+                match_id: "m1".into(),
+                winner_seat: Some(0),
+            },
+            draft_core::types::DraftAction::AdvanceRound,
+            draft_core::types::DraftAction::ReplaceSeatWithBot {
+                seat: 1,
+                name: None,
+            },
+        ];
+        for action in allowed {
+            assert!(
+                client_forbidden_draft_action_reason(&action).is_none(),
+                "expected {action:?} to be allowed from client"
+            );
+        }
     }
 }

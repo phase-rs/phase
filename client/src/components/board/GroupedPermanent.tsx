@@ -167,10 +167,22 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
 
   if (renderMode === "expanded") {
     return (
-      <div className="flex flex-wrap items-end gap-1">
+      <div className="relative flex flex-wrap items-end gap-1">
         {group.ids.map((id) => (
           <PermanentCard key={id} objectId={id} />
         ))}
+        {/* Collapse affordance anchored to the same screen position the
+            expand badge occupied before expansion, so users return to a
+            stacked group via the spot they clicked to expand it. */}
+        <button
+          type="button"
+          onClick={onExpand}
+          className="absolute left-1 top-1 z-30 flex h-5 w-5 items-center justify-center rounded-full bg-black/80 text-[10px] font-bold text-white ring-1 ring-gray-500 transition-colors hover:bg-black"
+          aria-label={t("permanent.collapseGroup", { name: group.name })}
+          title={t("permanent.collapseGroup", { name: group.name })}
+        >
+          {group.count}
+        </button>
       </div>
     );
   }

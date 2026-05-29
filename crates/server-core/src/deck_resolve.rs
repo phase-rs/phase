@@ -59,5 +59,6 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
         main_deck,
         sideboard,
         commander,
+        bracket_tier: deck.bracket_tier,
     })
 }

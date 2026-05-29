@@ -1,7 +1,7 @@
 use crate::game::zones;
 use crate::types::ability::{
-    ControllerRef, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter,
-    TargetRef, TypedFilter,
+    BounceSelection, ControllerRef, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastingVariant, GameState, StackEntryKind, WaitingFor};
@@ -108,10 +108,11 @@ pub fn resolve(
     // Arc Blade, etc.) target the source object rather than inheriting the
     // parent's chosen targets via the chain target-propagation in
     // `effects::mod.rs`.
-    let (target_filter, destination) = match &ability.effect {
+    let (target_filter, destination, non_targeting) = match &ability.effect {
         Effect::Bounce {
             target,
             destination,
+            selection,
         } => (
             target,
             // CR 608.2c: Default to owner's hand — mirrors `BounceAll`'s
@@ -121,8 +122,9 @@ pub fn resolve(
             // parser branches that route through `Bounce` with non-`Hand`
             // destinations don't need a separate resolver.
             destination.unwrap_or(Zone::Hand),
+            matches!(selection, BounceSelection::AtResolution),
         ),
-        _ => (&TargetFilter::None, Zone::Hand),
+        _ => (&TargetFilter::None, Zone::Hand, false),
     };
 
     let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
@@ -136,6 +138,76 @@ pub fn resolve(
             }
         })
         .collect();
+
+    // CR 115.1 + Whitemane Lion ruling (issue #563): Non-targeted
+    // controller-scoped *battlefield* bounce. Oracle text like "return a
+    // creature you control to its owner's hand" parses to a
+    // `Bounce { selection: AtResolution, target: Typed{Creature, controller:You}, .. }`.
+    // The targeting pipeline does NOT create target slots for non-targeted
+    // effects (`extract_target_filter_from_effect` returns `None`), so
+    // `targets` is empty here. Enumerate the eligible permanents on the
+    // battlefield matching the filter and either fizzle (0), auto-move (1),
+    // or surface an `EffectZoneChoice` scoped to the ability controller so
+    // they pick which permanent returns (multiple). Mirrors the
+    // non-targeted graveyard branch below and the non-targeted
+    // `Effect::Sacrifice` resolver path.
+    //
+    // The graveyard-scope guard below this block excludes graveyard-scoped
+    // filters from this branch — they continue to flow into the existing
+    // chosen-player graveyard branch which has different selecting-player
+    // semantics (Skullwinder-class).
+    if non_targeting && targets.is_empty() && !filter_targets_zone(target_filter, Zone::Graveyard) {
+        let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        let eligible: Vec<_> = state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
+            })
+            .collect();
+
+        match eligible.len() {
+            0 => {
+                // CR 608.2d: empty pool — the effect does nothing.
+            }
+            1 => {
+                zones::move_to_zone(state, eligible[0], destination, events);
+            }
+            _ => {
+                // CR 608.2c + CR 608.2d: surface card selection scoped to the
+                // ability controller. `EffectKind::ChangeZone` routes through
+                // the existing `EffectZoneChoice` intake
+                // (`engine_resolution_choices.rs`) which honors `destination`
+                // for the battlefield → hand move.
+                state.waiting_for = WaitingFor::EffectZoneChoice {
+                    player: ability.controller,
+                    cards: eligible,
+                    count: 1,
+                    min_count: 1,
+                    up_to: false,
+                    source_id: ability.source_id,
+                    effect_kind: EffectKind::ChangeZone,
+                    zone: Zone::Battlefield,
+                    destination: Some(destination),
+                    enter_tapped: false,
+                    enter_transformed: false,
+                    enters_under_player: None,
+                    enters_attacking: false,
+                    owner_library: false,
+                    track_exiled_by_source: false,
+                    count_param: 0,
+                };
+                return Ok(());
+            }
+        }
+
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
 
     // CR 608.2c + CR 608.2d + CR 109.4 (issue #534): Non-targeted
     // graveyard-return branch. Skullwinder-class effects ("That player
@@ -404,6 +476,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -443,6 +516,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::StackSpell,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(spell_id)],
             ObjectId(100),
@@ -492,6 +566,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::StackSpell,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(spell_id)],
             ObjectId(100),
@@ -560,6 +635,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::StackAbility { controller: None },
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(stack_id)],
             ObjectId(100),
@@ -590,6 +666,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::None,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![],
             obj_id,
@@ -618,6 +695,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -657,6 +735,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: Some(Zone::Library),
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -693,6 +772,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -725,6 +805,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::ParentTarget,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![],
             obj_id,
@@ -753,6 +834,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::SelfRef,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![],
             obj_id,
@@ -796,6 +878,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::ParentTarget,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
         )));
         state
@@ -1050,5 +1133,179 @@ mod tests {
             }
             ref other => panic!("expected BounceAll EffectZoneChoice, got {other:?}"),
         }
+    }
+
+    /// CR 115.1 + Whitemane Lion ruling (issue #563): Non-targeted
+    /// controller-scoped bounce with a single eligible permanent auto-moves
+    /// without prompting. Mirrors the graveyard branch's single-match path.
+    #[test]
+    fn test_bounce_non_targeting_controller_scope_single_eligible_auto_moves() {
+        use crate::types::ability::TypeFilter;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        // P0 controls one creature; P1 controls a creature too but the filter
+        // is `controller: You` so only P0's creature is eligible.
+        let own_bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_bear = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Bear".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [own_bear, opp_bear] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+                ),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // P0's creature moved to hand; P1's creature stayed on battlefield.
+        assert!(state.players[0].hand.contains(&own_bear));
+        assert!(!state.battlefield.contains(&own_bear));
+        assert!(state.battlefield.contains(&opp_bear));
+        // No prompt — single-eligible auto-move path.
+        assert!(matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::Priority { .. }
+        ));
+    }
+
+    /// CR 115.1 + Whitemane Lion ruling (issue #563): Non-targeted
+    /// controller-scoped bounce with multiple eligible permanents surfaces an
+    /// `EffectZoneChoice` so the controller picks. Mirrors the graveyard
+    /// branch's multi-match path.
+    #[test]
+    fn test_bounce_non_targeting_controller_scope_multiple_eligible_prompts_choice() {
+        use crate::types::ability::TypeFilter;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let own_bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let own_dragon = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [own_bear, own_dragon] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+                ),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Both creatures still on battlefield; controller prompted to choose
+        // one via EffectZoneChoice.
+        assert!(state.battlefield.contains(&own_bear));
+        assert!(state.battlefield.contains(&own_dragon));
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                effect_kind: EffectKind::ChangeZone,
+                zone: Zone::Battlefield,
+                destination: Some(Zone::Hand),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 1);
+                assert_eq!(*min_count, 1);
+                assert!(cards.contains(&own_bear));
+                assert!(cards.contains(&own_dragon));
+            }
+            other => panic!("expected EffectZoneChoice for non-targeted bounce, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1 + Whitemane Lion ruling (issue #563): When no eligible
+    /// permanent matches the filter (empty pool), the effect fizzles —
+    /// emits `EffectResolved` without crashing or prompting. Models the
+    /// Whitemane Lion case where the controller has no other creatures.
+    #[test]
+    fn test_bounce_non_targeting_controller_scope_empty_eligible_fizzles() {
+        use crate::types::ability::TypeFilter;
+
+        let mut state = GameState::new_two_player(42);
+        // No creatures on the battlefield — the filter yields an empty pool.
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+                ),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // No prompt; EffectResolved event emitted.
+        assert!(matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::Priority { .. }
+        ));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
     }
 }

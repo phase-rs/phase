@@ -131,13 +131,13 @@ function buildDefaultPreferences(): PreferencesState {
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
     aiSeats: [defaultAiSeat()],
+    cedhMode: false,
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
     aiBracketFilter: [] as CommanderBracket[],
     lastFormat: null,
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
-    experimentalFeatures: false,
     dismissedFlowHelpNudge: false,
     dismissedSandboxToolsNudge: false,
     artChain: [] as ArtChainEntry[],
@@ -187,13 +187,17 @@ interface PreferencesState {
   /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
   opponentHudDensity: OpponentHudDensity;
   aiSeats: AiSeatPref[];
+  /** Table-wide cEDH toggle. When true, every AI opponent plays at cEDH
+   *  (bracket 5) regardless of its per-seat difficulty, and the AI/human deck
+   *  pools are restricted to bracket-5 decks. cEDH is a table property, not a
+   *  per-seat difficulty — see `effectiveAiDifficulty` in `services/cedhLock`. */
+  cedhMode: boolean;
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
   aiBracketFilter: CommanderBracket[];
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
-  experimentalFeatures: boolean;
   dismissedFlowHelpNudge: boolean;
   dismissedSandboxToolsNudge: boolean;
   artChain: ArtChainEntry[];
@@ -240,13 +244,14 @@ interface PreferencesActions {
    *  shrinking truncates trailing slots. Called whenever the player count
    *  changes so the UI always has exactly `playerCount - 1` panels to render. */
   ensureAiSeatCount: (count: number) => void;
+  /** Toggle the table-wide cEDH mode (all AI play cEDH, deck pools → bracket 5). */
+  setCedhMode: (enabled: boolean) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
   setAiBracketFilter: (brackets: CommanderBracket[]) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
-  setExperimentalFeatures: (enabled: boolean) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
   setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
   addArtChainEntry: (entry: ArtChainEntry) => void;
@@ -372,13 +377,13 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           }
           return { aiSeats: grown };
         }),
+      setCedhMode: (enabled) => set({ cedhMode: enabled }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
-      setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
       setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),
       addArtChainEntry: (entry) =>
@@ -427,7 +432,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 11,
+      version: 12,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -558,6 +563,28 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         // comfortable two-row rail (the prior fixed behavior).
         if (version < 11) {
           migrated = { ...migrated, opponentHudDensity: "comfortable" };
+        }
+
+        // v11 → v12: cEDH is no longer a per-seat difficulty — it's the
+        // table-wide `cedhMode` toggle. Derive the flag from any seat that was
+        // set to "CEDH" (the old cascade forced every seat to it) and reset
+        // those seats to the default difficulty so the per-seat dropdowns no
+        // longer surface "CEDH".
+        if (version < 12) {
+          const legacy = migrated as {
+            aiSeats?: Array<{ difficulty?: string } & Record<string, unknown>>;
+          } & Record<string, unknown>;
+          const seats = Array.isArray(legacy.aiSeats) ? legacy.aiSeats : [];
+          const wasCedh = seats.some((s) => s?.difficulty === "CEDH");
+          migrated = {
+            ...legacy,
+            cedhMode: wasCedh,
+            aiSeats: seats.map((s) =>
+              s?.difficulty === "CEDH"
+                ? { ...s, difficulty: DEFAULT_AI_DIFFICULTY }
+                : s,
+            ),
+          };
         }
 
         return migrated;

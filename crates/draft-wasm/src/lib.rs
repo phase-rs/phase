@@ -720,12 +720,38 @@ enum SeatDescriptor {
     Bot { name: String },
 }
 
-/// Create a multiplayer draft session. Used by the P2P host to initialize a
-/// Premier or Traditional draft with human + bot seats.
+/// Pool source for multiplayer draft creation.
+/// Discriminated union mirroring the TS `PoolInput` type. The `data` payload
+/// uses snake_case field names matching `CubeDraftSettings` and the existing
+/// TS↔Rust mirror convention in `draft-adapter.ts`.
 ///
-/// - `set_pool_json`: serialized LimitedSetPool from draft-pools.json
+/// JSON examples:
+///   `{ "type": "Set",  "data": { "set_pool_json": "<serialized LimitedSetPool>" } }`
+///   `{ "type": "Cube", "data": { "cube_list_text": "...", "cube_name": "My Cube",
+///                                 "cube_draft_settings": { ... } } }`
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum PoolInput {
+    Set {
+        set_pool_json: String,
+    },
+    Cube {
+        cube_list_text: String,
+        cube_name: String,
+        cube_draft_settings: CubeDraftSettings,
+    },
+}
+
+/// Create a multiplayer draft session. Used by the P2P host to initialize a
+/// Premier or Traditional draft with human + bot seats from either a Set pool
+/// or a custom Cube list.
+///
+/// - `pool_input_json`: serialized `PoolInput` discriminated union
+///   (`{ "type": "Set" | "Cube", "data": { ... } }`)
 /// - `seats_json`: JSON array of SeatDescriptors
-/// - `kind`: 0=Quick, 1=Premier, 2=Traditional
+/// - `kind`: 0=Quick, 1=Premier, 2=Traditional. The user-selected DraftKind
+///   flows through to `DraftConfig.kind` unchanged. Tournament match format
+///   (Bo1 for Premier, Bo3 for Traditional) is identical to set drafts.
 /// - `seed`: RNG seed for deterministic pack generation
 /// - `draft_code`: unique room identifier
 ///
@@ -734,7 +760,7 @@ enum SeatDescriptor {
 /// for seat 0.
 #[wasm_bindgen]
 pub fn create_multiplayer_draft(
-    set_pool_json: &str,
+    pool_input_json: &str,
     seats_json: &str,
     kind: u8,
     seed: u32,
@@ -742,20 +768,44 @@ pub fn create_multiplayer_draft(
     tournament_format: &str,
     pod_policy: &str,
 ) -> Result<JsValue, JsValue> {
-    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {}", e)))?;
+    let view = create_multiplayer_draft_inner(
+        pool_input_json,
+        seats_json,
+        kind,
+        seed,
+        draft_code,
+        tournament_format,
+        pod_policy,
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&view))
+}
 
-    let seat_descriptors: Vec<SeatDescriptor> = serde_json::from_str(seats_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse seats: {}", e)))?;
+/// Pure-Rust core for `create_multiplayer_draft`. Returns a typed
+/// `DraftPlayerView` so this branch is reachable from `cargo test` without
+/// going through `js_sys::JSON::parse`. The WASM export wraps this with
+/// `to_js` and `JsValue::from_str` error mapping.
+fn create_multiplayer_draft_inner(
+    pool_input_json: &str,
+    seats_json: &str,
+    kind: u8,
+    seed: u32,
+    draft_code: &str,
+    tournament_format: &str,
+    pod_policy: &str,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let pool_input: PoolInput = serde_json::from_str(pool_input_json)
+        .map_err(|e| format!("Failed to parse pool input: {}", e))?;
+
+    let seat_descriptors: Vec<SeatDescriptor> =
+        serde_json::from_str(seats_json).map_err(|e| format!("Failed to parse seats: {}", e))?;
 
     let draft_kind = match kind {
         0 => DraftKind::Quick,
         1 => DraftKind::Premier,
         2 => DraftKind::Traditional,
         _ => {
-            return Err(JsValue::from_str(
-                "kind must be 0 (Quick), 1 (Premier), or 2 (Traditional)",
-            ))
+            return Err("kind must be 0 (Quick), 1 (Premier), or 2 (Traditional)".to_string());
         }
     };
 
@@ -763,9 +813,7 @@ pub fn create_multiplayer_draft(
         "Swiss" => TournamentFormat::Swiss,
         "SingleElimination" => TournamentFormat::SingleElimination,
         _ => {
-            return Err(JsValue::from_str(
-                "tournament_format must be Swiss or SingleElimination",
-            ))
+            return Err("tournament_format must be Swiss or SingleElimination".to_string());
         }
     };
 
@@ -773,13 +821,9 @@ pub fn create_multiplayer_draft(
         "Competitive" => PodPolicy::Competitive,
         "Casual" => PodPolicy::Casual,
         _ => {
-            return Err(JsValue::from_str(
-                "pod_policy must be Competitive or Casual",
-            ))
+            return Err("pod_policy must be Competitive or Casual".to_string());
         }
     };
-
-    let set_code = set_pool.code.clone();
 
     let seats: Vec<DraftSeat> = seat_descriptors
         .into_iter()
@@ -795,36 +839,115 @@ pub fn create_multiplayer_draft(
         })
         .collect();
 
-    let config = DraftConfig {
-        source: DraftSource::Set {
-            code: set_code.clone(),
-        },
-        set_code,
-        kind: draft_kind,
-        pod_size: seats.len() as u8,
-        cards_per_pack: 14,
-        pack_count: 3,
-        min_deck_size: 40,
-        addable_cards: DeckAddableCards::standard_basics(),
-        rng_seed: seed as u64,
-        tournament_format,
-        pod_policy,
-        spectator_visibility: SpectatorVisibility::default(),
-    };
+    match pool_input {
+        PoolInput::Set { set_pool_json } => {
+            let set_pool: LimitedSetPool = serde_json::from_str(&set_pool_json)
+                .map_err(|e| format!("Failed to parse set pool: {}", e))?;
+            let set_code = set_pool.code.clone();
 
-    let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
-    let pack_gen = PackGenerator::new(set_pool);
+            let config = DraftConfig {
+                source: DraftSource::Set {
+                    code: set_code.clone(),
+                },
+                set_code,
+                kind: draft_kind,
+                pod_size: seats.len() as u8,
+                cards_per_pack: 14,
+                pack_count: 3,
+                min_deck_size: 40,
+                addable_cards: DeckAddableCards::standard_basics(),
+                rng_seed: seed as u64,
+                tournament_format,
+                pod_policy,
+                spectator_visibility: SpectatorVisibility::default(),
+            };
 
-    session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
-        .map_err(|e| JsValue::from_str(&format!("Failed to start draft: {}", e)))?;
+            let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
+            let pack_gen = PackGenerator::new(set_pool);
 
-    let view = filter_for_player(&draft_session, 0);
+            session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
+                .map_err(|e| format!("Failed to start draft: {}", e))?;
 
-    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
-    PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
-    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+            let view = filter_for_player(&draft_session, 0);
 
-    Ok(to_js(&view))
+            DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+            PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+            RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+
+            Ok(view)
+        }
+        PoolInput::Cube {
+            cube_list_text,
+            cube_name,
+            cube_draft_settings: settings,
+        } => {
+            let entries = parse_cube_list(&cube_list_text).map_err(|errors| {
+                format!(
+                    "Failed to parse cube list: {}",
+                    serde_json::to_string(&errors).unwrap_or_else(|_| "invalid lines".to_string())
+                )
+            })?;
+            let (cards, addable_cards) = CARD_DB.with(|cell| {
+                let db_borrow = cell.borrow();
+                let db = db_borrow
+                    .as_ref()
+                    .ok_or_else(|| "Card database must be loaded before cube draft".to_string())?;
+                let cards = cube_cards_from_entries(&entries, db).map_err(|errors| {
+                    format!(
+                        "Failed to resolve cube cards: {}",
+                        serde_json::to_string(&errors)
+                            .unwrap_or_else(|_| "unknown cards".to_string())
+                    )
+                })?;
+                let addable_cards =
+                    resolve_addable_cards(&settings.addable_cards, db).map_err(|errors| {
+                        format!(
+                            "Failed to resolve addable cards: {}",
+                            serde_json::to_string(&errors)
+                                .unwrap_or_else(|_| "unknown cards".to_string())
+                        )
+                    })?;
+                Ok::<_, String>((cards, addable_cards))
+            })?;
+
+            // pod_size from settings is overridden by seats.len() — MP authoritative source
+            let config = DraftConfig {
+                source: DraftSource::Cube {
+                    id: "custom-cube".to_string(),
+                    name: cube_name.clone(),
+                },
+                set_code: "custom-cube".to_string(),
+                kind: draft_kind,
+                pod_size: seats.len() as u8,
+                cards_per_pack: settings.cards_per_pack,
+                pack_count: settings.pack_count,
+                min_deck_size: settings.min_deck_size,
+                addable_cards,
+                rng_seed: seed as u64,
+                tournament_format,
+                pod_policy,
+                spectator_visibility: SpectatorVisibility::default(),
+            };
+
+            let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
+            let pack_source = CubePackSource::new(cards);
+
+            session::apply(
+                &mut draft_session,
+                DraftAction::StartDraft,
+                Some(&pack_source),
+            )
+            .map_err(|e| format!("Failed to start cube draft: {}", e))?;
+
+            let view = filter_for_player(&draft_session, 0);
+
+            DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+            PACK_GEN.with(|cell| cell.set(None));
+            RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+
+            Ok(view)
+        }
+    }
 }
 
 /// Apply a draft action from any seat. Used by the P2P host to forward
@@ -861,4 +984,240 @@ pub fn get_draft_view_for_seat(seat_index: u8) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn get_draft_status() -> Result<JsValue, JsValue> {
     with_draft(|session| to_js(&session.status))
+}
+
+#[cfg(test)]
+mod pool_input_tests {
+    use super::*;
+
+    #[test]
+    fn pool_input_set_round_trip() {
+        let json = r#"{"type":"Set","data":{"set_pool_json":"{\"code\":\"foo\"}"}}"#;
+        let parsed: PoolInput = serde_json::from_str(json).unwrap();
+        match parsed {
+            PoolInput::Set { set_pool_json } => {
+                assert_eq!(set_pool_json, "{\"code\":\"foo\"}");
+            }
+            _ => panic!("expected Set"),
+        }
+    }
+
+    #[test]
+    fn pool_input_cube_round_trip() {
+        let json = r#"{
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "1 Lightning Bolt\n",
+                "cube_name": "Test Cube",
+                "cube_draft_settings": {
+                    "pod_size": 8,
+                    "pack_count": 3,
+                    "cards_per_pack": 15,
+                    "min_deck_size": 40,
+                    "addable_cards": { "policy": "StandardBasics", "custom": [] }
+                }
+            }
+        }"#;
+        let parsed: PoolInput = serde_json::from_str(json).unwrap();
+        match parsed {
+            PoolInput::Cube {
+                cube_list_text,
+                cube_name,
+                cube_draft_settings,
+            } => {
+                assert_eq!(cube_list_text, "1 Lightning Bolt\n");
+                assert_eq!(cube_name, "Test Cube");
+                assert_eq!(cube_draft_settings.cards_per_pack, 15);
+                assert_eq!(cube_draft_settings.pack_count, 3);
+            }
+            _ => panic!("expected Cube"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod create_multiplayer_draft_tests {
+    use super::*;
+    use draft_core::types::DraftStatus;
+    use engine::database::CardDatabase;
+
+    /// Minimal card-data JSON with four vanilla cards usable as cube content.
+    /// Shape mirrors the production card-data export consumed by
+    /// `CardDatabase::from_json_str` (see engine-wasm bracket_estimate_tests).
+    fn fixture_card_db_json() -> &'static str {
+        r#"{
+            "alpha": {
+                "name": "Alpha",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": "1", "toughness": "1", "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": { "game_changer": false, "mass_land_denial": false, "extra_turn": false, "efficient_tutor": false }
+            },
+            "beta": {
+                "name": "Beta",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": "1", "toughness": "1", "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": { "game_changer": false, "mass_land_denial": false, "extra_turn": false, "efficient_tutor": false }
+            },
+            "gamma": {
+                "name": "Gamma",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": "1", "toughness": "1", "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": { "game_changer": false, "mass_land_denial": false, "extra_turn": false, "efficient_tutor": false }
+            },
+            "delta": {
+                "name": "Delta",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": "1", "toughness": "1", "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": { "game_changer": false, "mass_land_denial": false, "extra_turn": false, "efficient_tutor": false }
+            }
+        }"#
+    }
+
+    fn install_fixture_db() {
+        let db = CardDatabase::from_json_str(fixture_card_db_json()).unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+    }
+
+    fn clear_state() {
+        DRAFT_SESSION.with(|cell| cell.set(None));
+        PACK_GEN.with(|cell| cell.set(None));
+        RNG.with(|cell| cell.set(None));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    #[test]
+    fn cube_pool_input_drives_drafting_status_and_pack_size() {
+        clear_state();
+        install_fixture_db();
+
+        // 2 seats × 2 cards/pack × 1 pack = 4 cards exactly.
+        let pool_input_json = r#"{
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "1 Alpha\n1 Beta\n1 Gamma\n1 Delta\n",
+                "cube_name": "Test Cube",
+                "cube_draft_settings": {
+                    "pod_size": 2,
+                    "pack_count": 1,
+                    "cards_per_pack": 2,
+                    "min_deck_size": 4,
+                    "addable_cards": { "policy": "StandardBasics", "custom": [] }
+                }
+            }
+        }"#;
+        let seats_json = r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#;
+
+        let view = create_multiplayer_draft_inner(
+            pool_input_json,
+            seats_json,
+            1, // Premier
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("cube draft should start");
+
+        assert!(
+            matches!(view.status, DraftStatus::Drafting),
+            "expected Drafting, got {:?}",
+            view.status
+        );
+        assert_eq!(view.cards_per_pack, 2);
+        assert_eq!(view.pack_count, 1);
+        assert_eq!(view.min_deck_size, 4);
+        let pack = view.current_pack.as_ref().expect("seat 0 has a pack");
+        assert_eq!(pack.len(), 2);
+
+        // Drive one Pick action by seat 0 and verify a delta is produced.
+        let picked = pack[0].instance_id.clone();
+        let action = DraftAction::Pick {
+            seat: 0,
+            card_instance_id: picked.clone(),
+        };
+        DRAFT_SESSION.with(|cell| {
+            let mut session = cell.take().expect("session populated");
+            let deltas = session::apply(&mut session, action, None).expect("pick applies");
+            assert!(!deltas.is_empty(), "pick should produce deltas");
+            cell.set(Some(session));
+        });
+
+        // After the human pick, seat 0's pack should no longer contain the picked card
+        // (it has been passed; pack will not be visible again until the rotation lands).
+        let post_view = DRAFT_SESSION.with(|cell| {
+            let session = cell.take().expect("session populated");
+            let v = filter_for_player(&session, 0);
+            cell.set(Some(session));
+            v
+        });
+        if let Some(pack_after) = &post_view.current_pack {
+            assert!(
+                !pack_after.iter().any(|c| c.instance_id == picked),
+                "picked card must not remain in seat 0's pack"
+            );
+        }
+
+        clear_state();
+    }
+
+    #[test]
+    fn cube_branch_uses_settings_cards_per_pack_not_default() {
+        clear_state();
+        install_fixture_db();
+
+        let pool_input_json = r#"{
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "1 Alpha\n1 Beta\n1 Gamma\n1 Delta\n",
+                "cube_name": "C1",
+                "cube_draft_settings": {
+                    "pod_size": 2,
+                    "pack_count": 1,
+                    "cards_per_pack": 2,
+                    "min_deck_size": 4,
+                    "addable_cards": { "policy": "StandardBasics", "custom": [] }
+                }
+            }
+        }"#;
+        let seats_json = r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#;
+
+        let view = create_multiplayer_draft_inner(
+            pool_input_json,
+            seats_json,
+            2, // Traditional
+            7,
+            "test-room",
+            "Swiss",
+            "Casual",
+        )
+        .expect("cube draft should start");
+
+        // C1: cards_per_pack must come from settings, NOT the hardcoded 14 in the Set branch.
+        assert_eq!(
+            view.cards_per_pack, 2,
+            "cards_per_pack must read from CubeDraftSettings"
+        );
+        // DraftKind flow-through: Traditional flows unchanged.
+        assert!(matches!(view.kind, DraftKind::Traditional));
+
+        clear_state();
+    }
 }

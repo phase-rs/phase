@@ -136,10 +136,12 @@ export interface LobbyGame {
 
 /** Metadata for draft pod lobby entries. */
 export interface DraftLobbyMetadata {
-  /** Three-letter set code (e.g. "MKM", "OTJ"). */
+  /** Three-letter set code (e.g. "MKM", "OTJ"). For cube drafts, "custom-cube". */
   setCode: string;
   /** Draft kind: "Quick", "Premier", or "Traditional". */
   draftKind: string;
+  /** Human-readable cube name when the pod is a cube draft. Absent for set drafts. */
+  cubeName?: string;
 }
 
 /**
@@ -1089,6 +1091,7 @@ export type WaitingFor =
   | { type: "TributeChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
   | { type: "CombatTaxPayment"; data: { player: PlayerId; context: CombatTaxContext; total_cost: ManaCost; per_creature: [ObjectId, ManaCost][]; pending: CombatTaxPending } }
   | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[] } }
+  | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; remaining?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
   | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
@@ -1399,6 +1402,7 @@ export type GameAction =
   | { type: "ChooseBattleProtector"; data: { protector: PlayerId } }
   | { type: "PayCombatTax"; data: { accept: boolean } }
   | { type: "ChooseUntap"; data: { object_id: ObjectId; untap: boolean } }
+  | { type: "ChooseExert"; data: { exert: boolean } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
   | { type: "DeclareCompanion"; data: { card_index: number | null } }
   | { type: "CompanionToHand" }
@@ -1506,6 +1510,7 @@ export type GameEvent =
   | { type: "CardsRevealed"; data: { player: PlayerId; card_ids?: ObjectId[]; card_names: string[] } }
   | { type: "Regenerated"; data: { object_id: ObjectId } }
   | { type: "CreatureSuspected"; data: { object_id: ObjectId } }
+  | { type: "Detained"; data: { object_id: ObjectId } }
   | { type: "CaseSolved"; data: { object_id: ObjectId } }
   | { type: "ClassLevelGained"; data: { object_id: ObjectId; level: number } }
   | { type: "RingTemptsYou"; data: { player_id: PlayerId } }
@@ -1641,6 +1646,7 @@ export interface GameState {
   monarch?: PlayerId | null;
   city_blessing?: PlayerId[];
   ring_level?: Record<string, number>;
+  ring_bearer?: Record<string, ObjectId | null>;
   commander_damage?: CommanderDamageEntry[];
   exile_links?: Array<{ exiled_id: ObjectId; source_id: ObjectId }>;
   match_config?: MatchConfig;
@@ -1804,6 +1810,8 @@ export const AdapterErrorCode = {
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
+  /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
+  BRACKET_VIOLATION: "BRACKET_VIOLATION",
 } as const;
 
 /**

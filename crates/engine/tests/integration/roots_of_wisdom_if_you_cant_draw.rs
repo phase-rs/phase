@@ -166,8 +166,8 @@ fn roots_of_wisdom_returnable_land_draws_zero() {
 
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCondition, ControllerRef, Effect, FilterProp, QuantityExpr, ResolvedAbility,
-    TargetFilter, TypedFilter,
+    AbilityCondition, BounceSelection, ControllerRef, Effect, FilterProp, QuantityExpr,
+    ResolvedAbility, TargetFilter, TypedFilter,
 };
 use engine::types::identifiers::CardId;
 use engine::types::player::PlayerId;
@@ -187,6 +187,7 @@ fn bounce_then_gated_draw(source: ObjectId, controller: PlayerId) -> ResolvedAbi
         Effect::Bounce {
             target: land_in_graveyard,
             destination: Some(Zone::Hand),
+            selection: BounceSelection::Targeted,
         },
         vec![],
         source,

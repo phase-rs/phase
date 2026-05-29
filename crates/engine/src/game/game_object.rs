@@ -384,6 +384,18 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_variant_paid: Option<(CastVariantPaid, u32)>,
 
+    /// CR 603.6a + CR 400.7: When this permanent was put onto the battlefield as
+    /// part of resolving an ability's effect, this is the `ObjectId` of that
+    /// ability's source permanent. Set by `deliver_replaced_zone_change` on
+    /// battlefield entry; `None` for entries that are not ability-effect-driven
+    /// (normal land plays, spell resolution to battlefield, combat, etc.).
+    /// Read by `TriggerCondition::PlacedByAbilitySource` to implement
+    /// anti-recursion intervening-ifs ("if it wasn't put onto the battlefield
+    /// with this ability"). Cleared on battlefield exit/entry per CR 400.7 —
+    /// a re-entering permanent is a new object with no memory of how it arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entered_via_ability_source: Option<ObjectId>,
+
     /// CR 601.3b + CR 702.8a: Which cast-timing permission was used to cast
     /// the spell that became this permanent, and on which turn. Used by trigger
     /// conditions that care whether normal sorcery timing was bypassed.
@@ -809,6 +821,7 @@ impl GameObject {
             summoning_sick: false,
             echo_due: false,
             cast_variant_paid: None,
+            entered_via_ability_source: None,
             cast_timing_permission: None,
             cost_x_paid: None,
             kickers_paid: Vec::new(),
@@ -915,6 +928,10 @@ impl GameObject {
         self.paired_with = None;
         self.chosen_attributes.clear();
         self.cast_variant_paid = None;
+        // CR 400.7 + CR 603.6a: Ability-placement provenance is per-entry. Clear
+        // it here so the set-block in `deliver_replaced_zone_change` repopulates
+        // it only for ability-effect-driven entries (Kodama anti-recursion guard).
+        self.entered_via_ability_source = None;
         self.cast_timing_permission = None;
         // CR 400.7 + CR 702.33d: kicker payments are bound to the casting
         // event that produced this object. A re-entering permanent has no
@@ -971,6 +988,10 @@ impl GameObject {
         // re-checks resolve correctly. A permanent that leaves the battlefield
         // is a new object on any re-entry — clear the stale cast provenance.
         self.cast_from_zone = None;
+        // CR 400.7 + CR 603.6a: Ability-placement provenance is battlefield-entry
+        // scoped — a permanent that leaves the battlefield is a new object on any
+        // re-entry. Clear conservatively on exit, mirroring `cast_from_zone`.
+        self.entered_via_ability_source = None;
         // CR 305.1 + CR 603.4: Land-play provenance is likewise battlefield-
         // entry scoped and must not survive a later zone change.
         self.played_from_zone = None;

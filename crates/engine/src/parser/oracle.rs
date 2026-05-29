@@ -4043,9 +4043,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, ObjectScope,
-        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr,
-        QuantityRef, ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation,
-        ShieldKind, StaticCondition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SharedQuality,
+        SharedQualityRelation, ShieldKind, StaticCondition, TargetFilter, TriggerCondition,
+        TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -4519,6 +4520,41 @@ mod tests {
     }
 
     #[test]
+    fn toxic_deluge_full_oracle_parses_x_life_cost_and_x_pump() {
+        let r = parse(
+            "As an additional cost to cast this spell, pay X life.\nAll creatures get -X/-X until end of turn.",
+            "Toxic Deluge",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+
+        assert_eq!(
+            r.additional_cost,
+            Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }))
+        );
+        assert_eq!(r.abilities.len(), 1);
+        match r.abilities[0].effect.as_ref() {
+            Effect::PumpAll {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(power, &PtValue::Variable("-X".to_string()));
+                assert_eq!(toughness, &PtValue::Variable("-X".to_string()));
+                assert_eq!(target, &TargetFilter::Typed(TypedFilter::creature()));
+            }
+            other => panic!("expected all-creature -X/-X pump, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn llanowar_elves_mana_ability() {
         let r = parse(
             "{T}: Add {G}.",
@@ -4788,6 +4824,31 @@ mod tests {
         let r = parse("Destroy target creature.", "Murder", &[], &["Instant"], &[]);
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn cut_down_destroy_target_uses_total_power_toughness_filter() {
+        let r = parse(
+            "Destroy target creature with total power and toughness 5 or less.",
+            "Cut Down",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::Destroy { target, .. } = &*r.abilities[0].effect else {
+            panic!("expected Destroy effect");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::TotalPowerToughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 5 },
+        }));
     }
 
     #[test]
@@ -5957,6 +6018,96 @@ mod tests {
             .as_ref()
             .is_none_or(|tail| !matches!(*tail.effect, Effect::Unimplemented { ref name, .. } if name == "activate"));
         assert!(no_activate_tail);
+    }
+
+    #[test]
+    fn owen_grady_shared_noun_counter_choice_activated() {
+        use crate::types::counter::CounterType;
+
+        // CR 122.1b shared-noun counter choice on an activate-as-a-sorcery
+        // ability: "{T}: Put your choice of a menace, trample, reach, or haste
+        // counter on target Dinosaur. Activate only as a sorcery."
+        let r = parse(
+            "{T}: Put your choice of a menace, trample, reach, or haste counter on target Dinosaur. Activate only as a sorcery.",
+            "Owen Grady, Raptor Trainer",
+            &[],
+            &["Creature"],
+            &["Human"],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+
+        // Tap cost + sorcery-speed activation restriction.
+        assert_eq!(ability.cost, Some(crate::types::ability::AbilityCost::Tap));
+        assert!(ability.sorcery_speed);
+        assert!(ability
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::AsSorcery));
+
+        // The shared "on target Dinosaur" target is lifted to the TargetOnly head.
+        assert!(
+            matches!(&*ability.effect, Effect::TargetOnly { .. }),
+            "expected TargetOnly head, got {:?}",
+            ability.effect
+        );
+        let head_target = ability
+            .effect
+            .target_filter()
+            .expect("TargetOnly head must surface its shared target");
+        assert!(
+            // allow-noncombinator: test assertion on Debug output, not parsing dispatch
+            format!("{head_target:?}").contains("Dinosaur"),
+            "expected shared target to be a Dinosaur filter, got {head_target:?}"
+        );
+
+        // Body is the ChooseOneOf with 4 keyword PutCounter branches on ParentTarget.
+        let choice = ability
+            .sub_ability
+            .as_deref()
+            .expect("counter choice must be chained as a sub-ability");
+        let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+            panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 4);
+
+        let expected = [
+            KeywordKind::Menace,
+            KeywordKind::Trample,
+            KeywordKind::Reach,
+            KeywordKind::Haste,
+        ];
+        for (i, kind) in expected.iter().enumerate() {
+            match &*branches[i].effect {
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target,
+                } => {
+                    assert_eq!(
+                        *counter_type,
+                        CounterType::Keyword(*kind),
+                        "branch {i} should be {kind:?}"
+                    );
+                    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                    assert_eq!(*target, TargetFilter::ParentTarget);
+                }
+                other => panic!("expected branch {i} PutCounter, got {other:?}"),
+            }
+        }
+
+        // No Unimplemented anywhere in the chain.
+        assert!(
+            !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+            "head must not be Unimplemented"
+        );
+        for branch in branches {
+            assert!(
+                !matches!(&*branch.effect, Effect::Unimplemented { .. }),
+                "branch must not be Unimplemented"
+            );
+        }
     }
 
     #[test]
