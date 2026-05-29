@@ -15770,6 +15770,87 @@ mod phase_trigger_regression_tests {
     }
 
     #[test]
+    fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
+        let mut state = setup_game_at_main_phase();
+        let siege_id = create_object(
+            &mut state,
+            CardId(621),
+            PlayerId(0),
+            "Glacierwood Siege".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&siege_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "As this enchantment enters, choose Temur or Sultai.\n\
+• Temur — Whenever you cast an instant or sorcery spell, target player mills four cards.\n\
+• Sultai — You may play lands from your graveyard.",
+            "Glacierwood Siege",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        {
+            let obj = state.objects.get_mut(&siege_id).unwrap();
+            for trigger in parsed.triggers.clone() {
+                obj.trigger_definitions.push(trigger);
+            }
+            Arc::make_mut(&mut obj.base_trigger_definitions).extend(parsed.triggers);
+            for replacement in parsed.replacements.clone() {
+                obj.replacement_definitions.push(replacement);
+            }
+            Arc::make_mut(&mut obj.base_replacement_definitions).extend(parsed.replacements);
+            for static_def in parsed.statics.clone() {
+                obj.static_definitions.push(static_def);
+            }
+            Arc::make_mut(&mut obj.base_static_definitions).extend(parsed.statics);
+        }
+
+        state.stack.push_back(StackEntry {
+            id: siege_id,
+            source_id: siege_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(621),
+                ability: None,
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(state.battlefield.contains(&siege_id));
+        match resolve.waiting_for {
+            WaitingFor::NamedChoice {
+                player,
+                choice_type: crate::types::ability::ChoiceType::Labeled { ref options },
+                source_id,
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(source_id, Some(siege_id));
+                assert_eq!(options, &vec!["Temur".to_string(), "Sultai".to_string()]);
+            }
+            other => panic!("expected Glacierwood Siege anchor choice, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseOption {
+                choice: "Temur".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&siege_id].chosen_label(), Some("Temur"));
+    }
+
+    #[test]
     fn restricted_color_choice_rejects_excluded_color() {
         use crate::types::ability::ChoiceType;
         use crate::types::mana::ManaColor;
