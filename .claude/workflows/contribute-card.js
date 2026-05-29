@@ -21,6 +21,7 @@ const COVERAGE_URL = 'https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/stagin
 
 const MAX_PLAN_REVIEW_ROUNDS = 3
 const MAX_IMPL_REVIEW_ROUNDS = 3
+const MAX_CROSSCHECK_ROUNDS = 2
 const MAX_VERIFY_RETRIES = 2
 
 // args may be a bare card-name string or { card?, count? }.
@@ -352,15 +353,24 @@ async function reviewImpl(card) {
 }
 
 async function crossCheck(card) {
-  const res = await agent(crossCheckPrompt(card), {
+  let res = await agent(crossCheckPrompt(card), {
     label: `crosscheck:${card}`,
     phase: 'Review',
     schema: CROSSCHECK_SCHEMA,
   })
-  if (!res.clean && res.findings && res.findings.length) {
+  for (
+    let round = 1;
+    round <= MAX_CROSSCHECK_ROUNDS && !res.clean && res.findings && res.findings.length;
+    round++
+  ) {
     await agent(fixCrossCheckPrompt(card, res.findings), {
-      label: `fix-crosscheck:${card}`,
+      label: `fix-crosscheck:${card}#${round}`,
       phase: 'Review',
+    })
+    res = await agent(crossCheckPrompt(card), {
+      label: `recheck:${card}#${round}`,
+      phase: 'Review',
+      schema: CROSSCHECK_SCHEMA,
     })
   }
   return res
