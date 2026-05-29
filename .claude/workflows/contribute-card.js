@@ -41,3 +41,102 @@ function normalizeArgs(a) {
   }
   return { explicitCard: null, count: 1 }
 }
+
+const WORKLIST_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['cards'],
+  properties: {
+    cards: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Ordered card names to implement, exactly as they appear in coverage data',
+    },
+  },
+}
+
+const BRANCH_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['branch'],
+  properties: {
+    branch: { type: 'string', description: 'The exact git branch name created (card/<slug>[-N])' },
+  },
+}
+
+const REVIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['clean', 'findings'],
+  properties: {
+    clean: { type: 'boolean', description: 'true when there are no blocking findings' },
+    findings: { type: 'array', items: { type: 'string' } },
+  },
+}
+
+const IMPL_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['scopeExpansion', 'filesChanged', 'crReferences'],
+  properties: {
+    scopeExpansion: { type: 'string', description: 'Description of scope growth, or the literal "None."' },
+    filesChanged: { type: 'array', items: { type: 'string' } },
+    crReferences: { type: 'array', items: { type: 'string' }, description: 'CR XXX.Y annotations added or touched' },
+  },
+}
+
+const CROSSCHECK_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['clean', 'findings'],
+  properties: {
+    clean: { type: 'boolean' },
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['category', 'detail'],
+        properties: {
+          category: {
+            type: 'string',
+            enum: ['nom-mandate', 'cr-citation', 'pattern-coverage', 'logic-placement', 'building-block-reuse', 'bool-flag'],
+          },
+          location: { type: 'string', description: 'file:line if known' },
+          detail: { type: 'string' },
+        },
+      },
+    },
+  },
+}
+
+const VERIFY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['passed', 'commands', 'failures'],
+  properties: {
+    passed: { type: 'boolean' },
+    commands: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'status'],
+        properties: { name: { type: 'string' }, status: { type: 'string' } },
+      },
+    },
+    coverageSupported: { type: 'boolean', description: 'card now supported:true gap_count:0' },
+    semanticAuditClean: { type: 'boolean' },
+    failures: { type: 'array', items: { type: 'string' } },
+  },
+}
+
+const PR_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['opened'],
+  properties: {
+    opened: { type: 'boolean' },
+    prUrl: { type: 'string' },
+  },
+}
