@@ -5944,8 +5944,25 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         } else {
             after_counter_on
         };
+        // CR 608.2c: "put a counter on that <type> for each X" — when the
+        // counter target is an anaphoric back-reference (`that creature`,
+        // `that permanent`, etc.), `parse_subject_application` signals it
+        // with `inherits_parent: true` and returns the type filter as a
+        // suggestion. The contract documented inside `parse_subject_application`
+        // is that the call site must lower this to `TargetFilter::ParentTarget`
+        // so the counter lands on the inherited parent target (or, in passive
+        // contexts where there is no parent, on the post-replacement event
+        // recipient via the caller's post-parse rewrite). Without this, the
+        // typed `Creature` filter leaks through and the counter is placed on
+        // an unrelated creature.
         let target = parse_subject_application(counter_target_text, &mut ParseContext::default())
-            .map(|app| app.affected)
+            .map(|app| {
+                if app.inherits_parent {
+                    TargetFilter::ParentTarget
+                } else {
+                    app.affected
+                }
+            })
             .unwrap_or_else(|| {
                 ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
                     context: "unrecognized counter target".into(),
