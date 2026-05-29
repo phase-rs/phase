@@ -4434,62 +4434,6 @@ mod tests {
         }
     }
 
-    /// CR 701.17c + CR 608.2c: Terra, Magical Adept (issue #1298) — "Put up to
-    /// one enchantment card milled this way into your hand" after a `Mill` must
-    /// chain as `TrackedSetFiltered`, not a bare `Typed(Enchantment)` scan.
-    #[test]
-    fn terra_magical_adept_mill_enchantment_milled_this_way_uses_tracked_set() {
-        use super::super::parse_effect_chain;
-        use crate::types::ability::{TypeFilter, TypedFilter};
-
-        let def = parse_effect_chain(
-            "Mill five cards. Put up to one enchantment card milled this way into your hand.",
-            AbilityKind::Spell,
-        );
-
-        let mill = &def;
-        let Effect::Mill { count, .. } = &*mill.effect else {
-            panic!("expected Mill root, got {:?}", mill.effect);
-        };
-        assert_eq!(
-            count,
-            &QuantityExpr::Fixed { value: 5 },
-            "mill count must be five"
-        );
-
-        let put = mill
-            .sub_ability
-            .as_ref()
-            .expect("Mill must chain to put clause");
-        let Effect::ChangeZone {
-            destination,
-            target,
-            up_to,
-            ..
-        } = &*put.effect
-        else {
-            panic!("expected ChangeZone put clause, got {:?}", put.effect);
-        };
-        assert_eq!(*destination, Zone::Hand);
-        assert!(*up_to, "\"up to one\" is an up-to selection");
-        match target {
-            TargetFilter::TrackedSetFiltered { id, filter } => {
-                assert_eq!(id.0, 0, "sentinel TrackedSetId(0) — resolved at runtime");
-                assert!(
-                    matches!(
-                        filter.as_ref(),
-                        TargetFilter::Typed(TypedFilter {
-                            type_filters,
-                            ..
-                        }) if type_filters.contains(&TypeFilter::Enchantment)
-                    ),
-                    "inner filter must match enchantment cards, got {filter:?}"
-                );
-            }
-            other => panic!("expected TrackedSetFiltered target, got {other:?}"),
-        }
-    }
-
     /// CR 118.3 + CR 608.2c: A payment clause between the mill and "milled this
     /// way" return is lookback-transparent. The return must patch the earlier
     /// `Mill`, not bind `ParentTarget` to the payment/current source.

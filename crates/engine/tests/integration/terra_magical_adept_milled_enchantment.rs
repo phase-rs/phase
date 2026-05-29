@@ -8,7 +8,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{Effect, TargetFilter};
+use engine::types::ability::{Effect, TargetFilter, TypeFilter, TypedFilter};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -60,9 +60,17 @@ fn terra_etb_parses_milled_this_way_as_tracked_set_filtered() {
     let Effect::ChangeZone { target, .. } = &*put.effect else {
         panic!("expected ChangeZone put clause, got {:?}", put.effect);
     };
+    let TargetFilter::TrackedSetFiltered { id, filter } = target else {
+        panic!("put-from-milled must target TrackedSetFiltered, got {target:?}");
+    };
+    assert_eq!(id.0, 0, "sentinel TrackedSetId(0) — resolved at runtime");
     assert!(
-        matches!(target, TargetFilter::TrackedSetFiltered { .. }),
-        "put-from-milled must target TrackedSetFiltered, got {target:?}"
+        matches!(
+            filter.as_ref(),
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Enchantment)
+        ),
+        "inner filter must scope to enchantment cards, got {filter:?}"
     );
 }
 
@@ -145,91 +153,6 @@ fn terra_etb_offers_only_milled_enchantments_not_battlefield() {
         *destination,
         Some(Zone::Hand),
         "the chosen milled card moves to hand"
-    );
-}
-
-/// Issue #1298 regression guard: a bare `Typed(Enchantment)` put clause (the
-/// pre-fix shape) incorrectly offers battlefield enchantments — this test
-/// documents the defect class the `TrackedSetFiltered` fix prevents.
-#[test]
-fn bare_enchantment_filter_offers_battlefield_trap() {
-    use engine::game::ability_utils::build_resolved_from_def;
-    use engine::game::effects::resolve_ability_chain;
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, TypeFilter, TypedFilter,
-    };
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-
-    let source_id = scenario
-        .add_creature_to_hand(P0, "Terra, Magical Adept", 2, 2)
-        .id();
-
-    let milled_enchantment = scenario.add_card_to_library_top(P0, "Milled Aura");
-    for i in 0..4 {
-        scenario.add_card_to_library_top(P0, &format!("Instant {i}"));
-    }
-    for i in 0..10 {
-        scenario.add_card_to_library_top(P0, &format!("Padding {i}"));
-    }
-
-    let mut runner = scenario.build();
-    mark_enchantment(&mut runner, milled_enchantment);
-
-    let battlefield_enchantment = create_object(
-        runner.state_mut(),
-        engine::types::identifiers::CardId(99),
-        P0,
-        "Battlefield Aura".to_string(),
-        Zone::Battlefield,
-    );
-    mark_enchantment(&mut runner, battlefield_enchantment);
-
-    // Pre-fix AST shape: Mill chained to ChangeZone with a raw type filter.
-    let wrong_chain = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Mill {
-            count: QuantityExpr::Fixed { value: 5 },
-            target: TargetFilter::Controller,
-            destination: Zone::Graveyard,
-        },
-    )
-    .sub_ability(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::ChangeZone {
-            origin: None,
-            destination: Zone::Hand,
-            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
-            owner_library: false,
-            enter_transformed: false,
-            enters_under: None,
-            enter_tapped: false,
-            enters_attacking: false,
-            up_to: true,
-            enter_with_counters: vec![],
-        },
-    ));
-
-    let ability = build_resolved_from_def(&wrong_chain, source_id, P0);
-    let mut events = Vec::new();
-    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0).expect("chain resolves");
-
-    let WaitingFor::EffectZoneChoice { cards, .. } = &runner.state().waiting_for else {
-        panic!(
-            "expected EffectZoneChoice, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-
-    assert!(
-        cards.contains(&battlefield_enchantment),
-        "bare Typed(Enchantment) incorrectly scans the battlefield — this is \
-         the issue #1298 defect class; offered = {cards:?}"
-    );
-    assert!(
-        !cards.contains(&milled_enchantment),
-        "bare filter should not scope to the milled card; offered = {cards:?}"
     );
 }
 
