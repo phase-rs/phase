@@ -1145,6 +1145,11 @@ fn detect_dynamic_qty(
         // permanents you control, add one mana of that color" is captured as
         // a dynamic mana-production carrier, not a QuantityExpr count.
         "DistinctColorsAmongPermanents",
+        // CR 122.1: Bribe Taker class — "for each kind of counter on
+        // permanents you control" is captured as a `DistinctCounterKindsAmong`
+        // iteration-source QuantityRef driving `repeat_for`, not a swallowed
+        // count.
+        "DistinctCounterKindsAmong",
         // CR 702.122: Strive — "this spell costs {N} more for each target
         // beyond the first" is captured on the top-level `Card` as
         // `strive_cost: Some(ManaCost)`, not inside an ability tree.

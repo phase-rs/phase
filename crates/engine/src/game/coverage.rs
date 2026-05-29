@@ -1003,6 +1003,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::DistinctColorsAmongPermanents { filter } => {
             format!("# of colors among {}", fmt_target(filter))
         }
+        QuantityRef::DistinctCounterKindsAmong { filter } => {
+            format!("# of counter kinds among {}", fmt_target(filter))
+        }
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
@@ -5180,6 +5183,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DistinctColorsAmongPermanents { .. } => {
             ("DistinctColorsAmongPermanents", Handled)
         }
+        QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),

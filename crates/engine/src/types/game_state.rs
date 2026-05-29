@@ -665,6 +665,13 @@ pub struct PendingRepeatIteration {
     pub ability: Box<crate::types::ability::ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracked_members: Vec<ObjectId>,
+    /// CR 122.1 + CR 608.2c: the per-iteration counter kinds snapshotted at
+    /// loop entry for a `repeat_for: DistinctCounterKindsAmong` loop. Indexed
+    /// by iteration number; each resumed iteration rebinds its tagged
+    /// `ChooseOneOf` branch to `iterated_counter_kinds[iteration]`. Empty when
+    /// the loop is not counter-kind-driven.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
 }

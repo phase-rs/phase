@@ -1497,6 +1497,16 @@ pub(super) fn handle_resolution_choice(
                 let delayed = super::triggers::check_delayed_triggers(state, &deferred);
                 events.extend(delayed);
             }
+            // CR 608.2c + CR 122.1: advance any paused resolution chain after the
+            // branch resolves. This is the standard post-resolution step every
+            // sibling choice handler runs. It no-ops when no `pending_continuation`
+            // / `pending_repeat_iteration` exists (each drain block is guarded by
+            // `if let Some(..) = ..take()`), so it is safe for existing `ChooseOneOf`
+            // consumers and for the deferred-entry replay above (mutually exclusive
+            // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop
+            // paused on `ChooseOneOfBranch` advances past the first counter kind to
+            // prompt for each remaining kind (Bribe Taker).
+            effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (

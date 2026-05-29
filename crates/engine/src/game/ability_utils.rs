@@ -1728,7 +1728,8 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter } => {
+        | QuantityRef::DistinctColorsAmongPermanents { filter }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => {
             filter_references_target_creature_quantity(filter)
         }
         QuantityRef::SpellsCastThisTurn { filter, .. }

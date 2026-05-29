@@ -503,6 +503,7 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
         let crate::types::game_state::PendingRepeatIteration {
             ability,
             tracked_members,
+            iterated_counter_kinds,
             next_iteration,
             total_iterations,
         } = pending;
@@ -512,14 +513,23 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
         let mut paused = false;
         while iteration < total_iterations {
             let mut iter_ability;
-            let iter_effective: &ResolvedAbility =
-                if let Some(member) = tracked_members.get(iteration) {
-                    iter_ability = (*ability).clone();
-                    rebind_first_object_target(&mut iter_ability.targets, *member);
-                    &iter_ability
-                } else {
-                    &ability
-                };
+            // CR 109.5 / CR 122.1 + CR 608.2c: clone when EITHER a tracked
+            // member rebind (parent-target loop) OR a counter-kind rebind
+            // (DistinctCounterKindsAmong loop) applies to this iteration.
+            let member = tracked_members.get(iteration).copied();
+            let kind = iterated_counter_kinds.get(iteration).cloned();
+            let iter_effective: &ResolvedAbility = if member.is_some() || kind.is_some() {
+                iter_ability = (*ability).clone();
+                if let Some(member) = member {
+                    rebind_first_object_target(&mut iter_ability.targets, member);
+                }
+                if let Some(kind) = kind {
+                    rebind_iterated_counter_kind(&mut iter_ability, kind);
+                }
+                &iter_ability
+            } else {
+                &ability
+            };
             // CR 609.3 + CR 109.5: Drive the FULL chain (parent effect +
             // sub_ability + line-1660 continuation wiring) for each resumed
             // iteration, mirroring iteration 0's path. Calling `resolve_effect`
@@ -553,6 +563,7 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
                         Some(crate::types::game_state::PendingRepeatIteration {
                             ability: ability.clone(),
                             tracked_members: tracked_members.clone(),
+                            iterated_counter_kinds: iterated_counter_kinds.clone(),
                             next_iteration: next,
                             total_iterations,
                         });
@@ -2029,6 +2040,46 @@ fn rebind_first_object_target(
     }
 }
 
+/// CR 122.1 + CR 608.2c: Rebind a counter-kind-driven `ChooseOneOf` to the
+/// current iteration's counter kind. For each branch tagged
+/// `iteration_kind_binding == Some(RebindToIteratedKind)`, rewrites that
+/// branch's `Effect::PutCounter` counter type to `kind`. The fixed branch
+/// (binding `None`, e.g. "+1/+1") is left untouched. Used by the
+/// `repeat_for: DistinctCounterKindsAmong` loop so each iteration's dynamic
+/// branch puts "a counter of that kind" (CR 608.2d resolution choice).
+/// CR 608.2c + CR 608.2d: True when this ability's `repeat_for` is a
+/// `DistinctCounterKindsAmong` loop — the per-counter-kind iteration source
+/// (Bribe Taker). The "you may" on such an ability applies INDEPENDENTLY to
+/// each iterated kind (the controller may decline kind A and accept kind B —
+/// see the card's official ruling), so the up-front single-gate at the top of
+/// `resolve_chain_body` is suppressed for this shape and optionality is fired
+/// per-iteration inside the `repeat_for` loop instead.
+fn has_kind_driven_repeat(ability: &ResolvedAbility) -> bool {
+    matches!(
+        ability.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong { .. },
+        })
+    )
+}
+
+fn rebind_iterated_counter_kind(
+    ability: &mut ResolvedAbility,
+    kind: crate::types::counter::CounterType,
+) {
+    if let Effect::ChooseOneOf { branches, .. } = &mut ability.effect {
+        for branch in branches.iter_mut() {
+            if branch.iteration_kind_binding
+                == Some(crate::types::ability::IterationKindBinding::RebindToIteratedKind)
+            {
+                if let Effect::PutCounter { counter_type, .. } = branch.effect.as_mut() {
+                    *counter_type = kind.clone();
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn resolved_object_filter(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -3037,7 +3088,14 @@ fn resolve_chain_body(
     // execution. For subject-anchored optional effects ("its controller may
     // search their library" — Assassin's Trophy), the acting player is the
     // resolved subject (the target permanent's controller), NOT the caster.
-    if ability.optional {
+    //
+    // CR 608.2c + CR 608.2d: EXCEPTION — a `DistinctCounterKindsAmong` loop
+    // (Bribe Taker) makes its "you may" apply PER ITERATED KIND, not once up
+    // front. The card's ruling confirms the controller may decline one kind and
+    // accept another. Suppress the single up-front gate here; the `repeat_for`
+    // loop below fires its own per-iteration `OptionalEffectChoice` for each
+    // counter kind (see the `kind_driven` optional path in the loop).
+    if ability.optional && !has_kind_driven_repeat(ability) {
         let description = ability.description.clone();
         let prompt_player = optional_prompt_player(state, ability);
         let may_trigger_key = ability
@@ -3340,6 +3398,27 @@ fn resolve_chain_body(
                     _ => Vec::new(),
                 };
 
+            // CR 122.1 + CR 608.2c: A `repeat_for: DistinctCounterKindsAmong`
+            // loop iterates once per distinct counter kind on filter-matched
+            // permanents. Unlike `ObjectCount`, the branches reference `SelfRef`
+            // (not `ParentTarget`), so `effect_iterates_over_parent_target` is
+            // false and a separate snapshot arm is required. The kinds are
+            // resolved here (sorted deterministically by `as_str`) so count and
+            // per-iteration binding share one snapshot; each iteration's tagged
+            // `ChooseOneOf` branch is rebound to `iterated_counter_kinds[i]`.
+            let mut kind_driven = false;
+            let iterated_counter_kinds: Vec<crate::types::counter::CounterType> =
+                match &ability.repeat_for {
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::DistinctCounterKindsAmong { filter },
+                    }) => {
+                        kind_driven = true;
+                        let ctx = filter::FilterContext::from_ability(effective);
+                        crate::game::quantity::distinct_counter_kinds_among(state, filter, &ctx)
+                    }
+                    _ => Vec::new(),
+                };
+
             // CR 609.3 + CR 608.2: Execute the effect N times when repeat_for is
             // set. A `member_driven` ObjectCount loop takes its count from the
             // snapshotted members (resolved against `effective`), keeping count and
@@ -3350,6 +3429,11 @@ fn resolve_chain_body(
             // resolve to 0 and the loop to never execute (Torment of Hailfire bug).
             let base_iterations = if member_driven {
                 iter_tracked_members.len()
+            } else if kind_driven {
+                // CR 122.1: count and per-iteration kind binding come from one
+                // snapshot, so an empty controlled-counter set ⇒ 0 iterations ⇒
+                // no prompt.
+                iterated_counter_kinds.len()
             } else if let Some(ref qty) = ability.repeat_for {
                 crate::game::quantity::resolve_quantity_with_targets(state, qty, ability).max(0)
                     as usize
@@ -3404,10 +3488,30 @@ fn resolve_chain_body(
                 let is_replacement_added_copy =
                     replacement_added_copy_start.is_some_and(|start| iteration >= start);
                 let iter_effective: &ResolvedAbility =
-                    if member.is_some() || is_replacement_added_copy {
+                    if member.is_some() || is_replacement_added_copy || kind_driven {
                         iter_ability = effective.clone();
                         if let Some(member) = member {
                             rebind_first_object_target(&mut iter_ability.targets, member);
+                        }
+                        // CR 122.1 + CR 608.2c: rebind this iteration's dynamic
+                        // ChooseOneOf branch to the current counter kind.
+                        if kind_driven {
+                            rebind_iterated_counter_kind(
+                                &mut iter_ability,
+                                iterated_counter_kinds[iteration].clone(),
+                            );
+                            // CR 608.2c + CR 608.2d: when the per-kind action is
+                            // optional (Bribe Taker's "you may"), this iteration
+                            // must route through `resolve_ability_chain` so the
+                            // up-front optional gate fires its OWN
+                            // `OptionalEffectChoice` for THIS kind (decline →
+                            // place nothing for this kind and advance; accept →
+                            // the `ChooseOneOf` branch prompt). The loop owns
+                            // iteration, so clear `repeat_for` on the clone to
+                            // prevent re-entering this loop (the up-front gate at
+                            // the top of `resolve_chain_body` is suppressed for
+                            // kind-driven loops via `has_kind_driven_repeat`).
+                            iter_ability.repeat_for = None;
                         }
                         if let (true, Effect::CopySpell { retarget, .. }) =
                             (is_replacement_added_copy, &mut iter_ability.effect)
@@ -3418,7 +3522,21 @@ fn resolve_chain_body(
                     } else {
                         effective
                     };
-                let _ = resolve_effect(state, iter_effective, events);
+                // CR 608.2d: A kind-driven iteration whose action is optional
+                // fires its per-kind "you may" gate (and any accepted
+                // `ChooseOneOf` branch prompt) through the full chain. All other
+                // iterations resolve the effect directly — `resolve_effect` does
+                // not check `optional`, which is correct because non-kind loops
+                // apply their `optional` once up front in `resolve_chain_body`.
+                if kind_driven && iter_effective.optional {
+                    // CR 608.2c: pass a non-zero depth so the depth==0 prelude
+                    // (chain-local state clearing, resolution counter) does not
+                    // re-run mid-loop — this iteration continues the current
+                    // resolution, mirroring the drain-path resume at depth 1.
+                    let _ = resolve_ability_chain(state, iter_effective, events, depth.max(1));
+                } else {
+                    let _ = resolve_effect(state, iter_effective, events);
+                }
                 // CR 609.3 + CR 109.5: When the inner effect enters an
                 // interactive WaitingFor (e.g. SearchChoice), stash the
                 // remaining iterations so `drain_pending_continuation` can
@@ -3458,6 +3576,10 @@ fn resolve_chain_body(
                             Some(crate::types::game_state::PendingRepeatIteration {
                                 ability: Box::new(resume_ability),
                                 tracked_members: iter_tracked_members.clone(),
+                                // CR 122.1 + CR 608.2c: carry the per-iteration
+                                // counter kinds so each resumed iteration rebinds
+                                // its dynamic branch (empty for non-kind loops).
+                                iterated_counter_kinds: iterated_counter_kinds.clone(),
                                 next_iteration,
                                 total_iterations: iterations,
                             });
@@ -8638,6 +8760,7 @@ mod tests {
         state.pending_repeat_iteration = Some(PendingRepeatIteration {
             ability: Box::new(iter_ability),
             tracked_members: vec![],
+            iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 3,
         });
@@ -12077,6 +12200,373 @@ mod tests {
         assert!(
             !evaluate_condition(&condition, &state_no_win, &ability_no_win),
             "NO-WIN scenario: devotion=2, library=50 must NOT satisfy GE",
+        );
+    }
+
+    /// CR 122.1: Non-interactive proof that
+    /// `repeat_for: DistinctCounterKindsAmong` drives the iteration count. A
+    /// plain `PutCounter` (no ChooseOneOf, no "you may") runs once per distinct
+    /// counter kind among controlled permanents.
+    #[test]
+    fn distinct_counter_kinds_among_drives_repeat_for_count() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Source permanent (Bribe-Taker-like) — counters land here.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Two distinct counter kinds among controlled permanents: P1P1 + Lore.
+        let perm_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+        let perm_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.counters.insert(CounterType::Lore, 1);
+        }
+
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Permanent],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        let mut ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong { filter },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // 2 distinct kinds → loop ran twice → source has 2 +1/+1 counters
+        // (the source's own counters do not change the controlled-permanent set
+        // mid-loop because P1P1 is already present on perm_a — the kind set is
+        // snapshotted at loop entry regardless).
+        assert_eq!(
+            state
+                .objects
+                .get(&source)
+                .unwrap()
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "loop must run once per distinct counter kind (2)"
+        );
+    }
+
+    /// CR 122.1 + CR 608.2c + CR 608.2d + CR 109.4 (T1): Drive Bribe Taker's
+    /// interactive for-each-kind choice end-to-end, PROVING per-kind
+    /// optionality. The controller DECLINES the first kind's "you may" (no
+    /// counter for that kind) and the loop must still ADVANCE to a prompt for
+    /// the second kind, which is ACCEPTED. This is discriminating: under the old
+    /// single up-front gate, declining would have skipped ALL kinds and accepting
+    /// would have forced a counter on EVERY kind — neither matches the card's
+    /// ruling that each kind is independently optional.
+    ///
+    /// Also the H1 discriminator — without the `drain_pending_continuation` call
+    /// in the ChooseBranch handler, only the first prompted kind would advance.
+    #[test]
+    fn bribe_taker_for_each_kind_interactive_choice_runtime() {
+        use crate::game::engine::apply;
+        use crate::types::ability::{IterationKindBinding, TypeFilter, TypedFilter};
+        use crate::types::actions::GameAction;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bribe Taker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Controller perm A: +1/+1 counter. Perm B: Lore counter.
+        let perm_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+        let perm_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.counters.insert(CounterType::Lore, 1);
+        }
+        // OPPONENT perm with Stun counter — MUST be excluded (CR 109.4): if it
+        // leaked in, there would be 3 prompts, not 2.
+        let opp = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Opp".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&opp).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Stun, 1);
+        }
+
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Permanent],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        // Build the Bribe Taker ability: optional ChooseOneOf, fixed (+1/+1) +
+        // dynamic (RebindToIteratedKind) branches, driven by
+        // repeat_for: DistinctCounterKindsAmong.
+        let fixed_branch = AbilityDefinition {
+            ..AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            )
+        };
+        let dynamic_branch = AbilityDefinition {
+            iteration_kind_binding: Some(IterationKindBinding::RebindToIteratedKind),
+            ..AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            )
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: crate::types::ability::PlayerFilter::Controller,
+                branches: vec![fixed_branch, dynamic_branch],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong { filter },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // (d) — non-empty set: the FIRST kind's per-iteration "you may" gate must
+        // fire. The deterministic sorted order is [P1P1, Lore]; iteration 0 is the
+        // P1P1 kind. Under per-kind optionality this is an OptionalEffectChoice
+        // (the decline path is only reachable when the gate is per-iteration).
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "iteration 0 must fire its own per-kind 'you may' gate (got {:?})",
+            state.waiting_for
+        );
+
+        // Iteration 0 (P1P1 kind): DECLINE the "you may". No counter is placed
+        // for this kind, and the loop must ADVANCE to the next kind's gate — this
+        // is the discriminating step: a single up-front gate would have skipped
+        // ALL kinds here.
+        let r = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+        events.extend(r.events);
+
+        // (a) Per-kind decline + H1: after declining iteration 0, the loop must
+        // ADVANCE to iteration 1's (Lore) own "you may" gate — not return to
+        // Priority and not skip the remaining kind.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "after declining kind 0, kind 1 (Lore) must fire its own 'you may' gate \
+             (got {:?})",
+            state.waiting_for
+        );
+
+        // Iteration 1 (Lore kind): ACCEPT the "you may", then choose the DYNAMIC
+        // branch (index 1). (b) This must place a LORE counter, proving the
+        // rebind binds the iterated kind.
+        let r = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+        events.extend(r.events);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "accepting kind 1 must surface the ChooseOneOf branch prompt, got {:?}",
+            state.waiting_for
+        );
+        let r = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseBranch { index: 1 },
+        )
+        .unwrap();
+        events.extend(r.events);
+
+        // Loop complete: back to Priority.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "loop must complete after the last kind, got {:?}",
+            state.waiting_for
+        );
+
+        let src = state.objects.get(&source).unwrap();
+        // Iteration 0 was DECLINED: NO +1/+1 counter was placed for that kind.
+        assert_eq!(
+            src.counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "declining the P1P1 kind must place NO +1/+1 counter (per-kind 'may')"
+        );
+        // (b) Iteration 1 was ACCEPTED, dynamic branch on the Lore iteration: 1
+        // LORE counter, proving rebind binds the iterated kind.
+        assert_eq!(
+            src.counters.get(&CounterType::Lore).copied().unwrap_or(0),
+            1,
+            "accepting the Lore kind's dynamic branch must place a LORE counter (rebind)"
+        );
+    }
+
+    /// CR 122.1 (T1d): empty controlled-counter set → 0 iterations → no prompt.
+    #[test]
+    fn bribe_taker_empty_counter_set_no_prompt() {
+        use crate::types::ability::{IterationKindBinding, TypeFilter, TypedFilter};
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bribe Taker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // No counters anywhere the controller controls.
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Permanent],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+        let dynamic_branch = AbilityDefinition {
+            iteration_kind_binding: Some(IterationKindBinding::RebindToIteratedKind),
+            ..AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            )
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: crate::types::ability::PlayerFilter::Controller,
+                branches: vec![dynamic_branch],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        // CR 608.2c + CR 608.2d: `optional = true` mirrors the real card. With
+        // per-kind optionality, the "you may" gate fires INSIDE the `repeat_for`
+        // loop per iterated kind — so an empty controlled-counter set yields 0
+        // iterations, 0 gates, and no prompt. The up-front single gate in
+        // `resolve_chain_body` is suppressed for `DistinctCounterKindsAmong`
+        // loops (see `has_kind_driven_repeat`), so it cannot leak a stray prompt
+        // on the empty set.
+        ability.optional = true;
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong { filter },
+        });
+
+        let initial_waiting = state.waiting_for.clone();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        // Zero iterations → no prompt installed → waiting_for unchanged.
+        assert_eq!(
+            state.waiting_for, initial_waiting,
+            "empty counter set must not prompt"
         );
     }
 }

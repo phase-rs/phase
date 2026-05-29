@@ -1339,6 +1339,13 @@ fn resolve_ref(
             }
             usize_to_i32_saturating(seen.len())
         }
+        // CR 122.1: Count distinct counter kinds among permanents matching the
+        // filter (controller-relative, CR 109.4). Counter-side dual of
+        // `DistinctColorsAmongPermanents`. Each `CounterType` present on at
+        // least one matching permanent contributes once.
+        QuantityRef::DistinctCounterKindsAmong { filter } => {
+            usize_to_i32_saturating(distinct_counter_kinds_among(state, filter, &filter_ctx).len())
+        }
         // CR 305.6: Count distinct basic land types among lands controlled by
         // the referenced player. Domain counts distinct land subtypes, not
         // lands, so multiple Forests still contribute one.
@@ -2099,6 +2106,40 @@ fn object_id_for_scope(
         // referents read through `ability` slots, not `state.objects`.
         ObjectScope::CostPaidObject | ObjectScope::Anaphoric => None,
     }
+}
+
+/// CR 122.1: Distinct counter kinds present on permanents matching `filter`
+/// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmongPermanents`'s
+/// resolver (zone from `filter.extract_in_zone()`, `zone_object_ids`,
+/// `matches_target_filter`), enumerating `obj.counters.keys()` the same way
+/// proliferate does. Returns a `Vec<CounterType>` SORTED by `CounterType::as_str`
+/// for determinism — `CounterType` has no `Ord` (and must not gain one), so the
+/// underlying `HashSet` iteration order is nondeterministic and would cause
+/// replay desync if returned directly. Used both as the `len()` source for
+/// `QuantityRef::DistinctCounterKindsAmong` resolution and as the per-iteration
+/// kind sequence for `repeat_for` counter-kind loops.
+pub(crate) fn distinct_counter_kinds_among(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Vec<CounterType> {
+    let zone = filter
+        .extract_in_zone()
+        .unwrap_or(crate::types::zones::Zone::Battlefield);
+    let mut seen: HashSet<CounterType> = HashSet::new();
+    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
+        if !matches_target_filter(state, id, filter, filter_ctx) {
+            continue;
+        }
+        if let Some(obj) = state.objects.get(&id) {
+            for ct in obj.counters.keys() {
+                seen.insert(ct.clone());
+            }
+        }
+    }
+    let mut kinds: Vec<CounterType> = seen.into_iter().collect();
+    kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    kinds
 }
 
 pub(crate) fn counter_count_from_map(
@@ -3173,6 +3214,89 @@ mod tests {
             obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
         }
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), spell), 0);
+    }
+
+    /// CR 122.1 + CR 109.4: count distinct counter kinds among permanents the
+    /// resolving player controls. An opponent's counter kind must be EXCLUDED,
+    /// and the same kind on two controlled permanents counts once. Order is
+    /// deterministic (sorted by `as_str`).
+    #[test]
+    fn resolve_distinct_counter_kinds_among_controlled_permanents() {
+        let mut state = GameState::new_two_player(42);
+
+        // Controller's permanent A: +1/+1 counter.
+        let perm_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Perm A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+        // Controller's permanent B: Lore counter (distinct kind).
+        let perm_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Perm B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.counters.insert(CounterType::Lore, 1);
+        }
+        // Controller's permanent C: another +1/+1 (same kind as A — counts once).
+        let perm_c = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Perm C".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_c).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 3);
+        }
+        // OPPONENT's permanent: Stun counter — MUST be excluded (CR 109.4).
+        let opp_perm = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Opp Perm".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&opp_perm).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Stun, 1);
+        }
+
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Permanent],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        // Direct helper: distinct kinds among controlled permanents = {P1P1, Lore},
+        // sorted by as_str ("P1P1" < "lore" by byte order; uppercase 'P' = 0x50,
+        // lowercase 'l' = 0x6C).
+        let ctx = FilterContext::from_source_with_controller(perm_a, PlayerId(0));
+        let kinds = distinct_counter_kinds_among(&state, &filter, &ctx);
+        assert_eq!(kinds, vec![CounterType::Plus1Plus1, CounterType::Lore]);
+
+        // QuantityRef resolution returns the count (2).
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong {
+                filter: filter.clone(),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), perm_a), 2);
     }
 
     #[test]

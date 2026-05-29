@@ -47,13 +47,13 @@ use crate::types::ability::{
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
     ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction,
-    ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr,
-    QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
-    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter, UnlessPayModifier, UntilCondition,
+    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, IterationKindBinding,
+    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost,
+    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
+    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
+    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -2780,6 +2780,90 @@ fn all_core_type_categories() -> Vec<CoreType> {
     ]
 }
 
+/// CR 122.1 + CR 608.2d: Parse the body of Bribe Taker's "for each kind of
+/// counter on permanents you control, you may put your choice of a +1/+1 counter
+/// or a counter of that kind on this creature" into a `ChooseOneOf` between a
+/// fixed-counter branch and a dynamic "counter of that kind" branch.
+///
+/// This runs on the body remainder AFTER `strip_for_each_prefix` has lifted the
+/// `DistinctCounterKindsAmong` iteration source onto the parent ability's
+/// `repeat_for` (so the body text here has the "for each … , " prefix already
+/// removed). The leading "you may " is also already peeled by `peel_clause`
+/// (which sets `optional`), but is accepted here as well so direct invocations
+/// (tests, non-peeled paths) parse identically.
+///
+/// The dynamic branch is tagged `IterationKindBinding::RebindToIteratedKind`;
+/// the `repeat_for` loop rewrites its placeholder counter type to each iterated
+/// kind in turn (see `rebind_iterated_counter_kind` in `effects/mod.rs`). The
+/// fixed counter type is parsed via `parse_counter_type_typed`, so the class
+/// covers any fixed counter ("a lore counter or a counter of that kind"), not
+/// just +1/+1. The placeholder counter type on the dynamic branch is a
+/// don't-care — the loop overwrites every tagged branch each iteration.
+fn try_parse_for_each_counter_kind_choice(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, saw_you_may) = opt(tag::<_, _, E>("you may "))
+        .parse(tp.lower)
+        .map(|(rest, opt_match)| (rest, opt_match.is_some()))
+        .ok()?;
+    let (rest, _) = tag::<_, _, E>("put your choice of ").parse(rest).ok()?;
+    let (rest, _) = nom_primitives::parse_article.parse(rest).ok()?;
+    let (rest, fixed_counter) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    let (rest, _) = tag::<_, _, E>(" counter or a counter of that kind on ")
+        .parse(rest)
+        .ok()?;
+    // CR 109.4: self target — "this creature" is normalized to `~` upstream.
+    let (rest, _) = tag::<_, _, E>("~").parse(rest).ok()?;
+    if !rest.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+
+    // CR 608.2d: the controller chooses between the two branches at resolution.
+    // Fixed branch: put the parsed counter on self.
+    let fixed_branch = AbilityDefinition {
+        description: Some(format!("put a {} counter", fixed_counter.display_phrase())),
+        ..AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: fixed_counter,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )
+    };
+    // Dynamic branch: placeholder counter type is a don't-care — the
+    // `DistinctCounterKindsAmong` loop rewrites it to the current iterated kind
+    // each iteration via `rebind_iterated_counter_kind`.
+    let dynamic_branch = AbilityDefinition {
+        description: Some("put a counter of that kind".to_string()),
+        iteration_kind_binding: Some(IterationKindBinding::RebindToIteratedKind),
+        ..AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )
+    };
+
+    Some(ParsedEffectClause {
+        effect: Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![fixed_branch, dynamic_branch],
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        // CR 608.2: "you may" makes the per-iteration choice optional. When this
+        // body was peeled, `peel_clause` will OR its own optional flag in too.
+        optional: saw_you_may,
+        unless_pay: None,
+    })
+}
+
 fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     type E<'a> = OracleError<'a>;
 
@@ -3478,6 +3562,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // matched by the imperative "you may" arm or fall through to
     // `Effect::Unimplemented`.
     if let Some(clause) = try_parse_compound_subject_each(text, ctx) {
+        return clause;
+    }
+
+    // CR 122.1 + CR 608.2d: Bribe Taker — "[you may] put your choice of a
+    // <fixed> counter or a counter of that kind on ~". Runs before the generic
+    // for-each path; the `DistinctCounterKindsAmong` iteration source has already
+    // been lifted onto the parent's `repeat_for` by `strip_for_each_prefix`.
+    if let Some(clause) = try_parse_for_each_counter_kind_choice(tp) {
         return clause;
     }
 
@@ -18820,6 +18912,103 @@ mod tests {
                 properties: vec![FilterProp::Another],
             })),
             ..ParseContext::default()
+        }
+    }
+
+    /// CR 122.1 + CR 608.2d: Bribe Taker building-block — "for each kind of
+    /// counter on permanents you control, you may put your choice of a +1/+1
+    /// counter or a counter of that kind on this creature" lifts a
+    /// `DistinctCounterKindsAmong` iteration source onto `repeat_for` and a
+    /// `ChooseOneOf` body with a fixed (+1/+1) branch and a dynamic
+    /// `RebindToIteratedKind` branch, both targeting `SelfRef`.
+    #[test]
+    fn bribe_taker_for_each_counter_kind_choice() {
+        let mut ctx = ParseContext::default();
+        let def = parse_effect_chain_with_context(
+            "for each kind of counter on permanents you control, you may put your choice of a +1/+1 counter or a counter of that kind on ~.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        // CR 122.1: iteration source lifted onto the parent's repeat_for.
+        match &def.repeat_for {
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong { filter },
+            }) => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected typed permanent filter, got {other:?}"),
+            },
+            other => panic!("expected DistinctCounterKindsAmong repeat_for, got {other:?}"),
+        }
+        // CR 608.2: "you may" → optional choice.
+        assert!(def.optional, "expected optional ChooseOneOf");
+        match &*def.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(*chooser, PlayerFilter::Controller);
+                assert_eq!(branches.len(), 2);
+                // Fixed branch: +1/+1 on self, no kind binding.
+                assert_eq!(branches[0].iteration_kind_binding, None);
+                match &*branches[0].effect {
+                    Effect::PutCounter {
+                        counter_type,
+                        target,
+                        ..
+                    } => {
+                        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                        assert_eq!(*target, TargetFilter::SelfRef);
+                    }
+                    other => panic!("expected PutCounter fixed branch, got {other:?}"),
+                }
+                // Dynamic branch: tagged RebindToIteratedKind, on self.
+                assert_eq!(
+                    branches[1].iteration_kind_binding,
+                    Some(IterationKindBinding::RebindToIteratedKind)
+                );
+                match &*branches[1].effect {
+                    Effect::PutCounter { target, .. } => {
+                        assert_eq!(*target, TargetFilter::SelfRef);
+                    }
+                    other => panic!("expected PutCounter dynamic branch, got {other:?}"),
+                }
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    /// Generality check: a non-+1/+1 fixed counter ("a lore counter or a counter
+    /// of that kind") proves the class is not hardcoded to +1/+1.
+    #[test]
+    fn for_each_counter_kind_choice_non_p1p1_fixed() {
+        let mut ctx = ParseContext::default();
+        let def = parse_effect_chain_with_context(
+            "for each kind of counter on permanents you control, put your choice of a lore counter or a counter of that kind on ~.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(matches!(
+            &def.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong { .. }
+            })
+        ));
+        // No "you may" → mandatory.
+        assert!(!def.optional);
+        match &*def.effect {
+            Effect::ChooseOneOf { branches, .. } => {
+                match &*branches[0].effect {
+                    Effect::PutCounter { counter_type, .. } => {
+                        assert_eq!(*counter_type, CounterType::Lore);
+                    }
+                    other => panic!("expected PutCounter, got {other:?}"),
+                }
+                assert_eq!(
+                    branches[1].iteration_kind_binding,
+                    Some(IterationKindBinding::RebindToIteratedKind)
+                );
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
         }
     }
 

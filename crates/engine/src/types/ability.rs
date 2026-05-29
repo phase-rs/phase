@@ -3171,6 +3171,15 @@ pub enum QuantityRef {
     /// mana ability. Composes with `ObjectCount`-style filter predicates and is
     /// the dual to `ManaProduction::DistinctColorsAmongPermanents`.
     DistinctColorsAmongPermanents { filter: TargetFilter },
+    /// CR 122.1: distinct counter kinds among filter-matched permanents
+    /// (controller-relative, CR 109.4). Counter-side dual of
+    /// `DistinctColorsAmongPermanents` — counts each distinct `CounterType`
+    /// appearing on at least one permanent matching `filter` exactly once.
+    /// Used by Bribe Taker's "for each kind of counter on permanents you
+    /// control" iteration source. Kept a separate variant from the color
+    /// dual because counters (CR 122.1) and colors (CR 105/106) are distinct
+    /// rule sections the engine resolves independently.
+    DistinctCounterKindsAmong { filter: TargetFilter },
 }
 
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.
@@ -8512,6 +8521,13 @@ pub struct AbilityDefinition {
     /// `lower_effect_chain_ir` from the `ClauseBoundary` PRECEDING this clause.
     #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
+    /// CR 608.2c + CR 122.1: when this ability is a `ChooseOneOf` branch driven
+    /// by a counter-kind iteration (`repeat_for: DistinctCounterKindsAmong`),
+    /// `Some(RebindToIteratedKind)` marks the branch whose `PutCounter`
+    /// counter type must be rewritten to the current iteration's counter kind
+    /// before resolution. `None` (default) = branch is fixed (e.g. "+1/+1").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration_kind_binding: Option<IterationKindBinding>,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -8580,6 +8596,8 @@ struct AbilityDefinitionRepr<'a> {
     repeat_until: &'a Option<RepeatContinuation>,
     #[serde(skip_serializing_if = "SubAbilityLink::is_continuation")]
     sub_link: SubAbilityLink,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iteration_kind_binding: &'a Option<IterationKindBinding>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -8621,6 +8639,7 @@ impl Serialize for AbilityDefinition {
             target_selection_mode,
             repeat_until,
             sub_link,
+            iteration_kind_binding,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -8657,6 +8676,7 @@ impl Serialize for AbilityDefinition {
             target_selection_mode: *target_selection_mode,
             repeat_until,
             sub_link: *sub_link,
+            iteration_kind_binding,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` is the computed UI key (#506).
@@ -8723,6 +8743,20 @@ pub enum RepeatContinuation {
     ControllerChoice,
 }
 
+/// CR 608.2c + CR 122.1: tags a `ChooseOneOf` branch whose effect must be
+/// rebound to the current counter-kind iteration before resolving. Used when a
+/// `repeat_for: DistinctCounterKindsAmong` loop drives a "put your choice of a
+/// fixed counter or a counter of that kind" choice — the dynamic branch carries
+/// `RebindToIteratedKind` so the loop rewrites its `PutCounter` counter type to
+/// the iteration's kind. Typed (not a bool) so future binding modes can extend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum IterationKindBinding {
+    /// Rebind this branch's `PutCounter` counter type to the current iterated
+    /// counter kind.
+    RebindToIteratedKind,
+}
+
 impl fmt::Debug for AbilityDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // JSON serialization instead of field-by-field Debug — avoids stack overflow
@@ -8781,6 +8815,7 @@ impl AbilityDefinition {
             target_selection_mode: TargetSelectionMode::Chosen,
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
+            iteration_kind_binding: None,
         }
     }
 
