@@ -3390,13 +3390,13 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::IsCommander]),
                     )
-                // CR 111.1 / CR 205.3: A `non`/`non-` negation descriptor
-                // ("Nontoken creatures you control") is a type/token-identity
-                // negation, NOT a subtype. Bail so dispatch falls through to
-                // `parse_subject_additive_type_static`, which routes the
-                // subject through `parse_type_phrase` and yields the correct
-                // `FilterProp::NonToken`.
-                } else if descriptor_is_negation(descriptor) {
+                // CR 111.1 / CR 205.3 / CR 205.4a: A `non`/`non-` negation
+                // descriptor ("Nontoken creatures you control") or supertype
+                // descriptor ("Legendary creatures you control") is NOT a
+                // subtype. Bail so dispatch falls through to the subject parser,
+                // which routes the full phrase through `parse_type_phrase`.
+                } else if descriptor_is_negation(descriptor) || descriptor_is_supertype(descriptor)
+                {
                     return None;
                 } else if is_capitalized_words(descriptor) {
                     TargetFilter::Typed(
@@ -3417,9 +3417,12 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             p
                         }),
                 )
-            } else if descriptor_is_negation(desc_remaining) {
-                // CR 111.1 / CR 205.3: negation descriptor after a combat-status
-                // prefix — not a subtype; fall through to additive-type dispatch.
+            } else if descriptor_is_negation(desc_remaining)
+                || descriptor_is_supertype(desc_remaining)
+            {
+                // CR 111.1 / CR 205.3 / CR 205.4a: negation/supertype descriptor
+                // after a combat-status prefix — not a subtype; fall through to
+                // full subject parsing.
                 return None;
             } else if is_capitalized_words(desc_remaining) {
                 // Combat-status prefix found + remaining is a subtype
@@ -5530,13 +5533,14 @@ fn parse_subject_suffix<'a>(subject: &TextPair<'a>, suffix: &str) -> Option<Text
     ))
 }
 
-/// CR 109.5 + CR 205.3: Controller-scoped subject descriptors may name object
-/// types, colors, or subtypes controlled by the source's controller.
+/// CR 109.5 + CR 205.3 + CR 205.4a: Controller-scoped subject descriptors
+/// may name object types, colors, subtypes, or supertypes controlled by the
+/// source's controller.
 fn typed_you_control_descriptor_filter(
     descriptor: TextPair<'_>,
     creature_subject: bool,
 ) -> Option<TargetFilter> {
-    if descriptor_is_negation(descriptor.original) {
+    if descriptor_is_negation(descriptor.original) || descriptor_is_supertype(descriptor.original) {
         return None;
     }
 
@@ -6021,6 +6025,14 @@ fn descriptor_is_negation(descriptor: &str) -> bool {
     after_non.chars().next().is_some_and(|c| !c.is_whitespace())
 }
 
+fn descriptor_is_supertype(descriptor: &str) -> bool {
+    let lower = descriptor.to_lowercase();
+    let is_supertype = all_consuming(nom_target::parse_supertype_word)
+        .parse(lower.as_str())
+        .is_ok();
+    is_supertype
+}
+
 fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
@@ -6103,14 +6115,13 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(TargetFilter::Typed(typed));
     }
 
-    // CR 111.1 / CR 205.3: A `non`/`non-` negation descriptor (e.g. "Nontoken
-    // creatures") is a type phrase with a token-identity / type negation, NOT a
-    // subtype. `is_capitalized_words` below would otherwise fabricate a bogus
-    // `Subtype("Nontoken")` for a sentence-leading capitalized "Nontoken". Bail
-    // so `parse_continuous_subject_filter` falls through to its own
-    // `parse_type_phrase` call, whose negation loop maps `nontoken` →
-    // `FilterProp::NonToken` via `classify_negation`.
-    if descriptor_is_negation(descriptor) {
+    // CR 111.1 / CR 205.3 / CR 205.4a: A `non`/`non-` negation descriptor
+    // (e.g. "Nontoken creatures") or a supertype descriptor (e.g. "Legendary
+    // creatures") is NOT a subtype. `is_capitalized_words` below would
+    // otherwise fabricate a bogus subtype. Bail so `parse_continuous_subject_filter`
+    // falls through to its own `parse_type_phrase` call, whose typed grammar
+    // maps these descriptors onto properties.
+    if descriptor_is_negation(descriptor) || descriptor_is_supertype(descriptor) {
         return None;
     }
 
@@ -16473,6 +16484,69 @@ mod tests {
             tf.properties
         );
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn continuous_subject_filter_legendary_is_supertype_not_subtype() {
+        // CR 205.4a: "Legendary creatures you control" names the legendary
+        // supertype plus the creature card type, not a creature subtype named
+        // "Legendary". This is the Jodah, the Unifier anthem subject shape.
+        let filter = super::parse_continuous_subject_filter("Legendary creatures you control")
+            .expect("legendary creature subject should parse");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {:?}", filter);
+        };
+        assert!(
+            tf.get_subtype().is_none(),
+            "must NOT fabricate a subtype, got {:?}",
+            tf.get_subtype()
+        );
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }),
+            "expected HasSupertype(Legendary), got {:?}",
+            tf.properties
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn static_jodah_anthem_affected_filter_uses_legendary_supertype() {
+        // CR 205.4a + CR 613.4c: Jodah, the Unifier's anthem affects
+        // legendary creatures you control and scales by that same population.
+        let def = parse_static_line(
+            "Legendary creatures you control get +X/+X, where X is the number of legendary creatures you control.",
+        )
+        .expect("Jodah anthem static should parse");
+        let Some(TargetFilter::Typed(tf)) = &def.affected else {
+            panic!("Expected Typed affected filter, got {:?}", def.affected);
+        };
+        assert!(
+            tf.get_subtype().is_none(),
+            "must NOT fabricate Legendary as a subtype, got {:?}",
+            tf.get_subtype()
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }),
+            "expected affected filter to use HasSupertype(Legendary), got {:?}",
+            tf.properties
+        );
+        assert!(def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })));
+        assert!(def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })));
     }
 
     #[test]
