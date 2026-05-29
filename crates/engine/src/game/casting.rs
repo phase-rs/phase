@@ -17,7 +17,8 @@ use crate::types::mana::{
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    ActivationExemption, CastFrequency, CastingProhibitionCondition, ProhibitionScope, StaticMode,
+    ActivationExemption, CastFrequency, CastingProhibitionCondition, ExileCastCost,
+    ProhibitionScope, StaticMode,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -1130,11 +1131,12 @@ struct ExilePermissionSource<'a> {
     source_id: ObjectId,
     filter: &'a TargetFilter,
     frequency: CastFrequency,
-    /// CR 118.9a: `true` for the Maralen shape — the spell is cast without
-    /// paying its printed mana cost. `casting_costs` reads this flag at cast
-    /// finalization. `false` is the "pay normal cost" shape (no shipping card
-    /// uses it today, but the static keeps the axis available).
-    without_paying_mana_cost: bool,
+    /// CR 118.9a: How the spell's mana cost is paid when cast via this
+    /// permission. `WithoutPayingManaCost` is the Maralen shape (the printed
+    /// mana cost is zeroed by `casting_costs`). `PayNormalCost` casts at the
+    /// spell's normal cost — no shipping card uses this shape today, but the
+    /// static keeps the axis available.
+    cost: ExileCastCost,
 }
 
 /// CR 601.2a + CR 113.6b: Enumerate every battlefield permanent controlled by
@@ -1164,7 +1166,7 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                 StaticMode::ExileCastPermission {
                     frequency,
                     play_mode: CardPlayMode::Cast | CardPlayMode::Play,
-                    without_paying_mana_cost,
+                    cost,
                 } => definition
                     .affected
                     .as_ref()
@@ -1172,7 +1174,7 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                         source_id,
                         filter,
                         frequency,
-                        without_paying_mana_cost,
+                        cost,
                     }),
                 _ => None,
             })
@@ -1257,17 +1259,17 @@ fn exile_cast_frequency_available(
     }
 }
 
-/// CR 601.2a + CR 113.6b: Find the (source, frequency, without_paying_mana_cost)
-/// triple authorizing `player` to cast `exiled_id` via a
+/// CR 601.2a + CR 113.6b: Find the (source, frequency, cost) triple
+/// authorizing `player` to cast `exiled_id` via a
 /// `StaticMode::ExileCastPermission`, or `None` when no functioning static
 /// authorizes the cast. Used by `prepare_spell_cast` / `casting_costs` to tag
 /// the `CastingVariant::ExilePermission` context and zero out the mana cost
-/// when the static is the "without paying" shape.
+/// when the static is the `WithoutPayingManaCost` shape.
 pub(crate) fn exile_cast_permission_source(
     state: &GameState,
     player: PlayerId,
     exiled_id: ObjectId,
-) -> Option<(ObjectId, CastFrequency, bool)> {
+) -> Option<(ObjectId, CastFrequency, ExileCastCost)> {
     let obj = state.objects.get(&exiled_id)?;
     if obj.zone != Zone::Exile {
         return None;
@@ -1288,11 +1290,7 @@ pub(crate) fn exile_cast_permission_source(
         if !super::filter::matches_target_filter(state, exiled_id, source.filter, &ctx) {
             return None;
         }
-        Some((
-            source.source_id,
-            source.frequency,
-            source.without_paying_mana_cost,
-        ))
+        Some((source.source_id, source.frequency, source.cost))
     })
 }
 
@@ -2314,13 +2312,14 @@ fn prepare_spell_cast_with_variant_override_inner(
         matches!(casting_variant, CastingVariant::HandPermission { .. });
     // CR 601.2a + CR 118.9a: ExilePermission variant (Maralen, Fae Ascendant).
     // Pays no mana cost when the granting static carries
-    // `without_paying_mana_cost: true`. Re-derived from `exile_cast_permission_source`
-    // — the variant itself does not carry the flag because that would let the
-    // override side bypass the static's authoritative shape.
+    // `cost: ExileCastCost::WithoutPayingManaCost`. Re-derived from
+    // `exile_cast_permission_source` — the variant itself does not carry the
+    // cost shape because that would let the override side bypass the static's
+    // authoritative shape.
     let is_exile_permission_free_cast =
         if let CastingVariant::ExilePermission { .. } = casting_variant {
             exile_cast_permission_source(state, player, object_id)
-                .is_some_and(|(_, _, without_paying_mana_cost)| without_paying_mana_cost)
+                .is_some_and(|(_, _, cost)| matches!(cost, ExileCastCost::WithoutPayingManaCost))
         } else {
             false
         };
@@ -27331,7 +27330,7 @@ mod tests {
         let def = StaticDefinition::new(StaticMode::ExileCastPermission {
             frequency: CastFrequency::OncePerTurn,
             play_mode: CardPlayMode::Cast,
-            without_paying_mana_cost: true,
+            cost: ExileCastCost::WithoutPayingManaCost,
         })
         .affected(affected);
         let obj = state.objects.get_mut(&source).unwrap();

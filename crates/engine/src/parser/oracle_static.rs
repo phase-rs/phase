@@ -47,7 +47,8 @@ use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::phase::Phase;
 use crate::types::statics::{
     ActivationExemption, BlockExceptionKind, CastFrequency, CastingProhibitionCondition,
-    CostPaymentProhibition, HandSizeModification, ProhibitionScope, StaticMode, TriggerCause,
+    CostPaymentProhibition, ExileCastCost, HandSizeModification, ProhibitionScope, StaticMode,
+    TriggerCause,
 };
 use crate::types::zones::Zone;
 
@@ -10355,17 +10356,22 @@ fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option<StaticDefi
     let after_this_turn = nom_tag_lower(after_source, after_source, " this turn")?;
 
     // CR 118.9a: Optional " without paying its mana cost" / "their mana costs"
-    // alt-cost rider. The `scan_contains` is the same idiom the sibling
-    // graveyard parser uses for its trailing alt-cost detection.
-    let without_paying_mana_cost =
-        nom_primitives::scan_contains(after_this_turn, "without paying its mana cost")
-            || nom_primitives::scan_contains(after_this_turn, "without paying their mana cost");
+    // alt-cost rider selects the `WithoutPayingManaCost` shape; absence leaves
+    // the static at `PayNormalCost`. The `scan_contains` is the same idiom the
+    // sibling graveyard parser uses for its trailing alt-cost detection.
+    let cost = if nom_primitives::scan_contains(after_this_turn, "without paying its mana cost")
+        || nom_primitives::scan_contains(after_this_turn, "without paying their mana cost")
+    {
+        ExileCastCost::WithoutPayingManaCost
+    } else {
+        ExileCastCost::PayNormalCost
+    };
 
     Some(
         StaticDefinition::new(StaticMode::ExileCastPermission {
             frequency,
             play_mode: CardPlayMode::Cast,
-            without_paying_mana_cost,
+            cost,
         })
         .affected(filter)
         .description(text.to_string()),
@@ -16342,7 +16348,7 @@ mod tests {
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
-                without_paying_mana_cost: true,
+                cost: ExileCastCost::WithoutPayingManaCost,
             },
             "expected ExileCastPermission, got {:?}",
             def.mode
@@ -16385,7 +16391,7 @@ mod tests {
                 StaticMode::ExileCastPermission {
                     frequency: CastFrequency::OncePerTurn,
                     play_mode: CardPlayMode::Cast,
-                    without_paying_mana_cost: true,
+                    cost: ExileCastCost::WithoutPayingManaCost,
                 }
             ),
             "expected ExileCastPermission(OncePerTurn, Cast, free), got {:?}",

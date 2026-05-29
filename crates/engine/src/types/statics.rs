@@ -304,6 +304,51 @@ impl FromStr for CastFrequency {
     }
 }
 
+/// CR 118.9 + CR 601.2a: The cost axis for `StaticMode::ExileCastPermission`.
+///
+/// Sibling to `CastFrequency` and `CardPlayMode` — each axis of the exile-cast
+/// permission is a typed enum rather than a `bool` so the design space stays
+/// open. `bool` fields cannot grow to accommodate future cost shapes (e.g. an
+/// alternative life cost analogous to Bolas's Citadel).
+///
+/// - `PayNormalCost` — cast at the spell's normal mana cost. No shipping
+///   printing uses this shape today, but it is the natural default; if a future
+///   card prints "Once each turn, you may cast a spell from among cards exiled
+///   with ~ this turn." (no "without paying" rider), this is the variant.
+/// - `WithoutPayingManaCost` — CR 118.9a: cast without paying the printed mana
+///   cost. Maralen, Fae Ascendant ("...without paying its mana cost.") is the
+///   type specimen and the only shipping printing today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExileCastCost {
+    /// Cast at the spell's normal mana cost — no alternative cost applied.
+    PayNormalCost,
+    /// CR 118.9a: Cast without paying the spell's printed mana cost
+    /// (Maralen, Fae Ascendant).
+    #[default]
+    WithoutPayingManaCost,
+}
+
+impl fmt::Display for ExileCastCost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExileCastCost::PayNormalCost => write!(f, "pay_normal_cost"),
+            ExileCastCost::WithoutPayingManaCost => write!(f, "without_paying_mana_cost"),
+        }
+    }
+}
+
+impl FromStr for ExileCastCost {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pay_normal_cost" => Ok(ExileCastCost::PayNormalCost),
+            "without_paying_mana_cost" => Ok(ExileCastCost::WithoutPayingManaCost),
+            other => Err(format!("unknown ExileCastCost: {other}")),
+        }
+    }
+}
+
 /// CR 603.2d: The cause-predicate axis for trigger-doubling static abilities.
 ///
 /// "An effect that states a triggered ability of an object triggers additional
@@ -656,13 +701,14 @@ pub enum StaticMode {
         /// axis is retained for symmetry with the graveyard / top-of-library
         /// permission classes.
         play_mode: CardPlayMode,
-        /// CR 118.9a: When `true`, the spell is cast without paying its mana
-        /// cost — `casting_costs` zeroes the printed mana cost (mirrors the
-        /// Omniscience / `CastFromHandFree` flow). When `false`, the spell is
-        /// cast at its normal cost (no published printings in this class today,
-        /// but the field keeps the static composable with future patterns).
+        /// CR 118.9a: How the spell's mana cost is paid when cast via this
+        /// permission. `WithoutPayingManaCost` zeroes the printed mana cost
+        /// (mirrors the Omniscience / `CastFromHandFree` flow — Maralen, Fae
+        /// Ascendant). `PayNormalCost` casts at the spell's normal cost (no
+        /// published printings today, but the axis keeps the static composable
+        /// with future patterns).
         #[serde(default)]
-        without_paying_mana_cost: bool,
+        cost: ExileCastCost,
     },
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
@@ -1002,11 +1048,11 @@ impl Hash for StaticMode {
             StaticMode::ExileCastPermission {
                 frequency,
                 play_mode,
-                without_paying_mana_cost,
+                cost,
             } => {
                 frequency.hash(state);
                 play_mode.hash(state);
-                without_paying_mana_cost.hash(state);
+                cost.hash(state);
             }
             StaticMode::SkipStep { step } => step.hash(state),
             StaticMode::DoubleTriggers { cause } => cause.hash(state),
@@ -1123,14 +1169,15 @@ impl fmt::Display for StaticMode {
             StaticMode::ExileCastPermission {
                 frequency,
                 play_mode,
-                without_paying_mana_cost,
-            } => {
-                if *without_paying_mana_cost {
+                cost,
+            } => match cost {
+                ExileCastCost::WithoutPayingManaCost => {
                     write!(f, "ExileCastPermission({play_mode},{frequency},free)")
-                } else {
+                }
+                ExileCastCost::PayNormalCost => {
                     write!(f, "ExileCastPermission({play_mode},{frequency})")
                 }
-            }
+            },
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantBeCopied => write!(f, "CantBeCopied"),
             StaticMode::CantEnterBattlefieldFrom => write!(f, "CantEnterBattlefieldFrom"),
@@ -1430,13 +1477,13 @@ impl FromStr for StaticMode {
             "ExileCastPermission" => StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
-                without_paying_mana_cost: false,
+                cost: ExileCastCost::PayNormalCost,
             },
             s if s.starts_with("ExileCastPermission(") => {
                 // Display form: "ExileCastPermission(<play_mode>,<frequency>)" or
                 // "ExileCastPermission(<play_mode>,<frequency>,free)" for the
-                // without-paying-mana-cost variant. Parse positionally so a
-                // later 3-segment form survives lossless round-trip.
+                // `WithoutPayingManaCost` shape. Parse positionally so a later
+                // 3-segment form survives lossless round-trip.
                 let inner = s
                     .strip_prefix("ExileCastPermission(")
                     .and_then(|s| s.strip_suffix(')'))
@@ -1450,11 +1497,15 @@ impl FromStr for StaticMode {
                     .next()
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(CastFrequency::Unlimited);
-                let without_paying_mana_cost = matches!(parts.next(), Some("free"));
+                let cost = if matches!(parts.next(), Some("free")) {
+                    ExileCastCost::WithoutPayingManaCost
+                } else {
+                    ExileCastCost::PayNormalCost
+                };
                 StaticMode::ExileCastPermission {
                     frequency,
                     play_mode,
-                    without_paying_mana_cost,
+                    cost,
                 }
             }
             "CantBeCountered" => StaticMode::CantBeCountered,
@@ -1858,12 +1909,12 @@ mod tests {
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
-                without_paying_mana_cost: true,
+                cost: ExileCastCost::WithoutPayingManaCost,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
-                without_paying_mana_cost: false,
+                cost: ExileCastCost::PayNormalCost,
             },
             // Casting prohibitions
             StaticMode::CantBeCast {
