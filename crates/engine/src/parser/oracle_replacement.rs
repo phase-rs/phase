@@ -4810,10 +4810,43 @@ fn parse_damage_prevention_replacement(
         // avoids parser-context plumbing. Single building-block walker
         // (`each_target_filter_mut`) handles every target-bearing effect arm.
         rewrite_parent_target_controller_to_post_replacement_source(&mut followup_def);
+        rewrite_damage_recipient_to_post_replacement_target(&mut followup_def);
         def = def.execute(followup_def);
     }
 
     Some(def)
+}
+
+/// True when the text after a `dealt to <type phrase>` recipient ends the
+/// recipient description. Accepts a trailing comma before the prevention result
+/// ("dealt to another creature you control, prevent that damage" — Vigor).
+fn damage_recipient_phrase_rest_complete(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return true;
+    }
+    if rest.starts_with(',') {
+        return true;
+    }
+    all_consuming(alt((
+        value((), tag::<_, _, OracleError<'_>>(".")),
+        value(
+            (),
+            terminated(
+                tag::<_, _, OracleError<'_>>("this turn"),
+                opt(tag::<_, _, OracleError<'_>>(".")),
+            ),
+        ),
+        value(
+            (),
+            terminated(
+                tag::<_, _, OracleError<'_>>("until end of turn"),
+                opt(tag::<_, _, OracleError<'_>>(".")),
+            ),
+        ),
+    )))
+    .parse(rest)
+    .is_ok()
 }
 
 fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<TargetFilter> {
@@ -4827,28 +4860,7 @@ fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<Targe
             )));
         }
 
-        let rest = rest.trim_start();
-        if all_consuming(alt((
-            value((), eof::<&str, OracleError<'_>>),
-            value((), tag::<_, _, OracleError<'_>>(".")),
-            value(
-                (),
-                terminated(
-                    tag::<_, _, OracleError<'_>>("this turn"),
-                    opt(tag::<_, _, OracleError<'_>>(".")),
-                ),
-            ),
-            value(
-                (),
-                terminated(
-                    tag::<_, _, OracleError<'_>>("until end of turn"),
-                    opt(tag::<_, _, OracleError<'_>>(".")),
-                ),
-            ),
-        )))
-        .parse(rest)
-        .is_ok()
-        {
+        if damage_recipient_phrase_rest_complete(rest) {
             Ok((rest, filter))
         } else {
             Err(nom::Err::Error(OracleError::new(
@@ -4886,6 +4898,12 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
 /// Neither resolves correctly here (there is no parent target and no trigger
 /// event), so rewrite the anaphoric recipient to `PostReplacementDamageTarget`
 /// at the call site.
+fn is_unscoped_creature_typed_filter(tf: &TypedFilter) -> bool {
+    tf.type_filters == [TypeFilter::Creature]
+        && tf.controller.is_none()
+        && tf.properties.is_empty()
+}
+
 fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
         if matches!(
@@ -4893,8 +4911,17 @@ fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefiniti
             TargetFilter::Player
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::ParentTargetController
+                | TargetFilter::TriggeringSource
         ) {
             *f = TargetFilter::PostReplacementDamageTarget;
+        } else if let TargetFilter::Typed(tf) = f {
+            // CR 615.5: "that creature" in a prevention follow-up (Vigor,
+            // Test of Faith) sometimes lowers to an unscoped Typed(Creature)
+            // when no trigger event is active. Bind it to the prevented
+            // damage recipient instead of any creature on the battlefield.
+            if is_unscoped_creature_typed_filter(tf) {
+                *f = TargetFilter::PostReplacementDamageTarget;
+            }
         }
     });
     if let Some(sub) = def.sub_ability.as_mut() {
@@ -5748,6 +5775,54 @@ mod tests {
                 target: TargetFilter::ParentTarget,
             } if *counter_type == CounterType::Plus1Plus1
         ));
+    }
+
+    #[test]
+    fn vigor_prevention_scopes_to_other_creatures_you_control() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to another creature you control, prevent that damage. \
+             Put a +1/+1 counter on that creature for each 1 damage prevented this way.",
+            "Vigor",
+        )
+        .expect("Vigor prevention replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        let valid = def
+            .valid_card
+            .as_ref()
+            .expect("recipient filter must be present");
+        if let TargetFilter::Typed(tf) = valid {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert!(tf.properties.contains(&FilterProp::Another));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!("expected Typed valid_card filter, got {valid:?}");
+        }
+
+        let execute = def.execute.as_ref().expect("counter follow-up present");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                ));
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+            }
+            other => panic!("expected PutCounter follow-up, got {other:?}"),
+        }
     }
 
     #[test]
