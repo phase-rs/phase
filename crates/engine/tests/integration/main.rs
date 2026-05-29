@@ -3,6 +3,7 @@ mod abundance_optional_draw_replacement;
 mod adapter_contract_fixtures;
 mod advanced_reconstruction_regression;
 mod ajani_nacatl_pariah_transform;
+mod amphin_mutineer_regression;
 mod anaphoric_scope_allowlist_guard;
 mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
