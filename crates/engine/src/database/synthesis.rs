@@ -4514,10 +4514,7 @@ mod kicker_synthesis_tests {
             reveal_hand_chain_has_cmc_filter(base),
             "base branch should keep CMC restriction"
         );
-        let paid = base
-            .sub_ability
-            .as_deref()
-            .expect("cleave paid branch");
+        let paid = base.sub_ability.as_deref().expect("cleave paid branch");
         assert_eq!(
             paid.condition,
             Some(AbilityCondition::AdditionalCostPaidInstead)

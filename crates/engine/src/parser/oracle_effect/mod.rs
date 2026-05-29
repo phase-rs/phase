@@ -29300,10 +29300,7 @@ mod tests {
         fn reveal_hand_filter(def: &AbilityDefinition) -> Option<&TargetFilter> {
             match def.effect.as_ref() {
                 Effect::RevealHand { card_filter, .. } => Some(card_filter),
-                _ => def
-                    .sub_ability
-                    .as_deref()
-                    .and_then(reveal_hand_filter),
+                _ => def.sub_ability.as_deref().and_then(reveal_hand_filter),
             }
         }
 
