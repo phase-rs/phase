@@ -223,6 +223,12 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ObjectId>,
     },
+    /// CR 701.43a + CR 701.43d: A creature was exerted as it attacked. Fires the
+    /// linked `TriggerMode::Exerted` "when you do" trigger (Combat Celebrant,
+    /// Glory-Bound Initiate, ...).
+    CreatureExerted {
+        object_id: ObjectId,
+    },
     PlayerLost {
         player_id: PlayerId,
     },

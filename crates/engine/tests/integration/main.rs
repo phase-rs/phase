@@ -18,6 +18,7 @@ mod brigid_mana_ability;
 mod chain_of_smog_copy;
 mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
+mod combat_celebrant_exert;
 mod council_of_four_nth_per_turn;
 mod cr_annotations;
 mod cultivate_split_destination;

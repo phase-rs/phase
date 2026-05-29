@@ -457,6 +457,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // to the same turn, so both maps clear together at turn start.
     state.loyalty_abilities_activated_this_turn.clear();
     state.extra_loyalty_activations_this_turn.clear();
+    // CR 701.43d: the "exerted this turn" record gates the linked "when you do"
+    // trigger to once per turn; reset it alongside the other per-turn trackers.
+    state.exerted_this_turn.clear();
     // CR 514 + CR 603.4: Per-ability per-turn resolution counter resets at turn
     // boundary alongside other "this turn" trackers (mirrors the cleanup of
     // `trigger_fire_counts_this_turn`).
