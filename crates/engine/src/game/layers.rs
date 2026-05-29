@@ -3538,31 +3538,19 @@ mod tests {
             obj.base_card_types = obj.card_types.clone();
         }
 
-        let legendary_creatures_you_control = TargetFilter::Typed(
-            TypedFilter::creature()
-                .controller(ControllerRef::You)
-                .properties(vec![FilterProp::HasSupertype {
-                    value: Supertype::Legendary,
-                }]),
-        );
-        let qty = QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount {
-                filter: legendary_creatures_you_control.clone(),
-            },
-        };
+        // Drive Jodah's real Oracle line through the parser so this runtime test
+        // also fails if the supertype-descriptor parse regresses (closing the
+        // parser->layers seam, not hand-building the expected StaticDefinition).
+        let def = crate::parser::oracle_static::parse_static_line(
+            "Legendary creatures you control get +X/+X, where X is the number of legendary creatures you control.",
+        )
+        .expect("Jodah anthem static should parse");
         state
             .objects
             .get_mut(&jodah)
             .unwrap()
             .static_definitions
-            .push(
-                StaticDefinition::continuous()
-                    .affected(legendary_creatures_you_control)
-                    .modifications(vec![
-                        ContinuousModification::AddDynamicPower { value: qty.clone() },
-                        ContinuousModification::AddDynamicToughness { value: qty },
-                    ]),
-            );
+            .push(def);
 
         evaluate_layers(&mut state);
 
