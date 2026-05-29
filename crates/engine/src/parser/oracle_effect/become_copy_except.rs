@@ -392,7 +392,7 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
         if word.is_empty() {
             continue;
         }
-        if let Ok((_, color)) = nom_primitives::parse_color(word) {
+        if let Ok(("", color)) = nom_primitives::parse_color(word) {
             mods.push(ContinuousModification::AddColor { color });
             continue;
         }
