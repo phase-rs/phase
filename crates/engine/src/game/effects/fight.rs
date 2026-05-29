@@ -4,9 +4,11 @@ use crate::game::effects::{append_to_pending_continuation, mark_pending_continua
 use crate::types::ability::{
     Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::zones::Zone;
 
 /// CR 701.14a: Resolve the subject creature for a fight effect.
 /// - `SelfRef` → the ability's source object (default: "~ fights").
@@ -48,6 +50,13 @@ fn refers_to_attached(filter: &TargetFilter) -> bool {
         ))
 }
 
+/// CR 701.14b: A creature must be on the battlefield and still be a creature to fight.
+fn fight_eligible(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.zone == Zone::Battlefield && obj.card_types.core_types.contains(&CoreType::Creature)
+    })
+}
+
 /// CR 701.14a: Fight — each creature deals damage equal to its power to the other.
 pub fn resolve(
     state: &mut GameState,
@@ -72,6 +81,15 @@ pub fn resolve(
         })
         .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
 
+    // CR 701.14b: If either fighter left the battlefield or is no longer a creature, no damage.
+    if !fight_eligible(state, source_id) || !fight_eligible(state, target_id) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     // Read power and controller for both creatures before mutable damage phase.
     let (source_power, source_controller) = {
         let obj = state
@@ -87,6 +105,34 @@ pub fn resolve(
             .ok_or(EffectError::ObjectNotFound(target_id))?;
         (obj.power.unwrap_or(0), obj.controller)
     };
+
+    // CR 701.14c: Self-fight deals twice the creature's power as a single damage instance.
+    if source_id == target_id {
+        if source_power > 0 {
+            let amount = (source_power as u32).saturating_mul(2);
+            let source_ctx = DamageContext::from_source(state, source_id)
+                .unwrap_or_else(|| DamageContext::fallback(source_id, source_controller));
+            if let DamageResult::NeedsChoice = apply_damage_to_target(
+                state,
+                &source_ctx,
+                TargetRef::Object(source_id),
+                amount,
+                false,
+                events,
+            )? {
+                if let Some(sub) = ability.sub_ability.as_ref() {
+                    append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+                }
+                mark_pending_continuation_parent(state, EffectKind::Fight);
+                return Ok(());
+            }
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
 
     // CR 701.14a + CR 120.2b: Fight damage is not combat damage.
     // Source deals damage to target (power of source → target's damage)
@@ -609,5 +655,91 @@ mod tests {
             fight_events, 1,
             "exactly one EffectKind::Fight event must fire across the pause-and-resume path; got events = {all_events:#?}",
         );
+    }
+
+    #[test]
+    fn fight_no_damage_when_source_left_battlefield() {
+        use crate::game::zones::move_to_zone;
+
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, bear, Zone::Graveyard, &mut events);
+
+        let ability = make_fight_ability(bear, wolf);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&wolf].damage_marked, 0);
+        assert_eq!(state.objects[&bear].damage_marked, 0);
+    }
+
+    #[test]
+    fn fight_no_damage_when_source_is_no_longer_creature() {
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
+
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .card_types
+            .core_types
+            .retain(|t| *t != CoreType::Creature);
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let ability = make_fight_ability(bear, wolf);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&wolf].damage_marked, 0);
+        assert_eq!(state.objects[&bear].damage_marked, 0);
+    }
+
+    #[test]
+    fn fight_no_damage_when_target_left_battlefield() {
+        use crate::game::zones::move_to_zone;
+
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, wolf, Zone::Exile, &mut events);
+
+        let ability = make_fight_ability(bear, wolf);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&wolf].damage_marked, 0);
+        assert_eq!(state.objects[&bear].damage_marked, 0);
+    }
+
+    #[test]
+    fn fight_self_deals_twice_power() {
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+
+        let ability = make_fight_ability(bear, bear);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&bear].damage_marked, 6);
+
+        let damage_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamageDealt { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(damage_events, vec![6]);
     }
 }
