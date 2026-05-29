@@ -10,11 +10,11 @@ use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracke
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::{
-    estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
-    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list, start_game,
-    start_game_with_starting_player, validate_name_deck_for_format, BracketEstimate,
-    DeckCompatibilityRequest, DeckList, PlayerDeckList,
+    can_pair_commanders, estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer,
+    finalize_public_state, is_brawl_commander_eligible, is_commander_eligible,
+    is_tiny_leader_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db,
+    resolve_deck_list, start_game, start_game_with_starting_player, validate_name_deck_for_format,
+    BracketEstimate, DeckCompatibilityRequest, DeckList, PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::identifiers::ObjectId;
@@ -307,6 +307,32 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
             _ => false,
         }
+    })
+}
+
+/// CR 702.124: Of `candidates`, which can legally pair with `first_commander`
+/// as a co-commander? Applies the full partner family (generic Partner, Partner
+/// with [Name], Friends Forever, Character Select, Doctor's Companion, Choose a
+/// Background) via the engine's single-authority `can_pair_commanders`. The
+/// frontend must not re-derive partner-pairing rules — it filters its candidate
+/// list through this. Returns an empty array if the database isn't loaded.
+#[wasm_bindgen(js_name = commanderPartnerCandidates)]
+pub fn commander_partner_candidates(
+    first_commander: String,
+    candidates: JsValue,
+) -> Result<JsValue, JsValue> {
+    let candidates: Vec<String> = serde_wasm_bindgen::from_value(candidates)
+        .map_err(|e| JsValue::from_str(&format!("Invalid candidate list: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Ok(to_js(&Vec::<String>::new()));
+        };
+        let eligible: Vec<String> = candidates
+            .into_iter()
+            .filter(|name| can_pair_commanders(db, &first_commander, name))
+            .collect();
+        Ok(to_js(&eligible))
     })
 }
 
