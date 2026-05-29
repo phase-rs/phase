@@ -16,9 +16,9 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::character::complete::{multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map, opt, rest, value};
-use nom::multi::many1;
+use nom::character::complete::{anychar, multispace0, multispace1};
+use nom::combinator::{all_consuming, eof, map, not, opt, recognize, rest, value};
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -2091,6 +2091,39 @@ fn try_parse_tap_or_untap_choice(
     Some(clause)
 }
 
+/// Separator combinator for disjunctive choice lists (CR 122.1 + CR 608.2d).
+/// Recognizes the Oxford-comma final separators (", or " / ", and "), the bare
+/// intra-list comma (", "), and the binary coordinators (" or " / " and ").
+/// Longer alternatives are tried first so ", or " is not mis-split as ", " plus
+/// a stray "or".
+fn parse_choice_list_separator(input: &str) -> nom::IResult<&str, ()> {
+    value(
+        (),
+        alt((
+            tag(", or "),
+            tag(", and "),
+            tag(", "),
+            tag(" or "),
+            tag(" and "),
+        )),
+    )
+    .parse(input)
+}
+
+/// Split a disjunctive choice list into its item slices using nom combinators.
+/// Counter noun phrases and bare keyword names never contain a list separator,
+/// so a `separated_list1` over `parse_choice_list_separator` recovers each item
+/// without manual byte-offset slicing. Returns `None` unless the whole input is
+/// consumed — a trailing unmatched remainder means the text was not a clean
+/// list.
+fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
+    let item = recognize(many1(preceded(not(parse_choice_list_separator), anychar)));
+    let (_, items) = all_consuming(separated_list1(parse_choice_list_separator, item))
+        .parse(input)
+        .ok()?;
+    Some(items)
+}
+
 /// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
 /// "put your choice of A counter-pattern, B counter-pattern, or C
 /// counter-pattern on TARGET" (N-ary branches).
@@ -2125,45 +2158,21 @@ fn try_parse_put_counter_choice(
     let after_choice = TextPair::new(after_choice_original, &tp.lower[consumed..]);
     let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
 
-    // Split the choices text into individual items.
-    // Three patterns:
-    //   1. "from among" list: "a counter from among X, Y, and Z"
-    //   2. Oxford comma: "a X counter, a Y counter, or a Z counter"
-    //   3. Binary: "a X counter or a Y counter"
+    // Split the post-"on" choices into individual items via nom combinators.
+    // Two list shapes (CR 122.1 + CR 608.2d), both handled by one separator
+    // grammar (`parse_choice_list_separator`):
+    //   1. "from among" bare keywords: "a counter from among X, Y, ..., and Z"
+    //   2. distributed / binary nouns: "a A counter, a B counter, or a C
+    //      counter" or "a A counter or a B counter"
+    // CR 122.1b: the "from among" form names bare keywords; strip its prefix so
+    // each branch is later synthesized as "a <keyword> counter".
     let choices_text = choices_tp.original;
-    let (choice_items, from_among): (Vec<&str>, bool) = if let Ok((keywords_text, _)) =
-        tag::<_, _, nom::error::Error<&str>>("a counter from among ")(choices_text)
-    {
-        // CR 122.1b: "from among" pattern — bare keyword names.
-        let items: Vec<&str> = if let Some(pos) = keywords_text.rfind(", and ") {
-            let prefix = &keywords_text[..pos];
-            let last = &keywords_text[pos + 6..]; // skip ", and "
-            let mut v: Vec<&str> = prefix.split(", ").collect();
-            v.push(last);
-            v
-        } else {
-            let pos = keywords_text.rfind(" and ")?;
-            // Binary: "X and Y".
-            let left = &keywords_text[..pos];
-            let right = &keywords_text[pos + 5..]; // skip " and "
-            vec![left, right]
+    let (list_text, from_among) =
+        match tag::<_, _, nom::error::Error<&str>>("a counter from among ")(choices_text) {
+            Ok((rest, _)) => (rest, true),
+            Err(_) => (choices_text, false),
         };
-        (items, true)
-    } else if let Some(pos) = choices_text.rfind(", or ") {
-        // Oxford comma: split on ", or " for the last item, then ", " for
-        // earlier items.
-        let prefix = &choices_text[..pos];
-        let last = &choices_text[pos + 5..]; // skip ", or "
-        let mut items: Vec<&str> = prefix.split(", ").collect();
-        items.push(last);
-        (items, false)
-    } else {
-        let pos = choices_text.rfind(" or ")?;
-        // Binary: "A or B".
-        let left = &choices_text[..pos];
-        let right = &choices_text[pos + 4..]; // skip " or "
-        (vec![left, right], false)
-    };
+    let choice_items = split_choice_list_items(list_text)?;
 
     // Require at least 2 branches.
     if choice_items.len() < 2 {
