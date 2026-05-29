@@ -10,6 +10,7 @@ use crate::types::game_state::{
     StackPaidSnapshot,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::ability_utils::{flatten_targets_in_chain, validate_targets_in_chain};
@@ -1044,6 +1045,298 @@ fn resolve_keyword_action(
             });
         }
     }
+}
+
+// ── Tier 3: true batch-resolution of identical token-creating triggers ────
+//
+// `resolve_next` wraps `resolve_top`. When the top of the stack begins a
+// contiguous run of provably-batch-safe identical triggered abilities, it
+// resolves the whole run in one step that applies the effect N times — the
+// same observable state and (coalesced) event sequence as one-by-one. Any
+// uncertainty falls back to the unchanged `resolve_top`. Three layers gate
+// eligibility: Layer A (run-identity, `BatchRunKey`), Layer B (handler purity,
+// `effects::try_resolve_batch`), Layer C (observer-order-invariance,
+// `observers_are_batch_safe`). See the plan trace in `effects/mod.rs`.
+
+/// Sentinel object id used only to build Layer C probe events. `keys_from_event`
+/// reads only `record.core_types`/`to` (ETB keys) and the `TokenCreated` variant
+/// tag — never the `object_id` — so a sentinel is sound (§2.3 PROBE_ID note).
+const PROBE_ID: ObjectId = ObjectId(u64::MAX);
+
+/// CR 608.2: Resolve the next stack object, collapsing a batch-safe run when
+/// one begins at the top. Returns the number of stack entries consumed
+/// (≥ 1) so the caller can correct the auto-pass baseline (§7.2).
+pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
+    // CR 603.3c/d: never collapse while the top entry is mid-construction.
+    let pending_top = state
+        .pending_trigger_entry
+        .is_some_and(|pending| state.stack.back().map(|e| e.id) == Some(pending));
+    if !pending_top {
+        if let Some(run_len) = batch_run_len(state) {
+            if run_len >= 2 {
+                // Layer B FIRST: per-handler purity produces the resolved token
+                // spec(s) the Layer C probe needs (HIGH-1) and applies the
+                // §2.2a/§2.3a/§3.4 gates internally.
+                let ability = state.stack.back().and_then(|e| e.ability()).cloned();
+                if let Some(ability) = ability {
+                    if let Some(plan) = effects::try_resolve_batch(state, &ability, run_len) {
+                        // Layer C: lazily refresh the index sentinel (mirrors the
+                        // consult site at triggers.rs:790) before the read-only probe.
+                        if state.trigger_index.by_key.is_empty()
+                            && state.trigger_index.unclassified.is_empty()
+                            && !state.battlefield.is_empty()
+                        {
+                            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+                        }
+                        if observers_are_batch_safe(state, &plan) {
+                            return resolve_batched(state, &plan, &ability, events);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    resolve_top(state, events);
+    1
+}
+
+/// CR 608.2: Apply a proven-safe batch. The per-resolution handler body runs
+/// `consumed` times (§5.2a — no count-fusion in v1), with the pipeline
+/// checkpoint hoisted to once-after by the caller. Per-entry `StackResolved`
+/// events are emitted for every consumed entry (§5.4) so the frontend's
+/// per-entry fade still works. Returns the number of entries consumed.
+fn resolve_batched(
+    state: &mut GameState,
+    plan: &effects::BatchPlan,
+    ability: &crate::types::ability::ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    let consumed = plan.consumed();
+    state.resolving_stack_entry = None;
+
+    // Pop the run's entries (resolution order is back-to-front), cleaning the
+    // per-entry side tables exactly as `resolve_top` does for a single entry.
+    let mut popped = Vec::with_capacity(consumed as usize);
+    for _ in 0..consumed {
+        match state.stack.pop_back() {
+            Some(entry) => {
+                state.stack_paid_facts.remove(&entry.id);
+                state.stack_trigger_event_batches.remove(&entry.id);
+                popped.push(entry);
+            }
+            None => break,
+        }
+    }
+
+    // CR 603.7c: Set the trigger event context once from the (identical) top
+    // entry — all popped entries are deep-equal by `BatchRunKey`, so a single
+    // set/clear is equivalent to N idempotent sequential set/clear cycles.
+    if let Some(top) = popped.first() {
+        if let crate::types::game_state::StackEntryKind::TriggeredAbility {
+            trigger_event: Some(te),
+            subject_match_count,
+            ..
+        } = &top.kind
+        {
+            state.current_trigger_event = Some(te.clone());
+            state.current_trigger_events = vec![te.clone()];
+            state.current_trigger_match_count = *subject_match_count;
+        }
+    }
+
+    // CR 608.2: Apply the effect N times through the existing per-resolution body.
+    plan.execute(state, ability, events);
+
+    // CR 603.7c: Clear trigger context after resolution completes.
+    state.current_trigger_event = None;
+    state.current_trigger_events.clear();
+    state.current_trigger_match_count = None;
+
+    // §5.4: one StackResolved per consumed entry.
+    for entry in &popped {
+        events.push(GameEvent::StackResolved {
+            object_id: entry.id,
+        });
+    }
+
+    popped.len() as u32
+}
+
+/// CR 603.2 + CR 603.3 + CR 603.6a: Layer C — battlefield-wide
+/// observer-order-invariance gate. A batched run is order-invariant iff NO
+/// battlefield trigger fans out on the token-ETB events the batch will emit.
+/// Build the REAL `ZoneChanged` + `TokenCreated` events one produced token
+/// emits (from the resolved spec's true characteristics) and route each through
+/// the public `candidates_for_event` — the same `keys_from_event` path the real
+/// events take downstream, with NO hand-picked key set. If ANY observer is
+/// registered for those events — including one on the run's own source (HIGH-2:
+/// a source carrying a second observer trigger keyed on the produced token's
+/// ETB/TokenCreated must NOT be excluded; doing so would skip the per-trigger
+/// priority interleaving CR 603.3 requires) — sequential resolution interleaves
+/// it per-token (CR 603.3 topmost-on-stack), so the batch ("all tokens, then
+/// all observers") may diverge. Refuse, fall back per-entry. The §2.2a
+/// emits-exactly gate makes this two-event probe complete by construction for
+/// ALL observer axes.
+fn observers_are_batch_safe(state: &GameState, plan: &effects::BatchPlan) -> bool {
+    for spec in plan.produced_token_specs() {
+        let record = zone_change_record_from_spec(spec);
+        let zc = GameEvent::ZoneChanged {
+            object_id: PROBE_ID,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(record),
+        };
+        let tc = GameEvent::TokenCreated {
+            object_id: PROBE_ID,
+            name: spec.characteristics.display_name.clone(),
+        };
+        for ev in [&zc, &tc] {
+            // unclassified ∪ buckets matching keys_from_event(ev). The
+            // unclassified bucket (Always/Immediate/dynamic/synthetic-keyword)
+            // is unconditionally included → any catch-all observer forces refuse.
+            // CR 603.3: any registered observer (including the run's own source)
+            // forces sequential resolution so priority interleaves per-token.
+            let candidates = crate::game::trigger_index::candidates_for_event(state, ev);
+            if !candidates.is_empty() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// CR 603.6a + CR 603.10: Build the faithful `ZoneChangeRecord` a produced
+/// token emits, from the resolved `TokenSpec` characteristics. `keys_from_event`
+/// reads only `core_types`/`to` for ETB keys, so the record's `core_types`
+/// drives the entire probe key set (mirrors `snapshot_for_zone_change`).
+fn zone_change_record_from_spec(
+    spec: &crate::types::proposed_event::TokenSpec,
+) -> crate::types::game_state::ZoneChangeRecord {
+    let ch = &spec.characteristics;
+    crate::types::game_state::ZoneChangeRecord {
+        object_id: PROBE_ID,
+        name: ch.display_name.clone(),
+        core_types: ch.core_types.clone(),
+        subtypes: ch.subtypes.clone(),
+        supertypes: ch.supertypes.clone(),
+        keywords: ch.keywords.clone(),
+        power: ch.power,
+        toughness: ch.toughness,
+        base_power: ch.power,
+        base_toughness: ch.toughness,
+        colors: ch.colors.clone(),
+        mana_value: 0,
+        controller: spec.controller,
+        owner: spec.controller,
+        from_zone: None,
+        to_zone: Zone::Battlefield,
+        attachments: Vec::new(),
+        linked_exile_snapshot: Vec::new(),
+        is_token: true,
+        combat_status: Default::default(),
+    }
+}
+
+/// Resolution-grade run key (stricter than the display `StackGroupKey`, §4.1).
+/// Two adjacent entries join a run iff every field is equal AND the entry is an
+/// untargeted `TriggeredAbility` (Layer A). Keyed on `source_id` + deep-equal
+/// `ResolvedAbility` (not display `source_name`), with the flattened target
+/// vector required empty (CR 608.2b).
+#[derive(PartialEq)]
+struct BatchRunKey<'a> {
+    controller: PlayerId,
+    source_id: ObjectId,
+    ability: &'a ResolvedAbility,
+    description: Option<&'a str>,
+    paid: Option<&'a StackPaidSnapshot>,
+    trigger_event: Option<&'a GameEvent>,
+}
+
+/// Build the run key for an entry, or `None` if the entry is not a candidate
+/// for batch-resolution (Layer A.1/A.4/A.5: must be an untargeted
+/// `TriggeredAbility` with no entry-level intervening-if condition).
+///
+/// No-wildcard discipline: every field of the `TriggeredAbility` variant is
+/// destructured explicitly (no `..`) so each is consciously dispositioned —
+/// the same exhaustiveness the codebase mandates for match arms, applied to
+/// struct destructuring. Field-by-field audit:
+/// - `source_id`   — IN KEY (run-identity: only one source's run collapses).
+/// - `ability`     — IN KEY (deep-equal `ResolvedAbility`: identical effect).
+/// - `condition`   — RESOLUTION-RELEVANT, NOT in key. CR 603.4: the entry-level
+///   intervening-if is rechecked per entry at resolution (`resolve_top`
+///   stack.rs:120-140) and the effect is skipped once the condition flips. The
+///   batch path applies the effect N times WITHOUT a per-entry recheck, so a
+///   run carrying an order-sensitive intervening-if (one the run's own tokens
+///   could move across its threshold) would diverge from sequential. We do NOT
+///   attempt to prove invariance in v1: any `condition.is_some()` makes the
+///   entry NON-batchable, forcing it into a singleton run that falls back to
+///   the `resolve_top` path which rechecks correctly. Conservative refuse.
+/// - `trigger_event` — IN KEY (event context drives `EventContextAmount`, etc.;
+///   differing context must not collapse).
+/// - `description` — IN KEY (distinguishes triggers from the same source).
+/// - `source_name` — RESOLUTION-IRRELEVANT: a display-only pre-resolved name
+///   (game_state.rs:3493-3500) the frontend renders; it derives from
+///   `source_id` (already in key) and is never read during resolution. Not in
+///   key by design.
+/// - `subject_match_count` — RESOLUTION-RELEVANT but PROVABLY EQUAL across a
+///   run: it is the CR 603.2c filtered subject count from the firing event
+///   batch. `resolve_batched` lifts it into resolution scope from the run's top
+///   entry (stack.rs:1135-1145), and `trigger_event` (which carries the firing
+///   event) is already in the key — two entries with equal `trigger_event` and
+///   equal deep `ability` carry the same batched subject count. It is therefore
+///   redundant to key on (would never break a run the other fields kept
+///   together) and is correctly applied from the top entry in the batch path.
+fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<BatchRunKey<'a>> {
+    let StackEntryKind::TriggeredAbility {
+        source_id,
+        ability,
+        condition,
+        trigger_event,
+        description,
+        source_name: _,
+        subject_match_count: _,
+    } = &entry.kind
+    else {
+        return None;
+    };
+    // CR 608.2b: untargeted-only — targets re-check legality per resolution.
+    if !flatten_targets_in_chain(ability).is_empty() {
+        return None;
+    }
+    // CR 603.4 (verified docs/MagicCompRules.txt:2588): an entry-level
+    // intervening-if is rechecked per entry at resolution and skips the effect
+    // once it flips. The batch path does not recheck per entry, so refuse to
+    // group any entry carrying one — it becomes a singleton run and falls back
+    // to the `resolve_top` path that rechecks correctly.
+    if condition.is_some() {
+        return None;
+    }
+    Some(BatchRunKey {
+        controller: entry.controller,
+        source_id: *source_id,
+        ability,
+        description: description.as_deref(),
+        paid: state.stack_paid_facts.get(&entry.id),
+        trigger_event: trigger_event.as_ref(),
+    })
+}
+
+/// CR 405.1: Length of the maximal contiguous run of batch-key-equal entries
+/// starting at the TOP of the stack (resolution order is back-to-front).
+/// Returns `None` when the top entry is not a batch candidate. Contiguous-only:
+/// a non-adjacent look-alike across a gap must resolve in true stack order.
+fn batch_run_len(state: &GameState) -> Option<u32> {
+    let top = state.stack.back()?;
+    let top_key = batch_run_key(state, top)?;
+    let mut len = 1u32;
+    // Walk downward from just below the top.
+    for entry in state.stack.iter().rev().skip(1) {
+        match batch_run_key(state, entry) {
+            Some(key) if key == top_key => len += 1,
+            _ => break,
+        }
+    }
+    Some(len)
 }
 
 fn execute_effect(
@@ -2823,5 +3116,1204 @@ mod tests {
             &mut events,
         );
         assert_eq!(state.objects[&spell_id].zone, Zone::Exile);
+    }
+
+    // ── Tier 3: batch-resolution tests ───────────────────────────────────
+    //
+    // These drive the REAL resolution pipeline (resolve_next / resolve_top +
+    // run_post_action_pipeline) — they are runtime tests, not shape tests.
+
+    mod batch_resolve {
+        // Driver internals under test (the stack module).
+        use super::super::{
+            batch_run_len, effects, observers_are_batch_safe, resolve_next, resolve_top,
+        };
+        // Test fixtures from the parent `tests` module.
+        use super::setup;
+        use crate::game::triggers;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityCondition, AbilityDefinition, Comparator, Duration, Effect, PtValue,
+            QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
+            TriggerDefinition, TypeFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
+        use crate::types::identifiers::{CardId, ObjectId};
+        use crate::types::mana::ManaColor;
+        use crate::types::player::PlayerId;
+        use crate::types::proposed_event::TokenSpec;
+        use crate::types::triggers::TriggerMode;
+        use crate::types::zones::Zone;
+        use std::sync::Arc;
+
+        /// A bare Insect Token effect: 1/1 green Insect, Fixed count.
+        fn insect_token_effect() -> Effect {
+            Effect::Token {
+                name: "Insect".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string()],
+                colors: vec![ManaColor::Green],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            }
+        }
+
+        /// Put `n` Forests on the battlefield under player 0.
+        fn add_lands(state: &mut GameState, n: usize) {
+            for _ in 0..n {
+                let id = create_object(
+                    state,
+                    CardId(900),
+                    PlayerId(0),
+                    "Forest".to_string(),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Land);
+            }
+        }
+
+        /// Create a Scute-Swarm-style source permanent (landfall trigger) on the
+        /// battlefield and return its id. The landfall trigger registers under
+        /// `EnterBattlefield(Some(Land))`, so (mirroring real Scute Swarm) it
+        /// never matches the creature-token probe — the source's own trigger does
+        /// not block batching, while a creature-keyed observer (CR 603.3) does.
+        fn add_scute_source(state: &mut GameState) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(901),
+                PlayerId(0),
+                "Scute Swarm".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                let landfall = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Land],
+                        ..Default::default()
+                    }));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(landfall.clone());
+                obj.trigger_definitions.push(landfall);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+            id
+        }
+
+        /// Push `n` identical untargeted Token triggers from `source_id`.
+        fn push_token_triggers(
+            state: &mut GameState,
+            source_id: ObjectId,
+            effect: Effect,
+            sub_ability: Option<Box<ResolvedAbility>>,
+            n: usize,
+        ) {
+            for _ in 0..n {
+                let entry_id = ObjectId(state.next_object_id);
+                state.next_object_id += 1;
+                let mut ability =
+                    ResolvedAbility::new(effect.clone(), vec![], source_id, PlayerId(0));
+                ability.sub_ability = sub_ability.clone();
+                state.stack.push_back(StackEntry {
+                    id: entry_id,
+                    source_id,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id,
+                        ability: Box::new(ability),
+                        condition: None,
+                        trigger_event: None,
+                        description: Some("Landfall".to_string()),
+                        source_name: "Scute Swarm".to_string(),
+                        subject_match_count: None,
+                    },
+                });
+            }
+        }
+
+        /// Drive resolution to empty via the BATCH path (`resolve_next`), running
+        /// the real post-action pipeline after each step. Returns the per-step
+        /// `consumed` counts.
+        fn resolve_to_empty_batched(state: &mut GameState) -> Vec<u32> {
+            let mut steps = Vec::new();
+            let mut guard = 0;
+            while !state.stack.is_empty() {
+                let mut events = Vec::new();
+                let consumed = resolve_next(state, &mut events);
+                steps.push(consumed);
+                triggers::process_triggers(state, &events);
+                crate::game::sba::check_state_based_actions(state, &mut events);
+                guard += 1;
+                assert!(guard < 10_000, "resolution did not terminate");
+            }
+            steps
+        }
+
+        /// Drive resolution to empty via the SEQUENTIAL path (`resolve_top`),
+        /// running the real post-action pipeline after each step.
+        fn resolve_to_empty_sequential(state: &mut GameState) {
+            let mut guard = 0;
+            while !state.stack.is_empty() {
+                let mut events = Vec::new();
+                resolve_top(state, &mut events);
+                triggers::process_triggers(state, &events);
+                crate::game::sba::check_state_based_actions(state, &mut events);
+                guard += 1;
+                assert!(guard < 10_000, "resolution did not terminate");
+            }
+        }
+
+        fn token_ids(state: &GameState) -> Vec<ObjectId> {
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| state.objects.get(id).is_some_and(|o| o.is_token))
+                .collect()
+        }
+
+        // §9.2 — observer-free positive batch case (sub-6 lands base Insect).
+        #[test]
+        fn observer_free_batch_equals_sequential() {
+            let mut base = setup();
+            add_lands(&mut base, 3);
+            let src = add_scute_source(&mut base);
+            push_token_triggers(&mut base, src, insect_token_effect(), None, 10);
+
+            let mut batched = base.clone();
+            let mut sequential = base.clone();
+
+            let steps = resolve_to_empty_batched(&mut batched);
+            resolve_to_empty_sequential(&mut sequential);
+
+            // The 10 entries collapsed into a single batched step.
+            assert_eq!(steps, vec![10], "expected one 10-entry batch");
+            // Exactly 10 Insect tokens, identical to the sequential path.
+            assert_eq!(token_ids(&batched).len(), 10);
+            assert_eq!(token_ids(&sequential).len(), 10);
+            assert_eq!(batched.battlefield.len(), sequential.battlefield.len());
+            assert!(batched.stack.is_empty() && sequential.stack.is_empty());
+            for id in token_ids(&batched) {
+                let o = &batched.objects[&id];
+                assert_eq!(o.power, Some(1));
+                assert_eq!(o.toughness, Some(1));
+                assert!(o.card_types.core_types.contains(&CoreType::Creature));
+            }
+        }
+
+        // §9.2 — Layer C reports safe on an observer-free board.
+        #[test]
+        fn observers_are_batch_safe_true_without_observers() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
+            let run_len = batch_run_len(&state).unwrap();
+            assert_eq!(run_len, 5);
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+            assert!(observers_are_batch_safe(&state, &plan));
+        }
+
+        // §9.4a — Cathars'-class creature-ETB observer forces refusal + the
+        // sequential fall-back produces the DESCENDING per-token distribution.
+        #[test]
+        fn creature_etb_observer_forces_sequential_descending_counters() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+
+            // Cathars'-class observer: "Whenever a creature you control enters,
+            // put a +1/+1 counter on each creature you control."
+            let observer_id = create_object(
+                &mut state,
+                CardId(902),
+                PlayerId(0),
+                "Cathars' Crusade".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&observer_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let put_all = Effect::PutCounterAll {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }),
+                };
+                let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        put_all,
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(trig.clone());
+                obj.trigger_definitions.push(trig);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
+
+            // Layer C refuses.
+            {
+                let run_len = batch_run_len(&state).unwrap();
+                let ability = state.stack.back().unwrap().ability().unwrap().clone();
+                let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+                assert!(
+                    !observers_are_batch_safe(&state, &plan),
+                    "creature-ETB observer must force refusal"
+                );
+            }
+
+            // The batch driver must fall back to one entry at a time.
+            let steps = resolve_to_empty_batched(&mut state);
+            assert!(
+                steps.iter().all(|&c| c == 1),
+                "observer board must resolve one-at-a-time, got {steps:?}"
+            );
+
+            // CR 603.3: sequential interleaving — token1 (created first) is
+            // present for the most subsequent Cathars resolutions, so its
+            // +1/+1 counter total is the largest; the last token's is smallest.
+            let mut totals: Vec<u32> = token_ids(&state)
+                .iter()
+                .map(|id| {
+                    state.objects[id]
+                        .counters
+                        .get(&CounterType::Plus1Plus1)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .collect();
+            assert_eq!(totals.len(), 5);
+            // The distribution is a strict descending permutation 5,4,3,2,1.
+            totals.sort_unstable();
+            assert_eq!(
+                totals,
+                vec![1, 2, 3, 4, 5],
+                "descending fan-out per CR 603.3"
+            );
+        }
+
+        // §9.5 — entering +1/+1 counter + live CounterAdded observer: the §2.2a
+        // gate refuses BEFORE Layer C is consulted (try_resolve_batch == None),
+        // and the sequential fall-back produces the descending distribution.
+        #[test]
+        fn entering_counter_with_counteradded_observer_refuses_and_falls_back() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+
+            // CounterAdded observer: "Whenever one or more +1/+1 counters are put
+            // on a creature you control, put a +1/+1 counter on each creature
+            // you control." Registers under TriggerEventKey::CounterAdded ONLY —
+            // NOT under any ETB/TokenCreated key.
+            let observer_id = create_object(
+                &mut state,
+                CardId(903),
+                PlayerId(0),
+                "Counter Doubler".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&observer_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let put_all = Effect::PutCounterAll {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }),
+                };
+                let trig = TriggerDefinition::new(TriggerMode::CounterAdded)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        put_all,
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(trig.clone());
+                obj.trigger_definitions.push(trig);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            // A Saproling token that enters WITH a +1/+1 counter.
+            let mut saproling = insect_token_effect();
+            if let Effect::Token {
+                name,
+                enter_with_counters,
+                ..
+            } = &mut saproling
+            {
+                *name = "Saproling".to_string();
+                *enter_with_counters =
+                    vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })];
+            }
+            push_token_triggers(&mut state, src, saproling, None, 5);
+
+            // §2.2a: spec_emits_only_etb_pair == false ⇒ try_resolve_batch == None.
+            {
+                let run_len = batch_run_len(&state).unwrap();
+                let ability = state.stack.back().unwrap().ability().unwrap().clone();
+                assert!(
+                    effects::try_resolve_batch(&state, &ability, run_len).is_none(),
+                    "entering-counter spec must fail the §2.2a gate before Layer C"
+                );
+            }
+
+            // Driver falls back to one-at-a-time.
+            let steps = resolve_to_empty_batched(&mut state);
+            assert!(
+                steps.iter().all(|&c| c == 1),
+                "entering-counter board must resolve sequentially, got {steps:?}"
+            );
+
+            // Each token entered with 1 counter; the CounterAdded observer then
+            // fans out per token. token1 observes the most subsequent counter
+            // events ⇒ descending distribution per CR 603.3.
+            let mut totals: Vec<u32> = token_ids(&state)
+                .iter()
+                .map(|id| {
+                    state.objects[id]
+                        .counters
+                        .get(&CounterType::Plus1Plus1)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .collect();
+            assert_eq!(totals.len(), 5);
+            totals.sort_unstable();
+            // Distinct strictly-descending per-token totals (not uniform).
+            assert!(
+                totals.windows(2).all(|w| w[0] < w[1]),
+                "expected strict descending distribution, got {totals:?}"
+            );
+        }
+
+        // §9.5 — Layer A/B predicate-shape refusals.
+        #[test]
+        fn non_fixed_count_is_not_batchable() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+            let mut effect = insect_token_effect();
+            if let Effect::Token { count, .. } = &mut effect {
+                *count = QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Land],
+                            ..Default::default()
+                        }),
+                    },
+                };
+            }
+            push_token_triggers(&mut state, src, effect, None, 5);
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            assert!(effects::try_resolve_batch(&state, &ability, run_len).is_none());
+        }
+
+        #[test]
+        fn targeted_trigger_breaks_the_run() {
+            let mut state = setup();
+            let src = add_scute_source(&mut state);
+            // A targeted Token (synthetic) is excluded by the empty-targets gate.
+            for _ in 0..3 {
+                let entry_id = ObjectId(state.next_object_id);
+                state.next_object_id += 1;
+                let ability = ResolvedAbility::new(
+                    insect_token_effect(),
+                    vec![TargetRef::Player(PlayerId(1))],
+                    src,
+                    PlayerId(0),
+                );
+                state.stack.push_back(StackEntry {
+                    id: entry_id,
+                    source_id: src,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id: src,
+                        ability: Box::new(ability),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                    },
+                });
+            }
+            // Targeted entries are not batch candidates → no run key at top.
+            assert!(batch_run_len(&state).is_none());
+        }
+
+        #[test]
+        fn mixed_sources_form_a_contiguity_boundary() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src_a = add_scute_source(&mut state);
+            let src_b = add_scute_source(&mut state);
+            // Bottom: one trigger from src_b; top: 3 from src_a.
+            push_token_triggers(&mut state, src_b, insect_token_effect(), None, 1);
+            push_token_triggers(&mut state, src_a, insect_token_effect(), None, 3);
+            // The contiguous run at the top is only the 3 src_a entries.
+            assert_eq!(batch_run_len(&state), Some(3));
+        }
+
+        // §2.2a companion field exclusions.
+        #[test]
+        fn spec_emits_only_etb_pair_field_exclusions() {
+            let base = TokenSpec {
+                characteristics: crate::types::proposed_event::TokenCharacteristics {
+                    display_name: "Insect".to_string(),
+                    power: Some(1),
+                    toughness: Some(1),
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec!["Insect".to_string()],
+                    supertypes: vec![],
+                    colors: vec![ManaColor::Green],
+                    keywords: vec![],
+                },
+                script_name: "Insect".to_string(),
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(1),
+                controller: PlayerId(0),
+                attach_to: None,
+            };
+            // Bare spec passes.
+            assert!(super::super::effects::token::spec_emits_only_etb_pair(
+                &base
+            ));
+
+            let mut with_counter = base.clone();
+            with_counter.enter_with_counters = vec![(CounterType::Plus1Plus1, 1)];
+            assert!(!super::super::effects::token::spec_emits_only_etb_pair(
+                &with_counter
+            ));
+
+            let mut attacking = base.clone();
+            attacking.enters_attacking = true;
+            assert!(!super::super::effects::token::spec_emits_only_etb_pair(
+                &attacking
+            ));
+
+            let mut sac = base.clone();
+            sac.sacrifice_at = Some(Duration::UntilEndOfCombat);
+            assert!(!super::super::effects::token::spec_emits_only_etb_pair(
+                &sac
+            ));
+
+            let mut attached = base.clone();
+            attached.attach_to = Some(crate::game::game_object::AttachTarget::Object(ObjectId(2)));
+            assert!(!super::super::effects::token::spec_emits_only_etb_pair(
+                &attached
+            ));
+        }
+
+        // §2.2 — ConditionInstead disjointness: a met copy-instead swap refuses.
+        #[test]
+        fn condition_instead_met_copy_branch_refuses() {
+            let mut state = setup();
+            add_lands(&mut state, 6); // 6 lands → "if you control 6+ lands" is met.
+            let src = add_scute_source(&mut state);
+
+            // sub: CopyTokenOf gated by ConditionInstead(lands >= 6).
+            let copy_effect = Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            };
+            let mut sub = ResolvedAbility::new(copy_effect, vec![], src, PlayerId(0));
+            sub.condition = Some(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Land],
+                                ..Default::default()
+                            }),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 6 },
+                }),
+            });
+
+            push_token_triggers(
+                &mut state,
+                src,
+                insect_token_effect(),
+                Some(Box::new(sub)),
+                5,
+            );
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            // Condition met (6 lands) ⇒ swap to CopyTokenOf ⇒ not batchable in v1.
+            assert!(effects::try_resolve_batch(&state, &ability, run_len).is_none());
+        }
+
+        // §2.2 — ConditionInstead NOT met + disjoint type ⇒ base Insect batches.
+        #[test]
+        fn condition_instead_not_met_disjoint_type_batches() {
+            let mut state = setup();
+            add_lands(&mut state, 3); // < 6 ⇒ base branch.
+            let src = add_scute_source(&mut state);
+
+            let copy_effect = Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            };
+            let mut sub = ResolvedAbility::new(copy_effect, vec![], src, PlayerId(0));
+            sub.condition = Some(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Land],
+                                ..Default::default()
+                            }),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 6 },
+                }),
+            });
+
+            push_token_triggers(
+                &mut state,
+                src,
+                insect_token_effect(),
+                Some(Box::new(sub)),
+                5,
+            );
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            // Land count invariant (token is a Creature, condition counts Lands) ⇒
+            // base branch is provably stable ⇒ batchable.
+            assert!(effects::try_resolve_batch(&state, &ability, run_len).is_some());
+        }
+
+        // §3.4 — mandatory Doubling-Season-class replacement still batches and
+        // produces 2× tokens per resolution.
+        #[test]
+        fn mandatory_token_doubling_batches_and_doubles() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+
+            // Doubling Season: mandatory token-count doubling replacement.
+            let ds_id = create_object(
+                &mut state,
+                CardId(904),
+                PlayerId(0),
+                "Doubling Season".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&ds_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let repl = doubling_season_replacement();
+                Arc::make_mut(&mut obj.base_replacement_definitions).push(repl.clone());
+                obj.replacement_definitions.push(repl);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
+            let steps = resolve_to_empty_batched(&mut state);
+            assert_eq!(
+                steps,
+                vec![5],
+                "mandatory replacement must not block batching"
+            );
+            // 5 resolutions × 2 (Doubling Season) = 10 Insect tokens.
+            assert_eq!(token_ids(&state).len(), 10);
+        }
+
+        /// Push `n` identical untargeted Token triggers from `source_id`, each
+        /// carrying the given entry-level intervening-if `condition` (CR 603.4).
+        fn push_token_triggers_with_condition(
+            state: &mut GameState,
+            source_id: ObjectId,
+            effect: Effect,
+            condition: TriggerCondition,
+            n: usize,
+        ) {
+            for _ in 0..n {
+                let entry_id = ObjectId(state.next_object_id);
+                state.next_object_id += 1;
+                let ability = ResolvedAbility::new(effect.clone(), vec![], source_id, PlayerId(0));
+                state.stack.push_back(StackEntry {
+                    id: entry_id,
+                    source_id,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::TriggeredAbility {
+                        source_id,
+                        ability: Box::new(ability),
+                        condition: Some(condition.clone()),
+                        trigger_event: None,
+                        description: Some("Landfall".to_string()),
+                        source_name: "Scute Swarm".to_string(),
+                        subject_match_count: None,
+                    },
+                });
+            }
+        }
+
+        // §9.5 HIGH (A4) — entry-level intervening-if that the run's OWN tokens
+        // mutate (CR 603.4) MUST NOT batch. The condition reads the live creature
+        // count; each created Insect raises it, so resolving the run one-by-one
+        // stops firing once the threshold is crossed — producing FEWER tokens
+        // than the run length. A batch that dropped the condition would fire all
+        // N. This is the discriminating test for the dropped-`condition` defect.
+        #[test]
+        fn entry_intervening_if_over_run_mutated_count_does_not_batch() {
+            let mut state = setup();
+            // add_scute_source contributes ONE creature (the source). No lands
+            // needed — the trigger entries are pushed directly.
+            let src = add_scute_source(&mut state);
+
+            // Intervening-if: "if you control fewer than 3 creatures, create a
+            // 1/1 Insect". Each Insect raises the creature count the condition
+            // reads — order-sensitive across the run.
+            let condition = TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            ..Default::default()
+                        }),
+                    },
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            };
+
+            push_token_triggers_with_condition(
+                &mut state,
+                src,
+                insect_token_effect(),
+                condition,
+                5,
+            );
+
+            // Layer A REFUSES to form a run: an entry carrying an entry-level
+            // `condition` is non-batchable (it would become a singleton run that
+            // falls back to `resolve_top`, which rechecks per entry per CR 603.4).
+            assert!(
+                batch_run_len(&state).is_none(),
+                "an intervening-if entry must not start a batch run"
+            );
+
+            // Driver falls back to one-at-a-time for every entry.
+            let steps = resolve_to_empty_batched(&mut state);
+            assert!(
+                steps.iter().all(|&c| c == 1),
+                "intervening-if run must resolve one-at-a-time, got {steps:?}"
+            );
+
+            // Sequential semantics: baseline 1 creature (the source). Entry 1
+            // sees 1<3 → +token (2). Entry 2 sees 2<3 → +token (3). Entries 3-5
+            // see 3, not <3 → skip. Exactly 2 tokens — FEWER than the run of 5.
+            // A reverted fix (condition dropped, all 5 batched) would give 5.
+            assert_eq!(
+                token_ids(&state).len(),
+                2,
+                "intervening-if must stop firing once the count crosses the threshold"
+            );
+        }
+
+        // §9.5 HIGH-2 — produced-token-non-observer gate (direct, discriminating):
+        // a produced token carrying an ETB observer trigger fails the gate, while
+        // a landfall-only (EnterBattlefield(Some(Land))) trigger passes. This
+        // exercises the gate's classifier directly — the copy path that would
+        // surface such a trigger end-to-end always falls back wholesale anyway
+        // (the met copy-instead branch, asserted below).
+        #[test]
+        fn produced_token_non_observer_gate_discriminates() {
+            use super::super::effects::token::produced_token_is_non_observer;
+            // A creature-ETB observer trigger ⇒ NOT a valid produced-token trigger.
+            let etb_observer = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                }));
+            assert!(
+                !produced_token_is_non_observer(std::slice::from_ref(&etb_observer)),
+                "an ETB-observing produced token must fail the gate"
+            );
+            // A landfall trigger (registers under EnterBattlefield(Some(Land))) is
+            // STILL an EnterBattlefield key ⇒ conservatively rejected.
+            let landfall = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Land],
+                    ..Default::default()
+                }));
+            assert!(
+                !produced_token_is_non_observer(std::slice::from_ref(&landfall)),
+                "any EnterBattlefield-keyed trigger is conservatively rejected"
+            );
+            // No triggers ⇒ passes (the bare Insect/Servo go-wide case).
+            assert!(
+                produced_token_is_non_observer(&[]),
+                "a trigger-free produced token passes the gate"
+            );
+        }
+
+        // §9.5 HIGH-2 — produced-token-non-observer gate: a CopyTokenOf run whose
+        // copy SOURCE carries an ETB observer trigger must refuse. (The copy
+        // branch falls back wholesale in v1 — see B5 — so this confirms a
+        // copy-source observer never reaches a batched resolution.)
+        #[test]
+        fn copy_source_with_etb_observer_refuses_to_batch() {
+            let mut state = setup();
+            add_lands(&mut state, 3); // < 6 ⇒ base/copy decision routes to copy below.
+
+            // A copy SOURCE permanent that itself carries a creature-ETB observer
+            // trigger ("whenever a creature you control enters, ..."). Copies of
+            // it would inherit this trigger and observe their siblings.
+            let copy_source = create_object(
+                &mut state,
+                CardId(905),
+                PlayerId(0),
+                "Observer Source".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&copy_source).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                let etb_observer = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(etb_observer.clone());
+                obj.trigger_definitions.push(etb_observer);
+            }
+
+            let src = add_scute_source(&mut state);
+
+            // sub: CopyTokenOf gated by a MET ConditionInstead (lands >= 1) so the
+            // copy branch is selected, then assert refusal (copy path falls back
+            // wholesale in v1 — so a copy-source observer never batches).
+            let copy_effect = Effect::CopyTokenOf {
+                target: TargetFilter::SpecificObject { id: copy_source },
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            };
+            let mut sub = ResolvedAbility::new(copy_effect, vec![], src, PlayerId(0));
+            sub.condition = Some(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Land],
+                                ..Default::default()
+                            }),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                }),
+            });
+
+            push_token_triggers(
+                &mut state,
+                src,
+                insect_token_effect(),
+                Some(Box::new(sub)),
+                5,
+            );
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            // The instead-swap fires (>= 1 land) ⇒ copy branch ⇒ not batchable in
+            // v1 (the copy path produces no TokenSpec and falls back). The gate
+            // therefore refuses regardless — confirming a copy-source observer
+            // never reaches a batched resolution.
+            assert!(
+                effects::try_resolve_batch(&state, &ability, run_len).is_none(),
+                "copy branch (and any copy-source observer) must refuse to batch"
+            );
+        }
+
+        // §9.5 MEDIUM-1 — interactive/optional replacement gate: an OPTIONAL
+        // token-doubling replacement applicable to the produced token must refuse
+        // (token_creation_needs_choice == true). The mandatory positive control is
+        // covered by `mandatory_token_doubling_batches_and_doubles`.
+        #[test]
+        fn optional_replacement_refuses_to_batch() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+
+            // An OPTIONAL ("you may") token-count-doubling replacement.
+            let opt_id = create_object(
+                &mut state,
+                CardId(906),
+                PlayerId(0),
+                "Optional Doubler".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&opt_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let repl = optional_token_doubling_replacement();
+                Arc::make_mut(&mut obj.base_replacement_definitions).push(repl.clone());
+                obj.replacement_definitions.push(repl);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            // The optional replacement could pause for a NeedsChoice prompt
+            // mid-batch ⇒ Layer B refuses.
+            assert!(
+                effects::try_resolve_batch(&state, &ability, run_len).is_none(),
+                "optional replacement must force fall-back"
+            );
+        }
+
+        // CR 603.3 (HIGH-2 loophole regression) — the run's OWN source carries a
+        // SECOND observer trigger keyed on the produced token's creature-ETB
+        // (e.g. "Whenever a land enters, create a 1/1 creature token. Whenever a
+        // creature enters, draw a card."). Under CR 603.3 each token-creation and
+        // each observer firing goes on the stack one at a time, with priority in
+        // between, so batching ("all tokens, then all observers") would skip the
+        // priority interleaving and let a player act between resolutions. Layer C
+        // MUST refuse. This test would have FALSELY PASSED (batch wrongly allowed)
+        // when `observers_are_batch_safe` excluded the run's own source IDs: the
+        // creature-ETB candidate == the run source, so the old `run_source_ids`
+        // exclusion filtered it out and reported the run batch-safe. With the
+        // exclusion removed, any registered observer — including the source's own
+        // second trigger — forces sequential resolution.
+        #[test]
+        fn source_with_own_token_etb_observer_forces_refusal() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            // `add_scute_source` registers the LAND-ETB token-creating trigger
+            // (the run). It never self-matches the creature-token probe.
+            let src = add_scute_source(&mut state);
+
+            // Attach a SECOND trigger to the SAME source, keyed on creature-ETB —
+            // exactly the produced token's type. This is the loophole gemini
+            // flagged: the run source observing its own produced tokens.
+            {
+                let obj = state.objects.get_mut(&src).unwrap();
+                let creature_observer = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(creature_observer.clone());
+                obj.trigger_definitions.push(creature_observer);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
+
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+            // The creature-ETB candidate IS the run source `src`. Pre-fix, the
+            // exclusion dropped it and this assertion would FAIL (batch allowed);
+            // post-fix it must hold (refuse to batch).
+            assert!(
+                !observers_are_batch_safe(&state, &plan),
+                "run source's own token-ETB observer must force sequential resolution (CR 603.3)"
+            );
+
+            // End-to-end: the batch driver must fall back to one entry at a time.
+            let steps = resolve_to_empty_batched(&mut state);
+            assert!(
+                steps.iter().all(|&c| c == 1),
+                "source-observed run must resolve one-at-a-time, got {steps:?}"
+            );
+        }
+
+        // §9.4a HIGH-1 regression — a live non-run battlefield observer keyed on a
+        // NARROW non-Creature ETB subtype (artifact creature) that the produced
+        // token matches must force Layer C to refuse. A round-2-style fixed
+        // `Some(Creature)` probe would have MISSED the `Some(Artifact)` bucket.
+        #[test]
+        fn narrow_artifact_etb_observer_forces_refusal() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+
+            // Observer narrowed to ARTIFACT ETB: registers ONLY under
+            // EnterBattlefield(Some(Artifact)) — NOT under (Some(Creature)).
+            let observer_id = create_object(
+                &mut state,
+                CardId(907),
+                PlayerId(0),
+                "Artifact Watcher".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&observer_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Artifact],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(trig.clone());
+                obj.trigger_definitions.push(trig);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            // The produced token is an ARTIFACT CREATURE (core_types = [Artifact,
+            // Creature]) — so the Layer C probe builds a record whose core_types
+            // include Artifact and hits the narrow observer's bucket.
+            let mut servo = insect_token_effect();
+            if let Effect::Token { name, types, .. } = &mut servo {
+                *name = "Servo".to_string();
+                *types = vec!["Artifact".to_string(), "Creature".to_string()];
+            }
+            push_token_triggers(&mut state, src, servo, None, 5);
+
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+            assert!(
+                !observers_are_batch_safe(&state, &plan),
+                "narrow artifact-ETB observer must force refusal (Some(Artifact) bucket)"
+            );
+        }
+
+        // §9.4a — Kodama-class broad-ETB observer (valid_card = Permanent) keyed
+        // under EnterBattlefield(None) must force Layer C to refuse. Documents
+        // that the motivating /tmp/gamestate.json board (with Kodama) does NOT
+        // batch (§2.4).
+        #[test]
+        fn kodama_broad_permanent_etb_observer_forces_refusal() {
+            let mut state = setup();
+            add_lands(&mut state, 3);
+            let src = add_scute_source(&mut state);
+
+            // Broad permanent-ETB observer ("whenever another permanent you
+            // control enters, ..."): valid_card = Permanent narrows to None ⇒
+            // registers under the broad EnterBattlefield(None) key.
+            let observer_id = create_object(
+                &mut state,
+                CardId(908),
+                PlayerId(0),
+                "Kodama of the East Tree".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&observer_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Permanent],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(trig.clone());
+                obj.trigger_definitions.push(trig);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
+
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+            assert!(
+                !observers_are_batch_safe(&state, &plan),
+                "broad permanent-ETB observer must force refusal (None bucket)"
+            );
+        }
+
+        // §9.4b / §9.2 — ConditionInstead DIFFERENTIAL harness: run BOTH the
+        // not-met (batches) and met (falls back) cases through the real pipeline
+        // and assert each produces the correct final state vs the sequential path.
+        #[test]
+        fn condition_instead_differential_not_met_and_met() {
+            // Build a Scute-Swarm-style state with `lands` lands and 5 landfall
+            // Token-or-copy triggers; return it ready to resolve.
+            let build = |lands: usize| -> GameState {
+                let mut state = setup();
+                add_lands(&mut state, lands);
+                let src = add_scute_source(&mut state);
+                let copy_effect = Effect::CopyTokenOf {
+                    target: TargetFilter::SelfRef,
+                    owner: TargetFilter::Controller,
+                    source_filter: None,
+                    enters_attacking: false,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![],
+                };
+                let mut sub = ResolvedAbility::new(copy_effect, vec![], src, PlayerId(0));
+                sub.condition = Some(AbilityCondition::ConditionInstead {
+                    inner: Box::new(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(TypedFilter {
+                                    type_filters: vec![TypeFilter::Land],
+                                    ..Default::default()
+                                }),
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 6 },
+                    }),
+                });
+                push_token_triggers(
+                    &mut state,
+                    src,
+                    insect_token_effect(),
+                    Some(Box::new(sub)),
+                    5,
+                );
+                state
+            };
+
+            // NOT met (3 lands): base Insect branch ⇒ batches; final state equals
+            // sequential. Disjoint type (token is Creature, condition counts Lands)
+            // proves invariance.
+            {
+                let base = build(3);
+                let mut batched = base.clone();
+                let mut sequential = base.clone();
+                let steps = resolve_to_empty_batched(&mut batched);
+                resolve_to_empty_sequential(&mut sequential);
+                assert_eq!(
+                    steps,
+                    vec![5],
+                    "not-met disjoint case must batch in one step"
+                );
+                assert_eq!(
+                    token_ids(&batched).len(),
+                    token_ids(&sequential).len(),
+                    "batched token count must equal sequential"
+                );
+                assert_eq!(token_ids(&batched).len(), 5);
+                assert_eq!(batched.battlefield.len(), sequential.battlefield.len());
+            }
+
+            // MET (6 lands): copy-instead fires ⇒ Layer B refuses ⇒ falls back to
+            // sequential; final state still correct (5 copies, one per step).
+            {
+                let mut state = build(6);
+                let steps = resolve_to_empty_batched(&mut state);
+                assert!(
+                    steps.iter().all(|&c| c == 1),
+                    "met copy-instead must fall back one-at-a-time, got {steps:?}"
+                );
+                assert_eq!(
+                    token_ids(&state).len(),
+                    5,
+                    "5 copy-token resolutions produce 5 tokens"
+                );
+            }
+        }
+
+        /// Build an OPTIONAL token-count-doubling replacement ("you may create
+        /// twice that many tokens instead").
+        fn optional_token_doubling_replacement() -> crate::types::ability::ReplacementDefinition {
+            use crate::types::ability::{
+                QuantityModification, ReplacementDefinition, ReplacementMode,
+            };
+            use crate::types::replacements::ReplacementEvent;
+            let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken);
+            def.mode = ReplacementMode::Optional { decline: None };
+            def.quantity_modification = Some(QuantityModification::Double);
+            def
+        }
+
+        /// Build a mandatory token-count-doubling replacement definition
+        /// (Doubling Season's "create twice that many tokens instead").
+        fn doubling_season_replacement() -> crate::types::ability::ReplacementDefinition {
+            use crate::types::ability::{
+                QuantityModification, ReplacementDefinition, ReplacementMode,
+            };
+            use crate::types::replacements::ReplacementEvent;
+            let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken);
+            def.mode = ReplacementMode::Mandatory;
+            def.quantity_modification = Some(QuantityModification::Double);
+            def
+        }
     }
 }

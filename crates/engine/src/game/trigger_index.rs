@@ -50,7 +50,7 @@ use super::game_object::GameObject;
 /// `ZoneChanged` to graveyard with 3 core types emits 1 (broad LBF) + 3
 /// (narrow LBF) + 1 (broad Dies) + 3 (narrow Dies) = 8. Inline `[..; 8]`
 /// covers every observed shape without heap allocation in the hot path.
-type Keys = SmallVec<[TriggerEventKey; 8]>;
+pub(crate) type Keys = SmallVec<[TriggerEventKey; 8]>;
 
 /// CR 205: Narrow a trigger's `valid_card` filter to exactly one `CoreType`
 /// when the filter is `Typed { type_filters: [single CoreType-bearing filter] }`.
@@ -100,7 +100,7 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
 ///   unclassified TriggerModes)
 /// - both empty/false → object is NOT registered for this trigger (state
 ///   conditions, Unknown).
-fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
+pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
     let mut keys: Keys = SmallVec::new();
     let narrow = narrow_core_type(&def.valid_card);
 

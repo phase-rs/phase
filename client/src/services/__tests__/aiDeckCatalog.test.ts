@@ -6,14 +6,27 @@ import { evaluateDeckCompatibility } from "../deckCompatibility";
 import { buildLegalAiDeckCatalog, filterByBracket, type AiDeckCandidate } from "../aiDeckCatalog";
 import { buildDeckCatalog } from "../deckCatalog";
 import { getCachedFeed, listSubscriptions } from "../feedService";
+import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { BUNDLED_CEDH_DECKS } from "../../data/cedhDecks";
 import { CEDH_BRACKET } from "../cedhLock";
+import type { BracketEstimate } from "../../types/bracket";
 
 vi.mock("../deckCompatibility", () => ({
   evaluateDeckCompatibility: vi.fn(),
 }));
+
+vi.mock("../../adapter/wasm-adapter", () => ({
+  getSharedAdapter: vi.fn(),
+}));
+
+/** Stub the shared adapter so `resolveBracket` returns the given estimate. */
+function stubBracketEstimate(estimate: BracketEstimate | null): void {
+  vi.mocked(getSharedAdapter).mockReturnValue({
+    estimateBracket: vi.fn(async () => estimate),
+  } as unknown as ReturnType<typeof getSharedAdapter>);
+}
 
 vi.mock("../feedService", () => ({
   feedDeckToParsedDeck: vi.fn((deck: { main: ParsedDeck["main"]; sideboard?: ParsedDeck["sideboard"]; commander?: string[] }) => ({
@@ -63,6 +76,9 @@ beforeEach(() => {
   vi.mocked(evaluateDeckCompatibility).mockImplementation(async (parsed) =>
     compatibility(parsed.main[0]?.name !== "Illegal Starter")
   );
+  // Default: no estimate available, so untagged decks stay null. Tests that
+  // exercise the estimate fallback override this via `stubBracketEstimate`.
+  stubBracketEstimate(null);
 });
 
 describe("buildLegalAiDeckCatalog", () => {
@@ -196,6 +212,45 @@ describe("buildLegalAiDeckCatalog", () => {
 
     const candidate = catalog.candidates.find((c) => c.id === "saved:Tagged Commander");
     expect(candidate?.bracket).toBe(4);
+  });
+
+  it("falls back to the engine bracket estimate for untagged Commander decks", async () => {
+    // The bug: untagged decks (feed decks, untagged precons, most saved decks)
+    // surfaced as `bracket: null` and were excluded by every bracket filter,
+    // collapsing the AI pool to "Random (0)". The fix resolves the bracket
+    // from the engine's computed estimate when no manual tag exists.
+    saveDeck("Estimated Commander", deck("Sol Ring", "Atraxa, Praetors' Voice"));
+    stubBracketEstimate({ tier: "optimized" } as BracketEstimate);
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+
+    const candidate = catalog.candidates.find((c) => c.id === "saved:Estimated Commander");
+    expect(candidate?.bracket).toBe(4); // "optimized" → 4
+  });
+
+  it("prefers an explicit bracket tag over the engine estimate", async () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Tagged Over Estimate",
+      JSON.stringify({
+        main: [{ count: 1, name: "Sol Ring" }],
+        sideboard: [],
+        commander: ["Atraxa, Praetors' Voice"],
+        bracket: 2,
+      }),
+    );
+    stubBracketEstimate({ tier: "cedh" } as BracketEstimate);
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+
+    const candidate = catalog.candidates.find((c) => c.id === "saved:Tagged Over Estimate");
+    // Human-declared bracket 2 wins; the cEDH (5) estimate is not consulted.
+    expect(candidate?.bracket).toBe(2);
   });
 
   it("validates Commander precons through the engine's compatibility check (banned cards filtered)", async () => {

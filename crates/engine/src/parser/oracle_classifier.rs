@@ -197,6 +197,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't win the game",
     "can't lose the game",
     "don't lose the game",
+    // CR 704.5j: Mirror Gallery / Sakashima of a Thousand Faces class —
+    // "the \"legend rule\" doesn't apply [to <scope> you control]". The leading
+    // quote is required: scan_contains only matches at word starts, and "legend"
+    // is glued to its opening quote ("legend) in the Oracle text.
+    "\"legend rule\" doesn't apply",
     "can block an additional",
     "can block any number",
     "play an additional land",

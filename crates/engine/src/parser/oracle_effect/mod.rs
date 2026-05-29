@@ -7895,55 +7895,94 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
     })
 }
 
-/// CR 109.5 + CR 608.2c + CR 800.4g: Distribute "<player-noun-A> and <player-noun-B>
-/// each <body>" into a 2-element AbilityDefinition chain whose halves apply
-/// `<body>` to two different players.
+/// CR 109.5 + CR 115.1 + CR 608.2c + CR 611.2c: Distribute "<subject-A> and
+/// <subject-B> each <body>" into an AbilityDefinition chain whose halves apply
+/// `<body>` to two different recipients.
 ///
-/// Recognized forms:
-/// - "you and that player each Y" — produced by "For each player who chose
-///   <choice>, you and that player each <body>" patterns inside
-///   Council's-dilemma vote effects (Master of Ceremonies).
-/// - "you and target opponent/player each Y" — the chosen player is a normal
-///   target slot (Bloodroot Apothecary class).
+/// Recognized subject axes (each is one `alt()` call; permutations are never
+/// enumerated):
+/// - First subject: `you` → `OriginalController` (player axis), or `~` →
+///   `SelfRef` (object axis — the ability source, e.g. Gogo).
+/// - Second subject: `that player` → `ScopedPlayer` (the iterated voter for
+///   `PlayerFilter::VotedFor`); `target opponent` / `target player` → `Player`
+///   (the chosen target player, Bloodroot Apothecary class); or `that creature`
+///   → `ParentTarget` (CR 115.1: the parent-ability target slot, e.g. the
+///   creature Gogo copied).
 ///
-/// The first half is targeted at `OriginalController` (the printed ability
-/// controller, fixed even when `player_scope` iteration rebinds the acting
-/// controller per-voter); the second half is targeted at either `ScopedPlayer`
-/// (the iterated voter for `PlayerFilter::VotedFor`) or `Player` (the chosen
-/// target player). The two halves resolve in printed order via the
-/// `sub_ability` chain.
+/// Player-axis exemplar: "For each player who chose <choice>, you and that
+/// player each <body>" (Council's-dilemma vote effects, Master of Ceremonies).
+/// `OriginalController` is the printed ability controller (fixed even when
+/// `player_scope` iteration rebinds the acting controller per-voter).
 ///
-/// Generality: the parser shape is parameterized to accept any single-effect
-/// body that has a `TargetFilter`-typed recipient slot (Token's `owner`,
-/// Draw's `target`, etc.). Effects without a recipient slot in the AST are
-/// not supported here — return `None` and let the caller fall through.
+/// Object-axis exemplar: Gogo, Mysterious Mime — "Gogo and that creature each
+/// get +2/+0 and gain haste until end of turn and attack this turn if able".
+/// CR 611.2c: the pump+haste are a single continuous effect; the body is a
+/// multi-link chain (pump+keyword link + MustAttack rider) distributed to both
+/// `SelfRef` and `ParentTarget`. The two halves resolve in printed order via
+/// the `sub_ability` chain, with half B appended at the tail of half A's chain.
 ///
-/// Other compound-subject forms ("you and an opponent of your choice") are
-/// deliberately out of scope for this entry point and will produce `None`.
+/// Generality: the parser shape is parameterized to accept any body whose links
+/// have a recognized `TargetFilter`-typed recipient slot (Token's `owner`,
+/// Draw/Discard/Mill/Pump's `target`, GenericEffect's `Option<target>`). Bodies
+/// with any link lacking a recipient slot are not supported — `None` is
+/// returned and the caller falls through to Unimplemented.
+/// CR 109.5 + CR 608.2c: Parse the compound-subject distribution prefix
+/// (`"<A> and <B> each "`), returning the two authoritatively-bound recipient
+/// filters and the remaining body text offset. Composed from independent
+/// dimensions (first-subject × second-subject × "each"); each axis is one
+/// `alt()` call so new compound forms extend without enumerating permutations.
+///
+/// Shared by `try_parse_compound_subject_each` (which builds the distributed
+/// chain) and `text_is_compound_subject_distribution` (the chunk-loop guard
+/// that protects the bound recipients from post-distribution anaphoric
+/// re-targeting). Keeping the prefix grammar in one place ensures the guard
+/// and the distributor never drift.
+fn parse_compound_subject_prefix(lower: &str) -> Option<(usize, TargetFilter, TargetFilter)> {
+    let parser: nom::IResult<&str, (TargetFilter, TargetFilter), OracleError<'_>> = (
+        alt((
+            value(TargetFilter::OriginalController, tag("you and ")),
+            value(TargetFilter::SelfRef, tag("~ and ")),
+        )),
+        alt((
+            value(TargetFilter::ScopedPlayer, tag("that player ")),
+            value(TargetFilter::Player, tag("target opponent ")),
+            value(TargetFilter::Player, tag("target player ")),
+            value(TargetFilter::ParentTarget, tag("that creature ")),
+        )),
+        value((), tag("each ")),
+    )
+        .parse(lower)
+        .map(|(rest, (first, second, ()))| (rest, (first, second)));
+    let (lower_rest, (first_filter, second_filter)) = parser.ok()?;
+    Some((lower.len() - lower_rest.len(), first_filter, second_filter))
+}
+
+/// CR 109.5 + CR 608.2c: True when `text` opens with a compound-subject
+/// distribution prefix. The distributor binds an explicit recipient on EVERY
+/// link of the chain it produces, so the chunk-loop anaphoric rewriter
+/// (`replace_target_with_parent`) must NOT re-target the head — that would
+/// clobber the distributor's authoritative binding (e.g. Gogo's leading
+/// `SelfRef` link flipped to `ParentTarget`). This guard lets the finalize
+/// path skip anaphoric re-targeting for distributed chains.
+fn text_is_compound_subject_distribution(text: &str) -> bool {
+    parse_compound_subject_prefix(&text.to_lowercase()).is_some()
+}
+
 fn try_parse_compound_subject_each(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    // Compose the prefix from independent dimensions:
+    // Compose the prefix from independent dimensions via the shared
     //   first-subject × " and " × second-subject × " each " × <body>
-    // Each subject axis is one alt() call; we never enumerate permutations.
-    let parser: nom::IResult<&str, (TargetFilter, TargetFilter), OracleError<'_>> = (
-        alt((value(TargetFilter::OriginalController, tag("you and ")),)),
-        alt((
-            value(TargetFilter::ScopedPlayer, tag("that player ")),
-            value(TargetFilter::Player, tag("target opponent ")),
-            value(TargetFilter::Player, tag("target player ")),
-        )),
-        value((), tag("each ")),
-    )
-        .parse(lower.as_str())
-        .map(|(rest, (first, second, ()))| (rest, (first, second)));
-    let (lower_rest, (first_filter, second_filter)) = parser.ok()?;
+    // grammar in `parse_compound_subject_prefix` (kept in lockstep with the
+    // chunk-loop guard `text_is_compound_subject_distribution`). Each axis is
+    // one alt() call; we never enumerate the permutations.
+    let (consumed_prefix, first_filter, second_filter) =
+        parse_compound_subject_prefix(lower.as_str())?;
 
     // Slice the original-case body text using the consumed offset.
-    let consumed = lower.len() - lower_rest.len();
-    let body_text = text[consumed..].trim();
+    let body_text = text[consumed_prefix..].trim();
     if body_text.is_empty() {
         return None;
     }
@@ -7964,18 +8003,26 @@ fn try_parse_compound_subject_each(
     // recipient field rewritten. Effects without a `TargetFilter`-typed
     // recipient are unsupported — return None to fall through to Unimplemented.
     let mut half_a = parsed_body.clone();
-    if !rewrite_player_recipient(&mut half_a, &first_filter) {
+    if !rewrite_recipient_chain(&mut half_a, &first_filter) {
         return None;
     }
     let mut half_b = parsed_body;
-    if !rewrite_player_recipient(&mut half_b, &second_filter) {
+    if !rewrite_recipient_chain(&mut half_b, &second_filter) {
         return None;
     }
 
     // Compose: Half A is the top-level effect; Half B is its sub_ability.
     // The runtime `resolve_ability_chain` walks parent → sub_ability in
     // printed order, matching the "you ..., then that player ..." reading.
-    half_a.sub_ability = Some(Box::new(half_b));
+    //
+    // CR 608.2c: distribution over a multi-link body — half B's chain attaches
+    // at the TAIL of half A's chain so half A's own deeper links (e.g. a
+    // MustAttack rider) survive. A plain overwrite would clobber them.
+    let mut tail = &mut half_a;
+    while tail.sub_ability.is_some() {
+        tail = tail.sub_ability.as_mut().unwrap();
+    }
+    tail.sub_ability = Some(Box::new(half_b));
 
     Some(ParsedEffectClause {
         effect: *half_a.effect,
@@ -7989,18 +8036,36 @@ fn try_parse_compound_subject_each(
     })
 }
 
-/// CR 109.5 + CR 115.1: Rewrite an `AbilityDefinition`'s recipient
-/// (`TargetFilter`-typed slot on the top-level effect) to the supplied
-/// filter. Returns `true` when the rewrite was applied; `false` when the
-/// effect has no recognized recipient slot (caller should treat as
-/// non-distributable and fall through).
+/// CR 109.5 + CR 115.1: Rewrite the recipient slot on EVERY link of an
+/// ability chain to `filter`. Walks parent -> sub_ability so a multi-link
+/// body (e.g. GenericEffect[pump+haste] -> GenericEffect[MustAttack]) has
+/// every link retargeted, not just the head. Returns `false` if ANY link
+/// has no recognized recipient slot, in which case the caller drops the
+/// (freshly-cloned) definition and falls through to Unimplemented.
 ///
-/// Covers the recipient-bearing effects produced by parsing "you and that
-/// player each Y" bodies — Token (`owner`), Draw (`target`), Discard
-/// (`target`), Mill (`target`), Tap/Untap (`target`), Investigate (no
-/// recipient → false). Extending to a new effect family is one match arm
-/// per family.
-fn rewrite_player_recipient(def: &mut AbilityDefinition, filter: &TargetFilter) -> bool {
+/// Atomic-mutation contract: callers MUST pass a freshly-cloned
+/// `AbilityDefinition`; partial mutation on a `false` return is dropped
+/// with the clone.
+fn rewrite_recipient_chain(def: &mut AbilityDefinition, filter: &TargetFilter) -> bool {
+    let mut cursor: Option<&mut AbilityDefinition> = Some(def);
+    while let Some(node) = cursor {
+        if !rewrite_recipient_on_link(node, filter) {
+            return false;
+        }
+        cursor = node.sub_ability.as_deref_mut();
+    }
+    true
+}
+
+/// CR 109.5 + CR 115.1: Rewrite one link's recipient (`TargetFilter`-typed
+/// slot) to `filter`. Returns `false` when the link's effect has no
+/// recognized recipient slot.
+///
+/// Covers the recipient-bearing effects produced by parsing "<A> and <B>
+/// each Y" bodies — Token (`owner`), Draw/Discard/Mill (`target`), Pump
+/// (`target`), GenericEffect (`Option<target>`). Extending to a new effect
+/// family is one match arm per family.
+fn rewrite_recipient_on_link(def: &mut AbilityDefinition, filter: &TargetFilter) -> bool {
     match def.effect.as_mut() {
         Effect::Token { owner, .. } => {
             *owner = filter.clone();
@@ -8012,11 +8077,39 @@ fn rewrite_player_recipient(def: &mut AbilityDefinition, filter: &TargetFilter) 
             *target = filter.clone();
             true
         }
+        // CR 611.2c: continuous P/T + keyword effect — recipient is a plain TargetFilter.
+        Effect::Pump { target, .. } => {
+            *target = filter.clone();
+            true
+        }
+        // GenericEffect carries the unified pump+haste mods AND the MustAttack
+        // rider; its recipient is Option<TargetFilter>. The top-level `target`
+        // is dispositive at the runtime register_transient_effect catch-all, but
+        // each static ability's `affected` set (the continuous-effect subject)
+        // must agree per CR 611.2c so the distributed continuous effect applies
+        // to the SAME object as its link recipient. Only an unbound / self /
+        // anaphoric default (`None` or `SelfRef`) is rebound — an explicit
+        // typed `affected` (e.g. "creatures you control") is preserved.
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } => {
+            *target = Some(filter.clone());
+            for static_def in static_abilities.iter_mut() {
+                match &static_def.affected {
+                    None | Some(TargetFilter::SelfRef) => {
+                        static_def.affected = Some(filter.clone());
+                    }
+                    Some(_) => {}
+                }
+            }
+            true
+        }
         // Any other effect family is out of scope for compound-subject
         // distribution at this entry point. Returning false keeps the
         // detector tight and prevents silent misparse on bodies whose
-        // recipient binding is encoded differently (GainLifePlayer enum,
-        // optional Option<TargetFilter>, etc.).
+        // recipient binding is encoded differently (GainLifePlayer enum, etc.).
         _ => false,
     }
 }
@@ -12878,8 +12971,19 @@ pub(crate) fn parse_effect_chain_ir(
         // attach to the triggering creature, not the parent target.
         let text_lower = text.to_lowercase();
         let typed_trigger_subject = ctx_has_typed_trigger_subject(ctx);
+        // CR 109.5 + CR 608.2c: A compound-subject distribution chunk ("~ and
+        // that creature each ...") has already had an explicit recipient bound
+        // on EVERY link by `try_parse_compound_subject_each` — the distributor
+        // is the authority for that chain. The anaphoric "it"/"that creature"
+        // rewriters below operate only on the head link (`clause.effect`) and
+        // would clobber the distributor's leading recipient (Gogo's head
+        // `SelfRef` → `ParentTarget`), so they must be skipped for distributed
+        // chunks. The deeper links are never visited by these rewriters anyway,
+        // which is exactly why a head-only rewrite corrupts the chain.
+        let is_distributed_chunk = text_is_compound_subject_distribution(&text);
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
         if condition.is_some()
+            && !is_distributed_chunk
             && !condition.as_ref().is_some_and(condition_refs_source_object)
             && !clauses.is_empty()
             && has_anaphoric_reference(&text_lower)
@@ -12895,6 +12999,7 @@ pub(crate) fn parse_effect_chain_ir(
         }
         // CR 608.2c: Pronoun clause following a conditional targeted effect.
         if condition.is_none()
+            && !is_distributed_chunk
             && clauses.last().is_some_and(|prev| {
                 prev.condition.is_some() && has_typed_target(&prev.parsed.effect)
             })
@@ -12913,6 +13018,7 @@ pub(crate) fn parse_effect_chain_ir(
         // anaphor ("Untap it.") doesn't hide the originating typed target
         // (Nissa, Who Shakes the World).
         if condition.is_none()
+            && !is_distributed_chunk
             && chain_has_prior_typed_referent(&clauses)
             && has_anaphoric_reference(&text_lower)
             && !typed_trigger_subject
@@ -12941,6 +13047,7 @@ pub(crate) fn parse_effect_chain_ir(
         // trailing rider is recognised structurally via
         // `is_exile_after_spell_rider_clause` so the relaxation is precise.
         if typed_trigger_subject
+            && !is_distributed_chunk
             && is_exile_after_spell_rider_clause(&text_lower)
             && clauses.last().is_some_and(|prev| {
                 matches!(
@@ -38987,6 +39094,196 @@ mod tests {
         ));
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
         assert_eq!(def.starting_with, Some(ControllerRef::You));
+    }
+
+    // --- compound-subject-each object axis (CR 109.5 / 115.1 / 611.2c) ---
+
+    /// Collect every link's recipient filter by walking the parent -> sub_ability
+    /// chain of a `ParsedEffectClause`.
+    fn chain_recipients(clause: &ParsedEffectClause) -> Vec<Option<TargetFilter>> {
+        fn recipient_of(effect: &Effect) -> Option<TargetFilter> {
+            match effect {
+                Effect::Pump { target, .. } => Some(target.clone()),
+                Effect::GenericEffect { target, .. } => target.clone(),
+                Effect::Token { owner, .. } => Some(owner.clone()),
+                Effect::Draw { target, .. }
+                | Effect::Discard { target, .. }
+                | Effect::Mill { target, .. } => Some(target.clone()),
+                _ => None,
+            }
+        }
+        let mut out = vec![recipient_of(&clause.effect)];
+        let mut cursor = clause.sub_ability.as_deref();
+        while let Some(node) = cursor {
+            out.push(recipient_of(&node.effect));
+            cursor = node.sub_ability.as_deref();
+        }
+        out
+    }
+
+    /// Count chain links (parent + all sub_ability descendants).
+    fn chain_len(clause: &ParsedEffectClause) -> usize {
+        let mut n = 1;
+        let mut cursor = clause.sub_ability.as_deref();
+        while let Some(node) = cursor {
+            n += 1;
+            cursor = node.sub_ability.as_deref();
+        }
+        n
+    }
+
+    /// Assert no link in the chain is Unimplemented.
+    fn assert_no_unimplemented(clause: &ParsedEffectClause) {
+        assert!(
+            !matches!(clause.effect, Effect::Unimplemented { .. }),
+            "head link is Unimplemented"
+        );
+        let mut cursor = clause.sub_ability.as_deref();
+        while let Some(node) = cursor {
+            assert!(
+                !matches!(*node.effect, Effect::Unimplemented { .. }),
+                "a sub_ability link is Unimplemented"
+            );
+            cursor = node.sub_ability.as_deref();
+        }
+    }
+
+    /// "~ and that creature each get +2/+0" → 2-link Pump chain:
+    /// SelfRef then ParentTarget, both +2/+0.
+    #[test]
+    fn compound_subject_each_object_axis_pump_only() {
+        let mut ctx = ParseContext::default();
+        let clause =
+            try_parse_compound_subject_each("~ and that creature each get +2/+0", &mut ctx)
+                .expect("object-axis pump body should parse");
+        assert_eq!(chain_len(&clause), 2, "expected 2 links");
+        assert_no_unimplemented(&clause);
+        // Head = Pump SelfRef +2/+0.
+        match &clause.effect {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(*target, TargetFilter::SelfRef);
+                assert_eq!(*power, PtValue::Fixed(2));
+                assert_eq!(*toughness, PtValue::Fixed(0));
+            }
+            other => panic!("expected head Pump SelfRef, got {other:?}"),
+        }
+        // Tail = Pump ParentTarget +2/+0.
+        let tail = clause.sub_ability.as_ref().expect("tail link");
+        match &*tail.effect {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(*target, TargetFilter::ParentTarget);
+                assert_eq!(*power, PtValue::Fixed(2));
+                assert_eq!(*toughness, PtValue::Fixed(0));
+            }
+            other => panic!("expected tail Pump ParentTarget, got {other:?}"),
+        }
+    }
+
+    /// Gogo's full distributed body: "~ and that creature each get +2/+0 and
+    /// gain haste until end of turn and attack this turn if able" — a multi-link
+    /// body distributed to SelfRef then ParentTarget. No Unimplemented anywhere,
+    /// and the recipient sequence is all SelfRef links followed by all
+    /// ParentTarget links (half A tail-appended with half B).
+    #[test]
+    fn compound_subject_each_object_axis_full_body() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_compound_subject_each(
+            "~ and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able",
+            &mut ctx,
+        )
+        .expect("full object-axis body should parse");
+        assert_no_unimplemented(&clause);
+        let recipients = chain_recipients(&clause);
+        // Every link must carry a recipient (none should be None / unrecognized).
+        assert!(
+            recipients.iter().all(|r| r.is_some()),
+            "every link must have a recipient: {recipients:?}"
+        );
+        let half = recipients.len() / 2;
+        assert!(
+            half >= 1,
+            "expected at least one link per half: {recipients:?}"
+        );
+        // First half all SelfRef, second half all ParentTarget (tail-append order).
+        for (i, r) in recipients.iter().enumerate() {
+            let expected = if i < half {
+                TargetFilter::SelfRef
+            } else {
+                TargetFilter::ParentTarget
+            };
+            assert_eq!(
+                r.as_ref(),
+                Some(&expected),
+                "link {i} recipient mismatch in {recipients:?}"
+            );
+        }
+    }
+
+    // --- rewrite_recipient_chain walker (CR 109.5 / 115.1) ---
+
+    /// The chain-walker retargets EVERY link of a hand-built 3-link chain and
+    /// returns true.
+    #[test]
+    fn rewrite_recipient_chain_retargets_every_link() {
+        fn pump_link(target: TargetFilter) -> AbilityDefinition {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Pump {
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(1),
+                    target,
+                },
+            )
+        }
+        let link3 = pump_link(TargetFilter::Controller);
+        let mut link2 = pump_link(TargetFilter::Controller);
+        link2.sub_ability = Some(Box::new(link3));
+        let mut link1 = pump_link(TargetFilter::Controller);
+        link1.sub_ability = Some(Box::new(link2));
+
+        assert!(rewrite_recipient_chain(&mut link1, &TargetFilter::SelfRef));
+        // Walk and confirm all three links are SelfRef.
+        let mut cursor: Option<&AbilityDefinition> = Some(&link1);
+        let mut count = 0;
+        while let Some(node) = cursor {
+            match &*node.effect {
+                Effect::Pump { target, .. } => assert_eq!(*target, TargetFilter::SelfRef),
+                other => panic!("expected Pump, got {other:?}"),
+            }
+            count += 1;
+            cursor = node.sub_ability.as_deref();
+        }
+        assert_eq!(count, 3);
+    }
+
+    /// The walker returns false when ANY link lacks a recognized recipient slot
+    /// (here a deeper `Unimplemented` link).
+    #[test]
+    fn rewrite_recipient_chain_false_on_unrecognized_link() {
+        let mut head = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::Controller,
+            },
+        );
+        head.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Unimplemented {
+                name: "test".to_string(),
+                description: None,
+            },
+        )));
+        assert!(!rewrite_recipient_chain(&mut head, &TargetFilter::SelfRef));
     }
 }
 

@@ -3215,6 +3215,43 @@ fn try_parse_gain_quoted_ability(text: &str) -> Option<Effect> {
     })
 }
 
+/// CR 611.2c + CR 702.10: Coalesce a subjectless continuous body that combines a
+/// P/T pump with one or more keyword/ability grants ("get +2/+0 and gain haste
+/// until end of turn") into a single `Effect::GenericEffect`, mirroring the
+/// subject-bound `build_continuous_clause` so both paths emit the same mods.
+///
+/// Returns `None` for a pure pump body (no non-P/T modification) so the caller
+/// falls through to the existing bare-`Effect::Pump` numeric arm unchanged, and
+/// `None` for a keyword-only body (handled by `try_parse_gain_keyword`).
+fn coalesce_pump_with_modifications(body_text: &str) -> Option<Effect> {
+    let (without_duration, duration) = super::strip_trailing_duration(body_text);
+    let modifications = parse_continuous_modifications(without_duration);
+    let has_pt = modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )
+    });
+    let has_non_pt = modifications.iter().any(|m| {
+        !matches!(
+            m,
+            ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. }
+        )
+    });
+    if !(has_pt && has_non_pt) {
+        return None;
+    }
+    let duration = duration.or(Some(Duration::UntilEndOfTurn));
+    Some(Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(modifications)
+            .description(body_text.to_string())],
+        duration,
+        target: None,
+    })
+}
+
 /// CR 702: Parse bare "gain [keyword]" / "gain [keyword] until end of turn"
 /// in the imperative path. Handles "gain haste", "gain trample and haste",
 /// "gain flying until end of turn", etc.
@@ -5536,11 +5573,16 @@ pub(super) fn parse_imperative_family_ast(
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             }),
 
-        // "gets"/"get" → try player counter first, then pump (step 3)
-        "gets" | "get" => try_parse_player_counter(lower).or_else(|| {
-            parse_numeric_imperative_ast(text, lower)
-                .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
-        }),
+        // "gets"/"get" → try player counter first, then the subjectless
+        // pump+keyword coalescer (CR 611.2c: keeps "gain haste" attached to the
+        // P/T pump as one GenericEffect), then bare numeric pump (step 3). Pure
+        // "get +N/+M" bodies coalesce to None and fall through to the numeric arm.
+        "gets" | "get" => try_parse_player_counter(lower)
+            .or_else(|| coalesce_pump_with_modifications(text).map(ImperativeFamilyAst::GainKeyword))
+            .or_else(|| {
+                parse_numeric_imperative_ast(text, lower)
+                    .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
+            }),
 
         // "deals"/"deal" → damage (via cost_resource, which contains try_parse_damage)
         "deals" | "deal" => {
@@ -5571,6 +5613,12 @@ pub(super) fn parse_imperative_family_ast(
             // Damage: try_parse_damage uses lower.find("deals ") — matches anywhere
             if let Some(ast) = parse_cost_resource_ast(text, lower, ctx) {
                 return Some(ImperativeFamilyAst::CostResource(ast));
+            }
+            // CR 611.2c: subjectless pump+keyword body ("get +2/+0 and gain
+            // haste ...") — coalesce into one GenericEffect so the keyword grant
+            // is not dropped by the bare-Pump numeric arm. Pure pump → None.
+            if let Some(effect) = coalesce_pump_with_modifications(text) {
+                return Some(ImperativeFamilyAst::GainKeyword(effect));
             }
             // Numeric: contains("gain")+contains("life"), contains("gets +"), etc.
             if let Some(ast) = parse_numeric_imperative_ast(text, lower) {
@@ -9921,6 +9969,125 @@ mod tests {
             }
             other => panic!("expected Effect::PutCounter, got {other:?}"),
         }
+    }
+
+    // --- coalesce_pump_with_modifications (CR 611.2c / 702.10) ---
+
+    /// Returns true if any static ability in a GenericEffect carries `keyword`.
+    fn generic_has_keyword(effect: &Effect, keyword: crate::types::keywords::Keyword) -> bool {
+        match effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.iter().any(|s| {
+                s.modifications.iter().any(|m| {
+                    matches!(m, ContinuousModification::AddKeyword { keyword: k } if *k == keyword)
+                })
+            }),
+            _ => false,
+        }
+    }
+
+    /// pump + haste body retains all three mods (AddPower, AddToughness,
+    /// AddKeyword(Haste)) as one GenericEffect with `target: None` and
+    /// UntilEndOfTurn.
+    #[test]
+    fn coalesce_pump_haste_retains_all_mods() {
+        let effect = coalesce_pump_with_modifications("get +2/+0 and gain haste until end of turn")
+            .expect("pump+keyword body should coalesce");
+        match &effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+            } => {
+                assert_eq!(*target, None, "non-distributed body must not broadcast");
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                let mods = &static_abilities[0].modifications;
+                assert!(mods
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::AddPower { value: 2 })));
+                assert!(mods
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::AddToughness { value: 0 })));
+                assert!(generic_has_keyword(
+                    &effect,
+                    crate::types::keywords::Keyword::Haste
+                ));
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// Pure pump body → None (falls through to the bare numeric Pump arm).
+    #[test]
+    fn coalesce_pure_pump_is_none() {
+        assert!(coalesce_pump_with_modifications("get +2/+0").is_none());
+    }
+
+    /// Keyword-only body → None (handled by `try_parse_gain_keyword`).
+    #[test]
+    fn coalesce_keyword_only_is_none() {
+        assert!(coalesce_pump_with_modifications("gain haste until end of turn").is_none());
+    }
+
+    /// No explicit duration on a pump+keyword body defaults to UntilEndOfTurn.
+    #[test]
+    fn coalesce_pump_keyword_defaults_until_end_of_turn() {
+        let effect = coalesce_pump_with_modifications("get +1/+0 and gain flying")
+            .expect("pump+keyword body should coalesce");
+        match effect {
+            Effect::GenericEffect { duration, .. } => {
+                assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// Multi-keyword body keeps both granted keywords.
+    #[test]
+    fn coalesce_pump_multi_keyword() {
+        let effect = coalesce_pump_with_modifications("get +1/+0 and gain flying and haste")
+            .expect("pump+multi-keyword body should coalesce");
+        assert!(generic_has_keyword(
+            &effect,
+            crate::types::keywords::Keyword::Haste
+        ));
+        assert!(generic_has_keyword(
+            &effect,
+            crate::types::keywords::Keyword::Flying
+        ));
+    }
+
+    /// Integration: a subjectless pump+keyword body routed through
+    /// `parse_imperative_family_ast` yields `GainKeyword(GenericEffect)`.
+    #[test]
+    fn imperative_family_pump_keyword_is_gain_keyword() {
+        let text = "get +2/+0 and gain haste until end of turn";
+        let mut ctx = ParseContext::default();
+        let ast = parse_imperative_family_ast(text, &text.to_lowercase(), &mut ctx)
+            .expect("pump+keyword body should parse");
+        match ast {
+            ImperativeFamilyAst::GainKeyword(effect) => {
+                assert!(matches!(effect, Effect::GenericEffect { .. }));
+            }
+            other => panic!("expected GainKeyword(GenericEffect), got {other:?}"),
+        }
+    }
+
+    /// Regression: a pure pump body still routes through the numeric Pump arm.
+    #[test]
+    fn imperative_family_pure_pump_still_numeric() {
+        let text = "get +2/+0";
+        let mut ctx = ParseContext::default();
+        let ast = parse_imperative_family_ast(text, &text.to_lowercase(), &mut ctx)
+            .expect("pump body should parse");
+        assert!(
+            matches!(
+                ast,
+                ImperativeFamilyAst::Structured(ImperativeAst::Numeric(_))
+            ),
+            "pure pump must remain a numeric imperative, got {ast:?}"
+        );
     }
 
     /// CR 706 + CR 706.2: "Roll a d20" with no modifier parses to a bare RollDie.
