@@ -8340,4 +8340,101 @@ mod tests {
             "Non-Zombie recipient must NOT be buffed (per-recipient gate)"
         );
     }
+
+    /// CR 205.1a + CR 613.1d (Layer 4) + CR 105.3 + CR 613.1e (Layer 5):
+    /// End-to-end confirmation of the Frogify class — a non-additive "is a 1/1
+    /// blue Frog creature" Aura *replaces* the enchanted creature's card types,
+    /// creature subtypes, and color, rather than adding to them. A Red Human
+    /// Wizard 2/2 becomes exactly a 1/1 blue Frog creature with no residual
+    /// Human/Wizard subtypes and no residual red color.
+    #[test]
+    fn frogify_aura_replaces_subtypes_color_and_type() {
+        let mut state = setup();
+        // RemoveAllSubtypes{Creature} resolves creature-type membership against
+        // state.all_creature_types — the wipe and the new Frog must be known.
+        state.all_creature_types =
+            vec!["Human".to_string(), "Wizard".to_string(), "Frog".to_string()];
+
+        let creature = make_creature(&mut state, "Human Wizard", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.subtypes.push("Human".to_string());
+            obj.card_types.subtypes.push("Wizard".to_string());
+            obj.color = vec![ManaColor::Red];
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_color = obj.color.clone();
+        }
+
+        // Create the Frogify Aura carrying the modifications the parser now emits.
+        let aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Frogify".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(creature.into());
+            obj.timestamp = ts;
+
+            let enchanted_creature = TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(enchanted_creature)
+                    .modifications(vec![
+                        ContinuousModification::RemoveAllAbilities,
+                        ContinuousModification::SetCardTypes {
+                            core_types: vec![CoreType::Creature],
+                        },
+                        ContinuousModification::SetColor {
+                            colors: vec![ManaColor::Blue],
+                        },
+                        ContinuousModification::SetPower { value: 1 },
+                        ContinuousModification::SetToughness { value: 1 },
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: SubtypeSet::Creature,
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Frog".to_string(),
+                        },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let c = state.objects.get(&creature).unwrap();
+        assert_eq!(c.power, Some(1), "Frogify sets base power to 1");
+        assert_eq!(c.toughness, Some(1), "Frogify sets base toughness to 1");
+        assert_eq!(
+            c.color,
+            vec![ManaColor::Blue],
+            "non-additive color must replace Red with Blue"
+        );
+        assert_eq!(
+            c.card_types.subtypes,
+            vec!["Frog".to_string()],
+            "Human and Wizard must be wiped, only Frog remains: {:?}",
+            c.card_types.subtypes
+        );
+        assert_eq!(
+            c.card_types.core_types,
+            vec![CoreType::Creature],
+            "card types must be replaced with exactly Creature: {:?}",
+            c.card_types.core_types
+        );
+    }
 }
