@@ -285,3 +285,99 @@ function prPrompt(card, { impl, verify, partial }) {
     `Return opened=true and the prUrl on success.`
   )
 }
+
+async function selectCards({ explicitCard, count }) {
+  if (explicitCard) return [explicitCard]
+  const res = await agent(
+    `WebFetch ${COVERAGE_URL} and return the ${count} best card(s) to implement. ` +
+      `Selection criteria: supported == false, smallest gap_count (prefer 1-3), and ` +
+      `NOT depending on deferred infrastructure (Rooms, Enchant Player, Suspend, ` +
+      `Aggression). Return exactly ${count} card name(s) as they appear in the data.`,
+    { label: 'select-cards', phase: 'Select', schema: WORKLIST_SCHEMA },
+  )
+  return (res && res.cards ? res.cards : []).slice(0, count)
+}
+
+async function createBranch(card) {
+  const res = await agent(
+    `Create a git branch for implementing the card "${card}". Build ` +
+      `slug="card/<lowercase-hyphenated-card-name>". Collision guard: if that branch ` +
+      `exists locally (git rev-parse --verify) or on origin (git ls-remote --exit-code ` +
+      `origin), append -2, -3, ... until free. Then: git checkout -b "$slug". Return ` +
+      `the exact branch name created.`,
+    { label: `branch:${card}`, phase: 'Implement', schema: BRANCH_SCHEMA },
+  )
+  return res && res.branch ? res.branch : null
+}
+
+async function planCard(card) {
+  let plan = await agent(planPrompt(card), { label: `plan:${card}`, phase: 'Plan' })
+  for (let round = 1; round <= MAX_PLAN_REVIEW_ROUNDS; round++) {
+    const review = await agent(reviewPlanPrompt(card, plan), {
+      label: `review-plan:${card}#${round}`,
+      phase: 'Plan',
+      schema: REVIEW_SCHEMA,
+    })
+    if (review.clean) break
+    plan = await agent(replanPrompt(card, plan, review.findings), {
+      label: `replan:${card}#${round}`,
+      phase: 'Plan',
+    })
+  }
+  return plan
+}
+
+async function implementCard(card, plan) {
+  return await agent(implementPrompt(card, plan), {
+    label: `implement:${card}`,
+    phase: 'Implement',
+    schema: IMPL_SCHEMA,
+  })
+}
+
+async function reviewImpl(card) {
+  for (let round = 1; round <= MAX_IMPL_REVIEW_ROUNDS; round++) {
+    const review = await agent(reviewImplPrompt(card), {
+      label: `review-impl:${card}#${round}`,
+      phase: 'Review',
+      schema: REVIEW_SCHEMA,
+    })
+    if (review.clean) return true
+    await agent(fixImplPrompt(card, review.findings), {
+      label: `fix-impl:${card}#${round}`,
+      phase: 'Review',
+    })
+  }
+  return false
+}
+
+async function crossCheck(card) {
+  const res = await agent(crossCheckPrompt(card), {
+    label: `crosscheck:${card}`,
+    phase: 'Review',
+    schema: CROSSCHECK_SCHEMA,
+  })
+  if (!res.clean && res.findings && res.findings.length) {
+    await agent(fixCrossCheckPrompt(card, res.findings), {
+      label: `fix-crosscheck:${card}`,
+      phase: 'Review',
+    })
+  }
+  return res
+}
+
+async function verifyCard(card) {
+  return await agent(verifyPrompt(card), {
+    label: `verify:${card}`,
+    phase: 'Verify',
+    schema: VERIFY_SCHEMA,
+  })
+}
+
+async function openPr(card, ctx) {
+  return await agent(prPrompt(card, ctx), {
+    label: `pr:${card}`,
+    phase: 'PR',
+    schema: PR_SCHEMA,
+  })
+}
