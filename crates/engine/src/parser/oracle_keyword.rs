@@ -1609,6 +1609,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_keyword_from_oracle_protection_from_each_of_your_opponents() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::keywords::ProtectionTarget;
+
+        // Issue #767 / CR 702.16k: Figure of Fable's Avatar form. Previously
+        // fell through to ProtectionTarget::CardType("each of your opponents"),
+        // which never matched any source at runtime.
+        let kw = parse_keyword_from_oracle("protection from each of your opponents").unwrap();
+        assert_eq!(
+            kw,
+            Keyword::Protection(ProtectionTarget::FromPlayer(ControllerRef::Opponent))
+        );
+    }
+
+    #[test]
     fn parse_keyword_from_oracle_gift_a_card() {
         use crate::types::keywords::GiftKind;
         let kw = parse_keyword_from_oracle("gift a card").unwrap();

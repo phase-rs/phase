@@ -349,6 +349,14 @@ pub enum ProtectionTarget {
     /// filter's properties — only `FilterProp` predicates that can be resolved
     /// from the object alone (without game state) are valid here.
     Filter(super::ability::TargetFilter),
+    /// CR 702.16k: "Protection from [a player]" — protection from each object
+    /// controlled by the scoped player(s), relative to the protected object's
+    /// controller, regardless of the source's characteristic values. Covers
+    /// "protection from each of your opponents" (Figure of Fable's Avatar form)
+    /// via `ControllerRef::Opponent`. CR 702.16i makes "each of your opponents"
+    /// behave as protection from every opponent, which the Opponent scope
+    /// captures in one variant.
+    FromPlayer(super::ability::ControllerRef),
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -1827,6 +1835,14 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
         // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
         "everything" => ProtectionTarget::Everything,
+        // CR 702.16k: "protection from each of your opponents" (Figure of
+        // Fable's Avatar form) and its phrasings — protection from every
+        // opponent of the protected permanent's controller.
+        // CR 702.16i: "protection from each ... players" is shorthand for
+        // separate protection from each; the Opponent scope captures all of them.
+        "each of your opponents" | "your opponents" | "an opponent" | "opponents" => {
+            ProtectionTarget::FromPlayer(super::ability::ControllerRef::Opponent)
+        }
         // Lowercase the stored quality — `source_matches_card_type` only matches
         // lowercase, so the canonical stored form must be lowercase.
         _ if lower.starts_with("from ") => ProtectionTarget::Quality(lower),
