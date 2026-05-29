@@ -6439,6 +6439,36 @@ mod tests {
         }
     }
 
+    /// Issue #878: loyalty lines must stay separate activated abilities; the +1
+    /// must not require targets (otherwise the UI auto-dispatches the sole legal
+    /// -3 when the player clicks Teferi).
+    #[test]
+    fn teferi_time_raveler_loyalty_abilities_parse() {
+        let r = parse(
+            "Each opponent can cast spells only any time they could cast a sorcery.\n\
+             [+1]: Until your next turn, you may cast sorcery spells as though they had flash.\n\
+             [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+            "Teferi, Time Raveler",
+            &[],
+            &["Planeswalker"],
+            &["Teferi"],
+        );
+        assert_eq!(r.abilities.len(), 2, "abilities: {:?}", r.abilities);
+        assert!(
+            matches!(&*r.abilities[0].effect, Effect::GenericEffect { .. }),
+            "+1 must grant flash timing via GenericEffect, got {:?}",
+            r.abilities[0].effect
+        );
+        assert!(matches!(
+            r.abilities[0].cost,
+            Some(AbilityCost::Loyalty { amount: 1 })
+        ));
+        assert!(matches!(
+            r.abilities[1].cost,
+            Some(AbilityCost::Loyalty { amount: -3 })
+        ));
+    }
+
     #[test]
     fn forest_reminder_text_only() {
         let r = parse("({T}: Add {G}.)", "Forest", &[], &["Land"], &["Forest"]);

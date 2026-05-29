@@ -855,4 +855,42 @@ mod tests {
             "activating ability 0 must lock out ability 1 on the same planeswalker"
         );
     }
+
+    /// Issue #878: Teferi +1 must be activatable alongside -3; mis-parsing the
+    /// +1 as a targeted `CastFromZone` made only -3 legal, so the UI auto-fired
+    /// the bounce when the player clicked Teferi.
+    #[test]
+    fn teferi_time_raveler_plus_one_and_minus_three_both_legal_at_four_loyalty() {
+        use crate::game::casting::can_activate_ability_now;
+        use crate::parser::oracle::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "Each opponent can cast spells only any time they could cast a sorcery.\n\
+             [+1]: Until your next turn, you may cast sorcery spells as though they had flash.\n\
+             [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+            "Teferi, Time Raveler",
+            &[],
+            &["Planeswalker".to_string()],
+            &["Teferi".to_string()],
+        );
+        assert_eq!(parsed.abilities.len(), 2);
+
+        let mut state = setup();
+        let pw = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Teferi, Time Raveler",
+            4,
+            parsed.abilities,
+        );
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), pw, 0),
+            "+1 must be legal at 4 loyalty with an empty board"
+        );
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), pw, 1),
+            "-3 must be legal at 4 loyalty with an empty board (up-to-one target)"
+        );
+    }
 }

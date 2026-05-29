@@ -9952,6 +9952,58 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
     .is_ok()
 }
 
+/// CR 601.3b + CR 702.8a: "you may cast [type] spells as though they had flash"
+/// — a duration-scoped flash-timing grant (Teferi, Time Raveler +1 class),
+/// not a `CastFromZone` card-selection permission. Must dispatch before
+/// `try_parse_cast_effect`, which misclassifies the spell-type filter as an
+/// activation-time target and blocks loyalty activation (issue #878).
+fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (type_text_orig, _) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
+        let (i, _) = tag("cast ").parse(i)?;
+        let (i, type_part) = take_until(" spells as though they had flash").parse(i)?;
+        let (i, _) = tag(" spells as though they had flash").parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, type_part.trim().to_string()))
+    })
+    .or_else(|| {
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, _) = opt(tag("you may ")).parse(i)?;
+            let (i, _) = tag("cast ").parse(i)?;
+            let (i, _) = tag("spells as though they had flash").parse(i)?;
+            let (i, _) = eof.parse(i)?;
+            Ok((i, String::new()))
+        })
+    })?;
+
+    let mut spell_filter = if type_text_orig.is_empty() {
+        TargetFilter::Any
+    } else {
+        let phrase = format!("{type_text_orig} spells");
+        parse_type_phrase(&phrase).0
+    };
+    if let TargetFilter::Typed(ref mut tf) = spell_filter {
+        if tf.controller.is_none() {
+            tf.controller = Some(ControllerRef::You);
+        }
+    }
+
+    let granted_static = StaticDefinition::new(StaticMode::CastWithKeyword {
+        keyword: Keyword::Flash,
+    })
+    .affected(spell_filter);
+
+    Some(parsed_clause(Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous().modifications(vec![
+            ContinuousModification::GrantStaticAbility {
+                definition: Box::new(granted_static),
+            },
+        ])],
+        duration: None,
+        target: Some(TargetFilter::SelfRef),
+    }))
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -10400,6 +10452,13 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     // just exiled by the preceding clause. It is not an immediate cast/play
     // instruction, so it must win before the generic CastFromZone parser.
     if let Some(clause) = try_parse_play_from_exile(tp) {
+        return clause;
+    }
+
+    // CR 601.3b + CR 702.8a: Flash-timing grants ("cast sorcery spells as though
+    // they had flash") are not CastFromZone card picks — route before the cast
+    // parser (issue #878).
+    if let Some(clause) = try_parse_cast_as_though_flash_permission(tp) {
         return clause;
     }
 
