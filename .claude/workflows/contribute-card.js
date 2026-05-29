@@ -140,3 +140,148 @@ const PR_SCHEMA = {
     prUrl: { type: 'string' },
   },
 }
+
+function planPrompt(card) {
+  return (
+    `Use the \`engine-planner\` skill to produce an architecturally idiomatic ` +
+    `implementation plan for full engine support of the Magic card "${card}". ` +
+    `Design for the class of cards, not the single card. Return the full plan text.`
+  )
+}
+
+function implementPrompt(card, plan) {
+  return (
+    `Implement full engine support for the card "${card}". Follow \`CLAUDE.md\` and ` +
+    `\`AGENTS.md\` design principles without exception: build for the class not the ` +
+    `card, nom combinators on first pass, CR annotations verified against ` +
+    `\`docs/MagicCompRules.txt\` (and for each cited rule, also read its adjacent ` +
+    `rules in the same section — cite the *authorizing* rule for the effect, not ` +
+    `just the *layering* rule), idiomatic Rust, engine owns all logic, frontend is ` +
+    `display-only. Reuse existing building blocks before writing new ones. Do not ` +
+    `ask for clarification — on any ambiguity, take the architecturally idiomatic ` +
+    `path. If scope expands beyond a single effect (e.g. the card requires new ` +
+    `infrastructure, a new keyword, a new replacement pipeline), proceed anyway and ` +
+    `explicitly note the scope expansion under a heading "Scope Expansion".\n\n` +
+    `You are implementing on a branch that already exists; do NOT commit — leave ` +
+    `changes in the working tree for review.\n\n` +
+    `Set scopeExpansion to a one-line description if scope grew, else the literal ` +
+    `"None.". List filesChanged (paths only) and crReferences (CR XXX.Y).\n\n` +
+    `APPROVED PLAN:\n${plan}`
+  )
+}
+
+function reviewPlanPrompt(card, plan) {
+  return (
+    `Use the \`review-engine-plan\` skill to review this implementation plan for the ` +
+    `card "${card}". Set clean=true only if there are no blocking architectural ` +
+    `findings. List each finding as a concrete string.\n\nPLAN:\n${plan}`
+  )
+}
+
+function replanPrompt(card, plan, findings) {
+  return (
+    `Revise the implementation plan for "${card}" to address these review ` +
+    `findings. Return the full revised plan text.\n\nFINDINGS:\n` +
+    findings.map((f) => `- ${f}`).join('\n') +
+    `\n\nCURRENT PLAN:\n${plan}`
+  )
+}
+
+function reviewImplPrompt(card) {
+  return (
+    `Use the \`review-impl\` skill against the current uncommitted working-tree diff ` +
+    `for the card "${card}". Set clean=true only if there are no defects, gaps, or ` +
+    `missing cases. List each finding as a concrete string with file:line.`
+  )
+}
+
+function fixImplPrompt(card, findings) {
+  return (
+    `Address every one of these \`review-impl\` findings for "${card}" with code ` +
+    `changes in the working tree. Do not commit.\n\nFINDINGS:\n` +
+    findings.map((f) => `- ${f}`).join('\n')
+  )
+}
+
+function crossCheckPrompt(card) {
+  return (
+    `You are an INDEPENDENT reviewer with fresh context. You are given ONLY the ` +
+    `unified diff (\`git diff\`), \`CLAUDE.md\`, and the skills under \`.claude/skills/\`. ` +
+    `Ignore any prior conversation. Review the uncommitted change for the card ` +
+    `"${card}" and check ALL of:\n` +
+    `(a) nom-mandate compliance — flag any \`match\` over a stringified parser-text ` +
+    `variable with string-literal arms, any chained \`if let Ok(..) = tag(..)\` ` +
+    `blocks, and any string-method dispatch (.contains, .find, .split_once, ` +
+    `.starts_with);\n` +
+    `(b) CR-citation completeness — for each cited rule, did the implementation ` +
+    `also cite the *authorizing* rule, not just the *layering* rule?\n` +
+    `(c) pattern coverage — does this work for >=10 cards or just one?\n` +
+    `(d) logic placement — engine vs frontend per CLAUDE.md;\n` +
+    `(e) building-block reuse — did it duplicate logic an existing helper ` +
+    `(oracle_util.rs, oracle_quantity.rs, game/filter.rs, game/zones.rs, etc.) ` +
+    `already provides?\n` +
+    `(f) bool-flag avoidance — any new bool field/param where a typed enum ` +
+    `(ControllerRef, Comparator, Option<T>) fits better.\n` +
+    `Set clean=true only if NONE of (a)-(f) produced a finding. Categorize each ` +
+    `finding.`
+  )
+}
+
+function fixCrossCheckPrompt(card, findings) {
+  return (
+    `A fresh-context reviewer found these issues in the "${card}" change. Fix each ` +
+    `with code in the working tree. Do not commit.\n\nFINDINGS:\n` +
+    findings
+      .map((f) => `- [${f.category}] ${f.location || ''} ${f.detail}`)
+      .join('\n')
+  )
+}
+
+function verifyPrompt(card) {
+  return (
+    `Run Developer-track verification for the card "${card}" in this exact order, ` +
+    `fixing in-loop on failure (max ${MAX_VERIFY_RETRIES} retries per command) ` +
+    `before continuing:\n` +
+    `1. cargo fmt --all   (always direct)\n` +
+    `2. ./scripts/check-parser-combinators.sh   (Gate A; one-shot, direct)\n` +
+    `3. If \`tilt get uiresource clippy >/dev/null 2>&1\` succeeds: ` +
+    `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data ; else: ` +
+    `cargo clippy-strict && cargo test -p engine && ./scripts/gen-card-data.sh\n` +
+    `4. cargo coverage   (confirm "${card}" is now supported:true, gap_count:0 -> ` +
+    `set coverageSupported)\n` +
+    `5. cargo semantic-audit   (confirm "${card}" has 0 findings -> set ` +
+    `semanticAuditClean)\n` +
+    `Set passed=true only if every command is clean AND coverageSupported AND ` +
+    `semanticAuditClean. Record each command's status; list any unresolved ` +
+    `failures in failures[].`
+  )
+}
+
+function prPrompt(card, { impl, verify, partial }) {
+  const verifyLines = (verify.commands || [])
+    .map((c) => `  - \`${c.name}\` — ${c.status}`)
+    .join('\n')
+  const title = partial ? `Partial: ${card}` : `Add ${card}`
+  const body =
+    `## Summary\nAdds engine support for **${card}**.\n\n` +
+    `## Files changed\n` +
+    (impl.filesChanged || []).map((f) => `- ${f}`).join('\n') +
+    `\n\n## CR references\n` +
+    (impl.crReferences || []).map((c) => `- ${c}`).join('\n') +
+    `\n\n## Track\nDeveloper\n\n` +
+    `## LLM\nModel: claude-opus-4-8\nThinking: high\n\n` +
+    `Tier: ${TIER}\n\n` +
+    `## Verification\n${verifyLines}\n\n` +
+    `## Scope Expansion\n${impl.scopeExpansion || 'None.'}\n\n` +
+    `## Validation Failures\n${partial ? 'See review/cross-check notes below.' : 'None.'}\n\n` +
+    `## CI Failures\n${(verify.failures && verify.failures.length) ? verify.failures.map((f) => `- ${f}`).join('\n') : 'None.'}\n`
+  return (
+    `Commit the working-tree change for "${card}", push the branch, and open a PR. ` +
+    `Run:\n` +
+    `git add -A && git commit -m ${JSON.stringify(`${title}`)} && git push -u origin HEAD\n` +
+    `Then: gh pr create --title ${JSON.stringify(title)} --body <BODY>  ` +
+    `(do NOT pass --label; the upstream auto-labeler handles it).\n\n` +
+    `Use exactly this PR body:\n\n${body}\n\n` +
+    `Return opened=true and the prUrl on success.`
+  )
+}
