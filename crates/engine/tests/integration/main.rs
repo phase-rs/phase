@@ -67,6 +67,7 @@ mod mystic_forge_regression;
 mod old_growth_troll_return_as_aura;
 mod oracle_parser;
 mod ponder_decline_shuffle_regression;
+mod power_fist_combat_damage_regression;
 mod refurbished_familiar;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;
