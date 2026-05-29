@@ -547,6 +547,7 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::PlayerPerformedAction { .. } => push(TriggerEventKey::PlayerActionPerformed),
         GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
+        | GameEvent::Detained { .. }
         | GameEvent::BecamePrepared { .. }
         | GameEvent::BecameUnprepared { .. } => {}
         GameEvent::CaseSolved { .. } | GameEvent::ClassLevelGained { .. } => {

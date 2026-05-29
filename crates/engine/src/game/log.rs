@@ -147,6 +147,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
+        | GameEvent::Detained { .. }
         | GameEvent::BecamePrepared { .. }
         | GameEvent::BecameUnprepared { .. }
         | GameEvent::CaseSolved { .. }
@@ -639,6 +640,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::CreatureSuspected { object_id } => {
             vec![card_seg(state, *object_id), text(" becomes suspected")]
+        }
+
+        GameEvent::Detained { object_id } => {
+            vec![card_seg(state, *object_id), text(" is detained")]
         }
 
         GameEvent::BecamePrepared { object_id } => {
