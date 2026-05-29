@@ -797,6 +797,15 @@ pub enum StaticMode {
     CantWinTheGame,
     /// CR 104.3b: This player can't lose the game (Platinum Angel effect).
     CantLoseTheGame,
+    /// CR 704.5j: The "legend rule" doesn't apply to the affected permanents, so
+    /// they are excluded from the same-name legendary grouping in the legend-rule
+    /// SBA. Scope rides on `StaticDefinition::affected`: `None` = global (Mirror
+    /// Gallery, "the legend rule doesn't apply"); a controller-scoped filter =
+    /// "doesn't apply to [permanents/tokens/Slivers/commanders] you control"
+    /// (Sakashima of a Thousand Faces, Mirror Box, Cadric, Sliver Gravemother,
+    /// Try-My-Deck Elemental, ...). Enforced per-permanent in `sba.rs` via
+    /// `check_static_ability` with the candidate as the target object.
+    LegendRuleDoesntApply,
     /// Speed may increase beyond 4, and 4+ still counts as max speed for that player.
     SpeedCanIncreaseBeyondFour,
     /// CR 118.12a: Defiler cycle — "As an additional cost to cast [color] permanent
@@ -1145,6 +1154,7 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CantWinTheGame => write!(f, "CantWinTheGame"),
             StaticMode::CantLoseTheGame => write!(f, "CantLoseTheGame"),
+            StaticMode::LegendRuleDoesntApply => write!(f, "LegendRuleDoesntApply"),
             StaticMode::SpeedCanIncreaseBeyondFour => write!(f, "SpeedCanIncreaseBeyondFour"),
             StaticMode::DefilerCostReduction { color, .. } => {
                 write!(f, "DefilerCostReduction({color:?})")
@@ -1398,6 +1408,7 @@ impl FromStr for StaticMode {
             "MayPlayAdditionalLand" => StaticMode::MayPlayAdditionalLand,
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
+            "LegendRuleDoesntApply" => StaticMode::LegendRuleDoesntApply,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
             // CR 509.1b + CR 609.4 + CR 702.14c: bare form = all-landwalk canceller.
             "IgnoreLandwalkForBlocking" => {

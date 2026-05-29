@@ -6481,6 +6481,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     || effective_lower.contains("can't lose the game")
             }
             StaticMode::CantWinTheGame => effective_lower.contains("can't win the game"),
+            // CR 704.5j: Mirror Gallery / Sakashima class — legend-rule exemption.
+            StaticMode::LegendRuleDoesntApply => {
+                effective_lower.contains("legend rule") && effective_lower.contains("doesn't apply")
+            }
             StaticMode::NoMaximumHandSize => effective_lower.contains("no maximum hand size"),
             StaticMode::MaximumHandSize { .. } => effective_lower.contains("maximum hand size is"),
             StaticMode::CantUntap => {

@@ -584,6 +584,26 @@ fn check_lethal_damage(
     }
 }
 
+/// CR 704.5j: A legendary permanent is exempt from the legend rule while an
+/// active `LegendRuleDoesntApply` static has an `affected` filter that matches
+/// it (Mirror Gallery's global exemption, Sakashima of a Thousand Faces /
+/// Mirror Box's "permanents you control", Cadric / Sliver Gravemother's
+/// type-scoped variants). The candidate is passed as the target object so
+/// type-scoped exemptions are evaluated per-permanent, not per-player.
+fn legend_rule_exempt(
+    state: &GameState,
+    permanent_id: crate::types::identifiers::ObjectId,
+) -> bool {
+    super::static_abilities::check_static_ability(
+        state,
+        StaticMode::LegendRuleDoesntApply,
+        &super::static_abilities::StaticCheckContext {
+            target_id: Some(permanent_id),
+            ..Default::default()
+        },
+    )
+}
+
 /// CR 704.5j: If a player controls two or more legendary permanents with the same name,
 /// that player chooses one and the rest are put into their owners' graveyards.
 /// This is NOT destruction — indestructible does not prevent it.
@@ -609,6 +629,9 @@ fn check_legend_rule(
                             && obj.card_types.supertypes.contains(&Supertype::Legendary)
                     })
                     .unwrap_or(false)
+                    // CR 704.5j: a permanent exempted by a "legend rule doesn't
+                    // apply" static is excluded from the same-name grouping.
+                    && !legend_rule_exempt(state, *id)
             })
             .collect();
 
@@ -2348,6 +2371,156 @@ mod tests {
             WaitingFor::ChooseLegend { .. }
         ));
         assert!(state.battlefield.contains(&id));
+    }
+
+    // --- CR 704.5j: Legend-rule exemption tests (Sakashima / Mirror Gallery class) ---
+
+    /// Helper: put a legendary creature with the given name onto the battlefield
+    /// under `owner`'s control.
+    fn add_legendary(
+        state: &mut GameState,
+        card: CardId,
+        owner: PlayerId,
+        name: &str,
+        turn: u32,
+    ) -> ObjectId {
+        let id = create_creature(state, card, owner, name, 2, 1);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.supertypes.push(Supertype::Legendary);
+        obj.entered_battlefield_turn = Some(turn);
+        id
+    }
+
+    /// Helper: add a permanent whose `LegendRuleDoesntApply` static carries the
+    /// given `affected` scope (`None` = global Mirror Gallery; a controller-scoped
+    /// filter = Sakashima/Cadric class).
+    fn add_legend_exemption(
+        state: &mut GameState,
+        owner: PlayerId,
+        affected: Option<TargetFilter>,
+    ) -> ObjectId {
+        use crate::types::ability::StaticDefinition;
+        let id = create_object(
+            state,
+            CardId(200),
+            owner,
+            "Legend Exemption".to_string(),
+            Zone::Battlefield,
+        );
+        let mut def = StaticDefinition::new(StaticMode::LegendRuleDoesntApply);
+        def.affected = affected;
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        id
+    }
+
+    #[test]
+    fn sba_legend_rule_suppressed_by_global_exemption() {
+        // CR 704.5j: Mirror Gallery — "The legend rule doesn't apply." (global).
+        let mut state = setup();
+        let id1 = add_legendary(&mut state, CardId(1), PlayerId(0), "Thalia", 1);
+        let id2 = add_legendary(&mut state, CardId(2), PlayerId(0), "Thalia", 2);
+        add_legend_exemption(&mut state, PlayerId(0), None);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "global legend-rule exemption must suppress the legend-rule choice"
+        );
+        assert!(state.battlefield.contains(&id1));
+        assert!(state.battlefield.contains(&id2));
+    }
+
+    #[test]
+    fn sba_legend_rule_suppressed_for_controller_scope() {
+        // CR 704.5j: Sakashima of a Thousand Faces — "doesn't apply to permanents
+        // you control." The controller keeps both same-name legendaries.
+        let mut state = setup();
+        let id1 = add_legendary(&mut state, CardId(1), PlayerId(0), "Sakashima", 1);
+        let id2 = add_legendary(&mut state, CardId(2), PlayerId(0), "Sakashima", 2);
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "controller-scoped legend-rule exemption must suppress the choice for its controller"
+        );
+        assert!(state.battlefield.contains(&id1));
+        assert!(state.battlefield.contains(&id2));
+    }
+
+    #[test]
+    fn sba_legend_rule_still_applies_to_opponent_without_exemption() {
+        // CR 704.5j: Sakashima's "permanents you control" exemption is controller
+        // scoped — an opponent who controls two same-name legendaries is still
+        // subject to the legend rule.
+        let mut state = setup();
+        // Player 0 controls Sakashima (the exemption source).
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+        // Player 1 controls two copies of the same legendary, with no exemption.
+        let id1 = add_legendary(&mut state, CardId(1), PlayerId(1), "Atraxa", 1);
+        let id2 = add_legendary(&mut state, CardId(2), PlayerId(1), "Atraxa", 2);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        match &state.waiting_for {
+            WaitingFor::ChooseLegend {
+                player, candidates, ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(candidates.contains(&id1));
+                assert!(candidates.contains(&id2));
+            }
+            other => panic!("Expected ChooseLegend for opponent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sba_legend_rule_type_scoped_exemption_only_exempts_matching() {
+        // CR 704.5j: Sliver Gravemother — "doesn't apply to Slivers you control."
+        // Two same-name NON-Sliver legendaries are still collapsed by the rule.
+        let mut state = setup();
+        add_legendary(&mut state, CardId(1), PlayerId(0), "Sliver Overlord", 1);
+        add_legendary(&mut state, CardId(2), PlayerId(0), "Sliver Overlord", 2);
+        // The exemption only covers Slivers; the legendaries above have no subtype.
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .subtype("Sliver".to_string()),
+            )),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "type-scoped exemption must not exempt permanents outside its filter"
+        );
     }
 
     // --- CR 704.5q: Counter cancellation tests ---

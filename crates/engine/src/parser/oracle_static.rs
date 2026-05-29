@@ -2415,6 +2415,13 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
+    // --- "the \"legend rule\" doesn't apply [to <scope> you control]" (CR 704.5j) ---
+    // Mirror Gallery (global), Sakashima of a Thousand Faces / Mirror Box
+    // ("permanents you control"), Sliver Gravemother / Spider-Verse (subtype).
+    if let Some(def) = parse_legend_rule_exemption(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "as though it/they had flash" (CR 702.8a) ---
     if nom_primitives::scan_contains(tp.lower, "as though it had flash")
         || nom_primitives::scan_contains(tp.lower, "as though they had flash")
@@ -6441,6 +6448,79 @@ fn lower_rule_static(
                 .description(description.to_string())
         }
     }
+}
+
+/// CR 704.5j: Parse a "the \"legend rule\" doesn't apply [to <scope> you control]"
+/// static-ability line into a `LegendRuleDoesntApply` definition.
+///
+/// - Global form ("the legend rule doesn't apply.") → `affected: None`
+///   (Mirror Gallery).
+/// - Scoped form ("... doesn't apply to <scope> you control.") → a
+///   controller-scoped `affected` filter derived from `<scope>`.
+///
+/// Anchored on the canonical opening, so conditional / compound forms that do
+/// not begin with the exemption clause — "If there are exactly two permanents
+/// named …" (Brothers Yamazaki), "As long as you control …" (Mothers Yamazaki),
+/// "Numot … have vigilance and haste, and the legend rule doesn't apply to
+/// them" (The Herald of Numot) — fall through and remain Unimplemented rather
+/// than being misparsed.
+fn parse_legend_rule_exemption(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    let rest = nom_tag_tp(tp, "the \"legend rule\" doesn't apply")?;
+
+    // Global form: nothing (or just the sentence terminator) follows.
+    if rest.lower.trim().trim_end_matches('.').trim().is_empty() {
+        return Some(
+            StaticDefinition::new(StaticMode::LegendRuleDoesntApply).description(text.to_string()),
+        );
+    }
+
+    // Scoped form: "... to <scope> you control."
+    let scope = nom_tag_tp(&rest, " to ")?;
+    let affected = parse_legend_rule_scope(&scope)?;
+    Some(
+        StaticDefinition::new(StaticMode::LegendRuleDoesntApply)
+            .affected(affected)
+            .description(text.to_string()),
+    )
+}
+
+/// CR 704.5j: Resolve the `<scope>` noun phrase of a legend-rule exemption
+/// ("permanents you control", "Slivers you control", ...) into a
+/// controller-scoped `affected` filter. Returns `None` for scopes this parser
+/// cannot resolve precisely ("tokens", "commanders", "creature tokens", "them"),
+/// so those cards are deferred rather than given a filter that silently matches
+/// nothing.
+/// CR 109.5: "you control" resolves to the source's controller.
+fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilter> {
+    // Drop the trailing sentence terminator so the combinator suffix split sees
+    // a clean "<descriptor> you control" phrase. allow-noncombinator: punctuation
+    // cleanup on a pre-tokenized chunk, not parsing dispatch.
+    let lower = scope.lower.trim_end().trim_end_matches('.').trim_end();
+    let cleaned = TextPair::new(&scope.original[..lower.len()], lower);
+    let base = parse_subject_suffix(&cleaned, " you control")?;
+
+    // "permanents you control" — every permanent the controller controls
+    // (Sakashima of a Thousand Faces, Mirror Box).
+    if base.lower == "permanents" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::You),
+        ));
+    }
+
+    // "<Subtype>s you control" — permanents of a single subtype (Sliver
+    // Gravemother, Spider-Verse). Require the subtype to consume the whole base
+    // so multi-word scopes ("creature tokens") are deferred, not truncated.
+    if let Some((canonical, consumed)) = parse_subtype(base.original) {
+        if consumed == base.original.len() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .subtype(canonical)
+                    .controller(ControllerRef::You),
+            ));
+        }
+    }
+
+    None
 }
 
 /// Determine player scope for "can't [verb]" patterns based on subject phrasing.
@@ -14447,6 +14527,81 @@ mod tests {
         let def = parse_static_line("Darksteel Myr must be blocked if able.").unwrap();
         assert_eq!(def.mode, StaticMode::MustBeBlocked);
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_legend_rule_global_exemption() {
+        // CR 704.5j: Mirror Gallery — "The legend rule doesn't apply." (global).
+        let def = parse_static_line("The \"legend rule\" doesn't apply.").unwrap();
+        assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+        assert_eq!(def.affected, None);
+    }
+
+    #[test]
+    fn static_legend_rule_permanents_you_control() {
+        // CR 704.5j: Sakashima of a Thousand Faces / Mirror Box — controller scope.
+        let def = parse_static_line("The \"legend rule\" doesn't apply to permanents you control.")
+            .unwrap();
+        assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn static_legend_rule_subtype_scope() {
+        // CR 704.5j: Sliver Gravemother — "doesn't apply to Slivers you control."
+        let def =
+            parse_static_line("The \"legend rule\" doesn't apply to Slivers you control.").unwrap();
+        assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+        match def.affected {
+            Some(TargetFilter::Typed(ref typed)) => {
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(typed.type_filters.iter().any(|t| matches!(
+                    t,
+                    crate::types::ability::TypeFilter::Subtype(s) if s == "Sliver"
+                )));
+            }
+            other => panic!("expected typed subtype filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_legend_rule_routes_through_classifier() {
+        // The classifier must route exemption lines to the static parser.
+        assert!(crate::parser::oracle_classifier::is_static_pattern(
+            "the \"legend rule\" doesn't apply to permanents you control."
+        ));
+        assert!(crate::parser::oracle_classifier::is_static_pattern(
+            "the \"legend rule\" doesn't apply."
+        ));
+    }
+
+    #[test]
+    fn static_legend_rule_defers_unparseable_scopes() {
+        // CR 704.5j: scopes this parser cannot resolve precisely, and conditional
+        // forms, must NOT be emitted as a LegendRuleDoesntApply static — they are
+        // deferred (left Unimplemented), never misparsed into a no-op exemption.
+        for text in [
+            "The \"legend rule\" doesn't apply to tokens you control.", // Cadric
+            "The \"legend rule\" doesn't apply to commanders you control.", // Try-My-Deck Elemental
+            "If there are exactly two permanents named Brothers Yamazaki on the battlefield, the \"legend rule\" doesn't apply to them.",
+        ] {
+            assert!(
+                !matches!(
+                    parse_static_line(text),
+                    Some(StaticDefinition {
+                        mode: StaticMode::LegendRuleDoesntApply,
+                        ..
+                    })
+                ),
+                "scope must be deferred, not misparsed: {text}"
+            );
+        }
     }
 
     #[test]
