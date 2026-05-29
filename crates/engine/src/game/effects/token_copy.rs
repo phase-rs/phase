@@ -346,6 +346,45 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 707.2: Compute the longest contiguous prefix of `source_ids` (top-down
+/// resolution order) whose copy sources all share IDENTICAL copiable values.
+///
+/// Tier-3 batch support: a run of "create a token that's a copy of it"
+/// self-copy triggers from distinct sources produces N tokens with identical
+/// characteristics iff every source has the same CR 707.2 copiable values. This
+/// walks the run, snapshots the top source's copiable values, then extends the
+/// prefix while each subsequent source's values are `==` to the snapshot.
+///
+/// Conserves on a vanished source: if `compute_current_copiable_values` returns
+/// `None` for any source in the prefix walk, the prefix stops there (the top
+/// source returning `None` yields `None` overall — nothing to batch).
+///
+/// Returns `(prefix_values, prefix_len)`. `prefix_len` may be shorter than
+/// `source_ids.len()` (a divergent tail resolves later). Token art is read from
+/// the live source at resolution time (`token_copy::resolve`), so no display
+/// `PrintedCardRef` is threaded through the batch probe (CR 707.2: not a
+/// copiable characteristic).
+pub(crate) fn compute_copy_batch_prefix(
+    state: &GameState,
+    source_ids: &[ObjectId],
+) -> Option<(crate::types::ability::CopiableValues, u32)> {
+    let top_id = *source_ids.first()?;
+    // Conserve on a vanished top source.
+    let prefix_values = compute_current_copiable_values(state, top_id)?;
+
+    let mut prefix_len = 1u32;
+    for &id in source_ids.iter().skip(1) {
+        // CR 707.2: stop at the first source that vanished (None) or whose
+        // copiable values diverge from the prefix snapshot.
+        match compute_current_copiable_values(state, id) {
+            Some(values) if values == prefix_values => prefix_len += 1,
+            _ => break,
+        }
+    }
+
+    Some((prefix_values, prefix_len))
+}
+
 /// CR 707.2 + CR 707.9: Apply non-keyword `, except <body>` modifications to
 /// a synthesized token. Tokens are created with copiable values baked in, so
 /// each modification mutates BOTH the layered view (`card_types`,

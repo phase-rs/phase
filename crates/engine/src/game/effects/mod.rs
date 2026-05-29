@@ -1433,6 +1433,21 @@ pub(crate) enum BatchExecutionPlan {
         spec: crate::types::proposed_event::TokenSpec,
         run_len: u32,
     },
+    /// CR 608.2c + CR 707.2: Resolve a met copy-instead swap (`CopyTokenOf`)
+    /// `prefix_len` times by replaying `token_copy::resolve` on the swapped
+    /// ability. `swapped` is the once-applied instead-swap (CR 608.2c — done
+    /// ONCE in `try_resolve_batch`, not per iteration). `probe_spec` carries the
+    /// prefix's shared copiable values so Layer C can build the real
+    /// ZoneChanged/TokenCreated probe events from the produced token's true
+    /// characteristics.
+    CopyToken {
+        // Boxed: `ResolvedAbility` is large, and keeping it inline would make
+        // `BatchExecutionPlan` carry that size in every variant (clippy
+        // `large_enum_variant`).
+        swapped: Box<ResolvedAbility>,
+        probe_spec: crate::types::proposed_event::TokenSpec,
+        prefix_len: u32,
+    },
 }
 
 /// A proven-safe batch plan returned by `try_resolve_batch`. The driver
@@ -1454,6 +1469,24 @@ impl BatchPlan {
         }
     }
 
+    /// CR 608.2c + CR 707.2: Build a copy-prefix batch plan: resolve the
+    /// swapped `CopyTokenOf` `prefix_len` times, producing one copy token each
+    /// iteration. Consumes `prefix_len` stack entries (may be < the full run).
+    pub(crate) fn copy_token(
+        swapped: ResolvedAbility,
+        probe_spec: crate::types::proposed_event::TokenSpec,
+        prefix_len: u32,
+    ) -> Self {
+        BatchPlan {
+            plan: BatchExecutionPlan::CopyToken {
+                swapped: Box::new(swapped),
+                probe_spec,
+                prefix_len,
+            },
+            consumed: prefix_len,
+        }
+    }
+
     pub(crate) fn consumed(&self) -> u32 {
         self.consumed
     }
@@ -1464,6 +1497,7 @@ impl BatchPlan {
     pub(crate) fn produced_token_specs(&self) -> Vec<&crate::types::proposed_event::TokenSpec> {
         match &self.plan {
             BatchExecutionPlan::Token { spec, .. } => vec![spec],
+            BatchExecutionPlan::CopyToken { probe_spec, .. } => vec![probe_spec],
         }
     }
 
@@ -1481,6 +1515,21 @@ impl BatchPlan {
             BatchExecutionPlan::Token { run_len, .. } => {
                 for _ in 0..*run_len {
                     let _ = token::resolve(state, ability, events);
+                }
+            }
+            // CR 608.2c + CR 707.2: Replay the swapped `CopyTokenOf` resolver
+            // `prefix_len` times. Like the base Token arm, this intentionally
+            // bypasses `resolve_ability_chain`'s depth-0 prelude (resolution-
+            // scoped clears, NthResolutionThisTurn counter) — the instead-swap
+            // was applied ONCE in `try_resolve_batch`, and each copy is an
+            // independent per-token creation at full multiplicity (§5.2).
+            BatchExecutionPlan::CopyToken {
+                swapped,
+                prefix_len,
+                ..
+            } => {
+                for _ in 0..*prefix_len {
+                    let _ = token_copy::resolve(state, swapped, events);
                 }
             }
         }
@@ -1505,9 +1554,10 @@ pub(crate) fn try_resolve_batch(
     state: &GameState,
     ability: &ResolvedAbility,
     run_len: u32,
+    run_source_ids: &[crate::types::identifiers::ObjectId],
 ) -> Option<BatchPlan> {
     match &ability.effect {
-        Effect::Token { .. } => token::try_resolve_batch(state, ability, run_len),
+        Effect::Token { .. } => token::try_resolve_batch(state, ability, run_len, run_source_ids),
         // Exhaustive conservative default: every other effect is non-batchable
         // in v1. The wildcard encodes "opt-in," not a forgotten arm — new
         // batch-aware handlers add an explicit arm above.
