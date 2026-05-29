@@ -19,7 +19,7 @@ use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map, not, opt, recognize, rest, value};
 use nom::multi::{many1, separated_list1};
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::bridge::nom_on_lower;
@@ -10739,29 +10739,51 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
 /// Split a post-"choose" clause into the card-description phrase and any trailing
 /// cleave-style bracket suffix after `"from it"` (e.g. `[with mana value 2 or less]`).
 fn choose_filter_parts(text: &str) -> (&str, &str) {
-    const ANCHORS: [&str; 3] = [" from it", " from among them", " from among those"];
-    for anchor in ANCHORS {
-        if let Some(pos) = text.find(anchor) {
-            return (text[..pos].trim(), text[pos + anchor.len()..].trim());
-        }
+    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from among those")
+    {
+        return (before.trim(), suffix.trim());
+    }
+    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from among them")
+    {
+        return (before.trim(), suffix.trim());
+    }
+    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from it") {
+        return (before.trim(), suffix.trim());
     }
     (text.trim(), "")
 }
 
+fn parse_choose_filter_leading_body(input: &str) -> &str {
+    type E<'a> = OracleError<'a>;
+    preceded(opt(alt((tag::<_, _, E>("a "), tag("an ")))), rest::<_, E>)
+        .parse(input.trim())
+        .map(|(_, body)| body.trim())
+        .unwrap_or(input.trim())
+}
+
+fn parse_cleave_bracket_suffix_body(input: &str) -> &str {
+    type E<'a> = OracleError<'a>;
+    nom_primitives::scan_preceded(input.trim(), |i| {
+        delimited(tag("["), take_until::<_, _, E>("]"), tag("]")).parse(i)
+    })
+    .map(|(_, inner, _)| inner.trim())
+    .unwrap_or("")
+}
+
+fn trailing_bare_article_only(input: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    opt(alt((
+        all_consuming(terminated(take_until::<_, _, E>(" an"), tag(" an"))),
+        all_consuming(terminated(take_until::<_, _, E>(" a"), tag(" a"))),
+    )))
+    .parse(input.trim())
+    .is_ok()
+}
+
 /// Merge the pre-`from it` card phrase with an optional bracketed restriction suffix.
 fn combine_choose_filter_parts(filter_part: &str, suffix_part: &str) -> String {
-    let filter_part = filter_part
-        .trim()
-        .trim_start_matches("a ")
-        .trim_start_matches("an ")
-        .trim();
-    let suffix = suffix_part.trim();
-    // allow-noncombinator: cleave bracket delimiter normalization, not parse dispatch
-    let suffix = suffix
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .map(str::trim)
-        .unwrap_or(suffix);
+    let filter_part = parse_choose_filter_leading_body(filter_part);
+    let suffix = parse_cleave_bracket_suffix_body(suffix_part);
     if suffix.is_empty() {
         filter_part.to_string()
     } else if filter_part.is_empty() {
@@ -10977,23 +10999,47 @@ fn is_unrestricted_card_filter(filter: &TargetFilter) -> bool {
     }
 }
 
+fn parse_article_type_phrase_suffix<'a>(
+    input: &'a str,
+) -> nom::IResult<&'a str, &'a str, OracleError<'a>> {
+    alt((
+        preceded(tag::<_, _, OracleError<'_>>(" an "), rest),
+        preceded(tag(" a "), rest),
+    ))
+    .parse(input)
+}
+
 /// Type phrase after the last article in text that precedes `"card from"` (e.g. `"nonland"`,
 /// `"creature with mana value 3 or less"`, or empty for bare `"a card from it"`).
 fn type_phrase_before_card_from(before_card: &str) -> &str {
     let trimmed = before_card.trim();
-    if let Some(idx) = trimmed.rfind(" an ") {
-        return trimmed[idx + 4..].trim();
-    }
-    if let Some(idx) = trimmed.rfind(" a ") {
-        return trimmed[idx + 3..].trim();
-    }
-    if trimmed.ends_with(" an") {
+
+    if trailing_bare_article_only(trimmed) {
         return "";
     }
-    if trimmed.ends_with(" a") {
-        return "";
+
+    let mut last = trimmed;
+    let mut cursor = 0;
+    while cursor < trimmed.len() {
+        let slice = &trimmed[cursor..];
+        if let Some((_rel_before, phrase, _rest)) =
+            nom_primitives::scan_preceded(slice, parse_article_type_phrase_suffix)
+        {
+            last = phrase.trim();
+            cursor += 1;
+        } else {
+            break;
+        }
     }
-    trimmed
+    last
+}
+
+fn choose_filter_search_text(phrase: &str) -> String {
+    if nom_primitives::scan_contains(phrase, "card") {
+        phrase.to_string()
+    } else {
+        format!("{phrase} card")
+    }
 }
 
 /// Extract card type filter from a sub-ability sentence containing "card from it/among".
@@ -11019,11 +11065,7 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
     if phrase.is_empty() || phrase == "a" {
         return TargetFilter::Any;
     }
-    let search_text = if phrase.contains("card") {
-        phrase.to_string()
-    } else {
-        format!("{phrase} card")
-    };
+    let search_text = choose_filter_search_text(phrase);
     let filter = parse_search_filter(&search_text, ctx);
     if !is_unrestricted_card_filter(&filter) {
         return filter;
@@ -30820,6 +30862,29 @@ mod tests {
             ctx.diagnostics.is_empty(),
             "bare card choice should not emit target fallback diagnostics: {:?}",
             ctx.diagnostics
+        );
+    }
+
+    #[test]
+    fn parse_choose_filter_merges_cleave_bracket_cmc_suffix() {
+        let mut ctx = ParseContext::default();
+        let lower =
+            "you choose a nonland card from it [with mana value 2 or less]. that player discards that card.";
+        let filter = parse_choose_filter(lower, &mut ctx);
+        assert!(
+            matches!(
+                &filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land))
+                    && tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 2 }
+                        }
+                    ))
+            ),
+            "expected nonland + CMC<=2, got {filter:?}"
         );
     }
 
