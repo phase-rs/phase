@@ -2603,13 +2603,62 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         } else {
             TriggerCause::Any
         };
-        return Some(
-            StaticDefinition::new(StaticMode::DoubleTriggers { cause })
-                .description(text.to_string()),
-        );
+        // CR 603.2d: Narrow the doubler to triggers from a specific source when
+        // the text names one ("a triggered ability of a Ninja creature you
+        // control"). Without this the `affected` filter is `None` and
+        // `apply_trigger_doubling` doubles every controlled permanent's
+        // triggers, not just the named source's (Splinter, Roaming Throne).
+        let mut def = StaticDefinition::new(StaticMode::DoubleTriggers { cause })
+            .description(text.to_string());
+        if let Some(filter) = parse_doubler_source_filter(tp.lower) {
+            def = def.affected(filter);
+        }
+        return Some(def);
     }
 
     None
+}
+
+/// CR 603.2d: Extract the source-restriction filter from a trigger-doubler's
+/// Oracle text. Trigger doublers name the doubled ability's source as
+/// "a triggered ability of <SOURCE>" — e.g. "a Ninja creature you control"
+/// (Splinter), "another creature you control of the chosen type" (Roaming
+/// Throne), or the unrestricted "a permanent you control" (Panharmonicon-class).
+///
+/// Returns `Some(filter)` only when `<SOURCE>` narrows beyond a bare controlled
+/// permanent (a subtype, a specific core type, or a property such as "another"
+/// / "of the chosen type"). A bare "permanent you control" needs no filter —
+/// `apply_trigger_doubling`'s controller match already enforces control — so
+/// this returns `None`, leaving `affected` unset (Panharmonicon/Isshin/Drivnod).
+fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
+    // The source phrase sits between "a triggered ability of " and the trigger
+    // verb: " to trigger" (cause-form: "...causes a triggered ability of X to
+    // trigger") or " triggers" (source-form: "a triggered ability of X
+    // triggers"). Try " to trigger" first so the cause-form's later " triggers"
+    // ("that ability triggers an additional time") is not mistaken for the
+    // delimiter.
+    let (_, source_phrase, _) = nom_primitives::scan_preceded(lower, |i| {
+        preceded(
+            tag::<_, _, OracleError<'_>>("a triggered ability of "),
+            alt((take_until(" to trigger"), take_until(" triggers"))),
+        )
+        .parse(i)
+    })?;
+
+    let (filter, _) = parse_type_phrase(source_phrase);
+    let TargetFilter::Typed(tf) = &filter else {
+        return None;
+    };
+    // Only narrow when the source carries a restriction beyond a controlled
+    // permanent: `Permanent`/`Card`/`Any` core types add nothing the controller
+    // match doesn't already enforce.
+    let restrictive = tf.type_filters.iter().any(|t| {
+        !matches!(
+            t,
+            TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
+        )
+    }) || !tf.properties.is_empty();
+    restrictive.then_some(filter)
 }
 
 fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
@@ -24918,5 +24967,68 @@ mod snapshot_tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// CR 603.2d: Source-restricted trigger doubler (Splinter, Radical Rat).
+    /// "If a triggered ability of a Ninja creature you control triggers, that
+    /// ability triggers an additional time." The cause is unrestricted (`Any`),
+    /// but the doubler's `affected` filter MUST narrow to Ninja creatures the
+    /// controller controls — otherwise every controlled permanent's triggers
+    /// double, not just Ninjas'.
+    #[test]
+    fn parses_splinter_source_restricted_doubler() {
+        let def = parse_static_line(
+            "If a triggered ability of a Ninja creature you control triggers, that ability triggers an additional time.",
+        )
+        .expect("expected DoubleTriggers static for Splinter");
+        assert_eq!(
+            def.mode,
+            StaticMode::DoubleTriggers {
+                cause: TriggerCause::Any
+            }
+        );
+        let affected = def
+            .affected
+            .as_ref()
+            .expect("source-restricted doubler must carry an `affected` filter");
+        match affected {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Ninja".to_string())),
+                    "expected Ninja subtype constraint, got {:?}",
+                    tf.type_filters
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// CR 603.6a: Panharmonicon's source is the unrestricted "a permanent you
+    /// control" — controller match alone suffices, so `affected` stays `None`.
+    /// Regression guard: the source-filter extraction must NOT populate
+    /// `affected` for a bare controlled-permanent source.
+    #[test]
+    fn panharmonicon_doubler_has_no_source_filter() {
+        let def = parse_static_line(
+            "If an artifact or creature entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+        )
+        .expect("expected DoubleTriggers static for Panharmonicon");
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::DoubleTriggers {
+                    cause: TriggerCause::EntersBattlefield { .. }
+                }
+            ),
+            "expected EntersBattlefield cause, got {:?}",
+            def.mode
+        );
+        assert!(
+            def.affected.is_none(),
+            "bare 'permanent you control' source must leave affected None, got {:?}",
+            def.affected
+        );
     }
 }
