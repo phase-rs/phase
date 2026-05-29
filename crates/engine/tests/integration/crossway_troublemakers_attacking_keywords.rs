@@ -17,7 +17,6 @@
 //! CR 702.2c: Deathtouch - any nonzero damage is lethal.
 //! CR 702.15b: Lifelink - damage causes controller to gain that much life.
 
-use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
@@ -38,8 +37,6 @@ fn declare_attacker(runner: &mut engine::game::scenario::GameRunner, attacker: O
             attacks: vec![(attacker, AttackTarget::Player(P1))],
         })
         .expect("DeclareAttackers should succeed");
-    // Explicitly evaluate layers to ensure FilterProp::Attacking is re-evaluated
-    evaluate_layers(runner.state_mut());
 }
 
 /// CR 506.4 + CR 702.2c: An attacking Vampire should have deathtouch immediately
