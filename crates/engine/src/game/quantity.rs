@@ -709,7 +709,17 @@ fn resolve_ref(
     // `FilterContext::recipient_id` so recipient-relative filter properties
     // resolve against the per-object recipient bound by the layer evaluator.
     let mut filter_ctx = match ability {
-        Some(a) => FilterContext::from_ability(a),
+        // CR 109.5: "you"/"your" on a triggered ability refer to the ability's
+        // (printed) controller. A quantity is a value sub-expression, not an effect
+        // target: while a `player_scope` iteration rebinds `ability.controller` to
+        // each affected player, "Zombies you control" in the quantity still means the
+        // printed/original controller (The Scarab God upkeep X). CR 608.2c: the
+        // ability's controller follows its instructions. Effect-target resolution
+        // keeps the scoped controller via the bare `from_ability` constructor.
+        Some(a) => FilterContext::from_ability_with_controller(
+            a,
+            a.original_controller.unwrap_or(a.controller),
+        ),
         None => FilterContext::from_source_with_controller(source_id, controller),
     };
     filter_ctx.recipient_id = ctx.recipient;
@@ -4655,6 +4665,73 @@ mod tests {
             Zone::Battlefield,
         );
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
+    }
+
+    /// CR 109.5: "you"/"your" on a triggered ability refer to the printed
+    /// controller of the source object, not the player a `player_scope`
+    /// iteration is temporarily affecting. During each-opponent resolution the
+    /// engine rebinds `ResolvedAbility::controller` to the scoped player while
+    /// preserving the printed controller in `original_controller`. A quantity
+    /// sub-expression ("Zombies you control" on The Scarab God) must read the
+    /// printed controller, so this asserts the count comes from P0 (printed
+    /// caster) even though `controller` has been rebound to P1 (scoped
+    /// opponent). Reverting the `quantity.rs` seam to a bare `from_ability`
+    /// would count P1's creatures (0) and fail this test.
+    #[test]
+    fn resolve_quantity_you_control_uses_original_controller_under_player_scope() {
+        let mut state = GameState::new_two_player(42);
+        // P0 (printed caster) controls 2 creatures.
+        for i in 0..2 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("P0 Creature {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        // P1 (scoped opponent) controls 0 creatures — asymmetric so the seam is
+        // discriminating: a correct fix returns 2, the buggy path returns 0.
+
+        // Source object is controlled by P0.
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Simulate mid-`player_scope` iteration: `controller` has been rebound to
+        // the scoped opponent (P1), but `original_controller` retains the printed
+        // caster (P0).
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.original_controller = Some(PlayerId(0));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+
+        // "creatures you control" resolves against the printed controller (P0 → 2),
+        // not the scoped opponent (P1 → 0).
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 2);
     }
 
     #[test]
