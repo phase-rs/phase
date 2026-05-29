@@ -596,20 +596,29 @@ pub fn resolve_add_all(
         _ => return Ok(()),
     };
     // CR 608.2c: Bind the `TrackedSetId(0)` sentinel emitted by the parser for
-    // "put a counter on each [card] this way" continuations to the highest
-    // tracked set id — the set the immediately preceding effect in this chain
-    // published. Empty sets are *not* skipped here (unlike
+    // "put a counter on each [card] this way" continuations to the active
+    // chain tracked set — the set the immediately preceding effect in this
+    // chain published. Empty sets are *not* skipped here (unlike
     // `targeting::resolve_tracked_set_sentinel`): a chained counter effect
-    // refers to the preceding effect's set even when it ended up empty.
+    // refers to the preceding effect's set even when it ended up empty. When
+    // no chain set exists, combat-damage trigger context may provide the
+    // filtered "those creatures" source set; otherwise fall back to the legacy
+    // latest tracked set behavior.
     let target_filter = match crate::game::effects::resolved_object_filter(ability, &target_filter)
     {
         TargetFilter::TrackedSet {
             id: crate::types::identifiers::TrackedSetId(0),
         } => state
-            .tracked_object_sets
-            .iter()
-            .max_by_key(|(id, _)| id.0)
-            .map(|(id, _)| TargetFilter::TrackedSet { id: *id })
+            .chain_tracked_set_id
+            .map(|id| TargetFilter::TrackedSet { id })
+            .or_else(|| crate::game::targeting::current_combat_damage_source_filter(state))
+            .or_else(|| {
+                state
+                    .tracked_object_sets
+                    .iter()
+                    .max_by_key(|(id, _)| id.0)
+                    .map(|(id, _)| TargetFilter::TrackedSet { id: *id })
+            })
             .unwrap_or(TargetFilter::TrackedSet {
                 id: crate::types::identifiers::TrackedSetId(0),
             }),

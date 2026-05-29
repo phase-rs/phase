@@ -701,6 +701,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     } else if condition_introduces_scoped_phase_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
     }
+    // Snapshot the condition-established scope before body parsing (which may
+    // temporarily rebind it via `with_player_scope`) so lowering sees the scope
+    // the condition introduced, not a transient nested-clause value.
+    let relative_player_scope = effect_ctx.relative_player_scope.clone();
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
@@ -782,6 +786,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             constraint,
             has_up_to,
             effect_lower: effect_lower.to_string(),
+            relative_player_scope,
         },
         source_text: text.to_string(),
     }
@@ -830,6 +835,18 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         Some(TriggerBody::PreLowered(ability)) => Some(ability.clone()),
         None => None,
     };
+
+    // CR 603.7c + CR 120.3 + CR 506.2: For triggers that introduce an
+    // event-bound player ("deals combat damage to a player, they lose half
+    // their life"), rebind the body's `PlayerScope::Target` possessive
+    // quantities to `PlayerScope::ScopedPlayer` so they resolve against the
+    // damaged/attacked player rather than an absent chosen target.
+    let mut execute = execute;
+    if modifiers.relative_player_scope == Some(ControllerRef::TargetPlayer) {
+        if let Some(ability) = execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_event_player_quantity_refs_to_scoped(ability);
+        }
+    }
 
     def.execute = execute;
     def.optional = modifiers.optional;
@@ -4057,6 +4074,10 @@ fn continues_player_action_list(after_comma: &str) -> bool {
         return true;
     }
 
+    if type_phrase_continues_to_combat_damage_player_event(trimmed) {
+        return true;
+    }
+
     // Recognize type-phrase continuations in comma-separated type lists.
     // E.g. "a creature, planeswalker, or battle enters" — after ", " we see
     // "planeswalker" (a bare type word) or "or battle enters" ("or" + type word).
@@ -4067,12 +4088,16 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // E.g. "creatures you control get +1/+1" starts with "creatures" (type word) but
     // has "get" (predicate verb) — this is the effect, not a continuation.
     let after_conjunction = alt((
+        value((), tag::<_, _, OracleError<'_>>("and/or ")),
         value((), tag::<_, _, OracleError<'_>>("or ")),
         value((), tag("and ")),
     ))
     .parse(trimmed)
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed);
+    if type_phrase_continues_to_combat_damage_player_event(after_conjunction) {
+        return true;
+    }
     if !starts_with_type_word(after_conjunction) {
         return false;
     }
@@ -4080,6 +4105,30 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // A continuation has no predicate verb before the trigger event verb;
     // a new sentence has a subject + predicate verb ("creatures you control get").
     !is_new_sentence_not_type_continuation(after_conjunction)
+}
+
+fn type_phrase_continues_to_combat_damage_player_event(text: &str) -> bool {
+    let (filter, rest) = parse_type_phrase(text);
+    if matches!(filter, TargetFilter::Any) || rest.len() >= text.len() {
+        return false;
+    }
+    let rest = rest.trim_start();
+    parse_combat_damage_to_player(rest).is_ok()
+}
+
+fn parse_combat_damage_to_player(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((
+                tag::<_, _, OracleError<'_>>("deal"),
+                tag::<_, _, OracleError<'_>>("deals"),
+            )),
+            tag(" combat damage"),
+            tag(" to a player"),
+        ),
+    )
+    .parse(input)
 }
 
 /// Check if the text starting at a type word is a new subject-predicate sentence
@@ -11985,6 +12034,55 @@ mod tests {
         }
     }
 
+    /// CR 603.7c + CR 120.3 + CR 119.3: Unstoppable Slasher — "Whenever this
+    /// creature deals combat damage to a player, they lose half their life,
+    /// rounded up." is an event-bound (non-targeted) trigger per CR 603.6f.
+    /// "they" must resolve to `TriggeringPlayer` (the damaged player), and the
+    /// half-life amount must read `PlayerScope::ScopedPlayer`, NOT the
+    /// targeting `PlayerScope::Target` (which has no chosen target on an
+    /// event-bound trigger and resolves to 0 — the reported silent no-op).
+    #[test]
+    fn parse_unstoppable_slasher_combat_damage_half_life() {
+        use crate::types::ability::{Effect, PlayerScope, QuantityExpr, QuantityRef, RoundingMode};
+
+        let def = parse_trigger_line(
+            "Whenever this creature deals combat damage to a player, they lose half their life, rounded up.",
+            "Unstoppable Slasher",
+        );
+
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        match &*execute.effect {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(
+                    target.as_ref(),
+                    Some(&TargetFilter::TriggeringPlayer),
+                    "LoseLife.target must be TriggeringPlayer (the damaged player), not ParentTarget",
+                );
+                match amount {
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => {
+                        assert_eq!(*divisor, 2, "half ⇒ divisor 2");
+                        assert_eq!(*rounding, RoundingMode::Up, "rounded up");
+                        assert_eq!(
+                            **inner,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::LifeTotal {
+                                    player: PlayerScope::ScopedPlayer,
+                                },
+                            },
+                            "inner amount must read the event player's life (ScopedPlayer), got {inner:?}",
+                        );
+                    }
+                    other => panic!("amount must be DivideRounded, got {other:?}"),
+                }
+            }
+            other => panic!("effect must be LoseLife, got {other:?}"),
+        }
+    }
+
     /// CR 603.4 + CR 608.2c + CR 119.3 + CR 107.1a: Cecil, Dark Knight —
     /// damage-done trigger with a "Then if your life total is less than or
     /// equal to half your starting life total, untap ~ and transform it"
@@ -13120,6 +13218,8 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageReceived);
         assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_target, None);
     }
 
     #[test]
@@ -17419,6 +17519,36 @@ mod tests {
         assert!(
             matches!(&def.valid_source, Some(TargetFilter::Or { filters }) if filters.len() == 2)
         );
+    }
+
+    #[test]
+    fn trigger_one_or_more_comma_and_or_subtypes_combat_damage() {
+        let def = parse_trigger_line(
+            "Whenever one or more Mutants, Ninjas, and/or Turtles you control deal combat damage to a player, put a +1/+1 counter on each of those creatures and draw a card.",
+            "Heroes in a Half Shell",
+        );
+
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert!(matches!(
+            &def.valid_source,
+            Some(TargetFilter::Or { filters }) if filters.len() == 3
+        ));
+
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutCounterAll {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ));
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("draw should be chained");
+        assert!(matches!(*sub.effect, Effect::Draw { .. }));
     }
 
     #[test]

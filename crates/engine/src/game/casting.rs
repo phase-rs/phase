@@ -715,6 +715,51 @@ fn granted_spell_keywords(
     keywords
 }
 
+/// CR 118.9 + CR 604.1: Collect an alternative MANA cost granted to `object_id`
+/// by a `CastWithAlternativeCost` static on the battlefield whose `affected`
+/// filter matches this spell.
+///
+/// CR 118.9a: only one alternative cost is ultimately applied to a spell, and
+/// the spell's controller chooses which. The casting pipeline currently surfaces
+/// a single alternative-vs-printed choice (`AdditionalCost::Choice`), so when
+/// multiple grants match (e.g. Rooftop Storm and Fist of Suns both active) this
+/// returns the first in deterministic battlefield-scan order rather than
+/// prompting the controller to choose among them. Offering a choice across
+/// multiple simultaneous grants needs a multi-alternative choice surface and is
+/// a known limitation tracked for follow-up, not implemented here.
+pub(super) fn granted_spell_alternative_cost(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Option<AbilityCost> {
+    let spell_obj = state.objects.get(&object_id)?;
+    let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
+
+    // CR 604.1: Functioning gate owned by `game_active_statics`.
+    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
+        let StaticMode::CastWithAlternativeCost { cost } = &def.mode else {
+            continue;
+        };
+
+        let matches = def.affected.as_ref().is_none_or(|filter| {
+            super::filter::spell_object_matches_filter_from_state(
+                state,
+                spell_obj,
+                origin_zone,
+                caster,
+                filter,
+                source_obj.id,
+                &state.all_creature_types,
+            )
+        });
+        if matches {
+            return Some(AbilityCost::Mana { cost: cost.clone() });
+        }
+    }
+
+    None
+}
+
 pub(crate) fn effective_spell_keywords(
     state: &GameState,
     caster: PlayerId,

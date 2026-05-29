@@ -14021,6 +14021,209 @@ mod phase_trigger_regression_tests {
         assert!(state.pending_trigger.is_none());
     }
 
+    /// Put a Go-Shintai of Boundless Vigor (the issue #1243 card) onto the
+    /// battlefield under P0, with its real parsed trigger set, and return its id.
+    /// The card is its own Shrine, so it is always a legal reflexive target.
+    fn put_boundless_go_shintai(state: &mut GameState) -> ObjectId {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Trample\nAt the beginning of your end step, you may pay {1}. When you do, put a +1/+1 counter on target Shrine for each Shrine you control.",
+            "Go-Shintai of Boundless Vigor",
+            &[],
+            &["Enchantment".to_string(), "Creature".to_string()],
+            &["Shrine".to_string(), "Spirit".to_string()],
+        );
+        assert!(
+            !parsed.triggers.is_empty(),
+            "parser must produce the end-step trigger, got {parsed:?}"
+        );
+
+        let id = create_object(
+            state,
+            CardId(200),
+            PlayerId(0),
+            "Go-Shintai of Boundless Vigor".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Shrine".to_string());
+        obj.power = Some(5);
+        obj.toughness = Some(5);
+        for t in parsed.triggers {
+            obj.trigger_definitions.push(t);
+        }
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    fn shintai_p1p1_counters(state: &GameState, id: ObjectId) -> u32 {
+        state
+            .objects
+            .get(&id)
+            .and_then(|o| {
+                o.counters
+                    .get(&crate::types::counter::CounterType::Plus1Plus1)
+                    .copied()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Issue #1243 — class regression. "At the beginning of your end step, you
+    /// may pay {1}. When you do, <effect>." parses into an end-step `Phase`
+    /// trigger whose execute is an optional `PayCost` carrying a reflexive
+    /// `WhenYouDo` sub-ability. CR 513.1a (beginning-of-end-step trigger) + CR
+    /// 603.1 (a triggered ability uses the stack) require the trigger to be put
+    /// on the stack and resolved; CR 603.12 makes "when you do" a reflexive
+    /// trigger that fires only if the optional payment is made. The shape is
+    /// shared by all four Boundless-era Go-Shintai and ~12 other "you may pay
+    /// {1}. When you do" cards, so this guards the whole class.
+    ///
+    /// Accept path: the {1} is paid and the reflexive PutCounter resolves,
+    /// placing one +1/+1 counter on the lone Shrine.
+    #[test]
+    fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::End;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let id = put_boundless_go_shintai(&mut state);
+        // One generic mana so the {1} is payable at resolution.
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(999),
+            false,
+            Vec::new(),
+        ));
+
+        let mut events = Vec::new();
+        crate::game::turns::auto_advance(&mut state, &mut events);
+        // CR 603.1 + CR 513.1a: the trigger must reach the stack, not be skipped.
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "end-step may-pay trigger must fire (waiting={:?})",
+            state.waiting_for
+        );
+
+        let mut saw_may_prompt = false;
+        for _ in 0..20 {
+            match state.waiting_for.clone() {
+                WaitingFor::Priority { player } => {
+                    if state.stack.is_empty() {
+                        break;
+                    }
+                    apply(&mut state, player, GameAction::PassPriority).unwrap();
+                }
+                // CR 603.12: the "you may pay {1}" choice on resolution.
+                WaitingFor::OptionalEffectChoice { player, .. } => {
+                    saw_may_prompt = true;
+                    apply(
+                        &mut state,
+                        player,
+                        GameAction::DecideOptionalEffect { accept: true },
+                    )
+                    .unwrap();
+                }
+                // Reflexive "when you do" target: the only Shrine is the source.
+                WaitingFor::TriggerTargetSelection { player, .. }
+                | WaitingFor::TargetSelection { player, .. } => {
+                    apply(
+                        &mut state,
+                        player,
+                        GameAction::SelectTargets {
+                            targets: vec![TargetRef::Object(id)],
+                        },
+                    )
+                    .unwrap();
+                }
+                _ => break,
+            }
+        }
+
+        assert!(
+            saw_may_prompt,
+            "the 'may pay {{1}}' prompt (CR 603.12) must be surfaced at the end step"
+        );
+        assert_eq!(
+            shintai_p1p1_counters(&state, id),
+            1,
+            "paying {{1}} must place one +1/+1 counter on the lone Shrine"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            0,
+            "the {{1}} must actually be paid on accept"
+        );
+    }
+
+    /// Issue #1243 — decline path. The trigger still goes on the stack and the
+    /// "may pay {1}" choice is still offered (CR 603.1), but declining means the
+    /// reflexive CR 603.12 "when you do" never triggers: no payment, no counter,
+    /// and the turn proceeds cleanly.
+    #[test]
+    fn issue_1243_end_step_may_pay_trigger_decline_places_no_counter() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::End;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let id = put_boundless_go_shintai(&mut state);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(999),
+            false,
+            Vec::new(),
+        ));
+
+        let mut events = Vec::new();
+        crate::game::turns::auto_advance(&mut state, &mut events);
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "end-step may-pay trigger must fire even when it will be declined"
+        );
+
+        let mut saw_may_prompt = false;
+        for _ in 0..20 {
+            match state.waiting_for.clone() {
+                WaitingFor::Priority { player } => {
+                    if state.stack.is_empty() {
+                        break;
+                    }
+                    apply(&mut state, player, GameAction::PassPriority).unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { player, .. } => {
+                    saw_may_prompt = true;
+                    apply(
+                        &mut state,
+                        player,
+                        GameAction::DecideOptionalEffect { accept: false },
+                    )
+                    .unwrap();
+                }
+                _ => break,
+            }
+        }
+
+        assert!(
+            saw_may_prompt,
+            "the 'may pay {{1}}' prompt must still be offered before declining"
+        );
+        assert_eq!(
+            shintai_p1p1_counters(&state, id),
+            0,
+            "declining must place no counter (CR 603.12 reflexive does not trigger)"
+        );
+    }
+
     #[test]
     fn spell_cast_trigger_syncs_priority_to_active_player() {
         let mut state = new_game(42);

@@ -1179,6 +1179,17 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
     }
+    // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
+    // "attacks a player" trigger introduces the damaged/attacked player as the
+    // event referent (the parser stamps `relative_player_scope = TargetPlayer`).
+    // "They" inside such an effect ("they lose half their life") refers to that
+    // event player, which auto-resolves from the triggering event
+    // (`TriggeringPlayer`) — NOT a chosen target. Without this, "they" fell
+    // through to `ParentTarget`, leaving the effect with no player to act on
+    // (Unstoppable Slasher's half-life loss silently resolved as "lose 0").
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
+        return TargetFilter::TriggeringPlayer;
+    }
     // CR 608.2c + CR 109.4: "They" after a `Choose(Player)` clause refers to
     // the chosen player — a player-only `Typed` filter carrying the chosen
     // scope (Gluntch's "choose a player. They put two +1/+1 counters …").

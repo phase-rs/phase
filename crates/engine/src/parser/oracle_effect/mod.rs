@@ -5390,6 +5390,16 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
         {
             return None;
         }
+        // CR 118.5 + CR 118.9 + CR 118.9a + CR 118.9b: "without paying [its|their]
+        // mana cost(s)" is a *free-cast alternative cost*, not a PlayFromExile
+        // permission. Defer to `try_parse_cast_effect`, which emits
+        // `CastFromZone { without_paying_mana_cost: true }` — the correct
+        // free-cast shape. Mirrors the bare-form guard below. Fallen Shinobi
+        // ("you may play those cards without paying their mana costs") and
+        // similar cards depend on this branch.
+        if scan_contains_phrase(tp.lower, "without paying") {
+            return None;
+        }
     } else {
         // Bare form (after "you may" was stripped by parse_effect_chain):
         // Only match when temporal context exists ("this turn", "until"),
@@ -5430,7 +5440,12 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
         },
-        target: TargetFilter::Any,
+        // CR 603.7 + CR 611.2a: The grant must reach the tracked exile set
+        // (the cards exiled by the prior clause) rather than fall back to the
+        // source object. `TargetFilter::Any` causes `grant_permission::resolve`
+        // to attach the permission to the source itself, which is wrong for
+        // impulse-draw chains like Act on Impulse, Light Up the Stage, etc.
+        target: tracked_set_filter(),
         grantee: Default::default(),
     }))
 }
@@ -11125,7 +11140,16 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::ChangeZone { target, .. }
-        | Effect::ChangeZoneAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
+        | Effect::ChangeZoneAll { target, .. }
+        // CR 603.7 + CR 608.2c: A cross-clause "cast/play that card / those
+        // cards" anaphor following an exile resolves to the *tracked set*
+        // (the cards exiled by the prior clause), not the trigger source.
+        // Fallen Shinobi ("...you may play those cards without paying their
+        // mana costs"), Daxos of Meletis ("...you may cast that card..."),
+        // and similar cross-clause cast forms reach `try_parse_cast_effect`
+        // with `target: ParentTarget`; this rewrite binds them to the
+        // tracked exile set during chain stitching.
+        | Effect::CastFromZone { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::Attach { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::UnattachAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::GenericEffect {
@@ -11269,7 +11293,7 @@ fn strip_trailing_activation_restriction_sentence(text: &str) -> String {
 /// "their hand") in Oracle text. Variants not listed here keep their
 /// expressions untouched; add arms here when a new variant surfaces a
 /// possessive quantity.
-fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mut QuantityExpr)) {
+pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mut QuantityExpr)) {
     match effect {
         Effect::LoseLife { amount, .. }
         | Effect::GainLife { amount, .. }
@@ -11535,6 +11559,81 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         apply_player_scope_rewrites(else_branch);
+    }
+}
+
+/// CR 603.7c + CR 119.3 + CR 120.3: Rebind the event-bound player possessive
+/// inside a "deals [combat] damage to a player" / "attacks a player" trigger
+/// body from the *targeting* reading (`PlayerScope::Target`, emitted by the
+/// generic "their life" / "their hand" possessive parser) to the
+/// *event* reading (`PlayerScope::ScopedPlayer`).
+///
+/// These triggers are NOT targeted (CR 603.6f): "they"/"their" binds to the
+/// damaged/attacked player carried on the triggering event, which the engine
+/// stamps onto `ResolvedAbility::scoped_player` at resolution. Without this
+/// rewrite, "they lose half their life" parses its amount as
+/// `LifeTotal { Target }`, which reads an absent player target and resolves to
+/// 0 (Unstoppable Slasher's silent no-op). Mirrors the each-player rewrite in
+/// [`rewrite_player_scope_refs`] but is deliberately narrower — it touches only
+/// quantity refs, never `You`-scoped filters, so "you draw a card" on the same
+/// trigger still acts for the controller.
+pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefinition) {
+    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+
+    fn rewrite_qty(expr: &mut QuantityExpr) {
+        match expr {
+            QuantityExpr::Ref { qty } => match qty {
+                QuantityRef::LifeTotal { player }
+                | QuantityRef::HandSize { player }
+                | QuantityRef::LifeLostThisTurn { player }
+                | QuantityRef::LifeGainedThisTurn { player }
+                | QuantityRef::PartySize { player }
+                    if *player == PlayerScope::Target =>
+                {
+                    *player = PlayerScope::ScopedPlayer;
+                }
+                QuantityRef::TargetZoneCardCount { zone } => match zone {
+                    ZoneRef::Hand => {
+                        *qty = QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        }
+                    }
+                    ZoneRef::Library | ZoneRef::Graveyard => {
+                        *qty = QuantityRef::ZoneCardCount {
+                            zone: zone.clone(),
+                            card_types: Vec::new(),
+                            scope: CountScope::ScopedPlayer,
+                        };
+                    }
+                    // No scoped-player equivalent for exile counts; leave as-is.
+                    ZoneRef::Exile => {}
+                },
+                _ => {}
+            },
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_qty(inner);
+                }
+            }
+            QuantityExpr::UpTo { max } => rewrite_qty(max),
+            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
+            QuantityExpr::Difference { left, right } => {
+                rewrite_qty(left);
+                rewrite_qty(right);
+            }
+            QuantityExpr::Fixed { .. } => {}
+        }
+    }
+
+    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_event_player_quantity_refs_to_scoped(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_event_player_quantity_refs_to_scoped(else_branch);
     }
 }
 
@@ -28342,6 +28441,135 @@ mod tests {
         ));
     }
 
+    /// CR 118.5 + CR 118.9 + CR 603.7 + CR 608.2c: Fallen Shinobi class —
+    /// "Until end of turn, you may play those cards without paying their mana
+    /// costs" must lower to `CastFromZone { without_paying_mana_cost: true,
+    /// target: TrackedSet(0), mode: Play }` (a free-cast alternative cost
+    /// bound to the cards exiled by the prior clause), NOT
+    /// `GrantCastingPermission { PlayFromExile }` which silently drops the
+    /// free-cast clause.
+    #[test]
+    fn parse_fallen_shinobi_shape_emits_cast_from_zone_with_tracked_set() {
+        let def = parse_effect_chain(
+            "That player exiles the top two cards of their library. Until end of turn, you may play those cards without paying their mana costs.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Fallen Shinobi chain must produce a cast sub-ability");
+        match &*sub.effect {
+            Effect::CastFromZone {
+                target,
+                without_paying_mana_cost,
+                mode,
+                ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    "expected sub-ability to bind to the tracked exile set"
+                );
+                assert!(
+                    *without_paying_mana_cost,
+                    "expected `without paying their mana costs` to set the free-cast flag"
+                );
+                assert!(
+                    matches!(mode, CardPlayMode::Play),
+                    "expected `play` to lower to CardPlayMode::Play, got {mode:?}"
+                );
+            }
+            other => panic!("expected CastFromZone sub-ability, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7 + CR 611.2a + CR 118.9: Daxos of Meletis class — "Until end
+    /// of turn, you may cast that card" (single-card anaphor, no "without
+    /// paying"). Without `without paying` this is a normal casting permission
+    /// for the exiled card — i.e. `GrantCastingPermission { PlayFromExile }`
+    /// — but the target must bind to the tracked exile set (the card just
+    /// exiled), not `TargetFilter::Any` which would have grant_permission's
+    /// fallback attach the permission to the source object instead.
+    #[test]
+    fn parse_daxos_shape_emits_play_from_exile_with_tracked_set() {
+        let def = parse_effect_chain(
+            "Exile the top card of that player's library. Until end of turn, you may cast that card.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Daxos chain must produce a permission sub-ability");
+        match &*sub.effect {
+            Effect::GrantCastingPermission {
+                permission, target, ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    "Daxos grant must bind to the tracked exile set, not Any"
+                );
+                assert!(
+                    matches!(
+                        permission,
+                        CastingPermission::PlayFromExile {
+                            duration: Duration::UntilEndOfTurn,
+                            ..
+                        }
+                    ),
+                    "expected PlayFromExile(UntilEndOfTurn), got {permission:?}"
+                );
+            }
+            other => panic!("expected GrantCastingPermission sub-ability, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7 + CR 611.2a: Act on Impulse class — "Until end of turn, you
+    /// may play those cards" (no "without paying" clause) keeps the
+    /// `GrantCastingPermission { PlayFromExile }` shape but its target must
+    /// be the tracked exile set, not `TargetFilter::Any` (which would cause
+    /// the grant to attach to the source object at resolution per
+    /// `grant_permission::resolve`'s `Any` fallback).
+    #[test]
+    fn parse_act_on_impulse_targets_tracked_set() {
+        let def = parse_effect_chain(
+            "Exile the top three cards of your library. Until end of turn, you may play those cards.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Act on Impulse chain must produce a permission sub-ability");
+        match &*sub.effect {
+            Effect::GrantCastingPermission {
+                permission, target, ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    "Act on Impulse grant must bind to the tracked exile set, not Any"
+                );
+                assert!(
+                    matches!(
+                        permission,
+                        CastingPermission::PlayFromExile {
+                            duration: Duration::UntilEndOfTurn,
+                            ..
+                        }
+                    ),
+                    "expected PlayFromExile(UntilEndOfTurn), got {permission:?}"
+                );
+            }
+            other => panic!("expected GrantCastingPermission sub-ability, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_exile_target_spell_then_it_becomes_plotted() {
         let def = parse_effect_chain(
@@ -28701,6 +28929,7 @@ mod tests {
             def.effect
         );
         let sub = def.sub_ability.as_ref().expect("Expected sub_ability");
+        // CR 603.7 + CR 611.2a: target must be the tracked exile set, not `Any`.
         assert!(
             matches!(
                 *sub.effect,
@@ -28711,10 +28940,13 @@ mod tests {
                         },
                         ..
                     },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
                     ..
                 }
             ),
-            "Expected PlayFromExile(UntilYourNextTurn), got {:?}",
+            "Expected PlayFromExile(UntilYourNextTurn) on TrackedSet(0), got {:?}",
             sub.effect
         );
     }

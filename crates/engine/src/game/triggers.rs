@@ -448,6 +448,16 @@ fn collect_matching_triggers(
                     .into_iter()
                     .map(|trigger_event| vec![trigger_event])
                     .collect()
+            } else if matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController) {
+                // CR 603.2c: One aggregate combat-damage event may satisfy this
+                // trigger once, while CR 608.2c makes the filtered source set
+                // available to later "those creatures" instructions.
+                super::trigger_matchers::matching_damage_done_once_by_controller_event(
+                    event, trig_def, obj_id, state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else {
                 vec![vec![event.clone()]]
             };

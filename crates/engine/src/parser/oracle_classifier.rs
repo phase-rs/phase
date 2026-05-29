@@ -54,6 +54,18 @@ pub(crate) fn is_defiler_cost_pattern(lower: &str) -> bool {
         && scan_contains(lower, "life")
 }
 
+/// CR 118.9: Mana-cost-alternative-grant static — "You may [pay X] rather than
+/// pay [the/its/this <object>'s] mana cost for [filter] spells you cast."
+/// Rooftop Storm / Fist of Suns / Jodah class. `scan_contains` is a cheap
+/// structural pre-filter; the lowering (`parse_spells_alternative_cost`)
+/// re-parses with combinators and strict-fails on non-mana / unparsed filters.
+pub(crate) fn is_spells_alternative_cost_pattern(lower: &str) -> bool {
+    lower_starts_with(lower, "you may pay ")
+        && scan_contains(lower, "rather than pay")
+        && scan_contains(lower, "mana cost for")
+        && scan_contains(lower, "spells you cast")
+}
+
 pub(crate) fn is_enters_tapped_cant_untap_compound(lower: &str) -> bool {
     let has_enters_tapped = scan_contains(lower, "enters tapped")
         || scan_contains(lower, "enters the battlefield tapped");
@@ -538,4 +550,24 @@ pub(crate) fn is_effect_sentence_candidate(lower: &str) -> bool {
         .iter()
         .chain(EFFECT_SUBJECT_PREFIXES.iter())
         .any(|prefix| lower.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CR 118.9: the mana-cost-alternative-grant classifier must recognize the
+    /// Rooftop Storm / Fist of Suns shape and reject flash-permission text.
+    #[test]
+    fn classifies_spells_alternative_cost_pattern() {
+        assert!(is_spells_alternative_cost_pattern(
+            "you may pay {0} rather than pay the mana cost for zombie creature spells you cast."
+        ));
+        assert!(is_spells_alternative_cost_pattern(
+            "you may pay {w}{u}{b}{r}{g} rather than pay the mana cost for spells you cast."
+        ));
+        assert!(!is_spells_alternative_cost_pattern(
+            "you may cast this spell as though it had flash."
+        ));
+    }
 }
