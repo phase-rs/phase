@@ -50,10 +50,16 @@ fn refers_to_attached(filter: &TargetFilter) -> bool {
         ))
 }
 
-/// CR 701.14b: A creature must be on the battlefield and still be a creature to fight.
+/// CR 701.14b + CR 702.26b: A creature can fight only while it is on the
+/// battlefield, still a creature, and phased in. A phased-out permanent is
+/// treated as though it does not exist (CR 702.26b), so a creature that phased
+/// out in response to the fight (e.g. via Teferi's Protection) deals and takes
+/// no damage even though its `zone` is still `Battlefield`.
 fn fight_eligible(state: &GameState, id: ObjectId) -> bool {
     state.objects.get(&id).is_some_and(|obj| {
-        obj.zone == Zone::Battlefield && obj.card_types.core_types.contains(&CoreType::Creature)
+        obj.zone == Zone::Battlefield
+            && obj.card_types.core_types.contains(&CoreType::Creature)
+            && obj.is_phased_in()
     })
 }
 
@@ -720,6 +726,39 @@ mod tests {
 
         assert_eq!(state.objects[&wolf].damage_marked, 0);
         assert_eq!(state.objects[&bear].damage_marked, 0);
+    }
+
+    /// CR 701.14b + CR 702.26b: a fighter that phased out in response to the
+    /// fight (e.g. via Teferi's Protection) is treated as though it does not
+    /// exist — neither creature deals damage, even though its zone is still
+    /// `Battlefield` and it is still a creature. This discriminates the
+    /// `is_phased_in()` gate: without it, the stale phased-out creature would
+    /// pass `fight_eligible` and wrongly deal/take damage.
+    #[test]
+    fn fight_no_damage_when_source_phased_out() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
+        // Bear phases out (still on the battlefield, still a creature) before the
+        // fight resolves.
+        state.objects.get_mut(&bear).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+
+        let ability = make_fight_ability(bear, wolf);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&wolf].damage_marked, 0,
+            "wolf takes no damage"
+        );
+        assert_eq!(
+            state.objects[&bear].damage_marked, 0,
+            "phased-out bear deals no damage"
+        );
     }
 
     #[test]
