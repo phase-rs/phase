@@ -692,10 +692,12 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
     // TargetPlayer resolution inside the trigger effect body.
+    let mut introduces_event_player = false;
     if condition_introduces_damage_source_controller_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
     } else if condition_introduces_target_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
+        introduces_event_player = true;
     } else if condition_introduces_scoped_phase_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
     }
@@ -780,6 +782,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             constraint,
             has_up_to,
             effect_lower: effect_lower.to_string(),
+            introduces_event_player,
         },
         source_text: text.to_string(),
     }
@@ -828,6 +831,18 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         Some(TriggerBody::PreLowered(ability)) => Some(ability.clone()),
         None => None,
     };
+
+    // CR 603.7c + CR 120.3 + CR 506.2: For triggers that introduce an
+    // event-bound player ("deals combat damage to a player, they lose half
+    // their life"), rebind the body's `PlayerScope::Target` possessive
+    // quantities to `PlayerScope::ScopedPlayer` so they resolve against the
+    // damaged/attacked player rather than an absent chosen target.
+    let mut execute = execute;
+    if modifiers.introduces_event_player {
+        if let Some(ability) = execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_event_player_quantity_refs_to_scoped(ability);
+        }
+    }
 
     def.execute = execute;
     def.optional = modifiers.optional;
@@ -11766,6 +11781,55 @@ mod tests {
                 );
             }
             other => panic!("sub_ability effect must be LoseLife, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7c + CR 120.3 + CR 119.3: Unstoppable Slasher — "Whenever this
+    /// creature deals combat damage to a player, they lose half their life,
+    /// rounded up." is an event-bound (non-targeted) trigger per CR 603.6f.
+    /// "they" must resolve to `TriggeringPlayer` (the damaged player), and the
+    /// half-life amount must read `PlayerScope::ScopedPlayer`, NOT the
+    /// targeting `PlayerScope::Target` (which has no chosen target on an
+    /// event-bound trigger and resolves to 0 — the reported silent no-op).
+    #[test]
+    fn parse_unstoppable_slasher_combat_damage_half_life() {
+        use crate::types::ability::{Effect, PlayerScope, QuantityExpr, QuantityRef, RoundingMode};
+
+        let def = parse_trigger_line(
+            "Whenever this creature deals combat damage to a player, they lose half their life, rounded up.",
+            "Unstoppable Slasher",
+        );
+
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        match &*execute.effect {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(
+                    target.as_ref(),
+                    Some(&TargetFilter::TriggeringPlayer),
+                    "LoseLife.target must be TriggeringPlayer (the damaged player), not ParentTarget",
+                );
+                match amount {
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => {
+                        assert_eq!(*divisor, 2, "half ⇒ divisor 2");
+                        assert_eq!(*rounding, RoundingMode::Up, "rounded up");
+                        assert_eq!(
+                            **inner,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::LifeTotal {
+                                    player: PlayerScope::ScopedPlayer,
+                                },
+                            },
+                            "inner amount must read the event player's life (ScopedPlayer), got {inner:?}",
+                        );
+                    }
+                    other => panic!("amount must be DivideRounded, got {other:?}"),
+                }
+            }
+            other => panic!("effect must be LoseLife, got {other:?}"),
         }
     }
 

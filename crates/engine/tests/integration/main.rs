@@ -91,6 +91,7 @@ mod treasured_find_regression;
 mod turn_control_priority_softlock;
 mod twice_instead_repeat_for;
 mod tyvar_activate_as_though_haste;
+mod unstoppable_slasher_half_life;
 mod ureni_attack_trigger;
 mod urzas_saga_chapter_two;
 mod urzas_tower_conditional_mana;

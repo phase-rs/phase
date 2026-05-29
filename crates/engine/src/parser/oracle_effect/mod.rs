@@ -11267,7 +11267,7 @@ fn strip_trailing_activation_restriction_sentence(text: &str) -> String {
 /// "their hand") in Oracle text. Variants not listed here keep their
 /// expressions untouched; add arms here when a new variant surfaces a
 /// possessive quantity.
-fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mut QuantityExpr)) {
+pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mut QuantityExpr)) {
     match effect {
         Effect::LoseLife { amount, .. }
         | Effect::GainLife { amount, .. }
@@ -11533,6 +11533,81 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         apply_player_scope_rewrites(else_branch);
+    }
+}
+
+/// CR 603.7c + CR 119.3 + CR 120.3: Rebind the event-bound player possessive
+/// inside a "deals [combat] damage to a player" / "attacks a player" trigger
+/// body from the *targeting* reading (`PlayerScope::Target`, emitted by the
+/// generic "their life" / "their hand" possessive parser) to the
+/// *event* reading (`PlayerScope::ScopedPlayer`).
+///
+/// These triggers are NOT targeted (CR 603.6f): "they"/"their" binds to the
+/// damaged/attacked player carried on the triggering event, which the engine
+/// stamps onto `ResolvedAbility::scoped_player` at resolution. Without this
+/// rewrite, "they lose half their life" parses its amount as
+/// `LifeTotal { Target }`, which reads an absent player target and resolves to
+/// 0 (Unstoppable Slasher's silent no-op). Mirrors the each-player rewrite in
+/// [`rewrite_player_scope_refs`] but is deliberately narrower — it touches only
+/// quantity refs, never `You`-scoped filters, so "you draw a card" on the same
+/// trigger still acts for the controller.
+pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefinition) {
+    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+
+    fn rewrite_qty(expr: &mut QuantityExpr) {
+        match expr {
+            QuantityExpr::Ref { qty } => match qty {
+                QuantityRef::LifeTotal { player }
+                | QuantityRef::HandSize { player }
+                | QuantityRef::LifeLostThisTurn { player }
+                | QuantityRef::LifeGainedThisTurn { player }
+                | QuantityRef::PartySize { player }
+                    if *player == PlayerScope::Target =>
+                {
+                    *player = PlayerScope::ScopedPlayer;
+                }
+                QuantityRef::TargetZoneCardCount { zone } => match zone {
+                    ZoneRef::Hand => {
+                        *qty = QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        }
+                    }
+                    ZoneRef::Library | ZoneRef::Graveyard => {
+                        *qty = QuantityRef::ZoneCardCount {
+                            zone: zone.clone(),
+                            card_types: Vec::new(),
+                            scope: CountScope::ScopedPlayer,
+                        };
+                    }
+                    // No scoped-player equivalent for exile counts; leave as-is.
+                    ZoneRef::Exile => {}
+                },
+                _ => {}
+            },
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_qty(inner);
+                }
+            }
+            QuantityExpr::UpTo { max } => rewrite_qty(max),
+            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
+            QuantityExpr::Difference { left, right } => {
+                rewrite_qty(left);
+                rewrite_qty(right);
+            }
+            QuantityExpr::Fixed { .. } => {}
+        }
+    }
+
+    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_event_player_quantity_refs_to_scoped(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_event_player_quantity_refs_to_scoped(else_branch);
     }
 }
 

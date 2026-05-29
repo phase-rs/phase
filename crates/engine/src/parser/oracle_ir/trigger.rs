@@ -66,4 +66,11 @@ pub(crate) struct TriggerModifiers {
     pub(crate) has_up_to: bool,
     /// Lowered effect text (after comma split), for `effect_adds_mana_to_triggering_player`.
     pub(crate) effect_lower: String,
+    /// CR 603.7c + CR 120.3 + CR 506.2: Whether the trigger condition introduces
+    /// an event-bound player ("deals [combat] damage to a player" / "attacks a
+    /// player"). When set, lowering rebinds the body's `PlayerScope::Target`
+    /// possessive quantities ("they lose half their life") to
+    /// `PlayerScope::ScopedPlayer`, which resolves against the damaged/attacked
+    /// player stamped on the resolving ability from the triggering event.
+    pub(crate) introduces_event_player: bool,
 }
