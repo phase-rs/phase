@@ -4481,7 +4481,6 @@ mod kicker_synthesis_tests {
     use crate::types::mana::ManaCostShard;
 
     #[test]
-    #[test]
     fn synthesize_cleave_splits_reveal_hand_cmc_branch() {
         let mut face = CardFace {
             keywords: vec![Keyword::Cleave(ManaCost::Cost {
@@ -4529,6 +4528,7 @@ mod kicker_synthesis_tests {
         );
     }
 
+    #[test]
     fn synthesize_kicker_sets_typed_kicker_additional_cost() {
         let mut face = CardFace {
             keywords: vec![Keyword::Kicker(ManaCost::Cost {
