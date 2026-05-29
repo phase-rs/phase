@@ -55,7 +55,11 @@ fn mycoloth_upkeep_creates_saproling_tokens_equal_to_counters() {
     // Precondition: Mycoloth has 3 +1/+1 counters.
     let mycoloth_obj = runner.state().objects.get(&mycoloth).unwrap();
     assert_eq!(
-        mycoloth_obj.counters.get(&CounterType::Plus1Plus1).copied().unwrap_or(0),
+        mycoloth_obj
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
         3,
         "precondition: Mycoloth must have 3 +1/+1 counters"
     );
@@ -91,7 +95,11 @@ fn mycoloth_upkeep_creates_saproling_tokens_equal_to_counters() {
                 .get(id)
                 .map(|obj| {
                     obj.is_token
-                        && obj.card_types.subtypes.iter().any(|s| s.eq_ignore_ascii_case("Saproling"))
+                        && obj
+                            .card_types
+                            .subtypes
+                            .iter()
+                            .any(|s| s.eq_ignore_ascii_case("Saproling"))
                 })
                 .unwrap_or(false)
         })
