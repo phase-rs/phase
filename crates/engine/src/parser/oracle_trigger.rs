@@ -3994,15 +3994,22 @@ fn type_phrase_continues_to_combat_damage_player_event(text: &str) -> bool {
         return false;
     }
     let rest = rest.trim_start();
-    alt((
-        value(
-            (),
-            tag::<_, _, OracleError<'_>>("deal combat damage to a player"),
+    parse_combat_damage_to_player(rest).is_ok()
+}
+
+fn parse_combat_damage_to_player(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((
+                tag::<_, _, OracleError<'_>>("deal"),
+                tag::<_, _, OracleError<'_>>("deals"),
+            )),
+            tag(" combat damage"),
+            tag(" to a player"),
         ),
-        value((), tag("deals combat damage to a player")),
-    ))
-    .parse(rest)
-    .is_ok()
+    )
+    .parse(input)
 }
 
 /// Check if the text starting at a type word is a new subject-predicate sentence

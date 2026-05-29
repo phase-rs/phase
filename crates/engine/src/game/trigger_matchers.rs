@@ -1025,6 +1025,10 @@ pub(super) fn matching_damage_done_once_by_controller_event(
         return None;
     };
 
+    if !valid_player_matches(trigger, state, *player_id, source_id) {
+        return None;
+    }
+
     let matching_sources = if let Some(filter) = &trigger.valid_source {
         source_ids
             .iter()
@@ -5378,6 +5382,51 @@ mod tests {
             trigger_source,
             &state
         ));
+    }
+
+    #[test]
+    fn matching_damage_done_once_event_respects_valid_target() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Combat Damage Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_ids: vec![source],
+        };
+
+        assert!(matching_damage_done_once_by_controller_event(
+            &event,
+            &trigger,
+            trigger_source,
+            &state,
+        )
+        .is_none());
     }
 
     #[test]
