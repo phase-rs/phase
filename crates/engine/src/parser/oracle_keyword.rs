@@ -2697,4 +2697,24 @@ mod tests {
         // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
         assert!(s.contains("{W}"), "{s}");
     }
+
+    /// CR 702.173a: Freerunning recognized by is_keyword_cost_line.
+    #[test]
+    fn is_keyword_cost_line_freerunning() {
+        assert!(is_keyword_cost_line("freerunning {3}{b}{b}"));
+        assert!(is_keyword_cost_line("freerunning {1}{b}"));
+    }
+
+    /// CR 702.173a: Freerunning parsed from oracle text via parse_keyword_from_oracle.
+    #[test]
+    fn parse_keyword_from_oracle_freerunning() {
+        use crate::types::keywords::Keyword;
+        let kw = parse_keyword_from_oracle("freerunning {3}{b}{b}").unwrap();
+        match kw {
+            Keyword::Freerunning(_cost) => {
+                // Successfully parsed — cost structure validated by ManaCost parser
+            }
+            other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
+    }
 }

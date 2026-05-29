@@ -1511,6 +1511,7 @@ impl FromStr for Keyword {
                 "blitz" => return Ok(Keyword::Blitz(parse_keyword_mana_cost(p))),
                 "overload" => return Ok(Keyword::Overload(parse_keyword_mana_cost(p))),
                 "spectacle" => return Ok(Keyword::Spectacle(parse_keyword_mana_cost(p))),
+                // CR 702.173a: Freerunning alternative cost.
                 "freerunning" => return Ok(Keyword::Freerunning(parse_keyword_mana_cost(p))),
                 "surge" => return Ok(Keyword::Surge(parse_keyword_mana_cost(p))),
                 "encore" => return Ok(Keyword::Encore(parse_keyword_mana_cost(p))),
@@ -2117,6 +2118,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Blitz" => Ok(Keyword::Blitz(mana(data)?)),
         "Overload" => Ok(Keyword::Overload(mana(data)?)),
         "Spectacle" => Ok(Keyword::Spectacle(mana(data)?)),
+        // CR 702.173a: Freerunning alternative cost.
         "Freerunning" => Ok(Keyword::Freerunning(mana(data)?)),
         "Surge" => Ok(Keyword::Surge(mana(data)?)),
         "Encore" => Ok(Keyword::Encore(mana(data)?)),
@@ -3084,5 +3086,43 @@ mod tests {
                 }
             })
         );
+    }
+
+    /// CR 702.173a: Freerunning keyword FromStr parsing.
+    #[test]
+    fn freerunning_from_str_parses_cost() {
+        let parsed = Keyword::from_str("freerunning:{3}{B}{B}").unwrap();
+        let expected_cost = parse_keyword_mana_cost("{3}{B}{B}");
+        match parsed {
+            Keyword::Freerunning(cost) => {
+                assert_eq!(cost, expected_cost, "Freerunning cost mismatch");
+            }
+            other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
+    }
+
+    /// CR 702.173a: Freerunning keyword discriminant and serde round-trip.
+    #[test]
+    fn freerunning_kind_and_round_trip() {
+        let kw = Keyword::Freerunning(parse_keyword_mana_cost("{3}{B}{B}"));
+        assert_eq!(kw.kind(), KeywordKind::Freerunning);
+        let json = serde_json::to_value(&kw).unwrap();
+        let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(kw, deserialized, "round-trip failed for {json}");
+    }
+
+    /// CR 702.173a: Freerunning keyword_from_tagged deserialization.
+    #[test]
+    fn freerunning_keyword_from_tagged() {
+        let data = serde_json::json!({
+            "white": 0, "blue": 0, "black": 2, "red": 0, "green": 0,
+            "colorless": 3, "generic": 0
+        });
+        let kw = keyword_from_tagged("Freerunning", &data).unwrap();
+        assert_eq!(kw.kind(), KeywordKind::Freerunning);
+        match kw {
+            Keyword::Freerunning(_) => {} // cost shape validated by ManaCost deser
+            other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
     }
 }
