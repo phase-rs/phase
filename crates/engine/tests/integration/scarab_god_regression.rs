@@ -70,10 +70,9 @@ fn scarab_god_upkeep_opponent_loses_life_per_zombie_count() {
                     },
             } => {
                 assert_eq!(tf.controller, Some(ControllerRef::You));
-                assert!(
-                    tf.type_filters
-                        .contains(&TypeFilter::Subtype("Zombie".to_string()))
-                );
+                assert!(tf
+                    .type_filters
+                    .contains(&TypeFilter::Subtype("Zombie".to_string())));
             }
             other => panic!("expected zombie ObjectCount amount, got {other:?}"),
         },

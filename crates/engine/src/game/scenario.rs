@@ -82,13 +82,13 @@ fn build_face_from_oracle(
         keyword_names
     };
 
-        let parsed = parse_oracle_text(
-            oracle_text,
-            &obj.name,
-            effective_kw_names,
-            &type_strings,
-            &subtype_strings,
-        );
+    let parsed = parse_oracle_text(
+        oracle_text,
+        &obj.name,
+        effective_kw_names,
+        &type_strings,
+        &subtype_strings,
+    );
 
     // Merge keywords: parse keyword names into Keyword values (mirroring how
     // build_oracle_face merges MTGJSON keywords with extracted_keywords).
@@ -979,8 +979,7 @@ impl<'a> CardBuilder<'a> {
             let registration = self.state.objects.get(&object_id).map(|obj| {
                 let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
                     obj.trigger_definitions.as_slice().iter().cloned().collect();
-                let synthetic =
-                    crate::game::trigger_index::has_synthetic_keyword_trigger_for(obj);
+                let synthetic = crate::game::trigger_index::has_synthetic_keyword_trigger_for(obj);
                 (defs, synthetic)
             });
             if let Some((defs, synthetic)) = registration {

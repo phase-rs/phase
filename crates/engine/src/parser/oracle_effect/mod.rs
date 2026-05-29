@@ -20021,10 +20021,9 @@ mod tests {
                         },
                 } => {
                     assert_eq!(tf.controller, Some(ControllerRef::You));
-                    assert!(
-                        tf.type_filters
-                            .contains(&TypeFilter::Subtype("Zombie".to_string()))
-                    );
+                    assert!(tf
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Zombie".to_string())));
                 }
                 other => panic!("expected ObjectCount Zombies, got {other:?}"),
             },
@@ -20040,10 +20039,9 @@ mod tests {
                         },
                 } => {
                     assert_eq!(tf.controller, Some(ControllerRef::You));
-                    assert!(
-                        tf.type_filters
-                            .contains(&TypeFilter::Subtype("Zombie".to_string()))
-                    );
+                    assert!(tf
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Zombie".to_string())));
                 }
                 other => panic!("expected ObjectCount Zombies on Scry, got {other:?}"),
             },
