@@ -5428,13 +5428,13 @@ fn try_parse_event(
             // CR 120.2: Plural form for batched "are dealt damage" triggers.
             value(SimpleEvent::DealtDamage, tag("are dealt damage")),
             value(SimpleEvent::BecomesTapped, tag("becomes tapped")),
-            // CR 701.21: Plural form for batched "one or more ... become tapped" triggers.
+            // CR 701.26: Plural form for batched "one or more ... become tapped" triggers.
             value(SimpleEvent::BecomesTapped, tag("become tapped")),
             value(SimpleEvent::TappedForMana, tag("is tapped for mana")),
         ))
         .or(alt((
             value(SimpleEvent::BecomesUntapped, tag("becomes untapped")),
-            // CR 701.21: Plural form for batched "one or more ... become untapped" triggers.
+            // CR 701.26: Plural form for batched "one or more ... become untapped" triggers.
             value(SimpleEvent::BecomesUntapped, tag("become untapped")),
             value(SimpleEvent::BecomesUntapped, tag("untaps")),
             value(SimpleEvent::TurnFaceUp, tag("is turned face up")),
@@ -7539,7 +7539,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::Drawn, def));
     }
 
-    // CR 701.21: "you tap an untapped creature an opponent controls"
+    // CR 701.26: "you tap an untapped creature an opponent controls"
     for prefix in [
         "whenever you tap an untapped creature an opponent controls",
         "when you tap an untapped creature an opponent controls",
@@ -12997,7 +12997,7 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
-    /// CR 701.21 + CR 603.2c: Batched plural form "become tapped" for
+    /// CR 701.26 + CR 603.2c: Batched plural form "become tapped" for
     /// "Whenever one or more nontoken Merfolk you control become tapped" —
     /// Deeproot Pilgrimage.
     #[test]

@@ -153,6 +153,38 @@ test("Moxfield: emits companion section last so deckParser doesn't misfile", asy
   assert.ok(text.indexOf("[Main]") < text.indexOf("[Companion]"));
 });
 
+test("Moxfield: projects v2 nested boards (boards.<key>.cards)", async () => {
+  // The v2 API nests boards under a top-level `boards` map with entries under
+  // `.cards`. Reading boards only at the top level silently 404s every import.
+  mockUpstream({
+    name: "Nested",
+    boards: {
+      commanders: { cards: { a: { quantity: 1, card: { name: "Krenko, Mob Boss" } } } },
+      mainboard: { cards: { b: { quantity: 1, card: { name: "Sol Ring" } } } },
+      sideboard: { cards: {} },
+      companions: { cards: {} },
+    },
+  });
+  const resp = await call("https://moxfield.com/decks/nested");
+  assert.equal(resp.status, 200);
+  const text = await resp.text();
+  assert.match(text, /\[Commander\]\n1 Krenko, Mob Boss/);
+  assert.match(text, /\[Main\]\n1 Sol Ring/);
+});
+
+test("Moxfield: sideboard-only deck is not rejected as empty", async () => {
+  mockUpstream({
+    name: "SB only",
+    mainboard: {},
+    commanders: {},
+    sideboard: { a: { quantity: 2, card: { name: "Negate" } } },
+  });
+  const resp = await call("https://moxfield.com/decks/sbonly");
+  assert.equal(resp.status, 200);
+  const text = await resp.text();
+  assert.match(text, /\[Sideboard\]\n2 Negate/);
+});
+
 test("Moxfield: empty deck (private/hidden) returns 404 not_found", async () => {
   mockUpstream({ name: "Hidden", mainboard: {}, commanders: {} });
   const resp = await call("https://moxfield.com/decks/zzz");

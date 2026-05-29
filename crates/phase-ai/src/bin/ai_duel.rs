@@ -320,18 +320,8 @@ fn validate_deck(payload: &PlayerDeckPayload, expected: usize, label: &str) {
 }
 
 fn parse_difficulty(s: &str) -> AiDifficulty {
-    match s.to_lowercase().as_str() {
-        "veryeasy" => AiDifficulty::VeryEasy,
-        "easy" => AiDifficulty::Easy,
-        "medium" => AiDifficulty::Medium,
-        "hard" => AiDifficulty::Hard,
-        "veryhard" => AiDifficulty::VeryHard,
-        "cedh" => AiDifficulty::CEDH,
-        _ => {
-            eprintln!("Unknown difficulty '{s}', using Medium");
-            AiDifficulty::Medium
-        }
-    }
+    // Single authority for the label → enum mapping lives on `AiDifficulty`.
+    AiDifficulty::from_label(s)
 }
 
 fn print_usage() {

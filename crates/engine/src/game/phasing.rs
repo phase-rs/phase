@@ -439,6 +439,45 @@ mod tests {
     }
 
     #[test]
+    fn phased_out_permanent_is_excluded_from_trigger_candidates() {
+        // CR 702.26b: a phased-out permanent is treated as though it doesn't
+        // exist and must not be offered as a trigger candidate. The index does
+        // not track phase status, so `candidates_for_event` filters it; this
+        // test would fail before that filter was added.
+        use crate::game::trigger_index::candidates_for_event;
+
+        let mut state = GameState::new_two_player(42);
+        let phased = setup_creature(&mut state, "Breezekeeper", PlayerId(0));
+        let live = setup_creature(&mut state, "Bear", PlayerId(0));
+        // Register both as catch-all trigger sources (consulted on every event).
+        state.trigger_index.unclassified.push(phased);
+        state.trigger_index.unclassified.push(live);
+
+        let event = GameEvent::PermanentPhasedOut {
+            object_id: live,
+            indirect: false,
+        };
+
+        // Positive control: both are candidates while phased in.
+        let before = candidates_for_event(&state, &event);
+        assert!(before.contains(&phased));
+        assert!(before.contains(&live));
+
+        let mut events = Vec::new();
+        phase_out_object(&mut state, phased, PhaseOutCause::Directly, &mut events);
+
+        let after = candidates_for_event(&state, &event);
+        assert!(
+            !after.contains(&phased),
+            "phased-out permanent must not be a trigger candidate (CR 702.26b)"
+        );
+        assert!(
+            after.contains(&live),
+            "phased-in permanent must remain a trigger candidate"
+        );
+    }
+
+    #[test]
     fn untap_step_phasing_toggles_phasing_keyword_permanents() {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);

@@ -893,6 +893,13 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
             out.extend(bucket.iter().copied());
         }
     }
+    // CR 702.26b: a phased-out permanent is treated as though it doesn't exist,
+    // so it never triggers. The legacy battlefield scan dropped these via
+    // `battlefield_phased_in_ids`; the index does not track phase status
+    // (phasing is not a zone change and does not touch the trigger index), so
+    // the filter must be reapplied here. Unknown ids are kept defensively and
+    // handled by the caller's per-candidate lookup.
+    out.retain(|id| state.objects.get(id).is_none_or(|obj| !obj.is_phased_out()));
     out.sort_unstable_by_key(|id| id.0);
     out.dedup();
     out

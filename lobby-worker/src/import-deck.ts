@@ -144,7 +144,10 @@ function asString(value: unknown): string | undefined {
 
 // ---------------------------------------------------------------------------
 // Moxfield — https://api2.moxfield.com/v2/decks/all/<publicId>
-// Boards are top-level maps of <id> -> { quantity, card: { name, set, cn } }.
+// Each board maps <id> -> { quantity, card: { name, set, cn } }. The v2 payload
+// nests boards under a top-level `boards` map, each board exposing its entries
+// under `.cards`; older/simplified shapes expose the board map at the top level.
+// `moxfieldBoard` reads whichever is present so an import survives either shape.
 // ---------------------------------------------------------------------------
 
 interface MoxfieldCard {
@@ -158,12 +161,29 @@ interface MoxfieldEntry {
   card?: MoxfieldCard;
 }
 
+interface MoxfieldBoard {
+  cards?: Record<string, MoxfieldEntry>;
+}
+
 interface MoxfieldDeck {
   name?: unknown;
+  boards?: Record<string, MoxfieldBoard>;
   mainboard?: Record<string, MoxfieldEntry>;
   sideboard?: Record<string, MoxfieldEntry>;
   commanders?: Record<string, MoxfieldEntry>;
   companions?: Record<string, MoxfieldEntry>;
+}
+
+// Resolve a board's entry map by key, accepting both the nested v2 shape
+// (`boards.<key>.cards`) and the flat top-level shape (`deck.<key>`).
+function moxfieldBoard(
+  deck: MoxfieldDeck,
+  key: "mainboard" | "sideboard" | "commanders" | "companions",
+): Record<string, MoxfieldEntry> | undefined {
+  const nested = deck.boards?.[key]?.cards;
+  if (nested && typeof nested === "object") return nested;
+  const top = deck[key];
+  return top && typeof top === "object" ? top : undefined;
 }
 
 function moxfieldBoardToCards(board: Record<string, MoxfieldEntry> | undefined): ImportCard[] {
@@ -183,14 +203,25 @@ function moxfieldBoardToCards(board: Record<string, MoxfieldEntry> | undefined):
   return cards;
 }
 
+// An import is only "empty" when no board produced any card. Guarding on just
+// main+commander wrongly rejected sideboard-only or companion-only imports.
+function sectionsEmpty(sections: DeckSections): boolean {
+  return (
+    sections.commander.length === 0 &&
+    sections.main.length === 0 &&
+    sections.sideboard.length === 0 &&
+    sections.companion.length === 0
+  );
+}
+
 function projectMoxfield(deck: MoxfieldDeck): { text: string; empty: boolean } {
   const sections: DeckSections = {
-    commander: moxfieldBoardToCards(deck.commanders),
-    main: moxfieldBoardToCards(deck.mainboard),
-    sideboard: moxfieldBoardToCards(deck.sideboard),
-    companion: moxfieldBoardToCards(deck.companions),
+    commander: moxfieldBoardToCards(moxfieldBoard(deck, "commanders")),
+    main: moxfieldBoardToCards(moxfieldBoard(deck, "mainboard")),
+    sideboard: moxfieldBoardToCards(moxfieldBoard(deck, "sideboard")),
+    companion: moxfieldBoardToCards(moxfieldBoard(deck, "companions")),
   };
-  if (sections.main.length === 0 && sections.commander.length === 0) {
+  if (sectionsEmpty(sections)) {
     return { text: "", empty: true };
   }
   return { text: buildDeckText(asString(deck.name), sections), empty: false };
@@ -277,7 +308,7 @@ function projectArchidekt(deck: ArchidektDeck): { text: string; empty: boolean }
     sections[bucket].push(card);
   }
 
-  if (sections.main.length === 0 && sections.commander.length === 0) {
+  if (sectionsEmpty(sections)) {
     return { text: "", empty: true };
   }
   return { text: buildDeckText(asString(deck.name), sections), empty: false };

@@ -190,14 +190,7 @@ pub fn get_ai_action(
     let guard = state.game.lock().map_err(|e| e.to_string())?;
     let game = guard.as_ref().ok_or("Game not initialized")?;
 
-    let ai_difficulty = match difficulty.as_str() {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Medium,
-    };
+    let ai_difficulty = AiDifficulty::from_label(&difficulty);
 
     let config =
         create_config_for_players(ai_difficulty, Platform::Native, game.players.len() as u8);
