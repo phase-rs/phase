@@ -1538,11 +1538,22 @@ impl FromStr for Keyword {
                 "scavenge" => return Ok(Keyword::Scavenge(parse_keyword_mana_cost(p))),
                 "reinforce" => {
                     // CR 702.77a: "Reinforce N\u{2014}[cost]" \u{2014} N is the first token, rest is mana cost.
+                    // "x" or "X" maps to count=0 (sentinel for Variable X).
                     let p = p.trim();
                     if let Some((n_str, cost_str)) = p.split_once(' ') {
-                        let count = n_str.trim().parse::<u32>().unwrap_or(1);
+                        let n_trimmed = n_str.trim();
+                        let count = if n_trimmed.eq_ignore_ascii_case("x") {
+                            0
+                        } else {
+                            n_trimmed.parse::<u32>().unwrap_or(1)
+                        };
                         let cost = parse_keyword_mana_cost(cost_str.trim());
                         return Ok(Keyword::Reinforce { count, cost });
+                    } else if p.eq_ignore_ascii_case("x") {
+                        return Ok(Keyword::Reinforce {
+                            count: 0,
+                            cost: ManaCost::zero(),
+                        });
                     } else if let Ok(count) = p.parse::<u32>() {
                         return Ok(Keyword::Reinforce {
                             count,
@@ -2170,9 +2181,21 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Outlast" => Ok(Keyword::Outlast(mana(data)?)),
         "Scavenge" => Ok(Keyword::Scavenge(mana(data)?)),
         // CR 702.77a: Reinforce N—[cost]. Data is { "count": N, "cost": "..." }.
+        // count may be a number (fixed N) or the string "x"/"X" (Variable X, stored as 0).
         "Reinforce" => {
             let obj = data.as_object().ok_or("Reinforce: expected object")?;
-            let count = obj.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+            let count = obj
+                .get("count")
+                .map(|v| {
+                    if let Some(n) = v.as_u64() {
+                        n as u32
+                    } else if v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("x")) {
+                        0
+                    } else {
+                        1
+                    }
+                })
+                .unwrap_or(1);
             let cost_val = obj.get("cost").unwrap_or(data);
             let cost = mana(cost_val)?;
             Ok(Keyword::Reinforce { count, cost })

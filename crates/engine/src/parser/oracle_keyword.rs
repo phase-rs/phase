@@ -888,8 +888,9 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 702.77a: Reinforce N—{cost} — "[Cost], Discard this card: Put N +1/+1 counters
     // on target creature." Same N—{cost} format as Suspend/Awaken.
+    // Uses parse_number_or_x to handle "Reinforce X—{cost}" (e.g. Swell of Courage).
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("reinforce ").parse(text) {
-        if let Ok((after_count, count)) = nom_primitives::parse_number.parse(rest.trim()) {
+        if let Ok((after_count, count)) = nom_primitives::parse_number_or_x.parse(rest.trim()) {
             let cost_str = after_count
                 .strip_prefix('\u{2014}') // allow-noncombinator: em-dash punctuation separator
                 .or_else(|| after_count.strip_prefix("\u{2014}")) // allow-noncombinator: em-dash variant
@@ -1168,7 +1169,13 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Increment => "increment".to_string(),
         Keyword::Specialize(_) => "specialize".to_string(),
         Keyword::Offering(quality) => format!("{} offering", quality.to_lowercase()),
-        Keyword::Reinforce { count, .. } => format!("reinforce {count}"),
+        Keyword::Reinforce { count, .. } => {
+            if *count == 0 {
+                "reinforce x".to_string()
+            } else {
+                format!("reinforce {count}")
+            }
+        }
         Keyword::Unknown(s) => s.to_lowercase(),
     }
 }

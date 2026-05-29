@@ -1290,11 +1290,22 @@ pub fn synthesize_reinforce(face: &mut CardFace) {
                 ],
             };
             // CR 702.77a: "Put N +1/+1 counters on target creature."
+            // When count == 0, this is Reinforce X — use Variable("X") which
+            // resolves to chosen_x at runtime (the X in the mana cost).
+            let counter_count = if *count == 0 {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                }
+            } else {
+                QuantityExpr::Fixed {
+                    value: *count as i32,
+                }
+            };
             let effect = Effect::PutCounter {
                 counter_type: CounterType::Plus1Plus1,
-                count: QuantityExpr::Fixed {
-                    value: *count as i32,
-                },
+                count: counter_count,
                 target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
             };
             let def = AbilityDefinition::new(AbilityKind::Activated, effect).cost(composite_cost);
@@ -12226,5 +12237,51 @@ mod reinforce_synthesis_tests {
         synthesize_reinforce(&mut face);
         synthesize_reinforce(&mut face);
         assert_eq!(face.abilities.len(), 2);
+    }
+
+    /// CR 702.77a: Reinforce X (count=0) uses Variable("X") for counter quantity,
+    /// resolved at runtime via chosen_x from the X in the mana cost.
+    #[test]
+    fn synthesize_reinforce_x_uses_variable_quantity() {
+        // Swell of Courage: Reinforce X—{X}{W}{W}
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::White, ManaCostShard::White],
+            generic: 0,
+        };
+        let mut face = face_with_reinforce(0, cost.clone());
+        synthesize_reinforce(&mut face);
+        assert_eq!(face.abilities.len(), 1, "exactly one reinforce ability");
+        let def = &face.abilities[0];
+        assert_eq!(def.kind, AbilityKind::Activated);
+        assert_eq!(def.activation_zone, Some(Zone::Hand));
+        // Verify the counter count is Variable("X"), not Fixed(0).
+        match def.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string()
+                        }
+                    }
+                );
+                assert!(
+                    matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                );
+            }
+            other => panic!("expected PutCounter effect, got {:?}", other),
+        }
+        // Verify the mana cost contains X shard (triggers ChooseXValue at runtime).
+        match def.cost.as_ref().expect("reinforce must have a cost") {
+            AbilityCost::Composite { costs } => {
+                assert!(matches!(&costs[0], AbilityCost::Mana { cost: c } if *c == cost));
+            }
+            other => panic!("expected Composite cost, got {:?}", other),
+        }
     }
 }
