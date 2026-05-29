@@ -36,9 +36,9 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, AttachmentKind,
     BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator, ContinuousModification,
-    ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition,
-    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-    TypedFilter,
+    ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -175,6 +175,50 @@ fn parse_min_blockers_phrase(input: &str) -> OracleResult<'_, u32> {
     let (rest, n) = nom_primitives::parse_number(input)?;
     let (rest, _) = tag(" or more creatures").parse(rest)?;
     Ok((rest, n))
+}
+
+fn parse_source_power_block_restriction(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creatures with power less than ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("~'s power"),
+        tag("this creature's power"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" can't block ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creatures you control")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::CantBeBlockedBy {
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LT,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                },
+            ])),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .description(text.to_string()),
+    )
 }
 
 /// CR 509.1b: classify the remainder after "can't be blocked except by " into a
@@ -1264,6 +1308,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    if let Some(def) = parse_contextual_continuous_subject_static(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Creatures you control [with counter condition] get/have ..." ---
     // Must come BEFORE parse_typed_you_control to prevent core type words like
     // "Creatures" from falling through to the subtype path (A1 fix: 162+ cards).
@@ -1796,6 +1844,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     if let Some(def) = parse_subject_combat_rule_static(&text) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_source_power_block_restriction(&text) {
         return Some(def);
     }
 
@@ -4081,12 +4133,72 @@ fn contextual_continuous_subject_filter(
     }
 
     let subject_tp = TextPair::new(subject_original, subject_lower);
+    if let Some(filter) = parse_controlled_compound_continuous_subject_filter(&subject_tp) {
+        return Some(filter);
+    }
+
     let group_subject_tp = nom_tag_tp(&subject_tp, "~ and ")
         .or_else(|| nom_tag_tp(&subject_tp, "this creature and "))?;
     let group_filter = parse_continuous_subject_filter(group_subject_tp.original)?;
     Some(TargetFilter::Or {
         filters: vec![TargetFilter::SelfRef, group_filter],
     })
+}
+
+/// CR 613.1: A single continuous static may name multiple controlled subjects
+/// before one shared predicate ("Skeletons you control and other Zombies you
+/// control get ..."). Parse each complete subject phrase and union them rather
+/// than letting the first subject consume the whole predicate.
+fn parse_controlled_compound_continuous_subject_filter(
+    subject: &TextPair<'_>,
+) -> Option<TargetFilter> {
+    let (left_lower, _, right_lower) = nom_primitives::scan_preceded(subject.lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("and ")).parse(input)
+    })?;
+    let right_start = subject.lower.len() - right_lower.len();
+    let left_original = subject.original[..left_lower.len()].trim();
+    let right_original = &subject.original[right_start..];
+
+    let left_filter = parse_continuous_subject_filter(left_original)?;
+    let right_filter = if let Some(filter) = parse_controlled_compound_continuous_subject_filter(
+        &TextPair::new(right_original, right_lower),
+    ) {
+        filter
+    } else {
+        parse_continuous_subject_filter(right_original)?
+    };
+
+    if !filter_has_source_or_controller_anchor(&left_filter)
+        || !filter_has_source_or_controller_anchor(&right_filter)
+    {
+        return None;
+    }
+
+    let mut filters = Vec::new();
+    push_or_filter_branch(&mut filters, left_filter);
+    push_or_filter_branch(&mut filters, right_filter);
+    Some(TargetFilter::Or { filters })
+}
+
+fn push_or_filter_branch(filters: &mut Vec<TargetFilter>, filter: TargetFilter) {
+    match filter {
+        TargetFilter::Or { filters: inner } => filters.extend(inner),
+        other => filters.push(other),
+    }
+}
+
+fn filter_has_source_or_controller_anchor(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::SelfRef | TargetFilter::Controller => true,
+        TargetFilter::Typed(typed) => matches!(
+            typed.controller,
+            Some(ControllerRef::You | ControllerRef::Opponent)
+        ),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_has_source_or_controller_anchor)
+        }
+        _ => false,
+    }
 }
 
 fn exactly_one_creature_you_control_filter(condition: &StaticCondition) -> Option<&TargetFilter> {
@@ -5236,6 +5348,10 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return parse_continuous_subject_filter(rest_tp.original.trim());
     }
 
+    if let Some(filter) = parse_controlled_compound_continuous_subject_filter(&tp) {
+        return Some(filter);
+    }
+
     if let Some(rest_tp) = nom_tag_tp(&tp, "other ") {
         return parse_continuous_subject_filter(rest_tp.original.trim()).map(add_another_filter);
     }
@@ -5275,6 +5391,10 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(filter);
     }
 
+    if let Some(filter) = parse_typed_you_control_subject_filter(&tp) {
+        return Some(filter);
+    }
+
     // CR 903.3d: "commander(s) you control" / "commander(s)" subject phrase.
     // Must run before parse_creature_subject_filter because the bare token
     // "Commanders" otherwise falls into the capitalized-subtype fallback and
@@ -5293,6 +5413,104 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     }
 
     parse_rule_static_subject_filter(trimmed)
+}
+
+/// CR 109.5: In a static ability, "you" and "your" refer to the current
+/// controller of the object with that ability.
+fn parse_typed_you_control_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
+    if let Some(descriptor) = parse_subject_suffix(subject, " creatures you control") {
+        let descriptor = descriptor.trim_end();
+        if descriptor.is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ));
+        }
+        return typed_you_control_descriptor_filter(descriptor, true);
+    }
+
+    let descriptor = parse_subject_suffix(subject, " you control")?.trim_end();
+    if descriptor.is_empty() {
+        return None;
+    }
+    typed_you_control_descriptor_filter(descriptor, false)
+}
+
+/// CR 109.5: Keep the subject descriptor paired with its "you control" suffix
+/// so controller-scoped subjects can lower to the source controller.
+fn parse_subject_suffix<'a>(subject: &TextPair<'a>, suffix: &str) -> Option<TextPair<'a>> {
+    let (_, descriptor_lower) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(suffix),
+        tag::<_, _, OracleError<'_>>(suffix),
+    ))
+    .parse(subject.lower)
+    .ok()?;
+    Some(TextPair::new(
+        &subject.original[..descriptor_lower.len()],
+        descriptor_lower,
+    ))
+}
+
+/// CR 109.5 + CR 205.3: Controller-scoped subject descriptors may name object
+/// types, colors, or subtypes controlled by the source's controller.
+fn typed_you_control_descriptor_filter(
+    descriptor: TextPair<'_>,
+    creature_subject: bool,
+) -> Option<TargetFilter> {
+    if descriptor_is_negation(descriptor.original) {
+        return None;
+    }
+
+    if matches!(descriptor.lower, "creature" | "creatures") {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+    }
+
+    if let Some(color) = parse_named_color(descriptor.original) {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::HasColor { color }]),
+        ));
+    }
+
+    if let Some(filter) = try_parse_compound_subtypes(descriptor.original, &[], false) {
+        return Some(filter);
+    }
+
+    let singular_core_descriptor = strip_one_trailing_ascii_s(descriptor.lower);
+    if let Some(core_type) = try_parse_core_type_descriptor(descriptor.lower)
+        .or_else(|| try_parse_core_type_descriptor(singular_core_descriptor))
+    {
+        let typed = if creature_subject {
+            TypedFilter::creature().with_type(core_type)
+        } else {
+            TypedFilter::new(core_type)
+        };
+        return Some(TargetFilter::Typed(typed.controller(ControllerRef::You)));
+    }
+
+    if is_capitalized_words(descriptor.original) {
+        let subtype_name = parse_subtype(descriptor.original)
+            .map(|(canonical, _)| canonical)
+            .unwrap_or_else(|| descriptor.original.to_string());
+        return Some(TargetFilter::Typed(
+            typed_filter_for_subtype(&subtype_name).controller(ControllerRef::You),
+        ));
+    }
+
+    None
+}
+
+/// CR 205.2a: Core card type descriptors may appear in singular or regular
+/// plural form in Oracle subject phrases; remove at most one ASCII plural `s`
+/// for core-type lookup only.
+fn strip_one_trailing_ascii_s(text: &str) -> &str {
+    if text.as_bytes().last() == Some(&b's') {
+        &text[..text.len() - 1]
+    } else {
+        text
+    }
 }
 
 /// CR 205.3m: Parse "creature [you control] that's a Wolf or a Werewolf" subjects.
@@ -5751,6 +5969,17 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let descriptor = if let Some(prefix) = descriptor_text.strip_suffix(" creatures") {
         prefix.trim()
     } else if !descriptor_text.contains(' ') && descriptor_text.to_lowercase().ends_with('s') {
+        if descriptor_text.eq_ignore_ascii_case("creatures") {
+            // CR 205.2a: "creatures" names the creature card type, not a creature subtype.
+            let mut typed = TypedFilter::creature();
+            if let Some(controller) = controller {
+                typed = typed.controller(controller);
+            }
+            if has_other {
+                typed = typed.properties(vec![FilterProp::Another]);
+            }
+            return Some(TargetFilter::Typed(typed));
+        }
         // CR 205.3m: Use parse_subtype for irregular plurals (Elves→Elf, Dwarves→Dwarf)
         if let Some((canonical, _)) = parse_subtype(descriptor_text) {
             let mut typed = TypedFilter::creature().subtype(canonical);
@@ -5766,6 +5995,18 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     } else {
         return None;
     };
+
+    if descriptor.eq_ignore_ascii_case("creature") {
+        // CR 205.2a: "creature" names the creature card type, not a creature subtype.
+        let mut typed = TypedFilter::creature();
+        if let Some(controller) = controller {
+            typed = typed.controller(controller);
+        }
+        if has_other {
+            typed = typed.properties(vec![FilterProp::Another]);
+        }
+        return Some(TargetFilter::Typed(typed));
+    }
 
     if descriptor.is_empty() {
         return None;
@@ -8351,8 +8592,23 @@ fn parse_dynamic_pt_in_text(
     // die roll's result. `parse_cda_quantity` has no "the result" arm; fall
     // through to `parse_event_context_quantity`, which maps it to
     // `EventContextAmount` (the same channel "that much"/"the result" use).
-    let wx = where_x_expression?;
-    let quantity = parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx))?;
+    //
+    // CR 107.3a + CR 107.3i: When no "where X is …" clause is present and the
+    // containing activated ability has an {X} (or X) in its cost, X in the
+    // effect refers to the value chosen as the ability was activated
+    // (CR 107.3a) and every instance of X on the object shares that value
+    // (CR 107.3i). The engine models this as `QuantityRef::CostXPaid`,
+    // mirroring `parse_cost_x_become_pt_prefix` in
+    // `oracle_effect/animation.rs` for the "becomes an X/X creature" animation
+    // case. This unblocks +X/+0 and +X/+X pump activations like Kessig Wolf
+    // Run whose effect text has no binding clause — the X is bound to the
+    // cost, not to a derived quantity.
+    let quantity = match where_x_expression {
+        Some(wx) => parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx))?,
+        None => QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        },
+    };
 
     let mut mods = Vec::new();
     if p_is_x {
@@ -9981,7 +10237,7 @@ fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
 /// a spell reduces/raises its own cast cost (e.g., Tolarian Terror:
 /// "This spell costs {1} less to cast for each instant and sorcery card in
 /// your graveyard."). Callers use this to flag self-reference so the static
-/// is emitted with `affected = SelfRef` and `active_zones = [Hand, Stack]`
+/// is emitted with `affected = SelfRef` and `active_zones = [Hand, Stack, Command]`
 /// instead of the default battlefield scope.
 fn parse_self_spell_cost_subject(lower: &str) -> Option<()> {
     nom_on_lower(lower, lower, |i| {
@@ -10170,7 +10426,7 @@ fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefinition> {
 /// 3. Global taxing: "Noncreature spells cost {1} more to cast" (Thalia)
 /// 4. Broad: "Spells you cast cost {1} less to cast"
 /// 5. Self-spell: "This spell costs {N} less to cast for each ..." (Tolarian Terror)
-///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack]`.
+///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack, Command]`.
 ///
 /// Dynamic "for each" counts are extracted when present.
 fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
@@ -10186,8 +10442,10 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     // Distinct from battlefield cost modification (e.g., "creature spells you cast cost {1} less")
     // because the static must apply to the card while it is in hand (or on the stack during
     // casting), not once it has entered the battlefield. The caller wires this into
-    // `active_zones = [Hand, Stack]` with `affected = SelfRef` so the casting-time scanner
-    // finds it on the spell being cast.
+    // `active_zones = [Hand, Stack, Command]` with `affected = SelfRef` so
+    // the casting-time scanner finds it on the spell being cast from normal
+    // hand casting, the cost-determination stack step, and commander casting
+    // from the command zone.
     let is_self_spell = parse_self_spell_cost_subject(lower).is_some();
 
     let amount_is_variable_x = nom_primitives::scan_contains(lower, "{x}");
@@ -10281,6 +10539,25 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
                 Ok((_, (before, _))) => (before, true),
                 Err(_) => (without_from, false),
             };
+        // CR 205.2a + CR 601.2f: Strip the "of the chosen type" / "of that type"
+        // qualifier (Cloud Key, Umori, Stenn, Herald's Horn: "Spells you cast of
+        // the chosen type cost {1} less"). A "you cast" infix sits between the
+        // type word and this qualifier, so the trim chain below can't reach the
+        // type word and `parse_type_phrase` never extracts the chosen-type
+        // discriminator. Strip it here and re-attach IsChosenCardType /
+        // IsChosenCreatureType after the base type is parsed — mirrors the
+        // "with the chosen name" handling above.
+        let (without_chosen, has_chosen_type) = if let Ok((_, (before, _))) =
+            nom_primitives::split_once_on(without_chosen, " of the chosen type")
+        {
+            (before, true)
+        } else if let Ok((_, (before, _))) =
+            nom_primitives::split_once_on(without_chosen, " of that type")
+        {
+            (before, true)
+        } else {
+            (without_chosen, false)
+        };
         let type_desc = without_chosen
             .trim_end_matches(" you cast")
             .trim_end_matches(" your opponents cast")
@@ -10313,6 +10590,32 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
                     })
                 }
             }
+        };
+        // CR 205.2a: Re-attach the chosen-type discriminator stripped above. A
+        // creature-typed base ("Creature spells ... of the chosen type",
+        // Herald's Horn) pairs with a chosen CREATURE type; a bare-spells base
+        // ("Spells ... of the chosen type", Cloud Key / Umori / Stenn) pairs
+        // with a chosen CARD type. Resolved at cast time against the source
+        // permanent's `ChosenAttribute` (CR 601.2f).
+        let typed_filter = if has_chosen_type {
+            match typed_filter {
+                Some(TargetFilter::Typed(mut tf))
+                    if tf.type_filters.contains(&TypeFilter::Creature) =>
+                {
+                    tf.properties.push(FilterProp::IsChosenCreatureType);
+                    Some(TargetFilter::Typed(tf))
+                }
+                Some(TargetFilter::Typed(mut tf)) => {
+                    tf.properties.push(FilterProp::IsChosenCardType);
+                    Some(TargetFilter::Typed(tf))
+                }
+                None => Some(TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::IsChosenCardType]),
+                )),
+                other => other,
+            }
+        } else {
+            typed_filter
         };
         // Compose chosen-name constraint with the typed prefix (if any). Bare
         // "Spells with the chosen name" → `HasChosenName` alone; typed
@@ -10464,12 +10767,13 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         .description(text.to_string());
 
     // CR 117.7 + CR 601.2f: A self-spell cost reduction must apply while the
-    // card is in hand (pre-cast affordability checks) and on the stack (final
-    // cost determination during casting). Without opting in via `active_zones`,
-    // layer collection would ignore the static outside the battlefield, and
-    // the card would never reduce its own cost.
+    // card is in hand (pre-cast affordability checks), in the command zone
+    // (commander casting), and on the stack (final cost determination during
+    // casting). Without opting in via `active_zones`, layer collection would
+    // ignore the static outside the battlefield, and the card would never
+    // reduce its own cost.
     if is_self_spell {
-        definition.active_zones = vec![Zone::Hand, Zone::Stack];
+        definition.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
     }
     if let Some(filter) = first_qualified_spell_filter.as_ref() {
         definition.condition = Some(first_qualified_spell_condition(filter));
@@ -11056,8 +11360,9 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope, PtStat,
-        PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, ObjectProperty,
+        PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter,
+        ZoneRef,
     };
 
     /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
@@ -11388,6 +11693,43 @@ mod tests {
     }
 
     #[test]
+    fn static_source_power_cant_block_creatures_you_control() {
+        let def = parse_static_line(
+            "Creatures with power less than ~'s power can't block creatures you control.",
+        )
+        .expect("Champion of Lambholt static should parse");
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(ref tf))
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.controller == Some(ControllerRef::You)
+        ));
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::CantBeBlockedBy { ref filter }
+                    if matches!(
+                        filter,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                                && tf.properties.contains(&FilterProp::PtComparison {
+                                    stat: PtStat::Power,
+                                    scope: PtValueScope::Current,
+                                    comparator: Comparator::LT,
+                                    value: QuantityExpr::Ref {
+                                        qty: QuantityRef::Power {
+                                            scope: ObjectScope::Source
+                                        }
+                                    }
+                                })
+                    )
+            ),
+            "expected CantBeBlockedBy with source-power LT blocker filter, got {:?}",
+            def.mode
+        );
+    }
+
+    #[test]
     fn static_creatures_you_control() {
         let def = parse_static_line("Creatures you control get +1/+1.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
@@ -11504,6 +11846,110 @@ mod tests {
     }
 
     #[test]
+    fn static_controlled_compound_subject_shares_continuous_predicate() {
+        let def = parse_static_line(
+            "Skeletons you control and other Zombies you control get +1/+1 and have deathtouch.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Or { ref filters })
+                if filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.controller == Some(ControllerRef::You)
+                            && typed.type_filters.iter().any(|type_filter| matches!(
+                                type_filter,
+                                TypeFilter::Subtype(subtype) if subtype == "Skeleton"
+                            ))
+                            && !typed.properties.contains(&FilterProp::Another)
+                ))
+                    && filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(typed)
+                            if typed.controller == Some(ControllerRef::You)
+                                && typed.type_filters.iter().any(|type_filter| matches!(
+                                    type_filter,
+                                    TypeFilter::Subtype(subtype) if subtype == "Zombie"
+                                ))
+                                && typed.properties.contains(&FilterProp::Another)
+                    ))
+        ));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Deathtouch,
+            }));
+    }
+
+    #[test]
+    fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
+        let def = parse_static_line(
+            "Skeletons your opponents control and other Zombies your opponents control get -1/-1.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Or { ref filters })
+                if filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.controller == Some(ControllerRef::Opponent)
+                            && typed.type_filters.iter().any(|type_filter| matches!(
+                                type_filter,
+                                TypeFilter::Subtype(subtype) if subtype == "Skeleton"
+                            ))
+                            && !typed.properties.contains(&FilterProp::Another)
+                ))
+                    && filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(typed)
+                            if typed.controller == Some(ControllerRef::Opponent)
+                                && typed.type_filters.iter().any(|type_filter| matches!(
+                                    type_filter,
+                                    TypeFilter::Subtype(subtype) if subtype == "Zombie"
+                                ))
+                                && typed.properties.contains(&FilterProp::Another)
+                    ))
+        ));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: -1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: -1 }));
+    }
+
+    #[test]
+    fn static_custom_capitalized_subtype_you_control_preserves_s_suffix() {
+        let affected = parse_continuous_subject_filter("Anubis you control")
+            .expect("subject should produce a filter");
+        let TargetFilter::Typed(typed) = affected else {
+            panic!("expected typed subject filter");
+        };
+
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(
+            typed.type_filters.iter().any(|type_filter| matches!(
+                type_filter,
+                TypeFilter::Subtype(subtype) if subtype == "Anubis"
+            )),
+            "expected Anubis subtype, got {:?}",
+            typed.type_filters
+        );
+    }
+
+    #[test]
     fn static_cant_block() {
         let def = parse_static_line("Ragavan can't block.").unwrap();
         assert_eq!(def.mode, StaticMode::CantBlock);
@@ -11594,11 +12040,11 @@ mod tests {
     }
 
     /// CR 117.7 + CR 601.2f: "This spell costs {N} less ..." must parse into a
-    /// self-scoped static — affected = SelfRef, active_zones = [Hand, Stack] —
+    /// self-scoped static — affected = SelfRef, active_zones = [Hand, Stack, Command] —
     /// so the cast-time scanner finds it on the spell itself (not on the
     /// battlefield). Regression guard for Tolarian Terror class.
     #[test]
-    fn static_this_spell_cost_less_self_scoped_in_hand_and_stack() {
+    fn static_this_spell_cost_less_self_scoped_in_castable_zones() {
         let def = parse_static_line(
             "This spell costs {1} less to cast for each instant and sorcery card in your graveyard.",
         )
@@ -11612,7 +12058,36 @@ mod tests {
             }
         ));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
+    }
+
+    #[test]
+    fn ghalta_self_cost_reduction_is_active_from_command_zone() {
+        let def = parse_static_line(
+            "This spell costs {X} less to cast, where X is the total power of creatures you control.",
+        )
+        .unwrap();
+
+        let StaticMode::ReduceCost {
+            dynamic_count:
+                Some(QuantityRef::Aggregate {
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                    ..
+                }),
+            ..
+        } = def.mode
+        else {
+            panic!("expected dynamic self-spell ReduceCost, got {:?}", def.mode);
+        };
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11642,7 +12117,10 @@ mod tests {
             .iter()
             .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11661,7 +12139,10 @@ mod tests {
             }
         ));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11720,7 +12201,10 @@ mod tests {
             })
         );
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -11813,7 +12297,10 @@ mod tests {
             }
         )));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
     }
 
     #[test]
@@ -12051,6 +12538,68 @@ mod tests {
                 _ => panic!("Expected Typed filter"),
             }
         }
+    }
+
+    #[test]
+    fn static_spells_of_chosen_type_cost_less_carries_chosen_card_type() {
+        // Issue #930 — Cloud Key / Umori / Stenn:
+        // "Spells you cast of the chosen type cost {1} less to cast."
+        // CR 205.2a: the "of the chosen type" qualifier must narrow the
+        // reduction to the chosen card type, not every spell. The "you cast"
+        // infix previously prevented the discriminator from being extracted.
+        let def =
+            parse_static_line("Spells you cast of the chosen type cost {1} less to cast.").unwrap();
+        let StaticMode::ReduceCost {
+            spell_filter: Some(TargetFilter::Typed(ref tf)),
+            ..
+        } = def.mode
+        else {
+            panic!(
+                "expected ReduceCost with a Typed spell_filter, got {:?}",
+                def.mode
+            );
+        };
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenCardType)),
+            "chosen-type cost reduction must carry IsChosenCardType, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn static_creature_spells_of_chosen_type_cost_less_carries_chosen_creature_type() {
+        // Issue #930 — Herald's Horn:
+        // "Creature spells you cast of the chosen type cost {1} less to cast."
+        // CR 205.2a: a creature-typed base pairs with a chosen CREATURE type.
+        let def =
+            parse_static_line("Creature spells you cast of the chosen type cost {1} less to cast.")
+                .unwrap();
+        let StaticMode::ReduceCost {
+            spell_filter: Some(TargetFilter::Typed(ref tf)),
+            ..
+        } = def.mode
+        else {
+            panic!(
+                "expected ReduceCost with a Typed spell_filter, got {:?}",
+                def.mode
+            );
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)),
+            "expected Creature type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenCreatureType)),
+            "creature chosen-type reduction must carry IsChosenCreatureType, got {:?}",
+            tf.properties
+        );
     }
 
     #[test]
@@ -12728,7 +13277,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
-        assert!(matches!(def.affected, Some(TargetFilter::Typed(_))));
+        let Some(TargetFilter::Typed(tf)) = def.affected else {
+            panic!("expected typed affected filter, got {:?}", def.affected);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.get_subtype().is_none(),
+            "generic creatures must not become a Creature subtype filter: {:?}",
+            tf
+        );
     }
 
     #[test]
@@ -15131,7 +15693,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_creature_subject_filter_irregular_plurals() {
+    fn parse_creature_subject_filter_generic_and_irregular_plurals() {
+        let filter = super::parse_creature_subject_filter("Creatures you control").unwrap();
+        if let TargetFilter::Typed(tf) = &filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.get_subtype(), None);
+        } else {
+            panic!("Expected generic Creature filter, got {:?}", filter);
+        }
+
+        let filter = super::parse_creature_subject_filter("Other creatures you control").unwrap();
+        if let TargetFilter::Typed(tf) = &filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.get_subtype(), None);
+            assert!(tf.properties.contains(&FilterProp::Another));
+        } else {
+            panic!("Expected generic other Creature filter, got {:?}", filter);
+        }
+
         // Single-word plural subtypes should resolve via parse_subtype
         let filter = super::parse_creature_subject_filter("Elves").unwrap();
         if let TargetFilter::Typed(tf) = &filter {
@@ -15460,6 +16041,265 @@ mod tests {
                 .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
             "expected AddDynamicToughness, got {:?}",
             def.modifications
+        );
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_x_over_0_without_where_clause_defaults_to_cost_x_paid() {
+        // CR 107.3i: Kessig Wolf Run's activated ability text "Target creature
+        // gets +X/+0 and gains trample until end of turn." has no "where X is …"
+        // binding clause, so X in the effect refers to the value chosen for
+        // the ability's cost. `parse_dynamic_pt_in_text` previously gated the
+        // entire dynamic-PT path on a required `where_x_expression`, silently
+        // dropping the +X/+0 modification. The fix defaults the X-bound
+        // quantity to `QuantityRef::CostXPaid` when no clause is present.
+        let mods = parse_dynamic_pt_in_text(
+            "target creature gets +x/+0 and gains trample until end of turn.",
+            None,
+        )
+        .expect("dynamic-PT helper must emit modifications without a where-X clause");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected AddDynamicPower; got mods: {mods:?}"));
+        assert!(
+            matches!(
+                dyn_pow,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            ),
+            "expected QuantityExpr::Ref(CostXPaid), got {dyn_pow:?}"
+        );
+
+        // No AddDynamicToughness — the +0 leg must not emit a modification.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+            "must not emit AddDynamicToughness for the +0 leg, got {mods:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_x_over_x_without_where_clause_defaults_both_to_cost_x_paid() {
+        // CR 107.3i: When neither leg has a "where X is …" binding, both
+        // AddDynamicPower and AddDynamicToughness must default to
+        // `QuantityRef::CostXPaid`. Covers the symmetric +X/+X pump variant.
+        let mods = parse_dynamic_pt_in_text("target creature gets +x/+x until end of turn.", None)
+            .expect("symmetric +X/+X must emit modifications without a where-X clause");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        assert!(
+            matches!(
+                dyn_pow,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            ),
+            "power must be Ref(CostXPaid), got {dyn_pow:?}"
+        );
+
+        let dyn_tou = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicToughness { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicToughness");
+        assert!(
+            matches!(
+                dyn_tou,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            ),
+            "toughness must be Ref(CostXPaid), got {dyn_tou:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_x_over_0_with_where_clause_still_uses_where_clause() {
+        // CR 107.3i regression guard: when an explicit "where X is …" clause
+        // is present, the dynamic-PT branch must still resolve X via that
+        // clause (here, an ObjectCount) and NOT fall back to CostXPaid. This
+        // protects every existing dynamic-PT card (Craterhoof Behemoth-style)
+        // from being silently rewritten to read the cost-X channel.
+        let mods = parse_dynamic_pt_in_text(
+            "target creature gets +x/+0 until end of turn",
+            Some("the number of creatures you control"),
+        )
+        .expect("where-X branch must still emit modifications");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        match dyn_pow {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    ..
+                }) => {
+                    assert_eq!(type_filters, &vec![TypeFilter::Creature]);
+                    assert_eq!(controller.as_ref(), Some(&ControllerRef::You));
+                }
+                other => panic!("expected Typed(Creature, You) filter, got {other:?}"),
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            } => panic!(
+                "where-X clause must take precedence over CostXPaid default; \
+                 parser regressed to CostXPaid"
+            ),
+            other => panic!("expected Ref(ObjectCount), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_minus_x_over_0_without_where_clause_defaults_to_cost_x_paid() {
+        // CR 107.3i: Negated +X/+0 mirrors the positive variant — when no
+        // "where X is …" clause is present, X binds to the activated ability's
+        // cost-X (`QuantityRef::CostXPaid`). The `-X` leg wraps that ref in
+        // `QuantityExpr::Multiply { factor: -1, .. }` per the sign-handling
+        // block in `parse_dynamic_pt_in_text`. The `-0` leg must NOT emit an
+        // `AddDynamicToughness` modification.
+        let mods = parse_dynamic_pt_in_text("target creature gets -x/-0 until end of turn.", None)
+            .expect("dynamic-PT helper must emit modifications for -X/-0 without a where-X clause");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected AddDynamicPower; got mods: {mods:?}"));
+        match dyn_pow {
+            QuantityExpr::Multiply { factor: -1, inner } => assert!(
+                matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                ),
+                "expected Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got inner={inner:?}"
+            ),
+            other => {
+                panic!("expected Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got {other:?}")
+            }
+        }
+
+        // No AddDynamicToughness — the -0 leg must not emit a modification.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+            "must not emit AddDynamicToughness for the -0 leg, got {mods:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_minus_x_over_minus_x_without_where_clause_defaults_both_to_cost_x_paid() {
+        // CR 107.3i: Symmetric -X/-X with no binding clause must default both
+        // legs to `QuantityRef::CostXPaid` wrapped in
+        // `QuantityExpr::Multiply { factor: -1, .. }` per the sign-handling
+        // block in `parse_dynamic_pt_in_text`.
+        let mods = parse_dynamic_pt_in_text("target creature gets -x/-x until end of turn.", None)
+            .expect("symmetric -X/-X must emit modifications without a where-X clause");
+
+        let dyn_pow = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        match dyn_pow {
+            QuantityExpr::Multiply { factor: -1, inner } => assert!(
+                matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                ),
+                "power must be Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got inner={inner:?}"
+            ),
+            other => panic!(
+                "power must be Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got {other:?}"
+            ),
+        }
+
+        let dyn_tou = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicToughness { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicToughness");
+        match dyn_tou {
+            QuantityExpr::Multiply { factor: -1, inner } => assert!(
+                matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                ),
+                "toughness must be Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got inner={inner:?}"
+            ),
+            other => panic!(
+                "toughness must be Multiply {{ factor: -1, inner: Ref(CostXPaid) }}, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn dynamic_pt_in_text_plus_0_over_plus_x_without_where_clause_defaults_to_cost_x_paid() {
+        // CR 107.3i: Toughness-only asymmetric +0/+X must emit a single
+        // `AddDynamicToughness` carrying `Ref(CostXPaid)` and NOT emit
+        // `AddDynamicPower` — the +0 power leg must drop out per the
+        // `if p_is_x` guard in `parse_dynamic_pt_in_text`.
+        let mods = parse_dynamic_pt_in_text("target creature gets +0/+x until end of turn.", None)
+            .expect("dynamic-PT helper must emit modifications for +0/+X without a where-X clause");
+
+        let dyn_tou = mods
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicToughness { value } => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected AddDynamicToughness; got mods: {mods:?}"));
+        assert!(
+            matches!(
+                dyn_tou,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            ),
+            "expected QuantityExpr::Ref(CostXPaid), got {dyn_tou:?}"
+        );
+
+        // No AddDynamicPower — the +0 leg must not emit a modification.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })),
+            "must not emit AddDynamicPower for the +0 leg, got {mods:?}"
         );
     }
 
@@ -15805,6 +16645,44 @@ mod tests {
             "must not emit flat P/T modifications alongside dynamic ones: {:?}",
             def.modifications
         );
+    }
+
+    #[test]
+    fn static_self_ref_exact_base_power_object_count_filter() {
+        let def = parse_static_line(
+            "~ gets +X/+0, where X is the number of other creatures you control with base power 1.",
+        )
+        .expect("Zinnia-style static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+        let dyn_pow = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower for the X scaling");
+
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(typed),
+                },
+        } = dyn_pow
+        else {
+            panic!("expected ObjectCount over Typed filter, got {dyn_pow:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::Another));
+        assert!(typed.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Base,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 1 },
+        }));
     }
 
     #[test]

@@ -10,7 +10,8 @@
       "Easy": "Łatwy",
       "Medium": "Średni",
       "Hard": "Trudny",
-      "VeryHard": "Bardzo trudny"
+      "VeryHard": "Bardzo trudny",
+      "CEDH": "cEDH"
     }
   },
   "bracketFilter": {
@@ -38,7 +39,7 @@
     },
     "draft": {
       "title": "Draft",
-      "description": "Szybki draft przeciwko AI oraz eksperymentalne opcje draftu kostkowego i podu."
+      "description": "Szybki draft przeciwko AI, draft kostkowy lub hostuj draft podu."
     },
     "decks": {
       "title": "Talie",
@@ -95,6 +96,11 @@
     "difficulty": "Poziom trudności",
     "deckRandom": "Losowa",
     "deckRandomCount": "Losowa ({{count}})",
+    "cedhToggle": {
+      "label": "Tryb cEDH",
+      "hint": "Wszyscy przeciwnicy grają w cEDH. Każda talia musi być w przedziale 5.",
+      "badge": "cEDH"
+    },
     "source": {
       "feed": "Kanał",
       "user": "Użytkownik",
@@ -116,9 +122,16 @@
   "importDeck": {
     "title": "Importuj talię",
     "tabPaste": "Wklej tekst",
+    "tabUrl": "Z URL",
     "tabFile": "Z pliku",
     "deckNamePlaceholder": "Nazwa talii",
+    "urlPlaceholder": "https://moxfield.com/decks/… lub https://archidekt.com/decks/…",
+    "urlHint": "Importuje publiczną talię z Moxfield lub Archidekt.",
     "import": "Importuj",
+    "importing": "Importowanie…",
+    "errorInvalidUrl": "Wprowadź prawidłowy URL talii Moxfield lub Archidekt.",
+    "errorNetworkFailure": "Nie udało się połączyć z usługą importu. Sprawdź połączenie i spróbuj ponownie.",
+    "errorGeneric": "Nie udało się zaimportować talii.",
     "fileSupports": "Obsługuje formaty .dck, .dec, .txt oraz MTGA",
     "chooseFile": "Wybierz plik"
   },

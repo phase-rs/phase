@@ -68,6 +68,21 @@ export function legacyAiDeckNameToId(name: string): string {
   return savedDeckCatalogId(name);
 }
 
+/**
+ * Pure bracket filter for AI deck candidates.
+ *
+ * - `tier === null` — no constraint; returns all candidates unchanged.
+ * - `tier !== null` — returns only candidates whose `bracket` equals `tier`.
+ *   Untagged candidates (`bracket === null`) are excluded.
+ */
+export function filterByBracket(
+  decks: AiDeckCandidate[],
+  tier: CommanderBracket | null,
+): AiDeckCandidate[] {
+  if (tier === null) return decks;
+  return decks.filter((d) => d.bracket === tier);
+}
+
 export async function buildLegalAiDeckCatalog(
   options: AiDeckCatalogOptions,
 ): Promise<AiDeckCatalogResult> {

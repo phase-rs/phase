@@ -33,6 +33,7 @@ use super::ability_utils::{
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
+use super::game_object::PreparedState;
 use super::mana_payment;
 use super::quantity::resolve_quantity;
 use super::restrictions;
@@ -95,7 +96,7 @@ pub(crate) fn emit_targeting_events(
         match target {
             TargetRef::Object(obj_id) => {
                 events.push(GameEvent::BecomesTarget {
-                    object_id: *obj_id,
+                    target: TargetRef::Object(*obj_id),
                     source_id,
                 });
                 if !crime_committed {
@@ -107,6 +108,10 @@ pub(crate) fn emit_targeting_events(
                 }
             }
             TargetRef::Player(pid) => {
+                events.push(GameEvent::BecomesTarget {
+                    target: TargetRef::Player(*pid),
+                    source_id,
+                });
                 if !crime_committed && *pid != controller {
                     crime_committed = true;
                 }
@@ -1638,11 +1643,17 @@ fn casting_variant_candidates(
             .casting_permissions
             .iter()
             .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. }));
+        // CR 702.62a: Suspend candidate selection. Runtime-granted Suspend
+        // (CR 604.1, e.g. Jhoira of the Ghitu / The Tenth Doctor) lives in
+        // the effective off-zone keyword set, not `obj.keywords`, so query
+        // through the off-zone-aware helper to match Flashback/Retrace/
+        // Aftermath/Escape recognition in this file.
         if has_alt_cost
-            && obj
-                .keywords
-                .iter()
-                .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }))
+            && super::keywords::object_has_effective_keyword_kind(
+                state,
+                object_id,
+                KeywordKind::Suspend,
+            )
         {
             candidates.push(CastingVariant::Suspend);
         }
@@ -1936,12 +1947,16 @@ fn prepare_spell_cast_with_variant_override_inner(
     // cast is the suspend "play it without paying its mana cost" path. Mirrors
     // Warp/Flashback's keyword-presence detection and avoids coupling
     // `Effect::CastFromZone` to a cast-variant override field.
+    // CR 702.62a: Suspend cast detection. Reads the effective off-zone keyword
+    // set so Suspend granted at runtime by Jhoira of the Ghitu / The Tenth Doctor
+    // (CR 604.1) is recognized alongside printed Suspend.
     let is_suspend_cast = obj.zone == Zone::Exile
         && alt_cost_from_exile.is_some()
-        && obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }));
+        && super::keywords::object_has_effective_keyword_kind(
+            state,
+            object_id,
+            KeywordKind::Suspend,
+        );
 
     // CR 702.170d: Plot free-cast detection — when casting an exile-zone card
     // with a `CastingPermission::Plotted { turn_plotted }` (on a later turn
@@ -5315,19 +5330,25 @@ fn can_cast_prepared_now(
         }
     }
 
-    // CR 702.172: Spree spells must afford at least one mode to be castable
+    // CR 702.172: Spree spells must afford at least one mode to be castable.
+    // CR 117.1d + CR 601.2g: Use the feasibility predicate so non-tap mana
+    // abilities (Sacrifice / Discard / PayLife) the controller could activate
+    // manually during cost payment are counted as castable mana sources.
     if let Some(ref modal) = prepared.modal {
         if !modal.mode_costs.is_empty() {
             return modal.mode_costs.iter().any(|mode_cost| {
                 let total = restrictions::add_mana_cost(&prepared.mana_cost, mode_cost);
-                can_pay_cost_after_auto_tap(state, player, prepared.object_id, &total)
+                can_feasibly_pay_mana_cost(state, player, Some(prepared.object_id), &total)
             });
         }
     }
 
+    // CR 117.1d + CR 601.2g: Feasibility, not just auto-tap, gates castability —
+    // a player may activate sacrifice-/discard-/life-cost mana abilities during
+    // payment (issue #562: KCI must expose Ichor Wellspring as castable).
     let creature_face_ok = (prepared.modal.is_some()
         || spell_has_legal_targets(state, obj, player))
-        && can_pay_cost_after_auto_tap(state, player, prepared.object_id, &prepared.mana_cost);
+        && can_feasibly_pay_mana_cost(state, player, Some(prepared.object_id), &prepared.mana_cost);
 
     if creature_face_ok {
         return true;
@@ -5418,7 +5439,188 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
         .find(|p| p.id == player)
         .is_some_and(|player_data| {
             mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, permissions)
+                || ctx.is_some_and(|ctx| {
+                    matches!(ctx, PaymentContext::Spell(_))
+                        && can_pay_with_spell_tap_payments(
+                            &simulated,
+                            player,
+                            source_id,
+                            cost,
+                            Some(ctx),
+                            permissions,
+                        )
+                })
         })
+}
+
+/// CR 702.51a: Convoke functions on the spell being cast.
+/// CR 702.126a: Improvise functions on the spell being cast.
+/// Resolve the active tap-payment mode once from the spell's effective keyword set.
+pub(super) fn spell_tap_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> Option<ConvokeMode> {
+    if !state.objects.contains_key(&source_id) {
+        return None;
+    }
+    let effective_keywords = effective_spell_keywords(state, player, source_id);
+    if effective_keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Convoke))
+    {
+        Some(ConvokeMode::Convoke)
+    } else if effective_keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Waterbend))
+    {
+        Some(ConvokeMode::Waterbend)
+    } else if effective_keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Improvise))
+    {
+        Some(ConvokeMode::Improvise)
+    } else {
+        None
+    }
+}
+
+fn can_pay_with_spell_tap_payments(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+    permissions: crate::types::mana::CostPermissionContext,
+) -> bool {
+    let Some(mode) = spell_tap_payment_mode(state, player, source_id) else {
+        return false;
+    };
+    let Some(player_data) = state.players.iter().find(|p| p.id == player) else {
+        return false;
+    };
+
+    // CR 601.2h: This is an affordability preview only. The real payment still
+    // flows through ManaPayment and the shared mana-payment algorithm.
+    match mode {
+        ConvokeMode::Improvise => {
+            // CR 702.126a: Improvise lets players tap untapped artifacts to pay generic mana.
+            let mut pool = player_data.mana_pool.clone();
+            for (&object_id, obj) in &state.objects {
+                if obj.is_improvise_eligible(player) {
+                    pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                        crate::types::mana::ManaType::Colorless,
+                        object_id,
+                    ));
+                }
+            }
+            mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
+        }
+        ConvokeMode::Waterbend => {
+            let mut pool = player_data.mana_pool.clone();
+            for (&object_id, obj) in &state.objects {
+                if obj.is_waterbend_eligible(player) {
+                    pool.add(crate::types::mana::ManaUnit::new(
+                        crate::types::mana::ManaType::Colorless,
+                        object_id,
+                        false,
+                        Vec::new(),
+                    ));
+                }
+            }
+            mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
+        }
+        ConvokeMode::Convoke => {
+            // CR 702.51a: Convoke lets players tap untapped creatures to pay colored or generic mana.
+            let options = state
+                .objects
+                .iter()
+                .filter_map(|(_, obj)| {
+                    if !obj.is_convoke_eligible(player) {
+                        return None;
+                    }
+                    let mut choices = vec![crate::types::mana::ManaType::Colorless];
+                    for color in &obj.color {
+                        let mana_type = super::mana_sources::mana_color_to_type(color);
+                        if !choices.contains(&mana_type) {
+                            choices.push(mana_type);
+                        }
+                    }
+                    Some(choices)
+                })
+                .collect::<Vec<_>>();
+            can_pay_with_convoke_options(&player_data.mana_pool, cost, ctx, permissions, &options)
+        }
+    }
+}
+
+// CR 702.51a: Evaluate valid creature-tap choices that can satisfy a convoke cost.
+fn can_pay_with_convoke_options(
+    base_pool: &crate::types::mana::ManaPool,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+    permissions: crate::types::mana::CostPermissionContext,
+    options: &[Vec<crate::types::mana::ManaType>],
+) -> bool {
+    if options.is_empty() {
+        return false;
+    }
+    let max_taps = cost.mana_value() as usize;
+    if max_taps == 0 {
+        return false;
+    }
+
+    let mut states = HashSet::from([[0u8; 6]]);
+    for choices in options {
+        let mut next = states.clone();
+        for state in &states {
+            if state.iter().map(|count| *count as usize).sum::<usize>() >= max_taps {
+                continue;
+            }
+            for choice in choices {
+                let mut candidate = *state;
+                let index = mana_type_index(*choice);
+                candidate[index] = candidate[index].saturating_add(1);
+                next.insert(candidate);
+            }
+        }
+        states = next;
+    }
+
+    states.into_iter().any(|counts| {
+        let mut pool = base_pool.clone();
+        for (index, count) in counts.into_iter().enumerate() {
+            for _ in 0..count {
+                pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                    mana_type_from_index(index),
+                    ObjectId(0),
+                ));
+            }
+        }
+        mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
+    })
+}
+
+fn mana_type_index(mana_type: crate::types::mana::ManaType) -> usize {
+    match mana_type {
+        crate::types::mana::ManaType::White => 0,
+        crate::types::mana::ManaType::Blue => 1,
+        crate::types::mana::ManaType::Black => 2,
+        crate::types::mana::ManaType::Red => 3,
+        crate::types::mana::ManaType::Green => 4,
+        crate::types::mana::ManaType::Colorless => 5,
+    }
+}
+
+fn mana_type_from_index(index: usize) -> crate::types::mana::ManaType {
+    match index {
+        0 => crate::types::mana::ManaType::White,
+        1 => crate::types::mana::ManaType::Blue,
+        2 => crate::types::mana::ManaType::Black,
+        3 => crate::types::mana::ManaType::Red,
+        4 => crate::types::mana::ManaType::Green,
+        _ => crate::types::mana::ManaType::Colorless,
+    }
 }
 
 pub fn can_pay_cost_after_auto_tap(
@@ -5442,6 +5644,114 @@ pub fn can_pay_cost_after_auto_tap(
         spell_ctx.as_ref(),
         &HashSet::new(),
     )
+}
+
+/// Castability-gate feasibility predicate. Returns true if `player` could pay
+/// `cost` for casting `source_id` by **any** combination of auto-taps PLUS
+/// manual activation of non-tap mana abilities (Sacrifice — KCI, Phyrexian
+/// Altar, Ashnod's Altar; Discard — Lion's Eye Diamond; Pay Life; etc.) during
+/// the cost-payment step.
+///
+/// This is at least as permissive as [`can_pay_cost_after_auto_tap`]: it short-
+/// circuits to that path first and only attempts the manual extension when the
+/// auto-tap simulator alone cannot cover the cost. Callers that must require
+/// pure auto-payability (`pay_mana_cost`, the `Auto`-mode auto-finalize check
+/// in `casting_costs::enter_payment_step`) must continue to call the auto-tap
+/// predicate directly — only the castability/legal-actions surface widens to
+/// "manual is reachable."
+///
+/// Colored-shard feasibility under non-tap sources is conservatively rejected:
+/// if any colored shard remains after the existing pool is subtracted, this
+/// predicate returns `false`. Pure-generic feasibility is sufficient for the
+/// principal repro (Krark-Clan Ironworks producing `{C}{C}` — issue #562).
+/// Colored-shard widening — covering Phyrexian Altar, Lion's Eye Diamond, and
+/// other any-color non-tap mana abilities — is tracked in issue #1234.
+//
+// CR 117.1d + CR 601.2g: Mana abilities (including sacrifice-cost,
+// discard-cost, and pay-life mana abilities) may be activated during cost
+// payment. Castability must account for them, or spells with feasibly payable
+// costs are never offered (the original #562 bug).
+pub(super) fn can_feasibly_pay_mana_cost(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    // CR 117.1d: Auto-tap path remains the fast path. Anything that can be
+    // paid with only `{T}` activations was castable before this predicate
+    // existed and must continue to be castable now.
+    if let Some(sid) = source_id {
+        if can_pay_cost_after_auto_tap(state, player, sid, cost) {
+            return true;
+        }
+    }
+
+    let crate::types::mana::ManaCost::Cost { .. } = cost else {
+        // NoCost / SelfManaCost are unconditionally payable (they have no
+        // mana shards to cover); the auto-tap path already returned true above
+        // when `source_id` was `Some`, so this only fires for the rare
+        // `source_id == None` callers.
+        return true;
+    };
+
+    // Reduce the cost by the current floating mana pool. `reduce_cost_by_pool`
+    // is the dry-run twin of the real payment path — it respects spell
+    // restrictions and any-color permissions exactly as the real pay does.
+    let Some(player_data) = state.players.iter().find(|p| p.id == player) else {
+        return false;
+    };
+
+    let spell_meta = source_id.and_then(|sid| build_spell_meta(state, player, sid));
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    let any_color = source_id.is_some_and(|sid| {
+        player_can_spend_as_any_color_for_payment(state, player, sid, spell_ctx.as_ref())
+    });
+    let residual = mana_payment::reduce_cost_by_pool(
+        &player_data.mana_pool,
+        cost,
+        spell_ctx.as_ref(),
+        any_color,
+    );
+
+    let (residual_shards, residual_generic) = match &residual {
+        crate::types::mana::ManaCost::NoCost | crate::types::mana::ManaCost::SelfManaCost => {
+            return true
+        }
+        crate::types::mana::ManaCost::Cost { shards, generic } => (shards, *generic),
+    };
+
+    // CR 117.1: Colored-shard feasibility under non-tap mana sources is
+    // deferred (see issue #1234 — Phyrexian Altar, Lion's Eye Diamond, etc.).
+    // Pure-generic residual is sufficient for the principal repro (KCI
+    // sacrificing artifacts for `{C}{C}`).
+    if !residual_shards.is_empty() {
+        return false;
+    }
+    if residual_generic == 0 {
+        return true;
+    }
+
+    // CR 117.1d + CR 605.3a: Sum the per-permanent feasible mana capacity
+    // across the controller's untapped non-excluded battlefield permanents.
+    // Each contribution is the largest single mana-ability output the
+    // controller could currently activate (covering Sacrifice / Discard /
+    // PayLife costs that auto-tap cannot simulate).
+    //
+    // The per-permanent sum over-counts in chain-sacrifice configurations
+    // (e.g. 2× KCI + 1 fodder reports cap=4 when the actual reachable yield
+    // is 2). The trade-off — over-count rather than under-count, since
+    // under-count was the original #562 bug — is intentional. A bounded-
+    // flow model that respects sacrifice/discard/life supply is tracked in
+    // issue #1235.
+    let excluded = source_id;
+    let capacity: u32 = state
+        .battlefield
+        .iter()
+        .filter(|id| Some(**id) != excluded)
+        .map(|&id| super::mana_sources::feasible_mana_capacity(state, id, player))
+        .sum();
+
+    capacity >= residual_generic
 }
 
 /// Returns true if the player can pay this activated-ability mana cost after
@@ -7610,6 +7920,17 @@ pub fn handle_cancel_cast(
             state.stack_paid_facts.remove(&pending.object_id);
         }
     }
+
+    if let Some(source_id) = pending.cancel_restore_prepared_source {
+        // CR 601.2i + CR 722.3c: Prepare-copy cast cancellation must restore
+        // the source's prepared marker and clear the synthetic copy object.
+        if let Some(source) = state.objects.get_mut(&source_id) {
+            if source.zone == Zone::Battlefield {
+                source.prepared = Some(PreparedState);
+            }
+        }
+        state.objects.remove(&pending.object_id);
+    }
 }
 
 // Cost payment handlers are in casting_costs module.
@@ -8177,14 +8498,14 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        AbilityCost, AbilityTag, ActivationRestriction, BasicLandType, CastPermissionConstraint,
-        CastVariantPaid, CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator,
-        ContinuousModification, ControllerRef, CostCategory, FilterProp, GainLifePlayer,
-        GameRestriction, KickerVariant, ManaContribution, ManaProduction, ManaSpendPermission,
-        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
-        ProhibitedActivity, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
+        BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
+        ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
+        CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant, ManaContribution,
+        ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
+        ModalSelectionConstraint, ObjectProperty, ProhibitedActivity, PtValue, QuantityExpr,
+        QuantityRef, RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint,
+        StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -9416,6 +9737,143 @@ mod tests {
     }
 
     #[test]
+    fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(931),
+            PlayerId(0),
+            "Arcade Cabinet".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Double {
+                        target_kind: crate::types::ability::DoubleTarget::Counters {
+                            counter_type: None,
+                        },
+                        target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic: 2,
+                            },
+                        },
+                        AbilityCost::Tap,
+                        AbilityCost::Sacrifice {
+                            target: TargetFilter::Typed(
+                                TypedFilter::permanent().properties(vec![FilterProp::Token]),
+                            ),
+                            count: 1,
+                        },
+                    ],
+                }),
+            );
+        }
+        let token = create_object(
+            &mut state,
+            CardId(932),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.is_token = true;
+        }
+        let creature = create_object(
+            &mut state,
+            CardId(933),
+            PlayerId(0),
+            "Countered Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters
+                .insert(crate::types::counter::CounterType::Plus1Plus1, 2);
+        }
+        let other_creature = create_object(
+            &mut state,
+            CardId(934),
+            PlayerId(1),
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let waiting = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+            .expect("activation should ask for the token sacrifice cost first");
+        state.waiting_for = waiting;
+        let WaitingFor::SacrificeForCost {
+            permanents, count, ..
+        } = &state.waiting_for
+        else {
+            panic!("expected SacrificeForCost, got {:?}", state.waiting_for);
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(permanents, &vec![token]);
+
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![token] })
+            .expect("sacrificing the token should resume activation");
+        let WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("expected TargetSelection, got {:?}", state.waiting_for);
+        };
+        assert_eq!(target_slots.len(), 1);
+        assert!(
+            selection
+                .current_legal_targets
+                .contains(&TargetRef::Object(creature)),
+            "the post-cost target prompt must include the target creature"
+        );
+        assert!(
+            selection
+                .current_legal_targets
+                .contains(&TargetRef::Object(other_creature)),
+            "the post-cost target prompt must include each legal target creature"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(creature)),
+            },
+        )
+        .expect("target creature should be selectable");
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&crate::types::counter::CounterType::Plus1Plus1),
+            Some(&4)
+        );
+    }
+
+    #[test]
     fn targeted_composite_mana_tap_activation_excludes_source_after_target_selection() {
         let mut state = setup_game_at_main_phase();
         let cost = AbilityCost::Composite {
@@ -9598,6 +10056,7 @@ mod tests {
     fn x_phyrexian_composite_mana_tap_activation_excludes_source_during_phyrexian_prepass() {
         use super::super::engine::apply_as_current;
         use crate::types::ability::QuantityRef;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
 
         let mut state = setup_game_at_main_phase();
         let source = create_object(
@@ -9657,13 +10116,29 @@ mod tests {
 
         apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
 
-        assert!(
-            !matches!(state.waiting_for, WaitingFor::PhyrexianPayment { .. }),
-            "source-only Phyrexian activation has no mana/life choice once the source is excluded"
-        );
-        if matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
-            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        // CR 601.2f: After X is chosen, the activation enters ManaPayment to give the
+        // player priority over mana abilities. `PassPriority` then triggers the
+        // Phyrexian pause pre-pass.
+        assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        // CR 107.4f + CR 601.2h: With the source excluded and no other blue mana, the
+        // remaining {U/P} shard surfaces as `LifeOnly`. The engine now pauses to let
+        // the caster confirm or cancel rather than silently deducting life (issue #704).
+        match state.waiting_for.clone() {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(matches!(shards[0].options, ShardOptions::LifeOnly));
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
         }
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            },
+        )
+        .unwrap();
 
         assert!(state.objects[&source].tapped);
         assert_eq!(state.players[0].life, life_before - 2);
@@ -10664,6 +11139,141 @@ mod tests {
         );
     }
 
+    /// CR 107.3i regression for issue #897 (Kessig Wolf Run): the activated
+    /// pump ability "{X}{R}{G}, {T}: Target creature gets +X/+0 and gains
+    /// trample until end of turn." used to lose its +X/+0 modification during
+    /// parsing because the dynamic-PT helper required a "where X is …"
+    /// clause. The fix defaults X to `QuantityRef::CostXPaid` when no binding
+    /// clause is present, mirroring `parse_cost_x_become_pt_prefix` for the
+    /// animation case. This test drives the full activation pipeline through
+    /// the parser-produced ability and asserts the resolved target ends up
+    /// 5/2 with trample for X=3.
+    #[test]
+    fn kessig_wolf_run_x_pump_grants_dynamic_power_and_trample() {
+        use super::super::engine::apply_as_current;
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle::parse_oracle_text;
+
+        let mut state = setup_game_at_main_phase();
+        let controller = PlayerId(0);
+
+        // Vanilla 2/2 creature to be the pump target.
+        let target = create_object(
+            &mut state,
+            CardId(8970),
+            controller,
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Kessig Wolf Run with both abilities parsed from Oracle text.
+        let kessig = create_object(
+            &mut state,
+            CardId(8971),
+            controller,
+            "Kessig Wolf Run".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kessig).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+            let parsed = parse_oracle_text(
+                "{T}: Add {C}.\n{X}{R}{G}, {T}: Target creature gets +X/+0 and gains trample until end of turn.",
+                "Kessig Wolf Run",
+                &[],
+                &[String::from("Land")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+
+        // Locate the X-cost pump ability by shape — it is the activated
+        // ability whose effect is `GenericEffect`, not the mana ability.
+        let pump_ability_index = state.objects[&kessig]
+            .abilities
+            .iter()
+            .position(|a| matches!(*a.effect, Effect::GenericEffect { .. }))
+            .expect("Kessig Wolf Run must parse a GenericEffect pump ability");
+        // Sanity: the mana ability still exists (the parser didn't collapse them).
+        assert!(
+            state.objects[&kessig]
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::Mana { .. })),
+            "the {{T}}: Add {{C}} mana ability must still be present"
+        );
+
+        // Pool {R}{G}{1} so X=3 is payable after {R}{G}.
+        add_mana(&mut state, controller, ManaType::Red, 1);
+        add_mana(&mut state, controller, ManaType::Green, 1);
+        add_mana(&mut state, controller, ManaType::Colorless, 3);
+
+        // Activate.
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: kessig,
+                ability_index: pump_ability_index,
+            },
+        )
+        .expect("activating the X-cost pump must succeed");
+
+        // The {X} sub-cost forces ChooseXValue first — before mana payment,
+        // tap, or target selection. Hard-assert the state so a regression in
+        // the activation state machine fails loudly instead of being silently
+        // skipped by an `if matches!` guard.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "expected ChooseXValue after activating the X-cost pump, got {:?}",
+            state.waiting_for
+        );
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 })
+            .expect("committing X=3 must succeed");
+
+        // After X is chosen, the engine finalizes the {X}{R}{G}+{T} cost and
+        // populates the target slot. With exactly one legal creature target
+        // on the battlefield, single-target auto-selection fills the slot
+        // and the ability lands on the stack directly — TargetSelection is
+        // not entered. If a future change disables auto-selection here, this
+        // assertion fires loudly so the test can be updated explicitly
+        // instead of silently falling through.
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "pump ability must be on the stack after ChooseX; got waiting_for={:?}",
+            state.waiting_for
+        );
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        // Layer 7c/7e: base power 2 + dynamic power CostXPaid(=3) = 5.
+        evaluate_layers(&mut state);
+        let resolved = &state.objects[&target];
+        assert_eq!(
+            resolved.power,
+            Some(5),
+            "target must be 5 power (2 base + 3 from CostXPaid)"
+        );
+        assert_eq!(
+            resolved.toughness,
+            Some(2),
+            "target's toughness must be unchanged (the +0 leg emits no modification)"
+        );
+        assert!(
+            crate::game::keywords::has_keyword(&state.objects[&target], &Keyword::Trample),
+            "target must have Trample from the pump's static_abilities, got {:?}",
+            state.objects[&target].keywords
+        );
+    }
+
     #[test]
     fn x_cost_activated_minimum_above_payable_max_rejects_before_choose_x() {
         use super::super::engine::apply_as_current;
@@ -11596,6 +12206,294 @@ mod tests {
         );
     }
 
+    /// Issue #863 — cast-variant tag discriminator. Mirrors the
+    /// `granted_suspend_upkeep_trigger_ticks_counter_in_exile` setup (exiled
+    /// sorcery + permanent-duration granted Suspend), then resolves the
+    /// last-counter `CastFromZone` payload directly (the synthesized trigger's
+    /// body per `build_suspend_last_counter_cast_trigger`). This installs the
+    /// `ExileWithAltCost` permission. Finally, asks the casting pipeline what
+    /// variant the spell would be cast under — the granted (off-zone) Suspend
+    /// keyword must be visible to `casting_variant_candidates` /
+    /// `prepare_spell_cast_with_variant_override_inner` so the variant
+    /// resolves to `CastingVariant::Suspend`, not `CastingVariant::Normal`.
+    ///
+    /// Reverted-fix discriminator: with both predicates reading `obj.keywords`
+    /// instead of `object_has_effective_keyword_kind`, the granted Suspend is
+    /// invisible (printed-Suspend only populates `obj.keywords` for
+    /// battlefield/hand zones via `evaluate_layers`), the variant misroutes
+    /// to `CastingVariant::Normal`, and the assertion below fails.
+    // CR 702.62a: Suspend granted at runtime (CR 604.1) must produce the Suspend cast variant tag.
+    #[test]
+    fn jhoira_granted_suspend_last_counter_cast_tags_suspend_variant() {
+        use crate::types::ability::{
+            CardPlayMode, ContinuousModification, Duration, Effect, ResolvedAbility, TargetRef,
+        };
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup_game_at_main_phase();
+
+        // An exiled sorcery owned by PlayerId(0). The last upkeep tick has
+        // already happened conceptually — only one time counter remains, and
+        // it is the one the `CounterRemoved` trigger will key off of when the
+        // last-counter cast resolves.
+        let suspended = create_object(
+            &mut state,
+            CardId(5001),
+            PlayerId(0),
+            "Suspended Sorcery".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::generic(3);
+        }
+        // Battlefield grant source carrying the permanent-duration granted
+        // Suspend continuous effect (mirrors a Jhoira-style "it gains
+        // suspend" effect with Duration::Permanent).
+        let grant_source = create_object(
+            &mut state,
+            CardId(5002),
+            PlayerId(0),
+            "Suspend Granter".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            grant_source,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: suspended },
+            vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 0,
+                    },
+                },
+            }],
+            None,
+        );
+
+        // Sanity: the granted keyword is effective on the off-zone card.
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                suspended,
+                crate::types::keywords::KeywordKind::Suspend,
+            ),
+            "the exiled card must have the permanent granted Suspend"
+        );
+
+        // Resolve the synthesized last-counter trigger's `CastFromZone` body
+        // directly. This is the exact effect the suspend last-counter trigger
+        // synthesis (`build_suspend_last_counter_cast_trigger`) executes when
+        // the final time counter is removed (CR 702.62a). Resolving it
+        // installs `CastingPermission::ExileWithAltCost { cost: zero, .. }`
+        // on the exiled card via `cast_from_zone::resolve`.
+        let cast_trigger_ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![TargetRef::Object(suspended)],
+            suspended,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &cast_trigger_ability,
+            &mut events,
+            0,
+        )
+        .expect("CastFromZone must install ExileWithAltCost on the suspended card");
+
+        assert!(
+            state.objects[&suspended]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(
+                    p,
+                    CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()
+                )),
+            "CastFromZone must grant a zero-cost ExileWithAltCost permission \
+             on the exiled card (CR 702.62a synthesized trigger body)"
+        );
+
+        // The discriminator: ask the casting pipeline what variant would be
+        // selected. With the fix the granted off-zone Suspend keyword feeds
+        // both `casting_variant_candidates` and
+        // `prepare_spell_cast_with_variant_override_inner` through
+        // `object_has_effective_keyword_kind`, so the variant is Suspend.
+        let prepared =
+            prepare_spell_cast_with_variant_override(&state, PlayerId(0), suspended, None)
+                .expect("prepare_spell_cast must succeed with granted Suspend + ExileWithAltCost");
+        assert_eq!(
+            prepared.casting_variant,
+            CastingVariant::Suspend,
+            "granted Suspend (CR 604.1) must produce CastingVariant::Suspend, \
+             not Normal — the off-zone effective keyword set must be consulted"
+        );
+    }
+
+    /// Issue #863 — behavioral discriminator for CR 702.62a's creature-haste
+    /// branch. Same setup as the cast-variant test, but the exiled card is a
+    /// Creature. After installing `ExileWithAltCost` and casting the spell
+    /// through the real pipeline, the resolving permanent must gain Haste via
+    /// the transient continuous effect that `stack::resolve_top` installs on
+    /// the Suspend-cast resolution branch.
+    ///
+    /// Reverted-fix discriminator: with both predicates reading `obj.keywords`,
+    /// the cast misroutes to `CastingVariant::Normal`, the
+    /// `casting_variant == CastingVariant::Suspend` branch in `stack::resolve_top`
+    /// is never entered, no haste TCE is installed, and the assertion below
+    /// fails.
+    // CR 702.62a: "If you cast a creature spell this way, it gains haste until
+    // you lose control of the spell or the permanent it becomes." This must
+    // apply to granted-Suspend casts (CR 604.1) too.
+    #[test]
+    fn jhoira_granted_suspend_creature_cast_gains_haste() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{
+            CardPlayMode, ContinuousModification, Duration, Effect, ResolvedAbility, TargetRef,
+        };
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup_game_at_main_phase();
+
+        // An exiled creature owned by PlayerId(0).
+        let suspended = create_object(
+            &mut state,
+            CardId(6001),
+            PlayerId(0),
+            "Suspended Creature".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::generic(4);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.base_power = obj.power;
+            obj.base_toughness = obj.toughness;
+        }
+        let grant_source = create_object(
+            &mut state,
+            CardId(6002),
+            PlayerId(0),
+            "Suspend Granter".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            grant_source,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: suspended },
+            vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 0,
+                    },
+                },
+            }],
+            None,
+        );
+
+        // Resolve the synthesized last-counter trigger body to install
+        // `ExileWithAltCost { cost: zero, .. }` on the exiled creature.
+        let cast_trigger_ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![TargetRef::Object(suspended)],
+            suspended,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &cast_trigger_ability,
+            &mut events,
+            0,
+        )
+        .expect("CastFromZone must install ExileWithAltCost on the suspended card");
+
+        // Cast the spell through the real pipeline. The casting pipeline must
+        // pick `CastingVariant::Suspend` (the discriminator covered by the
+        // cast-variant test above), the spell goes to the stack at zero cost,
+        // and resolution enters `stack::resolve_top`'s Suspend branch which
+        // tags `cast_variant_paid` and installs the haste TCE for creatures.
+        let card_id = state.objects[&suspended].card_id;
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: suspended,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .expect("granted-Suspend creature must cast at zero cost through the real pipeline");
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Suspend cast must place the spell on the stack"
+        );
+
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&suspended].zone,
+            Zone::Battlefield,
+            "the resolving Suspend creature must enter the battlefield"
+        );
+
+        // CR 613.1: Re-evaluate continuous effects so the haste TCE installed
+        // by `stack::resolve_top`'s Suspend branch lands in `obj.keywords` for
+        // the battlefield-zone `effective_keyword` query below.
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // The behavioral assertion: the resolving creature must have Haste
+        // (CR 702.62a's "until you lose control of the spell or the permanent
+        // it becomes" branch). Effective off-zone / battlefield keyword query
+        // covers the layer-6 grant installed by `stack::resolve_top`.
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                suspended,
+                crate::types::keywords::KeywordKind::Haste,
+            ),
+            "Suspend-cast creature must gain Haste while its caster still \
+             controls it (CR 702.62a)"
+        );
+
+        // Audit trail: the cast variant tag must be Suspend.
+        assert!(
+            matches!(
+                state.objects[&suspended].cast_variant_paid,
+                Some((CastVariantPaid::Suspend, _))
+            ),
+            "Suspend-cast creature must carry cast_variant_paid = Suspend \
+             (audit trail for CR 702.62a)"
+        );
+    }
+
     /// Building-block test for `TargetFilter::CostPaidObject` as an effect
     /// target: a `PutCounter` whose target is `CostPaidObject` resolves the
     /// counters onto `ability.cost_paid_object`, independent of any card.
@@ -11737,7 +12635,7 @@ mod tests {
     /// CR 117.7 + CR 601.2f: A self-spell cost reduction printed on the card itself
     /// ("This spell costs {1} less to cast for each instant and sorcery card in your
     /// graveyard.") must fire while the card is in hand. Verifies the parser-emitted
-    /// static (affected = SelfRef, active_zones = [Hand, Stack]) is picked up by the
+    /// static (affected = SelfRef, active_zones = [Hand, Stack, Command]) is picked up by the
     /// casting-time scanner and reduces the spell's generic cost.
     #[test]
     fn tolarian_terror_self_cost_reduction_applies_from_hand() {
@@ -11759,7 +12657,7 @@ mod tests {
                 generic: 6,
             };
             // Self-spell cost reduction as the parser emits it: 1 generic per qualifying
-            // card in the graveyard, affected = SelfRef, active in Hand/Stack.
+            // card in the graveyard, affected = SelfRef, active in Hand/Stack/Command.
             use crate::types::ability::{CountScope, QuantityRef, ZoneRef};
             let mut def = StaticDefinition::new(StaticMode::ReduceCost {
                 amount: ManaCost::generic(1),
@@ -11771,7 +12669,7 @@ mod tests {
                 }),
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack];
+            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
             obj.static_definitions.push(def);
         }
 
@@ -11811,6 +12709,77 @@ mod tests {
                 generic, 3,
                 "3 qualifying graveyard cards should reduce generic from 6 to 3, got {generic}"
             ),
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+    }
+
+    /// CR 903.8 + CR 601.2f: A commander cast from the command zone still uses
+    /// self-spell cost modifications printed on that card. Ghalta's "This
+    /// spell costs {X} less..." must therefore function from Command as well
+    /// as Hand/Stack.
+    #[test]
+    fn self_cost_reduction_applies_from_command_zone() {
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+        let ghalta = create_object(
+            &mut state,
+            CardId(991),
+            PlayerId(0),
+            "Ghalta, Primal Hunger".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&ghalta).unwrap();
+            obj.is_commander = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 10,
+            };
+            let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+                amount: ManaCost::generic(1),
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::Aggregate {
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                }),
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+            obj.static_definitions.push(def);
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(992),
+            PlayerId(0),
+            "Charging Baloth".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(5);
+            obj.power = Some(5);
+        }
+
+        let mut mana_cost = state.objects.get(&ghalta).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers(
+            &state,
+            PlayerId(0),
+            ghalta,
+            &mut mana_cost,
+        );
+
+        match mana_cost {
+            ManaCost::Cost { generic, shards } => {
+                assert_eq!(generic, 5);
+                assert_eq!(shards, vec![ManaCostShard::Green, ManaCostShard::Green]);
+            }
             other => panic!("expected ManaCost::Cost, got {other:?}"),
         }
     }
@@ -12138,7 +13107,7 @@ mod tests {
                 dynamic_count: None,
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack];
+            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
             obj.static_definitions.push(def);
         }
 
@@ -12541,6 +13510,156 @@ mod tests {
     }
 
     #[test]
+    fn required_pay_x_life_additional_cost_sets_chosen_x_for_resolution() {
+        let mut state = setup_game_at_main_phase();
+        let own_creature = create_object(
+            &mut state,
+            CardId(12360),
+            PlayerId(0),
+            "Own Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opposing_creature = create_object(
+            &mut state,
+            CardId(12361),
+            PlayerId(1),
+            "Opposing Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for creature in [own_creature, opposing_creature] {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(5);
+            obj.base_toughness = Some(5);
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(12362),
+            PlayerId(0),
+            "Synthetic Deluge".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::NoCost;
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PumpAll {
+                    power: PtValue::Variable("-X".to_string()),
+                    toughness: PtValue::Variable("-X".to_string()),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ));
+        }
+
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CardId(12362),
+            &mut Vec::new(),
+        )
+        .expect("pay-X-life additional cost should prompt for X");
+        state.waiting_for = waiting;
+        match state.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 20),
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+        assert_eq!(state.players[0].life, 17);
+        assert_eq!(state.stack.len(), 1);
+
+        for _ in 0..5 {
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&own_creature].power, Some(2));
+        assert_eq!(state.objects[&own_creature].toughness, Some(2));
+        assert_eq!(state.objects[&opposing_creature].power, Some(2));
+        assert_eq!(state.objects[&opposing_creature].toughness, Some(2));
+    }
+
+    #[test]
+    fn toxic_deluge_style_x_life_additional_cost_still_pays_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_object(
+            &mut state,
+            CardId(12363),
+            PlayerId(0),
+            "Toxic Deluge Style Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 2,
+            };
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PumpAll {
+                    power: PtValue::Variable("-X".to_string()),
+                    toughness: PtValue::Variable("-X".to_string()),
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ));
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CardId(12363),
+            &mut Vec::new(),
+        )
+        .expect("X life additional cost should prompt before mana payment");
+        state.waiting_for = waiting;
+        match state.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 20),
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 5 }).unwrap();
+
+        assert_eq!(state.players[0].life, 15);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.stack.len(), 1);
+        match &state.stack[0].kind {
+            StackEntryKind::Spell {
+                ability: Some(ability),
+                ..
+            } => assert_eq!(ability.chosen_x, Some(5)),
+            other => panic!("expected spell on stack, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn cant_pay_cost_sacrifice_filters_forbidden_permanents_only() {
         let mut state = setup_game_at_main_phase();
         let spell = create_object(
@@ -12855,6 +13974,116 @@ mod tests {
         assert!(
             !ability.context.additional_cost_paid,
             "alternative costs are not additional costs"
+        );
+    }
+
+    #[test]
+    fn cast_without_mana_cost_option_checks_commander_control() {
+        let mut state = setup_game_at_main_phase();
+
+        let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+        let spell = state.objects.get_mut(&spell_id).unwrap();
+        spell.name = "Deadly Rollick Stand-In".to_string();
+        spell.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 3,
+        };
+        let abilities = Arc::make_mut(&mut spell.abilities);
+        abilities.clear();
+        abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        ));
+        spell.casting_options.push(
+            crate::types::ability::SpellCastingOption::free_cast().condition(
+                crate::types::ability::ParsedCondition::YouControlSubtypeCountAtLeast {
+                    subtype: "commander".to_string(),
+                    count: 1,
+                },
+            ),
+        );
+
+        let target_id = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), spell_id),
+            "without mana and without a commander, the printed-cost branch is not payable"
+        );
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(23),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Battlefield,
+        );
+        let commander = state.objects.get_mut(&commander_id).unwrap();
+        commander.card_types.core_types.push(CoreType::Artifact);
+        commander.is_commander = true;
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), spell_id),
+            "controlling a commander should make the free-cast option payable"
+        );
+
+        let mut events = Vec::new();
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(10), &mut events)
+            .expect("cast should reach the free-cast choice");
+        state.waiting_for = waiting;
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(
+                    AbilityCost::Mana {
+                        cost: ManaCost::NoCost
+                    },
+                    _
+                ),
+                ..
+            }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalCost { pay: true },
+        )
+        .expect("choosing the free-cast branch should cast the spell");
+
+        assert_eq!(state.stack.len(), 1);
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell on stack");
+        };
+        assert_eq!(
+            ability.targets,
+            vec![crate::types::ability::TargetRef::Object(target_id)]
         );
     }
 
@@ -13515,6 +14744,82 @@ mod tests {
             result,
             WaitingFor::ManaPayment {
                 convoke_mode: Some(ConvokeMode::Convoke),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn improvise_castability_preview_counts_untapped_artifacts_for_generic_cost() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_object(
+            &mut state,
+            CardId(29),
+            PlayerId(0),
+            "Kappa Cannoneer".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Improvise);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 5,
+            };
+        }
+        for index in 0..5 {
+            let artifact = create_object(
+                &mut state,
+                CardId(30 + index),
+                PlayerId(0),
+                format!("Artifact {}", index),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&artifact)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+        assert!(can_pay_cost_after_auto_tap(
+            &state,
+            PlayerId(0),
+            spell,
+            &state.objects[&spell].mana_cost
+        ));
+        assert!(can_cast_object_now(&state, PlayerId(0), spell));
+        let legal_actions = crate::ai_support::legal_actions(&state);
+        assert!(
+            legal_actions.iter().any(|action| matches!(
+                action,
+                GameAction::CastSpell {
+                    object_id,
+                    card_id,
+                    ..
+                } if *object_id == spell && *card_id == CardId(29)
+            )),
+            "legal actions must offer the Improvise cast when artifacts cover generic mana"
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(29),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Improvise),
                 ..
             }
         ));
@@ -15358,9 +16663,13 @@ mod tests {
             PlayerId(0),
             &mut events,
         );
-        assert!(events.iter().any(
-            |e| matches!(e, GameEvent::BecomesTarget { object_id, .. } if *object_id == target)
-        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::BecomesTarget {
+                target: TargetRef::Object(object_id),
+                ..
+            } if *object_id == target
+        )));
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
         ));
@@ -15403,6 +16712,13 @@ mod tests {
             PlayerId(0),
             &mut events,
         );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::BecomesTarget {
+                target: TargetRef::Player(PlayerId(1)),
+                ..
+            }
+        )));
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
         ));
@@ -15500,7 +16816,10 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                GameEvent::BecomesTarget { object_id, .. } if *object_id == creature
+                GameEvent::BecomesTarget {
+                    target: TargetRef::Object(object_id),
+                    ..
+                } if *object_id == creature
             )
         }));
         assert!(events.iter().any(|event| {
@@ -15869,6 +17188,7 @@ mod tests {
         obj.modal.as_mut().unwrap().constraints.push(
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Any,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -16114,7 +17434,7 @@ mod tests {
                         target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
@@ -16130,7 +17450,7 @@ mod tests {
                             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
                             owner_library: false,
                             enter_transformed: false,
-                            under_your_control: false,
+                            enters_under: None,
                             enter_tapped: false,
                             enters_attacking: false,
                             up_to: false,
@@ -16646,6 +17966,165 @@ mod tests {
             }
             _ => panic!("expected Spell on stack"),
         }
+    }
+
+    #[test]
+    fn modal_x_target_legality_chooses_x_before_targets() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(0),
+            "Test Kozilek Command".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::X,
+                    ManaCostShard::Colorless,
+                    ManaCostShard::Colorless,
+                ],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: "Eldrazi Spawn".to_string(),
+                    power: PtValue::Fixed(0),
+                    toughness: PtValue::Fixed(1),
+                    types: vec![
+                        "Creature".to_string(),
+                        "Eldrazi".to_string(),
+                        "Spawn".to_string(),
+                    ],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            ));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                        },
+                    ])),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            ));
+            obj.modal = Some(crate::types::ability::ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 2,
+                mode_descriptions: vec![
+                    "Create X Eldrazi Spawn tokens.".to_string(),
+                    "Exile target creature with mana value X or less.".to_string(),
+                ],
+                ..Default::default()
+            });
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(1),
+            "Two Drop".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let other_creature = create_object(
+            &mut state,
+            CardId(63),
+            PlayerId(1),
+            "Other Two Drop".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 4);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(61), &mut events).unwrap();
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![0, 1], &mut events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "X must be chosen before building target slots whose legality depends on X"
+        );
+
+        state.waiting_for = apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
+            .unwrap()
+            .waiting_for;
+        match &state.waiting_for {
+            WaitingFor::TargetSelection { target_slots, .. } => {
+                assert_eq!(target_slots.len(), 1);
+                assert!(target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(creature)));
+                assert!(target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(other_creature)));
+            }
+            other => panic!("expected target selection after choosing X, got {other:?}"),
+        }
+
+        state.waiting_for = apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(creature)],
+            },
+        )
+        .unwrap()
+        .waiting_for;
+
+        stack::resolve_top(&mut state, &mut events);
+        assert_eq!(state.objects[&creature].zone, Zone::Exile);
+        let spawn_count = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].name == "Eldrazi Spawn")
+            .count();
+        assert_eq!(spawn_count, 2);
     }
 
     #[test]
@@ -19371,7 +20850,7 @@ mod tests {
         };
 
         let chosen: Vec<ObjectId> = exile_cards.iter().copied().take(3).collect();
-        let _waiting2 = super::casting_costs::handle_exile_for_cost(
+        let waiting2 = super::casting_costs::handle_exile_for_cost(
             &mut state,
             PlayerId(0),
             crate::types::zones::ExileCostSourceZone::Graveyard,
@@ -19383,8 +20862,34 @@ mod tests {
         )
         .expect("exile cost payment should succeed");
 
-        // After exile cost, the flow should auto-resolve the Phyrexian mana
-        // cost ({U/P}) by paying 2 life (no mana available).
+        // CR 107.4f + CR 601.2h: After the exile portion is paid, the Phyrexian
+        // {U/P} shard is `LifeOnly` (empty pool, 20 life), so the engine pauses to
+        // let the caster confirm or cancel rather than silently deducting life
+        // (issue #704). Submitting `PayLife` finalizes the cast and deducts 2 life.
+        match waiting2 {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(matches!(
+                    shards[0].options,
+                    crate::types::game_state::ShardOptions::LifeOnly
+                ));
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: life must not be deducted before the caster confirms"
+        );
+
+        let choices = vec![crate::types::game_state::ShardChoice::PayLife];
+        super::casting_costs::finalize_mana_payment_with_phyrexian_choices(
+            &mut state,
+            PlayerId(0),
+            &choices,
+            &mut events,
+        )
+        .expect("resume with PayLife must succeed");
+
         assert_eq!(
             state.players[0].life,
             life_before - 2,
@@ -20486,10 +21991,15 @@ mod tests {
         obj_id
     }
 
-    /// CR 107.4f + CR 118.3b + CR 119.4: Paying a Phyrexian shard with life
-    /// actually deducts 2 life from the caster.
+    /// CR 107.4f + CR 118.3b + CR 119.4 + CR 601.2h: Paying a Phyrexian shard with life
+    /// actually deducts 2 life from the caster. With no mana of the color, the engine
+    /// pauses at `PhyrexianPayment` with `LifeOnly` so the caster can confirm or cancel
+    /// (issue #704); submitting `PayLife` finalizes the cast and deducts 2 life.
     #[test]
     fn phyrexian_cast_with_life_deducts_life() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
         let mut state = setup_game_at_main_phase();
         let spell = create_phyrexian_instant_in_hand(
             &mut state,
@@ -20497,23 +22007,39 @@ mod tests {
             vec![ManaCostShard::PhyrexianBlue],
             0,
         );
-        // Empty mana pool → the {U/P} must auto-resolve to the 2-life fallback.
+        // Empty mana pool → the {U/P} must surface a `LifeOnly` confirm-or-cancel pause.
         let life_before = state.players[0].life;
 
-        let mut events = Vec::new();
-        let result = handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9117), &mut events);
-
-        assert!(
-            result.is_ok(),
-            "cast must succeed paying 2 life for {{U/P}}"
+        let cast = GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(0x9117),
+            targets: Vec::new(),
+        };
+        let result = apply_as_current(&mut state, cast).expect("announce cast");
+        match &result.waiting_for {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(matches!(shards[0].options, ShardOptions::LifeOnly));
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: life must not be deducted until the caster confirms"
         );
+
+        let submit = GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        };
+        let result = apply_as_current(&mut state, submit).expect("submit PayLife");
         assert_eq!(
             state.players[0].life,
             life_before - 2,
             "CR 118.3b: paying 2 life must reduce the life total by 2"
         );
         assert!(
-            events
+            result
+                .events
                 .iter()
                 .any(|e| matches!(e, GameEvent::LifeChanged { player_id, amount: -2 } if *player_id == PlayerId(0))),
             "CR 119.4: pay-life must emit a LifeChanged event with amount -2"
@@ -20622,6 +22148,9 @@ mod tests {
 
     #[test]
     fn phyrexian_spell_prepass_honors_spell_mana_restrictions() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
         let mut state = setup_game_at_main_phase();
         let spell = create_phyrexian_instant_in_hand(
             &mut state,
@@ -20637,19 +22166,37 @@ mod tests {
         );
         let life_before = state.players[0].life;
 
-        let waiting = handle_cast_spell(
-            &mut state,
-            PlayerId(0),
-            spell,
-            CardId(0x9117),
-            &mut Vec::new(),
-        )
-        .expect("restricted mana cannot pay this instant, but life can");
-
-        assert!(
-            !matches!(waiting, WaitingFor::PhyrexianPayment { .. }),
-            "spell-restricted mana must not create a false mana/life choice for an ineligible spell"
+        // CR 107.4f + CR 601.2h: The restricted blue mana cannot pay this instant, so
+        // the {U/P} shard surfaces as `LifeOnly`. The original spell-restriction intent
+        // is verified by the absence of a `ManaOrLife` choice; the engine still pauses
+        // so the caster can confirm or cancel the life-only payment (issue #704).
+        let cast = GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(0x9117),
+            targets: Vec::new(),
+        };
+        let result = apply_as_current(&mut state, cast).expect("announce cast");
+        match &result.waiting_for {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(
+                    matches!(shards[0].options, ShardOptions::LifeOnly),
+                    "spell-restricted mana must not create a false mana/life choice for an ineligible spell"
+                );
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "life unchanged at pause"
         );
+
+        // CR 107.4f: caster accepts the life-only payment.
+        let submit = GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        };
+        apply_as_current(&mut state, submit).expect("submit PayLife");
+
         assert_eq!(state.players[0].life, life_before - 2);
         assert_eq!(
             state.players[0].mana_pool.total(),
@@ -20658,10 +22205,15 @@ mod tests {
         );
     }
 
-    /// CR 107.4f + CR 118.3b: Multi-Phyrexian cost paid entirely with life —
-    /// each shard deducts 2, total life loss = 2 × shard_count.
+    /// CR 107.4f + CR 118.3b + CR 601.2h: Multi-Phyrexian cost paid entirely with life —
+    /// each shard deducts 2, total life loss = 2 × shard_count. With no mana, every
+    /// shard surfaces as `LifeOnly` and the engine pauses for the caster to confirm or
+    /// cancel before any life is deducted (issue #704).
     #[test]
     fn phyrexian_multi_shard_all_life_deducts_per_shard() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
         let mut state = setup_game_at_main_phase();
         let spell = create_phyrexian_instant_in_hand(
             &mut state,
@@ -20671,13 +22223,31 @@ mod tests {
         );
         let life_before = state.players[0].life;
 
-        let mut events = Vec::new();
-        let result = handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9117), &mut events);
-
-        assert!(
-            result.is_ok(),
-            "cast must succeed paying 4 life for {{W/P}}{{U/P}}"
+        let cast = GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(0x9117),
+            targets: Vec::new(),
+        };
+        let result = apply_as_current(&mut state, cast).expect("announce cast");
+        match &result.waiting_for {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 2);
+                assert!(shards
+                    .iter()
+                    .all(|s| matches!(s.options, ShardOptions::LifeOnly)));
+            }
+            other => panic!("expected PhyrexianPayment (two LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: life must not be deducted before the caster confirms"
         );
+
+        let submit = GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife, ShardChoice::PayLife],
+        };
+        apply_as_current(&mut state, submit).expect("submit two PayLife choices");
+
         assert_eq!(
             state.players[0].life,
             life_before - 4,
@@ -21441,8 +23011,15 @@ mod tests {
         /// Reverted-fix discriminator: without the parser/promotion plumbing,
         /// `can_cast_object_now` rejects this cast and `handle_cast_spell`
         /// errors with `ActionNotAllowed("Cannot pay mana cost")`.
+        /// CR 107.4f + CR 601.2h: K'rrik enables {{B}} life-payment with 0 black mana.
+        /// The shard surfaces as `LifeOnly` so the caster confirms or cancels before
+        /// any life is deducted (issue #704); submitting `PayLife` finalizes the cast
+        /// and deducts 2 life.
         #[test]
         fn krrik_offers_life_payment_for_black_shard() {
+            use crate::game::engine::apply_as_current;
+            use crate::types::game_state::{ShardChoice, ShardOptions};
+
             let mut state = setup_game_at_main_phase();
             add_krrik_static(&mut state, PlayerId(0));
             state.players[0].life = 20;
@@ -21453,16 +23030,38 @@ mod tests {
                 "CR 107.4f: K'rrik must enable {{B}} cast with 0 black mana + 20 life"
             );
 
-            let mut events = Vec::new();
             let life_before = state.players[0].life;
-            let _waiting =
-                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
-                    .expect("CR 107.4f: K'rrik {B} cast must succeed via auto life payment");
+            let cast = GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(0x9595),
+                targets: Vec::new(),
+            };
+            let result = apply_as_current(&mut state, cast)
+                .expect("CR 107.4f: K'rrik {B} cast announcement must succeed");
+            match &result.waiting_for {
+                WaitingFor::PhyrexianPayment { shards, .. } => {
+                    assert_eq!(shards.len(), 1);
+                    assert!(
+                        matches!(shards[0].options, ShardOptions::LifeOnly),
+                        "CR 107.4f: with no black mana, the K'rrik-promoted shard is LifeOnly"
+                    );
+                }
+                other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+            }
+            assert_eq!(
+                state.players[0].life, life_before,
+                "CR 601.2h: life must not be deducted before the caster confirms"
+            );
+
+            let submit = GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            };
+            apply_as_current(&mut state, submit).expect("CR 107.4f: PayLife submit");
 
             assert_eq!(
                 state.players[0].life,
                 life_before - 2,
-                "CR 118.3b: auto-decided K'rrik life payment must deduct exactly 2 life"
+                "CR 118.3b: K'rrik life payment must deduct exactly 2 life"
             );
             assert!(
                 state.stack.iter().any(|s| s.source_id == spell),
@@ -21618,11 +23217,12 @@ mod tests {
             }
         }
 
-        /// CR 107.4f + CR 107.4e: K'rrik promotes `{2/B}` to
+        /// CR 107.4f + CR 107.4e + CR 601.2h: K'rrik promotes `{2/B}` to
         /// `TwoGenericHybridPhyrexian(Black)` — the synthetic fusion arm.
         /// With 0 mana and ample life, only the 2-life route is viable so the
-        /// engine auto-decides: cast succeeds, life drops 2, spell on stack.
-        /// (No pause — single option, no `ManaOrLife` choice.)
+        /// shard surfaces as `LifeOnly`. The engine pauses for the caster to
+        /// confirm or cancel rather than silently deducting life (issue #704);
+        /// submitting `PayLife` finalizes the cast.
         ///
         /// Reverted-fix discriminator: without the new
         /// `TwoGenericHybridPhyrexian` variant + promotion table, the {2/B}
@@ -21630,6 +23230,9 @@ mod tests {
         /// (no black mana, no generic mana).
         #[test]
         fn krrik_promotes_two_generic_hybrid_black_shard() {
+            use crate::game::engine::apply_as_current;
+            use crate::types::game_state::{ShardChoice, ShardOptions};
+
             let mut state = setup_game_at_main_phase();
             add_krrik_static(&mut state, PlayerId(0));
             state.players[0].life = 20;
@@ -21640,15 +23243,35 @@ mod tests {
                 "CR 107.4f: TwoGenericHybridPhyrexian promotion must enable cast"
             );
 
-            let mut events = Vec::new();
             let life_before = state.players[0].life;
-            let _waiting =
-                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
-                    .expect("CR 107.4f: {2/B} promoted under K'rrik must cast via life");
+            let cast = GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(0x9595),
+                targets: Vec::new(),
+            };
+            let result = apply_as_current(&mut state, cast)
+                .expect("CR 107.4f: {2/B} promoted under K'rrik must announce");
+            match &result.waiting_for {
+                WaitingFor::PhyrexianPayment { shards, .. } => {
+                    assert_eq!(shards.len(), 1);
+                    assert!(matches!(shards[0].options, ShardOptions::LifeOnly));
+                }
+                other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+            }
+            assert_eq!(
+                state.players[0].life, life_before,
+                "CR 601.2h: life must not be deducted before the caster confirms"
+            );
+
+            let submit = GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife],
+            };
+            apply_as_current(&mut state, submit).expect("CR 107.4f: PayLife submit");
+
             assert_eq!(
                 state.players[0].life,
                 life_before - 2,
-                "CR 118.3b: auto-paid life for {{2/B/P}} shard must deduct 2 life"
+                "CR 118.3b: paid life for {{2/B/P}} shard must deduct 2 life"
             );
             assert!(
                 state.stack.iter().any(|s| s.source_id == spell),
@@ -22310,10 +23933,10 @@ mod tests {
         use crate::types::mana::ManaCost;
         use crate::types::statics::StaticMode;
 
-        /// Attach a fixed self-spell `ReduceCost` static (active in Hand) to a
-        /// hand card. With `affected = SelfRef` and `dynamic_count = None`, this
-        /// reduces the generic component of whatever base cost is being computed
-        /// — printed OR alternative — mirroring a flat cost reduction.
+        /// Attach a fixed self-spell `ReduceCost` static to a hand card. With
+        /// `affected = SelfRef` and `dynamic_count = None`, this reduces the
+        /// generic component of whatever base cost is being computed — printed
+        /// OR alternative — mirroring a flat cost reduction.
         fn add_self_cost_reduction(state: &mut GameState, obj_id: ObjectId, generic: u32) {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             let mut def = StaticDefinition::new(StaticMode::ReduceCost {
@@ -22322,7 +23945,7 @@ mod tests {
                 dynamic_count: None,
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack];
+            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
             obj.static_definitions.push(def);
         }
 
@@ -23753,7 +25376,7 @@ mod tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,

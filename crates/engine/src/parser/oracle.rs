@@ -356,7 +356,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             origin: Some(Zone::Hand),
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -4519,6 +4519,41 @@ mod tests {
     }
 
     #[test]
+    fn toxic_deluge_full_oracle_parses_x_life_cost_and_x_pump() {
+        let r = parse(
+            "As an additional cost to cast this spell, pay X life.\nAll creatures get -X/-X until end of turn.",
+            "Toxic Deluge",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+
+        assert_eq!(
+            r.additional_cost,
+            Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }))
+        );
+        assert_eq!(r.abilities.len(), 1);
+        match r.abilities[0].effect.as_ref() {
+            Effect::PumpAll {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(power, &PtValue::Variable("-X".to_string()));
+                assert_eq!(toughness, &PtValue::Variable("-X".to_string()));
+                assert_eq!(target, &TargetFilter::Typed(TypedFilter::creature()));
+            }
+            other => panic!("expected all-creature -X/-X pump, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn llanowar_elves_mana_ability() {
         let r = parse(
             "{T}: Add {G}.",
@@ -6419,6 +6454,155 @@ mod tests {
         }
     }
 
+    /// CR 205.3i + CR 614.1a + CR 605.1a: All three Urza lands share a single
+    /// parsed shape — an activated mana ability (`{T}: Add {C}.` per CR 605.1a)
+    /// plus a conditional `Add {C}{C}{C} instead` sub-ability whose "instead"
+    /// makes it a replacement effect (CR 614.1a) gated on the player
+    /// controlling the OTHER two Urza land subtypes (from the CR 205.3i land
+    /// type list: Mine, Power-Plant, Tower). The
+    /// critical assertion is the cross-naming of the `And` branches: a
+    /// regression that emits `[Mine, Mine]` instead of `[Mine, Power-Plant]`
+    /// would let Urza's Tower count itself as one of the required lands and
+    /// silently change the rules. Each row in the table below pins the exact
+    /// pair of subtypes the parsed condition must reference.
+    #[test]
+    fn urzas_lands_share_delta_shape() {
+        // (card name, oracle text, expected subtypes on the And conditions in
+        // the order the parser emits them)
+        let cases: [(&str, &str, [&str; 2], &[&str]); 3] = [
+            (
+                "Urza's Tower",
+                "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
+                ["Mine", "Power-Plant"],
+                &["Urza's", "Tower"],
+            ),
+            (
+                "Urza's Power Plant",
+                "{T}: Add {C}. If you control an Urza's Mine and an Urza's Tower, add {C}{C}{C} instead.",
+                ["Mine", "Tower"],
+                &["Urza's", "Power-Plant"],
+            ),
+            (
+                "Urza's Mine",
+                "{T}: Add {C}. If you control an Urza's Power-Plant and an Urza's Tower, add {C}{C}{C} instead.",
+                ["Power-Plant", "Tower"],
+                &["Urza's", "Mine"],
+            ),
+        ];
+
+        for (name, text, expected_subs, subtypes) in cases {
+            let r = parse(text, name, &[], &["Land"], subtypes);
+            assert_eq!(r.abilities.len(), 1, "{name}: expected one ability");
+            let ability = &r.abilities[0];
+
+            match ability.effect.as_ref() {
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { count },
+                    ..
+                } => assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 1 },
+                    "{name}: base mana must be exactly one colorless"
+                ),
+                other => panic!("{name}: expected base colorless mana, got {other:?}"),
+            }
+
+            let sub = ability
+                .sub_ability
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: expected conditional delta sub-ability"));
+
+            match sub.effect.as_ref() {
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { count },
+                    ..
+                } => assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 2 },
+                    "{name}: delta must be +2 colorless (total 3 minus base 1)"
+                ),
+                other => panic!("{name}: expected colorless mana delta, got {other:?}"),
+            }
+
+            let conditions = match sub
+                .condition
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: expected sub-ability condition"))
+            {
+                AbilityCondition::And { conditions } => conditions,
+                other => panic!("{name}: expected And condition, got {other:?}"),
+            };
+            assert_eq!(
+                conditions.len(),
+                2,
+                "{name}: And must have exactly two ControllerControlsMatching branches"
+            );
+
+            let extracted: Vec<&str> = conditions
+                .iter()
+                .map(|c| match c {
+                    AbilityCondition::ControllerControlsMatching {
+                        filter: TargetFilter::Typed(typed),
+                    } => typed
+                        .get_subtype()
+                        .unwrap_or_else(|| panic!("{name}: filter must carry a subtype")),
+                    other => panic!(
+                        "{name}: expected ControllerControlsMatching with Typed filter, got {other:?}"
+                    ),
+                })
+                .collect();
+
+            assert_eq!(
+                extracted,
+                expected_subs.to_vec(),
+                "{name}: And branches must reference the OTHER two Urza land subtypes — \
+                 a regression here lets the land count itself as one of the required pieces"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_ugin_labyrinth_exiled_card_mana_as_delta() {
+        let r = parse(
+            "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n{T}: Add {C}. If a card is exiled with Ugin's Labyrinth, add {C}{C} instead.",
+            "Ugin's Labyrinth",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        match ability.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected base colorless mana, got {other:?}"),
+        }
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional delta");
+        match sub.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected colorless mana delta, got {other:?}"),
+        }
+        match sub.condition.as_ref().expect("expected condition") {
+            AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected exiled-with-source condition, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_compound_activate_only_constraints() {
         let r = parse(
@@ -7055,6 +7239,7 @@ mod tests {
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -7083,6 +7268,7 @@ mod tests {
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    source: crate::types::ability::AdditionalCostPaymentSource::Any,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -10608,7 +10794,10 @@ mod tests {
             .iter()
             .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
         assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
-        assert_eq!(r.statics[0].active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            r.statics[0].active_zones,
+            vec![Zone::Hand, Zone::Stack, Zone::Command]
+        );
         assert!(
             r.parse_warnings
                 .iter()
@@ -11646,9 +11835,10 @@ mod tests {
 
         assert_eq!(
             result.additional_cost,
-            Some(AdditionalCost::Optional(AbilityCost::CollectEvidence {
-                amount: 8,
-            }))
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::CollectEvidence { amount: 8 },
+                repeatable: false,
+            })
         );
         assert_eq!(result.abilities.len(), 1);
         let ability = &result.abilities[0];

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::types::ability::{
-    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, EffectKind, OriginConstraint,
-    TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DestinationConstraint, EffectKind,
+    OriginConstraint, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -97,6 +98,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::RolledDie | TriggerMode::RolledDieOnce => match_rolled_die,
         TriggerMode::FlippedCoin => match_flipped_coin,
         TriggerMode::Clashed => match_clash,
+        TriggerMode::Vote => match_vote_resolved,
         TriggerMode::RingTemptsYou => match_ring_tempts_you,
         TriggerMode::DungeonCompleted => match_dungeon_completed,
         TriggerMode::RoomEntered => match_room_entered,
@@ -104,6 +106,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::FullyUnlock => match_fully_unlock,
         TriggerMode::TakesInitiative => match_takes_initiative,
         TriggerMode::Exploited => match_exploited,
+        TriggerMode::BecomeRenowned => match_become_renowned,
         TriggerMode::BecomeMonstrous => match_become_monstrous,
         TriggerMode::ManaExpend => match_mana_expend,
         TriggerMode::EntersOrAttacks => match_enters_or_attacks,
@@ -150,8 +153,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::ChaosEnsues
         | TriggerMode::Copied
         | TriggerMode::ConjureAll
-        | TriggerMode::Vote
-        | TriggerMode::BecomeRenowned
         | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
@@ -179,6 +180,23 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
 // ---------------------------------------------------------------------------
 
 /// Build a registry mapping every TriggerMode to its matcher function.
+/// Process-wide cached trigger-matcher registry.
+///
+/// The registry is a pure constant (`TriggerMode` → fn-pointer) with no
+/// per-call state, so it is built exactly once. `unimplemented_mechanics`
+/// consults it for every battlefield object on every `apply()`; rebuilding
+/// the map per call (619 objects × every action) was the dominant cost in
+/// display derivation. Callers on hot paths must use [`trigger_registry`];
+/// `build_trigger_registry` remains for the `LazyLock` initializer and tests
+/// that need an owned copy.
+static TRIGGER_REGISTRY: LazyLock<HashMap<TriggerMode, TriggerMatcher>> =
+    LazyLock::new(build_trigger_registry);
+
+/// Cached accessor for the trigger-matcher registry. Built once on first use.
+pub fn trigger_registry() -> &'static HashMap<TriggerMode, TriggerMatcher> {
+    &TRIGGER_REGISTRY
+}
+
 pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     let mut r: HashMap<TriggerMode, TriggerMatcher> = HashMap::new();
 
@@ -318,6 +336,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 701.30: Clash trigger
     r.insert(TriggerMode::Clashed, match_clash);
 
+    // CR 701.38: Vote trigger
+    r.insert(TriggerMode::Vote, match_vote_resolved);
+
     // CR 701.54: Ring tempts you trigger
     r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
 
@@ -338,6 +359,8 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // CR 701.37b: "When ~ becomes monstrous" — self-trigger on Monstrosity resolution.
     r.insert(TriggerMode::BecomeMonstrous, match_become_monstrous);
+    // CR 702.112b: "When ~ becomes renowned" — self-trigger on Renown resolution.
+    r.insert(TriggerMode::BecomeRenowned, match_become_renowned);
 
     // CR 700.14: Expend trigger — cumulative mana spent on spells
     r.insert(TriggerMode::ManaExpend, match_mana_expend);
@@ -383,8 +406,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ChaosEnsues,
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
-        TriggerMode::Vote,
-        TriggerMode::BecomeRenowned,
         TriggerMode::Abandoned,
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
@@ -647,12 +668,15 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PermanentSacrificed { object_id, .. }
         | GameEvent::PermanentTapped { object_id, .. }
         | GameEvent::PermanentUntapped { object_id } => count_one(*object_id),
-        // CR 120.3: Damage dealt to an object yields the damaged object as
-        // subject. Damage dealt to a player has no object subject.
-        GameEvent::DamageDealt { target, .. } => match target {
-            TargetRef::Object(id) => count_one(*id),
-            TargetRef::Player(_) => 0,
-        },
+        // Object target events yield the affected object as subject. Player
+        // target events carry no object subject; player scoping lives on
+        // `valid_target`.
+        GameEvent::DamageDealt { target, .. } | GameEvent::BecomesTarget { target, .. } => {
+            match target {
+                TargetRef::Object(id) => count_one(*id),
+                TargetRef::Player(_) => 0,
+            }
+        }
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
@@ -688,7 +712,6 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::BlockersDeclared { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
-        | GameEvent::BecomesTarget { .. }
         | GameEvent::VehicleCrewed { .. }
         | GameEvent::Stationed { .. }
         | GameEvent::Saddled { .. }
@@ -746,6 +769,15 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint) -> bool {
+    match constraint {
+        DestinationConstraint::Any => true,
+        DestinationConstraint::Equals(expected) => zone == *expected,
+        DestinationConstraint::NotEquals(excluded) => zone != *excluded,
+        DestinationConstraint::OneOf(zones) => zones.contains(&zone),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core Trigger Matchers (~20 with real logic)
 // ---------------------------------------------------------------------------
@@ -757,6 +789,7 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
 fn zone_change_clause_matches(
     origin: &OriginConstraint,
     destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
     valid_card: Option<&TargetFilter>,
     from: &Option<Zone>,
     to: &Zone,
@@ -781,6 +814,9 @@ fn zone_change_clause_matches(
         if dest != to {
             return false;
         }
+    }
+    if !destination_matches_constraint(*to, destination_constraint) {
+        return false;
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_source(state, source_id);
@@ -820,6 +856,7 @@ pub(super) fn match_changes_zone(
                 zone_change_clause_matches(
                     &clause.origin,
                     clause.destination.as_ref(),
+                    &clause.destination_constraint,
                     clause.valid_card.as_ref(),
                     from,
                     to,
@@ -843,6 +880,7 @@ pub(super) fn match_changes_zone(
         zone_change_clause_matches(
             &origin,
             trigger.destination.as_ref(),
+            &trigger.destination_constraint,
             trigger.valid_card.as_ref(),
             from,
             to,
@@ -1640,7 +1678,7 @@ pub(super) fn match_becomes_target(
     state: &GameState,
 ) -> bool {
     let GameEvent::BecomesTarget {
-        object_id,
+        target,
         source_id: targeting_spell_id,
     } = event
     else {
@@ -1673,11 +1711,20 @@ pub(super) fn match_becomes_target(
         }
     }
 
-    // Check if the targeted object matches the trigger's valid_card filter
-    if trigger.valid_card.is_some() {
-        valid_card_matches(trigger, state, *object_id, source_id)
-    } else {
-        *object_id == source_id
+    match target {
+        TargetRef::Object(object_id) => {
+            // Check if the targeted object matches the trigger's valid_card filter.
+            if trigger.valid_card.is_some() {
+                valid_card_matches(trigger, state, *object_id, source_id)
+            } else {
+                *object_id == source_id
+            }
+        }
+        TargetRef::Player(player_id) => {
+            trigger.valid_card.is_none()
+                && trigger.valid_target.is_some()
+                && valid_player_matches(trigger, state, *player_id, source_id)
+        }
     }
 }
 
@@ -2194,6 +2241,31 @@ pub(super) fn match_exploited(
     )
 }
 
+/// CR 702.112b: "When [subject] becomes renowned" — fires when Renown
+/// resolution gives a permanent the renowned designation.
+pub(super) fn match_become_renowned(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::EffectResolved {
+        kind: EffectKind::Renown,
+        source_id: renowned_id,
+    } = event
+    else {
+        return false;
+    };
+
+    if let Some(filter) = &trigger.valid_source {
+        return target_filter_matches_object(state, *renowned_id, filter, source_id);
+    }
+    if let Some(filter) = &trigger.valid_card {
+        return target_filter_matches_object(state, *renowned_id, filter, source_id);
+    }
+    *renowned_id == source_id
+}
+
 /// CR 701.37b: "When ~ becomes monstrous" — self-trigger only.
 /// Fires when EffectResolved::Monstrosity is emitted for this source.
 pub(super) fn match_become_monstrous(
@@ -2297,10 +2369,21 @@ pub(super) fn match_leaves_battlefield(
     state: &GameState,
 ) -> bool {
     if let GameEvent::ZoneChanged {
-        object_id, from, ..
+        object_id,
+        from,
+        to,
+        ..
     } = event
     {
         if *from != Some(Zone::Battlefield) {
+            return false;
+        }
+        if let Some(destination) = trigger.destination {
+            if destination != *to {
+                return false;
+            }
+        }
+        if !destination_matches_constraint(*to, &trigger.destination_constraint) {
             return false;
         }
         valid_card_matches(trigger, state, *object_id, source_id)
@@ -2356,8 +2439,11 @@ pub(super) fn match_damage_received(
         ..
     } = event
     {
-        if matches!(trigger.damage_kind, DamageKindFilter::CombatOnly) && !is_combat {
-            return false;
+        match trigger.damage_kind {
+            DamageKindFilter::Any => {}
+            DamageKindFilter::CombatOnly if !is_combat => return false,
+            DamageKindFilter::NoncombatOnly if *is_combat => return false,
+            DamageKindFilter::CombatOnly | DamageKindFilter::NoncombatOnly => {}
         }
         // CR 603.2 + CR 120.1: Per-event damage-amount threshold. Mirrors
         // `match_damage_done` so a "is dealt N or more damage" trigger sets
@@ -2618,6 +2704,18 @@ pub(super) fn match_clash(
         }
         _ => false,
     }
+}
+
+/// CR 701.38: Match vote-resolved events.
+/// "Whenever players finish voting" fires once when all votes for a vote
+/// instruction have been cast and tallied.
+pub(super) fn match_vote_resolved(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::VoteResolved { .. })
 }
 
 /// CR 309.7: Match dungeon completion events.
@@ -4307,6 +4405,7 @@ mod tests {
             ZoneChangeClause {
                 origin: OriginConstraint::Equals(Zone::Battlefield),
                 destination: Some(Zone::Graveyard),
+                destination_constraint: DestinationConstraint::Any,
                 valid_card: None,
             },
             // Clause 2: a creature card put into a graveyard from anywhere
@@ -4314,12 +4413,14 @@ mod tests {
             ZoneChangeClause {
                 origin: OriginConstraint::NotEquals(Zone::Battlefield),
                 destination: Some(Zone::Graveyard),
+                destination_constraint: DestinationConstraint::Any,
                 valid_card: None,
             },
             // Clause 3: a creature card leaves the graveyard (any destination).
             ZoneChangeClause {
                 origin: OriginConstraint::Equals(Zone::Graveyard),
                 destination: None,
+                destination_constraint: DestinationConstraint::Any,
                 valid_card: None,
             },
         ];
@@ -4407,6 +4508,7 @@ mod tests {
                 Zone::Command,
             ]),
             destination: Some(Zone::Battlefield),
+            destination_constraint: DestinationConstraint::Any,
             valid_card: None,
         }];
 
@@ -4700,6 +4802,41 @@ mod tests {
             Vec::new(),
         );
         assert!(match_changes_zone(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn leaves_battlefield_without_dying_rejects_graveyard_destination() {
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::LeavesBattlefield);
+        trigger.destination_constraint = DestinationConstraint::NotEquals(Zone::Graveyard);
+
+        let to_exile = zone_changed_event(
+            ObjectId(5),
+            Zone::Battlefield,
+            Zone::Exile,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(match_leaves_battlefield(
+            &to_exile,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        let to_graveyard = zone_changed_event(
+            ObjectId(5),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!match_leaves_battlefield(
+            &to_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
     }
 
     #[test]
@@ -6419,7 +6556,7 @@ mod tests {
 
         // Event: trigger_owner becomes the target of spell_id
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
         };
         // No valid_card, so fallback: event.object_id == source_id param
@@ -6440,7 +6577,7 @@ mod tests {
 
         // Event: trigger_owner becomes the target of an activated ability
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
         };
         assert!(!match_becomes_target(
@@ -6460,10 +6597,91 @@ mod tests {
 
         // Event: trigger_owner becomes the target of an activated ability — should still fire
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
         };
         assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_player_matches_valid_target_controller() {
+        let (mut state, spell_id) = setup_with_spell_on_stack(false);
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Player Target Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Player(PlayerId(0)),
+            source_id: spell_id,
+        };
+
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_player_rejects_wrong_player() {
+        let (mut state, spell_id) = setup_with_spell_on_stack(false);
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Player Target Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Player(PlayerId(1)),
+            source_id: spell_id,
+        };
+
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_player_rejects_object_subject_shape() {
+        let (mut state, spell_id) = setup_with_spell_on_stack(false);
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Player Target Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_source = Some(TargetFilter::StackSpell);
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Player(PlayerId(0)),
+            source_id: spell_id,
+        };
+
+        assert!(!match_becomes_target(
             &event,
             &trigger,
             trigger_owner,
@@ -6479,7 +6697,7 @@ mod tests {
         trigger.valid_source = Some(aura_stack_spell_filter());
 
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
         };
         assert!(match_becomes_target(
@@ -6498,7 +6716,7 @@ mod tests {
         trigger.valid_source = Some(aura_stack_spell_filter());
 
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
         };
         assert!(!match_becomes_target(
@@ -6517,7 +6735,7 @@ mod tests {
         trigger.valid_source = Some(aura_stack_spell_filter());
 
         let event = GameEvent::BecomesTarget {
-            object_id: trigger_owner,
+            target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
         };
         assert!(!match_becomes_target(
@@ -6593,6 +6811,56 @@ mod tests {
             excess: 0,
         };
         assert!(match_damage_done(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn damage_received_noncombat_only_rejects_combat() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Receiver".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.damage_kind = DamageKindFilter::NoncombatOnly;
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: true,
+            excess: 0,
+        };
+
+        assert!(!match_damage_received(&event, &trigger, source_id, &state));
+    }
+
+    #[test]
+    fn damage_received_noncombat_only_accepts_noncombat() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Receiver".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.damage_kind = DamageKindFilter::NoncombatOnly;
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+
+        assert!(match_damage_received(&event, &trigger, source_id, &state));
     }
 
     #[test]
@@ -6729,6 +6997,59 @@ mod tests {
                 "amount={amount} GE 3"
             );
         }
+    }
+
+    #[test]
+    fn damage_received_object_target_rejects_damage_to_other_objects() {
+        let mut state = setup();
+        let obliterator = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Phyrexian Obliterator".to_string(),
+            Zone::Battlefield,
+        );
+        let other_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Damage Source".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::DamageReceived);
+
+        let unrelated_damage = GameEvent::DamageDealt {
+            source_id: damage_source,
+            target: TargetRef::Object(other_creature),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_received(&unrelated_damage, &trigger, obliterator, &state),
+            "Obliterator-style DamageReceived triggers must ignore damage to other objects"
+        );
+
+        let self_damage = GameEvent::DamageDealt {
+            source_id: damage_source,
+            target: TargetRef::Object(obliterator),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(match_damage_received(
+            &self_damage,
+            &trigger,
+            obliterator,
+            &state
+        ));
     }
 
     /// CR 120.1: match_damage_received fires for player targets when valid_target=Controller
@@ -7861,6 +8182,102 @@ mod tests {
     }
 
     #[test]
+    fn become_renowned_trigger_matches_filtered_controlled_creature() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(343),
+            PlayerId(0),
+            "Valeron Wardens".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, source_id);
+        let controlled = create_object(
+            &mut state,
+            CardId(344),
+            PlayerId(0),
+            "Renown Ally".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, controlled);
+        let opponent = create_object(
+            &mut state,
+            CardId(345),
+            PlayerId(1),
+            "Opponent Renown Creature".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, opponent);
+        let trigger = parse_trigger_line(
+            "Whenever a creature you control becomes renowned, draw a card.",
+            "Valeron Wardens",
+        );
+
+        let controlled_event = GameEvent::EffectResolved {
+            kind: EffectKind::Renown,
+            source_id: controlled,
+        };
+        assert!(match_become_renowned(
+            &controlled_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+
+        let opponent_event = GameEvent::EffectResolved {
+            kind: EffectKind::Renown,
+            source_id: opponent,
+        };
+        assert!(!match_become_renowned(
+            &opponent_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+    }
+
+    #[test]
+    fn become_renowned_trigger_defaults_to_self_when_unfiltered() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(346),
+            PlayerId(0),
+            "Self Renown Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, source_id);
+        let other = create_object(
+            &mut state,
+            CardId(347),
+            PlayerId(0),
+            "Other Renown Creature".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, other);
+        let trigger = make_trigger(TriggerMode::BecomeRenowned);
+
+        assert!(match_become_renowned(
+            &GameEvent::EffectResolved {
+                kind: EffectKind::Renown,
+                source_id,
+            },
+            &trigger,
+            source_id,
+            &state
+        ));
+        assert!(!match_become_renowned(
+            &GameEvent::EffectResolved {
+                kind: EffectKind::Renown,
+                source_id: other,
+            },
+            &trigger,
+            source_id,
+            &state
+        ));
+    }
+
+    #[test]
     fn sacrifice_blood_token_trigger_honors_token_property() {
         // CR 111.1 + CR 603.2 + CR 701.21: "Whenever you sacrifice a Blood token"
         // parses with FilterProp::Token, so a non-token object that happens to be a
@@ -8219,6 +8636,75 @@ mod tests {
             match_clash(&event2, &trigger, source, &state),
             "clash trigger must fire when controller is the opponent participant"
         );
+    }
+
+    /// CR 701.38: match_vote_resolved fires once on VoteResolved events.
+    #[test]
+    fn vote_resolved_trigger_fires_on_vote_resolved() {
+        let state = setup();
+        let trigger = make_trigger(TriggerMode::Vote);
+        let source = ObjectId(701);
+
+        let event = GameEvent::VoteResolved {
+            source_id: source,
+            tallies: vec![("friend".to_string(), 2), ("foe".to_string(), 1)],
+        };
+        assert!(
+            match_vote_resolved(&event, &trigger, source, &state),
+            "vote trigger must fire on VoteResolved"
+        );
+
+        let other = GameEvent::PlayerLost {
+            player_id: PlayerId(0),
+        };
+        assert!(
+            !match_vote_resolved(&other, &trigger, source, &state),
+            "vote trigger must not fire on unrelated events"
+        );
+    }
+
+    /// CR 603.2 + CR 701.38: parsed vote triggers must route through the
+    /// production trigger registry when a vote procedure finishes.
+    #[test]
+    fn parsed_vote_resolved_trigger_queues_from_process_triggers() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Model of Unity".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever players finish voting, draw a card.",
+            "Model of Unity",
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        crate::game::triggers::process_triggers(
+            &mut state,
+            &[GameEvent::VoteResolved {
+                source_id: source,
+                tallies: vec![("unity".to_string(), 2)],
+            }],
+        );
+
+        assert_eq!(state.stack.len(), 1);
+        let entry = state.stack.front().expect("expected queued trigger");
+        assert_eq!(entry.source_id, source);
+        assert_eq!(entry.controller, PlayerId(0));
+        assert!(matches!(
+            entry.kind,
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(GameEvent::VoteResolved { .. }),
+                ..
+            }
+        ));
     }
 
     /// Issue #311 end-to-end: parse the Undead Alchemist trigger line and

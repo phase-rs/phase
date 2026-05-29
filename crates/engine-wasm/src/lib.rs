@@ -6,6 +6,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_actions_full};
+use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::{
@@ -352,6 +353,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             main_deck: names,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            bracket_tier: Default::default(),
         };
         let payload = resolve_player_deck_list(db, &list);
         let profile = DeckProfile::analyze(&payload.main_deck);
@@ -591,6 +593,36 @@ pub fn initialize_game(
                 "error": true,
                 "reasons": reasons,
             }));
+        }
+
+        // cEDH bracket lock: enforced only when an AI seat runs CEDH difficulty
+        // (not merely when a deck carries a bracket-5 tag — bringing a B5 deck
+        // against a non-cEDH AI is allowed by spec section 5.5). Gating on AI
+        // difficulty is the correct "is this a cEDH game?" signal. Surfaced with
+        // a dedicated `cedh_bracket_violation` flag so the adapter maps it to
+        // AdapterErrorCode.BRACKET_VIOLATION rather than a generic deck-validation
+        // failure. Re-resolves the deck list to read each seat's bracket_tier;
+        // this only runs on the cEDH path.
+        if any_ai_difficulty_is_cedh(&deck_list.ai_difficulties) {
+            let cedh_error: Option<Vec<String>> = CARD_DB.with(|cell| {
+                let borrow = cell.borrow();
+                let db = borrow.as_ref().expect("CARD_DB presence checked above");
+                let payload = resolve_deck_list(db, &deck_list);
+                let all_decks: Vec<_> = std::iter::once(&payload.player)
+                    .chain(std::iter::once(&payload.opponent))
+                    .chain(payload.ai_decks.iter())
+                    .collect();
+                validate_cedh_bracket(&all_decks)
+                    .err()
+                    .map(|e| vec![e.to_string()])
+            });
+            if let Some(reasons) = cedh_error {
+                return to_js(&serde_json::json!({
+                    "error": true,
+                    "cedh_bracket_violation": true,
+                    "reasons": reasons,
+                }));
+            }
         }
 
         // Defense-in-depth: every seat must have at least one library card
@@ -1332,11 +1364,13 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
             // Stay at the name-only layer — `wasm.initialize_game` re-resolves
             // against `CARD_DB` when the game actually starts, so resolving
             // here would be wasted work and would force a name-vs-resolved
-            // shape coercion at every JS boundary.
+            // shape coercion at every JS boundary. The declared bracket_tier is
+            // carried through so a cEDH seat's declaration survives the round-trip.
             Ok(PlayerDeckList {
                 main_deck: deck_data.main_deck,
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
+                bracket_tier: deck_data.bracket_tier,
             })
         }
     }
@@ -1406,6 +1440,7 @@ mod bracket_estimate_tests {
             commander: vec!["Atraxa, Praetors' Voice".into()],
             main_deck: vec!["Smothering Tithe".into(), "Forest".into()],
             sideboard: vec![],
+            bracket_tier: Default::default(),
         };
         let result = estimate_bracket_inner(&deck);
         let est = result.expect("estimate present");
@@ -1422,6 +1457,7 @@ mod bracket_estimate_tests {
             commander: vec!["Cmdr".into()],
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
+            bracket_tier: Default::default(),
         };
         assert!(estimate_bracket_inner(&deck).is_none());
     }

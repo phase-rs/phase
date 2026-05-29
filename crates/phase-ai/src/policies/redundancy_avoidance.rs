@@ -300,6 +300,7 @@ fn redundancy_delta(
         Effect::Bounce {
             target,
             destination,
+            ..
         } => match destination {
             None | Some(Zone::Hand) => {
                 bounce_self_undo_redundancy(state, source_id, target, origin)
@@ -354,6 +355,7 @@ fn redundancy_delta(
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
         | Effect::BecomeCopy { .. }
@@ -434,6 +436,7 @@ fn redundancy_delta(
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
@@ -492,6 +495,10 @@ fn redundancy_delta(
         // attach pick. Its redundancy is the new Aura's grants vs. the
         // existing static layer — out of scope for this policy.
         | Effect::ReturnAsAura { .. }
+        // CR 701.12a: ExchangeLifeWithStat's value depends on the live gap
+        // between a player's life and the source's stat — no static redundancy
+        // signal (it never "does nothing" the way a duplicate keyword grant does).
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::ProcessRadCounters => None,
     }
 }
@@ -860,7 +867,7 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, PtValue, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, BounceSelection, PtValue, QuantityExpr, TargetFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::WaitingFor;
@@ -1370,6 +1377,7 @@ mod tests {
                     Effect::Bounce {
                         target: bounce_target,
                         destination,
+                        selection: BounceSelection::Targeted,
                     },
                 )),
         );
@@ -1474,6 +1482,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
         );
 

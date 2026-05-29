@@ -122,8 +122,8 @@ mod tests {
     use super::*;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-        QuantityExpr, TargetFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
+        ManaProduction, QuantityExpr, TargetFilter, TypedFilter,
     };
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::GameState;
@@ -191,7 +191,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::land()),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,

@@ -7,7 +7,7 @@
 //! lands phase by phase.
 
 use engine::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
     GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
     ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
@@ -2355,7 +2355,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2384,7 +2384,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                 target: TargetFilter::ParentTarget,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2398,7 +2398,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2822,7 +2822,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanent(target)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2834,7 +2834,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanents(filter)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2852,7 +2852,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanents(filter)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2863,6 +2863,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ReturnAnyNumberOfPermanentsToTheirOwnersHands(filter) => Effect::Bounce {
             target: convert_permanents(filter)?,
             destination: None,
+            selection: BounceSelection::Targeted,
         },
         // CR 400.7: Return to owner's hand — mass variant.
         // "Return each <filter> to its owner's hand." Mirrors
@@ -2872,6 +2873,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::PutEachPermanentIntoItsOwnersHand(filter) => Effect::Bounce {
             target: convert_permanents(filter)?,
             destination: None,
+            selection: BounceSelection::Targeted,
         },
 
         // CR 701.32: Sacrifice an effect on a permanent (rare; usually via cost).
@@ -2925,6 +2927,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::PutPermanentIntoItsOwnersHand(p) => Effect::Bounce {
             target: convert_permanent(p)?,
             destination: None,
+            selection: BounceSelection::Targeted,
         },
 
         // CR 401.1 + CR 608.2c: "Put [target permanent] on top of its owner's
@@ -2952,7 +2955,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: card_in_graveyard_to_filter(card)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2971,7 +2974,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: filter_mod::cards_in_graveyard_to_filter(cards)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -2999,7 +3002,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 },
                 owner_library: false,
                 enter_transformed: r.enter_transformed,
-                under_your_control: r.under_your_control,
+                enters_under: r.under_your_control.then_some(ControllerRef::You),
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
@@ -3023,7 +3026,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 target: card_in_graveyard_to_filter(card)?,
                 owner_library: false,
                 enter_transformed: r.enter_transformed,
-                under_your_control: r.under_your_control,
+                enters_under: r.under_your_control.then_some(ControllerRef::You),
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
@@ -3208,7 +3211,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: card_in_graveyard_to_filter(card)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -3309,6 +3312,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::PutAPermanentIntoItsOwnersHand(filter) => Effect::Bounce {
             target: convert_permanents(filter)?,
             destination: None,
+            selection: BounceSelection::Targeted,
         },
 
         // CR 701.3a + CR 701.3b: Attach. The mtgish shape is
@@ -3409,7 +3413,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 target: card_in_exile_to_filter(card)?,
                 owner_library: false,
                 enter_transformed: r.enter_transformed,
-                under_your_control: r.under_your_control,
+                enters_under: r.under_your_control.then_some(ControllerRef::You),
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
@@ -3428,7 +3432,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: card_in_graveyard_to_filter(card)?,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: false,
             enters_attacking: false,
             up_to: false,
@@ -3577,7 +3581,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 target: cards_in_hand_to_filter(cards)?,
                 owner_library: false,
                 enter_transformed: r.enter_transformed,
-                under_your_control: r.under_your_control,
+                enters_under: r.under_your_control.then_some(ControllerRef::You),
                 enter_tapped: r.enter_tapped,
                 enters_attacking: r.enters_attacking,
                 up_to: false,
@@ -6032,7 +6036,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         target: TargetFilter::Any,
         owner_library: false,
         enter_transformed: enter_repls.enter_transformed,
-        under_your_control: enter_repls.under_your_control,
+        enters_under: enter_repls.under_your_control.then_some(ControllerRef::You),
         enter_tapped: enter_repls.enter_tapped,
         enters_attacking: enter_repls.enters_attacking,
         up_to: false,
@@ -6094,7 +6098,7 @@ fn convert_multi_filter_search_library(
             target: TargetFilter::Any,
             owner_library: false,
             enter_transformed: enter_repls.enter_transformed,
-            under_your_control: enter_repls.under_your_control,
+            enters_under: enter_repls.under_your_control.then_some(ControllerRef::You),
             enter_tapped: enter_repls.enter_tapped,
             enters_attacking: enter_repls.enters_attacking,
             up_to: false,
@@ -6145,8 +6149,13 @@ fn group_filter_tag(group: &GroupFilter) -> String {
 struct EnterReplacements {
     /// CR 614.1: Object enters tapped.
     enter_tapped: bool,
-    /// CR 110.2: Object enters under the ability controller's control
-    /// (rather than its owner's).
+    /// CR 110.2a: Object enters under the ability controller's control
+    /// (rather than its owner's). Local bool carrier — mapped at the
+    /// `Effect::ChangeZone` boundary via
+    /// `enters_under: under_your_control.then_some(ControllerRef::You)`.
+    /// Only `ControllerRef::You` is producible from this AST, so a bool
+    /// is the natural local shape (Player-axis variants strict-fail in
+    /// `extract_enter_replacements`).
     under_your_control: bool,
     /// CR 712.2: Object enters showing its back face.
     enter_transformed: bool,
@@ -6163,7 +6172,7 @@ struct EnterReplacements {
 /// |------------------------------------------|-----------------------|
 /// | `EntersNormally`                         | (no-op marker)        |
 /// | `EntersTapped`                           | `enter_tapped`        |
-/// | `EntersUnderPlayersControl(Player::You)` | `under_your_control`  |
+/// | `EntersUnderPlayersControl(Player::You)` | `enters_under`        |
 /// | `EntersUnderOwnersControl`               | (no-op — engine default) |
 /// | `EntersTransformed`                      | `enter_transformed`   |
 /// | `EntersAttacking`                        | `enters_attacking`    |

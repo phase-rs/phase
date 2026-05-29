@@ -74,7 +74,9 @@
     "underAttack_other": "Von {{count}} Kreaturen angegriffen",
     "target": "Ziel",
     "copy": "Kopie",
-    "copyTooltip": "Spielstein-Kopie einer echten Karte"
+    "copyTooltip": "Spielstein-Kopie einer echten Karte",
+    "ringBearer": "Ring",
+    "ringBearerTooltip": "Ringträger"
   },
   "player": {
     "opponent": "Geg {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} Energiemarke",
     "energyAriaLabel_other": "{{count}} Energiemarken",
     "energyTooltip": "Energie: {{count}}",
-    "ringAriaLabel": "Der Eine Ring verlockt dich (Stufe {{level}})",
+    "ringAriaLabel": "Der Eine Ring verlockt dich (Stufe {{level}}), Ringträger: {{bearer}}",
     "ringTooltip": "Der Eine Ring verlockt dich — Stufe {{level}}",
+    "ringBearerTooltip": "Ringträger: {{name}}",
+    "noRingBearer": "keiner",
+    "noRingBearerTooltip": "Kein Ringträger",
+    "ringLevel1": "1. Der Ringträger ist legendär und kann nicht von Kreaturen mit größerer Stärke geblockt werden.",
+    "ringLevel2": "2. Wenn er angreift, ziehst du eine Karte und wirfst dann eine Karte ab.",
+    "ringLevel3": "3. Wenn er von einer Kreatur geblockt wird, opfert deren Beherrscher sie am Ende des Kampfes.",
+    "ringLevel4": "4. Wenn er einem Spieler Kampfschaden zufügt, verliert jeder Gegner 3 Lebenspunkte.",
     "radAriaLabel_one": "{{count}} Strahlungsmarke",
     "radAriaLabel_other": "{{count}} Strahlungsmarken",
     "radTooltip": "Strahlungsmarken: {{count}}",
@@ -434,6 +443,7 @@
     "blockersDeclared_one": "{{count}} Blocker zugeordnet",
     "blockersDeclared_other": "{{count}} Blocker zugeordnet",
     "becomesTarget": "Objekt {{objectId}} von {{sourceId}} anvisiert",
+    "becomesTargetPlayer": "{{player}} von {{sourceId}} anvisiert",
     "replacementApplied": "Ersatzeffekt angewendet: {{eventType}}",
     "companionRevealed": "{{player}} hat den Gefährten aufgedeckt: {{cardName}}",
     "companionMovedToHand": "{{player}} hat den Gefährten {{cardName}} auf die Hand genommen",
@@ -685,6 +695,13 @@
     "startMatch": "Partie starten",
     "startMatchWithOpponents": "Partie starten ({{count}} Geg.)",
     "deckNotLegal": "Das Deck ist nicht legal in {{format}}.",
+    "cedhWarning": "Dein Deck ist Bracket {{bracket}} gegen eine cEDH-KI – rechne mit einer schnellen Niederlage.",
+    "cedhWarningUntagged": "ohne Bracket",
+    "bracketViolation": {
+      "title": "cEDH-Bracket-Sperre",
+      "body": "Alle Decks an einem cEDH-Tisch müssen als Bracket 5 deklariert sein. Aktualisiere das Bracket deines Decks im Deckbauer und versuche es erneut.",
+      "returnToSetup": "Zurück zur Einrichtung"
+    },
     "selectDeckPrompt": "Wähle ein Deck",
     "commanderNote": "Commander: 100-Karten-Singleton, Kommandeurschaden bei {{threshold}}",
     "formatChip": {
@@ -875,6 +892,20 @@
       "title": "Exil",
       "subtitle_one": "Wähle {{count}} bleibende Karte fürs Exil",
       "subtitle_other": "Wähle {{count}} bleibende Karten fürs Exil"
+    },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "multiTarget": {
       "title": "Ziele wählen",
@@ -1360,5 +1391,9 @@
     "PostCombatMain": "Hauptphase 2",
     "End": "Endschritt",
     "Cleanup": "Aufräumen"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

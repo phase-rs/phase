@@ -74,7 +74,9 @@
     "underAttack_other": "Attaccato da {{count}} creature",
     "target": "Bersaglio",
     "copy": "Copia",
-    "copyTooltip": "Copia pedina di una carta reale"
+    "copyTooltip": "Copia pedina di una carta reale",
+    "ringBearer": "Anello",
+    "ringBearerTooltip": "Portatore dell'Anello"
   },
   "player": {
     "opponent": "Avv {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} segnalino energia",
     "energyAriaLabel_other": "{{count}} segnalini energia",
     "energyTooltip": "Energia: {{count}}",
-    "ringAriaLabel": "L'Anello ti tenta (livello {{level}})",
+    "ringAriaLabel": "L'Anello ti tenta (livello {{level}}), portatore dell'Anello: {{bearer}}",
     "ringTooltip": "L'Anello ti tenta — livello {{level}}",
+    "ringBearerTooltip": "Portatore dell'Anello: {{name}}",
+    "noRingBearer": "nessuno",
+    "noRingBearerTooltip": "Nessun portatore dell'Anello",
+    "ringLevel1": "1. Il portatore dell'Anello è leggendario e non può essere bloccato da creature con forza maggiore.",
+    "ringLevel2": "2. Quando attacca, pesca una carta, poi scarta una carta.",
+    "ringLevel3": "3. Quando viene bloccato da una creatura, il controllore di quella creatura la sacrifica alla fine del combattimento.",
+    "ringLevel4": "4. Quando infligge danno da combattimento a un giocatore, ogni avversario perde 3 punti vita.",
     "radAriaLabel_one": "{{count}} segnalino radiazione",
     "radAriaLabel_other": "{{count}} segnalini radiazione",
     "radTooltip": "Segnalini radiazione: {{count}}",
@@ -434,6 +443,7 @@
     "blockersDeclared_one": "{{count}} bloccante assegnato",
     "blockersDeclared_other": "{{count}} bloccanti assegnati",
     "becomesTarget": "Oggetto {{objectId}} bersagliato da {{sourceId}}",
+    "becomesTargetPlayer": "{{player}} bersagliato da {{sourceId}}",
     "replacementApplied": "Sostituzione applicata: {{eventType}}",
     "companionRevealed": "{{player}} ha rivelato il compagno: {{cardName}}",
     "companionMovedToHand": "{{player}} ha messo il compagno {{cardName}} in mano",
@@ -685,6 +695,13 @@
     "startMatch": "Avvia partita",
     "startMatchWithOpponents": "Avvia partita ({{count}} avv.)",
     "deckNotLegal": "Il mazzo non è legale in {{format}}.",
+    "cedhWarning": "Il tuo mazzo è di bracket {{bracket}} contro un'IA cEDH: preparati a perdere in fretta.",
+    "cedhWarningUntagged": "non assegnato",
+    "bracketViolation": {
+      "title": "Blocco bracket cEDH",
+      "body": "Tutti i mazzi a un tavolo cEDH devono essere dichiarati bracket 5. Aggiorna il bracket del tuo mazzo nel costruttore di mazzi e riprova.",
+      "returnToSetup": "Torna alla configurazione"
+    },
     "selectDeckPrompt": "Seleziona un mazzo",
     "commanderNote": "Commander: 100 carte singleton, danno da comandante a {{threshold}}",
     "formatChip": {
@@ -875,6 +892,20 @@
       "title": "Esilia",
       "subtitle_one": "Scegli {{count}} permanente da esiliare",
       "subtitle_other": "Scegli {{count}} permanenti da esiliare"
+    },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "multiTarget": {
       "title": "Scegli bersagli",
@@ -1360,5 +1391,9 @@
     "PostCombatMain": "Fase principale 2",
     "End": "Sottofase finale",
     "Cleanup": "Ripulitura"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

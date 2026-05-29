@@ -74,7 +74,9 @@
     "underAttack_other": "Atacado por {{count}} criaturas",
     "target": "Alvo",
     "copy": "Cópia",
-    "copyTooltip": "Cópia em ficha de uma carta real"
+    "copyTooltip": "Cópia em ficha de uma carta real",
+    "ringBearer": "Anel",
+    "ringBearerTooltip": "Portador do Anel"
   },
   "player": {
     "opponent": "Op {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} marcador de energia",
     "energyAriaLabel_other": "{{count}} marcadores de energia",
     "energyTooltip": "Energia: {{count}}",
-    "ringAriaLabel": "O Anel o tenta (nível {{level}})",
+    "ringAriaLabel": "O Anel o tenta (nível {{level}}), portador do Anel: {{bearer}}",
     "ringTooltip": "O Anel o tenta — nível {{level}}",
+    "ringBearerTooltip": "Portador do Anel: {{name}}",
+    "noRingBearer": "nenhum",
+    "noRingBearerTooltip": "Nenhum portador do Anel",
+    "ringLevel1": "1. O portador do Anel é lendário e não pode ser bloqueado por criaturas com poder maior.",
+    "ringLevel2": "2. Quando ele ataca, compre uma carta e depois descarte uma carta.",
+    "ringLevel3": "3. Quando ele for bloqueado por uma criatura, o controlador daquela criatura a sacrifica no final do combate.",
+    "ringLevel4": "4. Quando ele causa dano de combate a um jogador, cada oponente perde 3 pontos de vida.",
     "radAriaLabel_one": "{{count}} marcador de radiação",
     "radAriaLabel_other": "{{count}} marcadores de radiação",
     "radTooltip": "Marcadores de radiação: {{count}}",
@@ -434,6 +443,7 @@
     "blockersDeclared_one": "{{count}} bloqueador atribuído",
     "blockersDeclared_other": "{{count}} bloqueadores atribuídos",
     "becomesTarget": "Objeto {{objectId}} mirado por {{sourceId}}",
+    "becomesTargetPlayer": "{{player}} mirado por {{sourceId}}",
     "replacementApplied": "Substituição aplicada: {{eventType}}",
     "companionRevealed": "{{player}} revelou o companheiro: {{cardName}}",
     "companionMovedToHand": "{{player}} colocou o companheiro {{cardName}} na mão",
@@ -685,6 +695,13 @@
     "startMatch": "Iniciar Partida",
     "startMatchWithOpponents": "Iniciar Partida ({{count}} op.)",
     "deckNotLegal": "O deck não é válido em {{format}}.",
+    "cedhWarning": "Seu deck é bracket {{bracket}} contra uma IA cEDH — prepare-se para perder rápido.",
+    "cedhWarningUntagged": "sem bracket",
+    "bracketViolation": {
+      "title": "Bloqueio de bracket cEDH",
+      "body": "Todos os decks em uma mesa cEDH devem ser declarados como bracket 5. Atualize o bracket do seu deck no construtor de decks e tente novamente.",
+      "returnToSetup": "Voltar à configuração"
+    },
     "selectDeckPrompt": "Selecione um deck",
     "commanderNote": "Commander: singleton de 100 cartas, dano de comandante em {{threshold}}",
     "formatChip": {
@@ -875,6 +892,20 @@
       "title": "Exilar",
       "subtitle_one": "Escolha {{count}} permanente para exilar",
       "subtitle_other": "Escolha {{count}} permanentes para exilar"
+    },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "multiTarget": {
       "title": "Escolher Alvos",
@@ -1360,5 +1391,9 @@
     "PostCombatMain": "Fase principal 2",
     "End": "Etapa final",
     "Cleanup": "Limpeza"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { TargetRef, WaitingFor } from "../../adapter/types.ts";
@@ -46,6 +47,7 @@ export function ProliferateModal({
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const playerId = usePlayerId();
+  const hoverProps = useInspectHoverProps();
 
   const [selected, setSelected] = useState<TargetRef[]>(data.eligible);
 
@@ -108,6 +110,7 @@ export function ProliferateModal({
               key={key}
               type="button"
               aria-pressed={isSelected}
+              {...("Object" in target ? hoverProps(target.Object) : undefined)}
               onClick={() => handleToggle(target)}
               className={
                 gameButtonClass({

@@ -30,11 +30,15 @@ export function auto_pick(): any;
 
 /**
  * Create a multiplayer draft session. Used by the P2P host to initialize a
- * Premier or Traditional draft with human + bot seats.
+ * Premier or Traditional draft with human + bot seats from either a Set pool
+ * or a custom Cube list.
  *
- * - `set_pool_json`: serialized LimitedSetPool from draft-pools.json
+ * - `pool_input_json`: serialized `PoolInput` discriminated union
+ *   (`{ "type": "Set" | "Cube", "data": { ... } }`)
  * - `seats_json`: JSON array of SeatDescriptors
- * - `kind`: 0=Quick, 1=Premier, 2=Traditional
+ * - `kind`: 0=Quick, 1=Premier, 2=Traditional. The user-selected DraftKind
+ *   flows through to `DraftConfig.kind` unchanged. Tournament match format
+ *   (Bo1 for Premier, Bo3 for Traditional) is identical to set drafts.
  * - `seed`: RNG seed for deterministic pack generation
  * - `draft_code`: unique room identifier
  *
@@ -42,7 +46,7 @@ export function auto_pick(): any;
  * draft at a time per WASM instance). Returns the initial DraftPlayerView
  * for seat 0.
  */
-export function create_multiplayer_draft(set_pool_json: string, seats_json: string, kind: number, seed: number, draft_code: string, tournament_format: string, pod_policy: string): any;
+export function create_multiplayer_draft(pool_input_json: string, seats_json: string, kind: number, seed: number, draft_code: string, tournament_format: string, pod_policy: string): any;
 
 /**
  * Serialize the full DraftSession to JSON for host persistence.
@@ -107,6 +111,15 @@ export function init_panic_hook(): void;
  * Returns the number of cards loaded.
  */
 export function load_card_database(json_str: string): number;
+
+/**
+ * Mark a human seat as connected or disconnected. The host adapter calls
+ * this on guest disconnect/reconnect so `DraftPlayerView.seats[*].connected`
+ * reflects the runtime state. Rejects bot seats with `SeatIsBot`.
+ *
+ * Returns the DraftPlayerView for seat 0 (the host) after the update.
+ */
+export function set_seat_connected(seat: number, connected: boolean): any;
 
 /**
  * Start a multiplayer draft session (Premier or Traditional).
@@ -199,6 +212,7 @@ export interface InitOutput {
     readonly get_view_for_seat: (a: number) => [number, number, number];
     readonly import_draft_session: (a: number, b: number, c: number) => [number, number, number];
     readonly load_card_database: (a: number, b: number) => [number, number, number];
+    readonly set_seat_connected: (a: number, b: number) => [number, number, number];
     readonly start_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly start_quick_cube_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly start_quick_draft: (a: number, b: number, c: number, d: number) => [number, number, number];

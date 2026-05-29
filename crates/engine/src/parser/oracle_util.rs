@@ -568,6 +568,7 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
     "this planeswalker",
     "this battle",
     "this token",
+    "this spacecraft",
     // Enchantment subtypes used as self-references (193+ Saga cards, 28 Class, 16 Case, 4 Room)
     "this saga",
     "this class",

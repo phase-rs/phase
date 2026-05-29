@@ -74,7 +74,9 @@
     "underAttack_other": "Attaqué par {{count}} créatures",
     "target": "Cible",
     "copy": "Copie",
-    "copyTooltip": "Jeton-copie d'une vraie carte"
+    "copyTooltip": "Jeton-copie d'une vraie carte",
+    "ringBearer": "Anneau",
+    "ringBearerTooltip": "Porteur de l'Anneau"
   },
   "player": {
     "opponent": "Adv {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} marqueur énergie",
     "energyAriaLabel_other": "{{count}} marqueurs énergie",
     "energyTooltip": "Énergie : {{count}}",
-    "ringAriaLabel": "L'Anneau vous tente (niveau {{level}})",
+    "ringAriaLabel": "L'Anneau vous tente (niveau {{level}}), porteur de l'Anneau : {{bearer}}",
     "ringTooltip": "L'Anneau vous tente — niveau {{level}}",
+    "ringBearerTooltip": "Porteur de l'Anneau : {{name}}",
+    "noRingBearer": "aucun",
+    "noRingBearerTooltip": "Aucun porteur de l'Anneau",
+    "ringLevel1": "1. Le porteur de l'Anneau est légendaire et ne peut pas être bloqué par des créatures de force supérieure.",
+    "ringLevel2": "2. Quand il attaque, piochez une carte, puis défaussez-vous d'une carte.",
+    "ringLevel3": "3. Quand il devient bloqué par une créature, le contrôleur de cette créature la sacrifie à la fin du combat.",
+    "ringLevel4": "4. Quand il inflige des blessures de combat à un joueur, chaque adversaire perd 3 points de vie.",
     "radAriaLabel_one": "{{count}} marqueur rad",
     "radAriaLabel_other": "{{count}} marqueurs rad",
     "radTooltip": "Marqueurs rad : {{count}}",
@@ -434,6 +443,7 @@
     "blockersDeclared_one": "{{count}} bloqueur assigné",
     "blockersDeclared_other": "{{count}} bloqueurs assignés",
     "becomesTarget": "Objet {{objectId}} ciblé par {{sourceId}}",
+    "becomesTargetPlayer": "{{player}} ciblé par {{sourceId}}",
     "replacementApplied": "Remplacement appliqué : {{eventType}}",
     "companionRevealed": "{{player}} a révélé son compagnon : {{cardName}}",
     "companionMovedToHand": "{{player}} a mis le compagnon {{cardName}} dans sa main",
@@ -685,6 +695,13 @@
     "startMatch": "Démarrer le match",
     "startMatchWithOpponents": "Démarrer le match ({{count}} adv.)",
     "deckNotLegal": "Le deck n'est pas légal en {{format}}.",
+    "cedhWarning": "Votre deck est de bracket {{bracket}} face à une IA cEDH — attendez-vous à perdre vite.",
+    "cedhWarningUntagged": "non défini",
+    "bracketViolation": {
+      "title": "Verrou de bracket cEDH",
+      "body": "Tous les decks à une table cEDH doivent être déclarés bracket 5. Modifiez le bracket de votre deck dans le constructeur de deck et réessayez.",
+      "returnToSetup": "Retour à la configuration"
+    },
     "selectDeckPrompt": "Sélectionnez un deck",
     "commanderNote": "Commander : singleton de 100 cartes, blessures de commandant à {{threshold}}",
     "formatChip": {
@@ -875,6 +892,20 @@
       "title": "Exiler",
       "subtitle_one": "Choisissez {{count}} permanent à exiler",
       "subtitle_other": "Choisissez {{count}} permanents à exiler"
+    },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "multiTarget": {
       "title": "Choisir des cibles",
@@ -1360,5 +1391,9 @@
     "PostCombatMain": "Phase principale 2",
     "End": "Étape de fin",
     "Cleanup": "Nettoyage"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

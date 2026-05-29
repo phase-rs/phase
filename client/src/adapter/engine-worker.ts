@@ -84,7 +84,7 @@ type EngineRequest =
 type EngineResponse =
   | { type: "ready" }
   | { type: "result"; id: number; data: unknown }
-  | { type: "error"; id: number; message: string };
+  | { type: "error"; id: number; message: string; bracketViolation?: true };
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -100,6 +100,10 @@ function result(id: number, data: unknown): void {
 
 function error(id: number, message: string): void {
   respond({ type: "error", id, message });
+}
+
+function bracketViolationError(id: number, message: string): void {
+  respond({ type: "error", id, message, bracketViolation: true });
 }
 
 // ── Message Handler ──────────────────────────────────────────────────────
@@ -164,19 +168,24 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           msg.playerCount ?? undefined,
           msg.firstPlayer ?? undefined,
         );
-        // Engine returns { error: true, reasons: [...] } when deck validation fails
+        // Engine returns { error: true, cedh_bracket_violation: true, reasons: [...] }
+        // when the cEDH bracket lock fires. Preserve the violation flag so the
+        // client can throw a typed BracketViolationError rather than matching
+        // on a raw string substring.
         if (
           gameResult &&
           typeof gameResult === "object" &&
           "error" in gameResult &&
           gameResult.error
         ) {
-          const reasons =
-            (gameResult as { reasons?: string[] }).reasons ?? [];
-          error(
-            msg.id,
-            `Deck validation failed: ${reasons.join("; ")}`,
-          );
+          const envelope = gameResult as { reasons?: string[]; cedh_bracket_violation?: boolean };
+          const reasons = envelope.reasons ?? [];
+          const message = `Deck validation failed: ${reasons.join("; ")}`;
+          if (envelope.cedh_bracket_violation) {
+            bracketViolationError(msg.id, message);
+          } else {
+            error(msg.id, message);
+          }
           break;
         }
         result(msg.id, {

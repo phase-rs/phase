@@ -18,7 +18,7 @@ use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{EtbTapState, ProposedEvent, ReplacementId};
+use crate::types::proposed_event::{CounterMoveStage, EtbTapState, ProposedEvent, ReplacementId};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -227,7 +227,7 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
     }
 }
 
-fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
+pub(crate) fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
     matches!(
         mode,
         ReplacementMode::Optional { .. } | ReplacementMode::MayCost { .. }
@@ -1160,7 +1160,17 @@ fn lose_life_applier(
 // --- 7. AddCounter ---
 
 fn add_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    matches!(event, ProposedEvent::AddCounter { .. })
+    matches!(
+        event,
+        ProposedEvent::AddCounter { count, .. } if *count > 0
+    ) || matches!(
+        event,
+        ProposedEvent::MoveCounter {
+            stage: CounterMoveStage::Add,
+            add_count,
+            ..
+        } if *add_count > 0
+    )
 }
 
 fn add_counter_applier(
@@ -1178,41 +1188,71 @@ fn add_counter_applier(
     let Some(modification) = modification else {
         return ApplyResult::Modified(event);
     };
-    if let ProposedEvent::AddCounter {
-        actor,
-        object_id,
-        counter_type,
-        count,
-        applied,
-    } = event
-    {
-        // CR 614.1a: Modify counter count per replacement effect.
-        let new_count = match modification {
-            QuantityModification::Double => count.saturating_mul(2),
-            QuantityModification::Plus { value } => count.saturating_add(value),
-            QuantityModification::Minus { value } => count.saturating_sub(value),
-            // CR 614.6 + CR 614.7 + CR 122.1: "~ can't have counters put on it."
-            // — the proposed counter-placement event never happens
-            // (Melira's Keepers class). The replacement fires, but its outcome
-            // is to fully suppress the event rather than scale the count.
-            QuantityModification::Prevent => return ApplyResult::Prevented,
-        };
-        ApplyResult::Modified(ProposedEvent::AddCounter {
+    if matches!(modification, QuantityModification::Prevent) {
+        // CR 614.6 + CR 614.7 + CR 122.1: "~ can't have counters put on it."
+        // — the proposed counter-placement event never happens
+        // (Melira's Keepers class). The replacement fires, but its outcome
+        // is to fully suppress the event rather than scale the count.
+        return ApplyResult::Prevented;
+    }
+    let new_count = |count: u32| match modification {
+        QuantityModification::Double => count.saturating_mul(2),
+        QuantityModification::Plus { value } => count.saturating_add(value),
+        QuantityModification::Minus { value } => count.saturating_sub(value),
+        QuantityModification::Prevent => unreachable!(),
+    };
+
+    match event {
+        ProposedEvent::AddCounter {
             actor,
             object_id,
             counter_type,
-            count: new_count,
+            count,
             applied,
-        })
-    } else {
-        ApplyResult::Modified(event)
+        } => ApplyResult::Modified(ProposedEvent::AddCounter {
+            actor,
+            object_id,
+            counter_type,
+            count: new_count(count),
+            applied,
+        }),
+        ProposedEvent::MoveCounter {
+            actor,
+            source_id,
+            destination_id,
+            counter_type,
+            remove_count,
+            add_count,
+            stage: CounterMoveStage::Add,
+            applied,
+        } => ApplyResult::Modified(ProposedEvent::MoveCounter {
+            actor,
+            source_id,
+            destination_id,
+            counter_type,
+            remove_count,
+            add_count: new_count(add_count),
+            stage: CounterMoveStage::Add,
+            applied,
+        }),
+        event => ApplyResult::Modified(event),
     }
 }
 
 // --- 8. RemoveCounter ---
 
 fn remove_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    matches!(event, ProposedEvent::RemoveCounter { .. })
+    matches!(
+        event,
+        ProposedEvent::RemoveCounter { count, .. } if *count > 0
+    ) || matches!(
+        event,
+        ProposedEvent::MoveCounter {
+            stage: CounterMoveStage::Remove,
+            remove_count,
+            ..
+        } if *remove_count > 0
+    )
 }
 
 fn remove_counter_applier(
@@ -2196,6 +2236,16 @@ fn evaluate_replacement_condition(
     event: &ProposedEvent,
 ) -> bool {
     match condition {
+        ReplacementCondition::And { conditions } => conditions.iter().all(|condition| {
+            evaluate_replacement_condition(
+                condition,
+                controller,
+                source_id,
+                state,
+                affected_object_id,
+                event,
+            )
+        }),
         ReplacementCondition::UnlessControlsSubtype { subtypes } => {
             // "unless you control a [subtype]" → suppressed if controller has a matching permanent
             let controls_any = state.objects.values().any(|o| {
@@ -2339,6 +2389,7 @@ fn evaluate_replacement_condition(
                 crate::game::quantity::resolve_quantity(state, rhs, controller, source_id);
             comparator.evaluate(lhs_val, rhs_val)
         }
+        ReplacementCondition::HasMaxSpeed => super::speed::has_max_speed(state, controller),
         // CR 702.138c: "escapes with" — applies only when the source was cast via escape.
         // Check cast_from_zone on the entering permanent as a proxy for escape.
         ReplacementCondition::CastViaEscape => state
@@ -2516,6 +2567,13 @@ fn evaluate_replacement_condition(
                 .count();
             matching_count >= *minimum as usize
         }
+        // CR 611.3b + CR 716.2a: A Class-level static replacement applies only
+        // while the source Class enchantment is on the battlefield and at the
+        // gated level or higher.
+        ReplacementCondition::ClassLevelGE { level } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.class_level >= Some(*level)),
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.
@@ -2770,14 +2828,40 @@ pub fn find_applicable_replacements(
                     // the discriminator, so the engine honors that here.
                     // `None` and `Some(CounterMatch::Any)` accept any counter
                     // type (Doubling Season, modern wording).
-                    if let (
-                        Some(m),
-                        ProposedEvent::AddCounter {
-                            counter_type: ev_ct,
-                            ..
-                        },
-                    ) = (&repl_def.counter_match, event)
-                    {
+                    let event_counter_type = match (&repl_def.event, event) {
+                        (
+                            ReplacementEvent::AddCounter,
+                            ProposedEvent::AddCounter {
+                                counter_type: ev_ct,
+                                ..
+                            },
+                        )
+                        | (
+                            ReplacementEvent::AddCounter,
+                            ProposedEvent::MoveCounter {
+                                stage: CounterMoveStage::Add,
+                                counter_type: ev_ct,
+                                ..
+                            },
+                        )
+                        | (
+                            ReplacementEvent::RemoveCounter,
+                            ProposedEvent::RemoveCounter {
+                                counter_type: ev_ct,
+                                ..
+                            },
+                        )
+                        | (
+                            ReplacementEvent::RemoveCounter,
+                            ProposedEvent::MoveCounter {
+                                stage: CounterMoveStage::Remove,
+                                counter_type: ev_ct,
+                                ..
+                            },
+                        ) => Some(ev_ct),
+                        _ => None,
+                    };
+                    if let (Some(m), Some(ev_ct)) = (&repl_def.counter_match, event_counter_type) {
                         if !m.matches(ev_ct) {
                             continue;
                         }
@@ -3045,10 +3129,18 @@ impl EventModifiers {
     /// An ability that is *purely* a Tap SelfRef / PutCounter-SelfRef / ChangeZone has no
     /// remaining work after its modifiers are applied to the event.
     fn has_only_event_modifier(ability: Option<&AbilityDefinition>) -> bool {
-        let Some(def) = ability else {
+        let Some(mut current) = ability else {
             return false;
         };
-        Self::is_event_modifier_effect(&def.effect) && def.sub_ability.is_none()
+        loop {
+            if !Self::is_event_modifier_effect(&current.effect) {
+                return false;
+            }
+            let Some(next) = current.sub_ability.as_deref() else {
+                return true;
+            };
+            current = next;
+        }
     }
 
     /// CR 614.1c: Walk the ability's sub_ability chain and find the first effect
@@ -3511,7 +3603,7 @@ fn apply_single_replacement(
 /// shapes default to MATERIAL — never auto-resolve a possibly order-sensitive
 /// set; this conservative default also covers self-replacement effects
 /// (CR 616.1a / CR 614.15).
-fn replacement_ordering_is_material(
+pub(crate) fn replacement_ordering_is_material(
     state: &GameState,
     candidates: &[ReplacementId],
     proposed: &ProposedEvent,
@@ -3684,7 +3776,7 @@ fn effect_overrides_controller(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::ChangeZone {
-            under_your_control: true,
+            enters_under: Some(_),
             ..
         }
     )
@@ -4053,6 +4145,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chained_etb_modifiers_do_not_stash_post_replacement_continuation() {
+        let mut enter_tapped = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+        );
+        enter_tapped.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Stun,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )));
+        let repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(enter_tapped)
+            .valid_card(TargetFilter::SelfRef);
+        let mut state = test_state_with_object(ObjectId(10), Zone::Hand, vec![repl]);
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+            enter_tapped,
+            enter_with_counters,
+            ..
+        }) = result
+        else {
+            panic!("expected Execute with ZoneChange, got {result:?}");
+        };
+
+        assert!(enter_tapped.resolve(false));
+        assert_eq!(enter_with_counters, vec![(CounterType::Stun, 1)]);
+        assert!(
+            state.post_replacement_continuation.is_none(),
+            "pure ETB modifier chains must not be replayed after the event"
+        );
+    }
+
     fn test_state_with_object(
         obj_id: ObjectId,
         zone: Zone,
@@ -4270,7 +4404,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -5339,7 +5473,7 @@ mod tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -5614,6 +5748,66 @@ mod tests {
             &ReplacementCondition::SourceTappedState { tapped: false },
             PlayerId(0),
             ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn and_condition_requires_all_children() {
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        state.objects.get_mut(&ObjectId(10)).unwrap().tapped = true;
+
+        let condition = ReplacementCondition::And {
+            conditions: vec![
+                ReplacementCondition::SourceTappedState { tapped: true },
+                ReplacementCondition::UnlessYourTurn,
+            ],
+        };
+
+        state.active_player = PlayerId(1);
+        assert!(evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+
+        state.active_player = PlayerId(0);
+        assert!(!evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn class_level_condition_requires_battlefield_source_at_level() {
+        let source = ObjectId(10);
+        let mut state = test_state_with_object(source, Zone::Battlefield, Vec::new());
+        state.objects.get_mut(&source).unwrap().class_level = Some(3);
+        let condition = ReplacementCondition::ClassLevelGE { level: 3 };
+
+        assert!(evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            source,
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+
+        state.objects.get_mut(&source).unwrap().zone = Zone::Graveyard;
+        assert!(!evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            source,
             &state,
             None,
             &dummy_begin_turn_event(),
@@ -6985,6 +7179,32 @@ mod tests {
     }
 
     #[test]
+    fn has_max_speed_condition_tracks_controller_speed() {
+        let mut state = GameState::new_two_player(42);
+        let condition = ReplacementCondition::HasMaxSpeed;
+
+        assert!(!evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(1),
+            &state,
+            None,
+            &dummy_begin_turn_event()
+        ));
+
+        state.players[0].speed = Some(4);
+
+        assert!(evaluate_replacement_condition(
+            &condition,
+            PlayerId(0),
+            ObjectId(1),
+            &state,
+            None,
+            &dummy_begin_turn_event()
+        ));
+    }
+
+    #[test]
     fn only_if_quantity_is_filtered_for_opponent_draws() {
         let repl = ReplacementDefinition::new(ReplacementEvent::Draw)
             .condition(ReplacementCondition::OnlyIfQuantity {
@@ -7127,6 +7347,41 @@ mod tests {
         assert!(
             find_applicable_replacements(&state2, &proposed_creature, &registry).is_empty(),
             "opponent player filter should not match damage to creatures"
+        );
+    }
+
+    #[test]
+    fn damage_target_filter_controller_only() {
+        let repl = damage_repl(DamageModification::Plus { value: 1 }).damage_target_filter(
+            DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Controller,
+            },
+        );
+        let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        let registry = build_replacement_registry();
+
+        let proposed_self = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &proposed_self, &registry).is_empty(),
+            "controller player filter should match damage to the replacement source controller"
+        );
+
+        let proposed_opponent = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &proposed_opponent, &registry).is_empty(),
+            "controller player filter should not match damage to opponents"
         );
     }
 

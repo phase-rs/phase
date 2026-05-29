@@ -74,7 +74,9 @@
     "underAttack_other": "Attacked by {{count}} creatures",
     "target": "Target",
     "copy": "Copy",
-    "copyTooltip": "Token copy of a real card"
+    "copyTooltip": "Token copy of a real card",
+    "ringBearer": "Ring",
+    "ringBearerTooltip": "Ring-bearer"
   },
   "player": {
     "opponent": "Opp {{seat}}",
@@ -196,8 +198,15 @@
     "energyAriaLabel_one": "{{count}} energy counter",
     "energyAriaLabel_other": "{{count}} energy counters",
     "energyTooltip": "Energy: {{count}}",
-    "ringAriaLabel": "The Ring tempts you (level {{level}})",
+    "ringAriaLabel": "The Ring tempts you (level {{level}}), Ring-bearer: {{bearer}}",
     "ringTooltip": "The Ring tempts you — level {{level}}",
+    "ringBearerTooltip": "Ring-bearer: {{name}}",
+    "noRingBearer": "none",
+    "noRingBearerTooltip": "No Ring-bearer",
+    "ringLevel1": "1. Ring-bearer is legendary and can't be blocked by creatures with greater power.",
+    "ringLevel2": "2. When it attacks, draw a card, then discard a card.",
+    "ringLevel3": "3. When it becomes blocked by a creature, that creature's controller sacrifices it at end of combat.",
+    "ringLevel4": "4. When it deals combat damage to a player, each opponent loses 3 life.",
     "radAriaLabel_one": "{{count}} rad counter",
     "radAriaLabel_other": "{{count}} rad counters",
     "radTooltip": "Rad counters: {{count}}",
@@ -434,6 +443,7 @@
     "blockersDeclared_one": "{{count}} blocker assigned",
     "blockersDeclared_other": "{{count}} blockers assigned",
     "becomesTarget": "Object {{objectId}} targeted by {{sourceId}}",
+    "becomesTargetPlayer": "{{player}} targeted by {{sourceId}}",
     "replacementApplied": "Replacement applied: {{eventType}}",
     "companionRevealed": "{{player}} revealed companion: {{cardName}}",
     "companionMovedToHand": "{{player}} put companion {{cardName}} into hand",
@@ -685,6 +695,13 @@
     "startMatch": "Start Match",
     "startMatchWithOpponents": "Start Match ({{count}} opp.)",
     "deckNotLegal": "Deck is not legal in {{format}}.",
+    "cedhWarning": "Your deck is bracket {{bracket}} vs. a cEDH AI — expect to lose fast.",
+    "cedhWarningUntagged": "untagged",
+    "bracketViolation": {
+      "title": "cEDH bracket lock",
+      "body": "All decks at a cEDH table must be declared bracket 5. Update your deck's bracket in the deck builder and try again.",
+      "returnToSetup": "Return to setup"
+    },
     "selectDeckPrompt": "Select a deck",
     "commanderNote": "Commander: 100-card singleton, commander damage at {{threshold}}",
     "formatChip": {
@@ -875,6 +892,20 @@
       "title": "Exile",
       "subtitle_one": "Choose {{count}} permanent to exile",
       "subtitle_other": "Choose {{count}} permanents to exile"
+    },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "multiTarget": {
       "title": "Choose Targets",
@@ -1360,5 +1391,9 @@
     "PostCombatMain": "Main Phase 2",
     "End": "End Step",
     "Cleanup": "Cleanup"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

@@ -107,6 +107,10 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const isRingBearer = useGameStore((s) => {
+    const object = s.gameState?.objects[objectId];
+    return object ? s.gameState?.ring_bearer?.[String(object.controller)] === objectId : false;
+  });
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const tapRotation = usePreferencesStore((s) => s.tapRotation);
   const isCompactHeight = useIsCompactHeight();
@@ -529,6 +533,14 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
               className="absolute inset-0 z-20 bg-sky-500/25 mix-blend-screen pointer-events-none rounded-lg"
             />
           )}
+          {isRingBearer && (
+            <div
+              className="absolute bottom-1 left-1 z-20 rounded bg-amber-500/90 px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wide text-amber-950 shadow ring-1 ring-amber-100/70"
+              title={t("permanent.ringBearerTooltip")}
+            >
+              {t("permanent.ringBearer")}
+            </div>
+          )}
         </div>
       ) : (
         <>
@@ -598,6 +610,15 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
             >
               <span aria-hidden>⚔</span>
               {incomingAttackerCount > 1 && <span>×{incomingAttackerCount}</span>}
+            </div>
+          )}
+
+          {isRingBearer && (
+            <div
+              className="absolute bottom-1 left-1 z-20 rounded bg-amber-500/90 px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wide text-amber-950 shadow ring-1 ring-amber-100/70"
+              title={t("permanent.ringBearerTooltip")}
+            >
+              {t("permanent.ringBearer")}
             </div>
           )}
 

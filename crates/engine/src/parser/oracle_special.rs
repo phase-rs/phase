@@ -247,6 +247,9 @@ fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
 }
 
 /// CR 706: Try to parse a die roll table starting at line `i`.
+/// CR 706.2: Also extracts an optional "and add/subtract X" modifier
+/// from the header line so the resolver can shift the natural result before
+/// branch lookup (Deck of Many Things, Diviner's Portent, Gale's Redirection).
 pub(super) fn try_parse_die_roll_table(
     lines: &[&str],
     i: usize,
@@ -254,7 +257,7 @@ pub(super) fn try_parse_die_roll_table(
     kind: AbilityKind,
 ) -> Option<(AbilityDefinition, usize)> {
     let lower = line.to_lowercase();
-    let sides = parse_roll_die_sides(&lower)?;
+    let (sides, modifier) = parse_roll_die_sides_with_modifier(&lower)?;
 
     let mut branches = Vec::new();
     let mut has_branches = false;
@@ -285,25 +288,64 @@ pub(super) fn try_parse_die_roll_table(
         Effect::RollDie {
             sides,
             results: branches,
+            modifier,
         },
     );
     def.description = Some(line.to_string());
     Some((def, if has_branches { j } else { i + 1 }))
 }
 
-/// CR 706: Parse die side count from "roll a dN" and word-form "roll a six-sided die" patterns.
-fn parse_roll_die_sides(lower: &str) -> Option<u8> {
+/// CR 706.1a + CR 706.2: Parse the header line of a die-roll table, returning
+/// `(sides, optional_modifier)`. The modifier captures "and add/subtract X"
+/// suffixes attached to the roll command. Used by `try_parse_die_roll_table`
+/// so the same shape works at every parsing entry point (spell text, trigger
+/// text, activated effect text).
+fn parse_roll_die_sides_with_modifier(
+    lower: &str,
+) -> Option<(u8, Option<crate::types::ability::DieRollModifier>)> {
     let ((), rest) = nom_on_lower(lower, lower, |i| {
         value((), alt((tag("roll a d"), tag("rolls a d")))).parse(i)
     })?;
-    let rest = rest.trim_end_matches('.');
-    // Numeric form: "roll a d20", "roll a d6" — rest is "20", "6", etc.
-    if let Ok(n) = rest.parse::<u8>() {
-        return Some(n);
+    // Numeric form first; word-form below.
+    let digit_end = rest
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if digit_end > 0 {
+        if let Ok(sides) = rest[..digit_end].parse::<u8>() {
+            let after = &rest[digit_end..];
+            return Some((sides, parse_optional_modifier_suffix(after)));
+        }
     }
-    // Word-form: "roll a six-sided die" — the "roll a d" prefix consumed "d" which
-    // doesn't apply here, so fall back to word-form parsing on the full string.
-    parse_roll_die_sides_word_form(lower)
+    let sides = parse_roll_die_sides_word_form(lower)?;
+    Some((sides, None))
+}
+
+/// CR 706.2: Parse an optional " and (add|subtract) X" suffix attached to a
+/// die roll header. Returns `None` when the suffix is empty / purely
+/// punctuation; returns `None` (suffix dropped) when the suffix is non-empty
+/// but doesn't shape as a recognized modifier — the caller's outer parsing
+/// has already captured `sides`, and any wider trailing clause is handled by
+/// downstream chain parsing.
+fn parse_optional_modifier_suffix(after: &str) -> Option<crate::types::ability::DieRollModifier> {
+    let trimmed = after.trim().trim_end_matches(['.', ',', ';']).trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (after_and, _) = tag::<_, _, OracleError<'_>>("and ").parse(trimmed).ok()?;
+    let (modifier_text, sign) = alt((
+        value(true, tag::<_, _, OracleError<'_>>("add ")),
+        value(false, tag("subtract ")),
+    ))
+    .parse(after_and)
+    .ok()?;
+    let qty = crate::parser::oracle_quantity::parse_quantity_ref(modifier_text)?;
+    let value = crate::types::ability::QuantityExpr::Ref { qty };
+    Some(if sign {
+        crate::types::ability::DieRollModifier::Add { value }
+    } else {
+        crate::types::ability::DieRollModifier::Subtract { value }
+    })
 }
 
 /// CR 706: Parse word-form die patterns like "roll a six-sided die".

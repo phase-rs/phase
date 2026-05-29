@@ -1,7 +1,9 @@
 use std::sync::Mutex;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full};
+use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::CardDatabase;
+use engine::game::deck_loading::PlayerDeckPayload;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use std::collections::HashMap;
@@ -27,30 +29,63 @@ pub struct AppState {
     pub card_db: Mutex<Option<CardDatabase>>,
 }
 
+/// Structured error for `initialize_game` so the frontend can discriminate a
+/// cEDH bracket violation without substring-matching the Rust `Display` output.
+/// Serializes as `{ "kind": "...", "message": "..." }`, mirroring the WASM
+/// bridge's `cedh_bracket_violation` envelope flag — both transports surface the
+/// violation as a typed signal the adapter maps to `BRACKET_VIOLATION`.
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "message")]
+pub enum CommandError {
+    BracketViolation(String),
+    Generic(String),
+}
+
+impl CommandError {
+    fn generic(e: impl std::fmt::Display) -> Self {
+        Self::Generic(e.to_string())
+    }
+}
+
 #[tauri::command]
 pub fn initialize_game(
     state: tauri::State<AppState>,
     deck_data: Option<DeckPayload>,
     seed: Option<u64>,
     match_config: Option<MatchConfig>,
-) -> Result<ActionResult, String> {
+) -> Result<ActionResult, CommandError> {
     let seed = seed.unwrap_or(42);
     let mut game = GameState::new_two_player(seed);
     game.match_config = match_config.unwrap_or_default();
 
     if let Some(payload) = deck_data {
+        // Validate the table as a cEDH game only when any AI seat has CEDH
+        // difficulty. This prevents a spurious bracket-lock error when a user
+        // brings a bracket-5 tagged deck against a non-cEDH AI — that pairing
+        // is allowed by spec (section 5.5). Gating on AI difficulty (not deck
+        // bracket tier) is the correct signal for "is this a cEDH game?"
+        if any_ai_difficulty_is_cedh(&payload.ai_difficulties) {
+            let all_decks: Vec<&PlayerDeckPayload> =
+                std::iter::once(&payload.player)
+                    .chain(std::iter::once(&payload.opponent))
+                    .chain(payload.ai_decks.iter())
+                    .collect();
+            validate_cedh_bracket(&all_decks)
+                .map_err(|e| CommandError::BracketViolation(e.to_string()))?;
+        }
+
         // Canonical init sequence shared with WASM + server-core transports.
         // Passes the CardDatabase so `load_and_hydrate_decks` can populate
         // `back_face` on dual-faced cards (Adventure, Omen, MDFC, Transform,
         // Meld, Prepare). Frontend loads the DB once at adapter startup via
         // `load_card_database` — if that hasn't happened yet, `db` is None
         // and `load_and_hydrate_decks` logs a once-per-process warn.
-        let db_guard = state.card_db.lock().map_err(|e| e.to_string())?;
+        let db_guard = state.card_db.lock().map_err(CommandError::generic)?;
         load_and_hydrate_decks(&mut game, &payload, db_guard.as_ref());
     }
 
     let result = start_game(&mut game);
-    *state.game.lock().map_err(|e| e.to_string())? = Some(game);
+    *state.game.lock().map_err(CommandError::generic)? = Some(game);
 
     Ok(result)
 }

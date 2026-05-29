@@ -56,6 +56,18 @@ fn first_serum_powder_in_hand(
 /// it with structural "source-state-unchanged" detection.
 const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 
+/// CR 117.1 + Whitemane Lion loop mitigation (issue #563): AI safety cap on
+/// the number of times the same card can be CAST in a single turn by the AI.
+/// Identification is by card name captured in `SpellCastRecord` so different
+/// printings/copies of the same card share the cap. CR 117.1 permits unbounded
+/// casting at priority — this cap is a pure AI-pathology mitigation against
+/// loop-prone cards (ETB self-bounce, Whitemane Lion class) whose
+/// per-occurrence value remains positive even when the net board state is
+/// unchanged. Three is generous enough for legitimate value plays (Snapcaster
+/// flashback + recast, Eternal Witness reanimate chain) while preventing the
+/// thousands-of-iterations pathology observed in #563.
+const MAX_CASTS_OF_SAME_CARD_PER_TURN: usize = 3;
+
 /// Choose the best action for the AI player given the current game state.
 ///
 /// - For 0 or 1 legal actions, returns immediately.
@@ -721,11 +733,20 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
-        // Phyrexian payment: pay mana for all shards (safe default).
+        // Phyrexian payment: preserve each shard's only legal route when there
+        // is no scored candidate to choose from.
         WaitingFor::PhyrexianPayment { shards, .. } => {
             let choices = shards
                 .iter()
-                .map(|_| engine::types::game_state::ShardChoice::PayMana)
+                .map(|shard| match shard.options {
+                    engine::types::game_state::ShardOptions::LifeOnly => {
+                        engine::types::game_state::ShardChoice::PayLife
+                    }
+                    engine::types::game_state::ShardOptions::ManaOrLife
+                    | engine::types::game_state::ShardOptions::ManaOnly => {
+                        engine::types::game_state::ShardChoice::PayMana
+                    }
+                })
                 .collect();
             Some(GameAction::SubmitPhyrexianChoices { choices })
         }
@@ -772,7 +793,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // happen but CancelCast is not valid here. Use empty selection.
         WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
+        | WaitingFor::ExileForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
@@ -814,6 +835,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::SeparatePilesChoice { .. } => Some(GameAction::ChoosePile {
             pile: engine::types::game_state::PileSide::A,
         }),
+        WaitingFor::MoveCountersDistribution { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::ChooseCounterMoveDistribution { .. })),
 
         // Remaining pending-cast states are caught by the has_pending_cast
         // guard above. This arm is structurally unreachable but required
@@ -900,7 +924,37 @@ pub fn score_candidates(
     let gated: Vec<_> = gated
         .into_iter()
         .filter(|g| match &g.candidate.action {
-            GameAction::CastSpell { object_id, .. } => !state.cancelled_casts.contains(object_id),
+            GameAction::CastSpell { object_id, .. } => {
+                if state.cancelled_casts.contains(object_id) {
+                    return false;
+                }
+                // CR 117.1 + #563: Cap repeated casts of the same card by name
+                // within a single turn. The AI player's
+                // `spells_cast_this_turn_by_player` record carries each cast's
+                // captured name (`SpellCastRecord.name`) so the cap survives
+                // the spell having left the stack. Lookups are case-sensitive
+                // matches against the candidate object's current name (set at
+                // creation from the card name).
+                let candidate_name = state
+                    .objects
+                    .get(object_id)
+                    .map(|o| o.name.as_str())
+                    .unwrap_or("");
+                if candidate_name.is_empty() {
+                    return true;
+                }
+                let cast_count = state
+                    .spells_cast_this_turn_by_player
+                    .get(&ai_player)
+                    .map(|history| {
+                        history
+                            .iter()
+                            .filter(|rec| rec.name == candidate_name)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                cast_count < MAX_CASTS_OF_SAME_CARD_PER_TURN
+            }
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
@@ -1047,12 +1101,8 @@ pub fn score_candidates(
 
 /// Build AI context from the player's deck pool, or a neutral default if unavailable.
 fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> AiContext {
-    let deck = state
-        .deck_pools
-        .iter()
-        .find(|p| p.player == player)
-        .map(|p| p.current_main.as_slice())
-        .unwrap_or(&[]);
+    let ai_pool = state.deck_pools.iter().find(|p| p.player == player);
+    let deck = ai_pool.map(|p| p.current_main.as_slice()).unwrap_or(&[]);
     if deck.is_empty() {
         let mut ctx = AiContext::empty(&config.weights);
         ctx.player = player;
@@ -1066,9 +1116,21 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
     // Populate opponent features so archetype lookups hit the cache instead
     // of re-running `DeckProfile::analyze` per search call.
     let session = std::sync::Arc::make_mut(&mut ctx.session);
+    // `analyze_for_player` defaults the AI player's bracket tier to `Core`
+    // (it has no `state` access). Read the declared tier from the AI's
+    // `PlayerDeckPool` and refresh the session features with it so
+    // `DeckFeatures::is_cedh` (and any future tier-gated feature) reflects
+    // the real bracket — without this, `ComboLinePolicy::activation()` would
+    // never fire for cEDH decks.
+    if let Some(pool) = ai_pool {
+        if pool.bracket_tier != engine::game::bracket_estimate::CommanderBracketTier::Core {
+            session.invalidate_player_features(player);
+            session.ensure_player_features(player, deck, pool.bracket_tier);
+        }
+    }
     for pool in &state.deck_pools {
         if pool.player != player {
-            session.ensure_player_features(pool.player, &pool.current_main);
+            session.ensure_player_features(pool.player, &pool.current_main, pool.bracket_tier);
         }
     }
 
@@ -1399,9 +1461,10 @@ pub(crate) fn deterministic_choice(
         };
 
         let pay = match additional_cost {
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Mana { cost: extra_mana },
-            ) => affordable_mana_cost(extra_mana),
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Mana { cost: extra_mana },
+                ..
+            } => affordable_mana_cost(extra_mana),
             // CR 702.33c: a multikicker / kicker re-prompt presents exactly one
             // live cost. When that cost is pure mana, apply the same
             // affordability + over-commit guard as Optional(Mana).
@@ -1418,12 +1481,14 @@ pub(crate) fn deterministic_choice(
                 affordable_mana_cost(extra_mana)
             }
             // Non-mana optional costs: sacrifice → usually worth it for the upgrade
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Sacrifice { .. },
-            ) => false, // Conservative: don't sacrifice unless search says so
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::PayLife { amount },
-            ) => {
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Sacrifice { .. },
+                ..
+            } => false, // Conservative: don't sacrifice unless search says so
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::PayLife { amount },
+                ..
+            } => {
                 // CR 119.4 + CR 903.4: PayLife carries a QuantityExpr; resolve
                 // against the activator/source so dynamic costs (e.g. commander
                 // color identity) are costed correctly. Source = 0 falls back
@@ -1439,7 +1504,7 @@ pub(crate) fn deterministic_choice(
                 let life = state.players[player.0 as usize].life;
                 life > resolved * 3
             }
-            engine::types::ability::AdditionalCost::Optional(_) => true,
+            engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
             engine::types::ability::AdditionalCost::Choice(_, _) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,

@@ -326,6 +326,7 @@ fn parse_difficulty(s: &str) -> AiDifficulty {
         "medium" => AiDifficulty::Medium,
         "hard" => AiDifficulty::Hard,
         "veryhard" => AiDifficulty::VeryHard,
+        "cedh" => AiDifficulty::CEDH,
         _ => {
             eprintln!("Unknown difficulty '{s}', using Medium");
             AiDifficulty::Medium

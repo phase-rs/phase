@@ -108,6 +108,8 @@ pub enum KeywordKind {
     Modular,
     Renown,
     Fabricate,
+    /// CR 702.58a: Graft N — see `Keyword::Graft`.
+    Graft,
     Annihilator,
     Bushido,
     Tribute,
@@ -914,6 +916,7 @@ impl Keyword {
             Keyword::Dredge(_) => KeywordKind::Dredge,
             Keyword::Modular(_) => KeywordKind::Modular,
             Keyword::Renown(_) => KeywordKind::Renown,
+            Keyword::Graft(_) => KeywordKind::Graft,
             Keyword::Fabricate(_) => KeywordKind::Fabricate,
             Keyword::Annihilator(_) => KeywordKind::Annihilator,
             Keyword::Bushido(_) => KeywordKind::Bushido,
@@ -1037,7 +1040,6 @@ impl Keyword {
             | Keyword::Evoke(_)
             | Keyword::Fortify(_)
             | Keyword::Fuse
-            | Keyword::Graft(_)
             | Keyword::Gravestorm
             | Keyword::Haunt
             | Keyword::Hideaway(_)

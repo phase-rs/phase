@@ -18,8 +18,10 @@ import {
   getDeckCardCount,
 } from "../components/menu/deckHelpers";
 import { menuButtonClass } from "../components/menu/buttonStyles";
-import { ACTIVE_DECK_KEY, touchDeckPlayed } from "../constants/storage";
+import { ACTIVE_DECK_KEY, loadSavedDeckBracket, touchDeckPlayed } from "../constants/storage";
 import { useCardImage } from "../hooks/useCardImage";
+import { BRACKET_LABEL } from "../types/bracket";
+import { effectiveAiDifficulty, isDeckCedhLegal } from "../services/cedhLock";
 import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useCardDataStore } from "../stores/cardDataStore";
@@ -159,8 +161,12 @@ export function GameSetupPage() {
     const prefs = usePreferencesStore.getState();
     prefs.ensureAiSeatCount(opponentCount);
     const prefSeats = usePreferencesStore.getState().aiSeats.slice(0, opponentCount);
+    // cEDH is a table-wide toggle, not a per-seat difficulty: when it's on,
+    // every seat's engine difficulty resolves to "CEDH" (the per-seat value is
+    // preserved in prefs for when cEDH is turned off).
+    const cedhMode = prefs.cedhMode;
     const aiSeats = prefSeats.map((s) => ({
-      difficulty: s.difficulty,
+      difficulty: effectiveAiDifficulty(s.difficulty, cedhMode),
       deckId: s.deckId === "Random" ? null : s.deckId,
     }));
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
@@ -182,6 +188,15 @@ export function GameSetupPage() {
   // trap the user on this screen.
   const cardDataLoading = cardStatus === "loading";
   const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
+
+  // cEDH warning: shown when the human deck is not bracket 5 but the table is
+  // in cEDH mode (all AI play cEDH).
+  const cedhMode = usePreferencesStore((s) => s.cedhMode);
+  const humanDeckBracket = activeDeckName ? loadSavedDeckBracket(activeDeckName) : null;
+  const showCedhWarning =
+    activeDeckName !== null &&
+    cedhMode &&
+    !isDeckCedhLegal(humanDeckBracket);
   const representativeCard = useMemo(
     () => (activeDeckName ? getRepresentativeCard(activeDeckName) : null),
     [activeDeckName],
@@ -333,6 +348,20 @@ export function GameSetupPage() {
                     <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                       {selectedCompat.selected_format_reasons[0]
                         ?? t("gameSetup.deckNotLegal", { format: selectedFormat })}
+                    </div>
+                  )}
+
+                  {showCedhWarning && (
+                    <div
+                      role="alert"
+                      className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-200"
+                    >
+                      {t("gameSetup.cedhWarning", {
+                        bracket:
+                          humanDeckBracket !== null
+                            ? `${humanDeckBracket} (${BRACKET_LABEL[humanDeckBracket]})`
+                            : t("gameSetup.cedhWarningUntagged"),
+                      })}
                     </div>
                   )}
                 </div>

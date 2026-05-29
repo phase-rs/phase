@@ -21,6 +21,12 @@ pub struct ReplacementId {
     pub index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CounterMoveStage {
+    Remove,
+    Add,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum EtbTapState {
     #[default]
@@ -195,6 +201,20 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        applied: HashSet<ReplacementId>,
+    },
+    /// CR 122.5: Moving a counter is atomic: remove it from one object and put
+    /// it on another. Replacement effects see the remove and add stages, but
+    /// the physical counter mutation is committed only after both stages survive.
+    MoveCounter {
+        #[serde(default)]
+        actor: PlayerId,
+        source_id: ObjectId,
+        destination_id: ObjectId,
+        counter_type: CounterType,
+        remove_count: u32,
+        add_count: u32,
+        stage: CounterMoveStage,
         applied: HashSet<ReplacementId>,
     },
     /// CR 111.1 + CR 614.1a: Token creation event carrying the full
@@ -396,6 +416,7 @@ impl ProposedEvent {
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
             | ProposedEvent::RemoveCounter { applied, .. }
+            | ProposedEvent::MoveCounter { applied, .. }
             | ProposedEvent::CreateToken { applied, .. }
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
@@ -420,6 +441,7 @@ impl ProposedEvent {
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
             | ProposedEvent::RemoveCounter { applied, .. }
+            | ProposedEvent::MoveCounter { applied, .. }
             | ProposedEvent::CreateToken { applied, .. }
             | ProposedEvent::Discard { applied, .. }
             | ProposedEvent::Tap { applied, .. }
@@ -453,6 +475,22 @@ impl ProposedEvent {
                 .get(object_id)
                 .map(|o| o.controller)
                 .unwrap_or(PlayerId(0)),
+            ProposedEvent::MoveCounter {
+                source_id,
+                destination_id,
+                stage,
+                ..
+            } => {
+                let affected_id = match stage {
+                    CounterMoveStage::Remove => source_id,
+                    CounterMoveStage::Add => destination_id,
+                };
+                state
+                    .objects
+                    .get(affected_id)
+                    .map(|o| o.controller)
+                    .unwrap_or(PlayerId(0))
+            }
             ProposedEvent::Damage { target, .. } => match target {
                 TargetRef::Player(pid) => *pid,
                 TargetRef::Object(oid) => state
@@ -487,6 +525,15 @@ impl ProposedEvent {
             | ProposedEvent::RemoveCounter { object_id, .. }
             | ProposedEvent::Discard { object_id, .. }
             | ProposedEvent::Sacrifice { object_id, .. } => Some(*object_id),
+            ProposedEvent::MoveCounter {
+                source_id,
+                destination_id,
+                stage,
+                ..
+            } => Some(match stage {
+                CounterMoveStage::Remove => *source_id,
+                CounterMoveStage::Add => *destination_id,
+            }),
             // CR 106.3: The mana source (land being tapped) is the affected object —
             // this is what `valid_card` filters are matched against.
             ProposedEvent::ProduceMana { source_id, .. } => Some(*source_id),
@@ -562,6 +609,16 @@ mod tests {
                 count: 1,
                 applied: HashSet::new(),
             },
+            ProposedEvent::MoveCounter {
+                actor: PlayerId(0),
+                source_id: ObjectId(1),
+                destination_id: ObjectId(2),
+                counter_type: CounterType::Plus1Plus1,
+                remove_count: 1,
+                add_count: 1,
+                stage: CounterMoveStage::Remove,
+                applied: HashSet::new(),
+            },
             ProposedEvent::CreateToken {
                 owner: PlayerId(0),
                 spec: Box::new(TokenSpec {
@@ -623,7 +680,7 @@ mod tests {
                 applied: HashSet::new(),
             },
         ];
-        assert_eq!(events.len(), 19);
+        assert_eq!(events.len(), 20);
     }
 
     #[test]
@@ -663,6 +720,33 @@ mod tests {
         assert!(!event.already_applied(&rid));
         event.mark_applied(rid);
         assert!(event.already_applied(&rid));
+    }
+
+    #[test]
+    fn move_counter_stage_controls_affected_object() {
+        let remove = ProposedEvent::MoveCounter {
+            actor: PlayerId(0),
+            source_id: ObjectId(1),
+            destination_id: ObjectId(2),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 1,
+            add_count: 1,
+            stage: CounterMoveStage::Remove,
+            applied: HashSet::new(),
+        };
+        let add = ProposedEvent::MoveCounter {
+            actor: PlayerId(0),
+            source_id: ObjectId(1),
+            destination_id: ObjectId(2),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 1,
+            add_count: 1,
+            stage: CounterMoveStage::Add,
+            applied: HashSet::new(),
+        };
+
+        assert_eq!(remove.affected_object_id(), Some(ObjectId(1)));
+        assert_eq!(add.affected_object_id(), Some(ObjectId(2)));
     }
 
     /// SHAPE: `ProposedEvent::EmptyManaPool` survives a serde roundtrip with

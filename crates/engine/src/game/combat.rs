@@ -578,6 +578,13 @@ pub fn validate_blockers_for_player(
             }
         }
 
+        if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
+            return Err(format!(
+                "{:?} cannot block {:?} (Ring-bearer can't be blocked by greater power)",
+                blocker_id, attacker_id
+            ));
+        }
+
         // CR 702.16f: Protection — an attacking creature with protection can't
         // be blocked by creatures with the stated quality.
         for kw in &attacker.keywords {
@@ -1896,6 +1903,9 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
             _ => {}
         }
     }
+    if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
+        return false;
+    }
     for kw in &attacker.keywords {
         if let Keyword::Protection(target) = kw {
             if crate::game::keywords::source_matches_protection_target(target, attacker, blocker) {
@@ -1944,6 +1954,17 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         return false;
     }
     true
+}
+
+fn ring_bearer_unblockable_by_greater_power(
+    state: &GameState,
+    attacker: &GameObject,
+    blocker: &GameObject,
+) -> bool {
+    // CR 701.54c: The Ring emblem says "Your Ring-bearer is legendary and
+    // can't be blocked by creatures with greater power."
+    super::effects::ring::is_current_ring_bearer(state, attacker.controller, attacker.id)
+        && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
 }
 
 /// CR 509.1a + CR 509.1b: Compute the maximum number of attackers a creature can block.
@@ -2311,7 +2332,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
-    use crate::types::ability::StaticDefinition;
+    use crate::types::ability::{
+        Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
@@ -3442,6 +3466,54 @@ mod tests {
         assert!(
             can_block_pair(&state, blue_blocker, granted),
             "blue blocker should be able to block (color differs from chosen)"
+        );
+    }
+
+    #[test]
+    fn source_power_block_restriction_scopes_to_attackers_you_control() {
+        let mut state = setup();
+        let champion = create_creature(&mut state, PlayerId(0), "Champion", 3, 3);
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 1, 1);
+        let other_attacker = create_creature(&mut state, PlayerId(1), "Other Attacker", 1, 1);
+        let small_blocker = create_creature(&mut state, PlayerId(1), "Small Blocker", 2, 2);
+        let large_blocker = create_creature(&mut state, PlayerId(1), "Large Blocker", 4, 4);
+
+        state
+            .objects
+            .get_mut(&champion)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantBeBlockedBy {
+                    filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LT,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Power {
+                                    scope: ObjectScope::Source,
+                                },
+                            },
+                        },
+                    ])),
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            );
+
+        assert!(
+            !can_block_pair(&state, small_blocker, attacker),
+            "blockers with power less than the source's power cannot block creatures its controller controls"
+        );
+        assert!(
+            can_block_pair(&state, large_blocker, attacker),
+            "blockers with power at least the source's power remain legal"
+        );
+        assert!(
+            can_block_pair(&state, small_blocker, other_attacker),
+            "the restriction only protects creatures controlled by the static source controller"
         );
     }
 

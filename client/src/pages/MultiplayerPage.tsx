@@ -26,7 +26,6 @@ import type { LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
-import { usePreferencesStore } from "../stores/preferencesStore";
 import {
   useMultiplayerDraftStore,
   type MultiplayerDraftPhase,
@@ -76,7 +75,6 @@ export function MultiplayerPage() {
   const startP2PHostingSession = useMultiplayerStore((s) => s.startP2PHostingSession);
   const showToast = useMultiplayerStore((s) => s.showToast);
 
-  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   const draftPhase = useMultiplayerDraftStore((s) => s.phase);
   const draftRoomCode = useMultiplayerDraftStore((s) => s.roomCode);
   const joinDraft = useMultiplayerDraftStore((s) => s.joinDraft);
@@ -765,7 +763,7 @@ export function MultiplayerPage() {
             key={`${serverAddress}:${lobbyRetryKey}`}
             onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
             onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
-            onHostDraft={experimentalFeatures ? handleHostDraft : undefined}
+            onHostDraft={handleHostDraft}
             onJoinGame={handleJoinGame}
             connectionMode={connectionMode}
             onServerOffline={() => {

@@ -39,6 +39,9 @@ pub enum AiDifficulty {
     Medium,
     Hard,
     VeryHard,
+    /// Bracket-5 competitive Commander. Bypasses 4-player paranoid scaling;
+    /// activates combo-recognition policies via `DeckFeatures::is_cedh`.
+    CEDH,
 }
 
 /// Platform the AI runs on (affects budget constraints).
@@ -245,6 +248,14 @@ pub struct PolicyPenalties {
     /// Penalty multiplier for overextending when opponent likely has board wipe.
     #[serde(default = "default_threat_wipe_overextend_penalty")]
     pub threat_wipe_overextend_penalty: f64,
+    /// Bonus prior when a candidate action progresses a combo line that is
+    /// reachable this turn. Consumed by `ComboLinePolicy`.
+    #[serde(default = "default_combo_progress_this_turn_bonus")]
+    pub combo_progress_this_turn_bonus: f64,
+    /// Bonus prior when a candidate action (tutor / draw / ramp) progresses a
+    /// combo line that is reachable next turn. Consumed by `ComboLinePolicy`.
+    #[serde(default = "default_combo_progress_next_turn_bonus")]
+    pub combo_progress_next_turn_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -283,6 +294,8 @@ impl Default for PolicyPenalties {
             synergy_casting_bonus: default_synergy_casting_bonus(),
             threat_counter_tapout_penalty: default_threat_counter_tapout_penalty(),
             threat_wipe_overextend_penalty: default_threat_wipe_overextend_penalty(),
+            combo_progress_this_turn_bonus: default_combo_progress_this_turn_bonus(),
+            combo_progress_next_turn_bonus: default_combo_progress_next_turn_bonus(),
         }
     }
 }
@@ -335,6 +348,12 @@ fn default_threat_counter_tapout_penalty() -> f64 {
 fn default_threat_wipe_overextend_penalty() -> f64 {
     -0.6
 }
+fn default_combo_progress_this_turn_bonus() -> f64 {
+    15.0
+}
+fn default_combo_progress_next_turn_bonus() -> f64 {
+    5.0
+}
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.
 #[derive(Debug, Clone)]
@@ -361,7 +380,7 @@ impl Default for AiConfig {
 
 /// Create an AI configuration for the given difficulty and platform.
 ///
-/// Five presets scale from random play (VeryEasy) to deterministic best-move (VeryHard).
+/// Six presets scale from random play (VeryEasy) to competitive Commander (CEDH).
 /// WASM platform reduces search budgets to fit within browser constraints.
 pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
     let (temperature, profile, play_lookahead, combat_lookahead, search) = match difficulty {
@@ -485,6 +504,32 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 projection_min_budget_ms: 2000,
             },
         ),
+        AiDifficulty::CEDH => (
+            0.2,
+            AiProfile {
+                risk_tolerance: 0.4,
+                interaction_patience: 1.0,
+                stabilize_bias: 1.2,
+            },
+            true, // play_lookahead
+            true, // combat_lookahead — cEDH is the first tier to enable this
+            SearchConfig {
+                enabled: true,
+                max_depth: 3,
+                max_nodes: 96,
+                max_branching: 5,
+                planner_mode: PlannerMode::BeamPlusRollout,
+                rollout_depth: 2,
+                rollout_samples: 2,
+                opponent_model: OpponentModel::ThreatWeightedReply,
+                time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
+                deterministic: false,
+                threat_awareness: ThreatAwareness::Full,
+                // == AI_SEARCH_TIME_BUDGET_MS: projections only at turn start,
+                // before nodes consume the budget
+                projection_min_budget_ms: 1500,
+            },
+        ),
     };
 
     let mut config = AiConfig {
@@ -543,11 +588,15 @@ pub fn create_config_for_players(
     match player_count {
         0..=2 => {} // No scaling needed
         3..=4 => {
-            // Paranoid search: cap depth at 2, reduce budget
-            config.search.max_depth = config.search.max_depth.min(2);
-            config.search.max_nodes = config.search.max_nodes * 2 / 3;
-            config.search.max_branching = config.search.max_branching.min(4);
-            config.search.rollout_depth = config.search.rollout_depth.min(1);
+            // cEDH: no scaling needed — the preset is calibrated for 4-player tables.
+            // All other difficulties get the paranoid cap.
+            if difficulty != AiDifficulty::CEDH {
+                // Paranoid search: cap depth at 2, reduce budget
+                config.search.max_depth = config.search.max_depth.min(2);
+                config.search.max_nodes = config.search.max_nodes * 2 / 3;
+                config.search.max_branching = config.search.max_branching.min(4);
+                config.search.rollout_depth = config.search.rollout_depth.min(1);
+            }
         }
         _ => {
             // 5-6+ players: heuristic-only or minimal search
@@ -645,6 +694,7 @@ mod tests {
             AiDifficulty::Medium,
             AiDifficulty::Hard,
             AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
         ];
         for diff in &difficulties {
             let config = create_config(*diff, Platform::Native);
@@ -721,17 +771,97 @@ mod tests {
 
     #[test]
     fn ai_difficulty_serde_roundtrips() {
-        let difficulties = [
+        for diff in [
             AiDifficulty::VeryEasy,
             AiDifficulty::Easy,
             AiDifficulty::Medium,
             AiDifficulty::Hard,
             AiDifficulty::VeryHard,
-        ];
-        for diff in &difficulties {
-            let json = serde_json::to_string(diff).unwrap();
+            AiDifficulty::CEDH,
+        ] {
+            let json = serde_json::to_string(&diff).unwrap();
             let parsed: AiDifficulty = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, *diff);
+            assert_eq!(diff, parsed);
         }
+    }
+
+    #[test]
+    fn cedh_preset_values() {
+        let config = create_config(AiDifficulty::CEDH, Platform::Native);
+        assert_eq!(config.difficulty, AiDifficulty::CEDH);
+        assert_eq!(config.temperature, 0.2);
+        assert_eq!(config.profile.risk_tolerance, 0.4);
+        assert_eq!(config.profile.interaction_patience, 1.0);
+        assert_eq!(config.profile.stabilize_bias, 1.2);
+        assert!(config.play_lookahead);
+        assert!(config.combat_lookahead);
+        assert!(config.search.enabled);
+        assert_eq!(config.search.max_depth, 3);
+        assert_eq!(config.search.max_nodes, 96);
+        assert_eq!(config.search.max_branching, 5);
+        assert_eq!(config.search.rollout_depth, 2);
+        assert_eq!(config.search.rollout_samples, 2);
+        assert!(matches!(
+            config.search.opponent_model,
+            OpponentModel::ThreatWeightedReply
+        ));
+        assert!(matches!(
+            config.search.threat_awareness,
+            ThreatAwareness::Full
+        ));
+        assert_eq!(config.search.projection_min_budget_ms, 1500);
+        assert_eq!(config.search.time_budget_ms, AI_SEARCH_TIME_BUDGET_MS);
+    }
+
+    #[test]
+    fn cedh_preset_wasm_caps_apply() {
+        let config = create_config(AiDifficulty::CEDH, Platform::Wasm);
+        assert_eq!(config.search.max_depth, 2); // capped from 3
+        assert_eq!(config.search.max_nodes, 64); // 96 * 2/3
+        assert_eq!(config.search.rollout_depth, 2);
+    }
+
+    #[test]
+    fn cedh_skips_paranoid_scaling_at_4p() {
+        let cfg = create_config_for_players(AiDifficulty::CEDH, Platform::Native, 4);
+        assert_eq!(
+            cfg.search.max_depth, 3,
+            "cEDH must not be downgraded to depth 2 by paranoid scaling at 4p"
+        );
+        assert_eq!(
+            cfg.search.max_nodes, 96,
+            "cEDH must keep its native node budget at 4p"
+        );
+        assert_eq!(cfg.search.max_branching, 5);
+        assert_eq!(cfg.search.rollout_depth, 2);
+    }
+
+    #[test]
+    fn cedh_skips_paranoid_scaling_at_3p() {
+        let cfg = create_config_for_players(AiDifficulty::CEDH, Platform::Native, 3);
+        assert_eq!(
+            cfg.search.max_depth, 3,
+            "cEDH must not be downgraded at 3p any more than at 4p"
+        );
+        assert_eq!(cfg.search.max_nodes, 96);
+        assert_eq!(cfg.search.max_branching, 5);
+        assert_eq!(cfg.search.rollout_depth, 2);
+    }
+
+    #[test]
+    fn veryhard_still_gets_paranoid_scaling_at_4p() {
+        // Sanity: the scaling skip is cEDH-specific and doesn't affect VeryHard.
+        let cfg = create_config_for_players(AiDifficulty::VeryHard, Platform::Native, 4);
+        assert_eq!(
+            cfg.search.max_depth, 2,
+            "VeryHard should still be capped at 4p"
+        );
+    }
+
+    #[test]
+    fn policy_penalties_default_combo_progress_bonuses() {
+        let p = PolicyPenalties::default();
+        assert_eq!(p.combo_progress_this_turn_bonus, 15.0);
+        assert_eq!(p.combo_progress_next_turn_bonus, 5.0);
     }
 }

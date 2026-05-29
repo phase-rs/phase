@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, space0};
+use nom::character::complete::{alpha1, space0, space1};
 use nom::combinator::{all_consuming, not, opt, peek, value};
 use nom::sequence::preceded;
 use nom::Parser;
@@ -691,6 +691,18 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     if let Some(kw) = parse_firebending_keyword_line(text) {
         return Some(kw);
+    }
+
+    // CR 702.112a: Renown N — parameterized keyword from Oracle text.
+    // MTGJSON's keyword list carries only "Renown"; the Oracle line supplies N.
+    if let Ok((_, (_, _, n))) = all_consuming((
+        tag::<_, _, OracleError<'_>>("renown"),
+        space1,
+        nom_primitives::parse_number,
+    ))
+    .parse(text)
+    {
+        return Some(Keyword::Renown(n));
     }
 
     // First try direct parse (handles simple keywords like "flying")
@@ -1484,6 +1496,13 @@ mod tests {
         // CR 702.164: Toxic N — parameterized keyword from Oracle text
         let kw = parse_keyword_from_oracle("toxic 2").unwrap();
         assert_eq!(kw, Keyword::Toxic(2));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_renown() {
+        // CR 702.112a: Renown N — parameterized keyword from Oracle text.
+        let kw = parse_keyword_from_oracle("renown 2").unwrap();
+        assert_eq!(kw, Keyword::Renown(2));
     }
 
     #[test]
