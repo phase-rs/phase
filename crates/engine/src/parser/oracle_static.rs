@@ -8745,10 +8745,9 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // first quote, so the keyword clause above may miss "reach". Scan the slice
     // BEFORE the first quote independently. GUARD: only run when the post-strip
     // path produced no AddKeyword (prevents double-adding a keyword).
-    if text.contains('"')
-        && !modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. }))
+    if !modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::AddKeyword { .. }))
     {
         if let Ok((_, pre_quote)) = take_until::<_, _, OracleError<'_>>("\"").parse(text_stripped) {
             if let Some(keyword_text) = extract_keyword_clause(pre_quote) {

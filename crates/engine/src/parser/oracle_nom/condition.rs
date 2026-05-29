@@ -700,21 +700,14 @@ fn attached_filter_condition(filter: TargetFilter) -> StaticCondition {
     }
 }
 
-/// Parse a predicate tail (with optional `" or "` disjunction) into one or more
-/// bare predicate filters. Shared shape between the attached and recipient paths;
-/// the recipient path maps each bare filter to a `RecipientMatchesFilter`.
+/// Parse a predicate tail with optional N-way `" or "` disjunction into one or
+/// more bare predicate filters. Shared shape between the attached and recipient
+/// paths; the recipient path maps each bare filter to a `RecipientMatchesFilter`.
+/// `separated_list1` folds arbitrary arity ("a Zombie or a Skeleton or a Spirit")
+/// because `parse_bare_predicate_tail` stops at the first non-type token, leaving
+/// the `" or "` separator for the next iteration.
 fn parse_bare_predicate_disjunction(input: &str) -> OracleResult<'_, Vec<TargetFilter>> {
-    if let Ok((rest, left_text)) = take_until::<_, _, OracleError<'_>>(" or ").parse(input) {
-        if let Ok((left_rest, first)) = parse_bare_predicate_tail(left_text) {
-            if left_rest.is_empty() {
-                let (right_text, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest)?;
-                let (rest, second) = parse_bare_predicate_tail(right_text)?;
-                return Ok((rest, vec![first, second]));
-            }
-        }
-    }
-    let (rest, first) = parse_bare_predicate_tail(input)?;
-    Ok((rest, vec![first]))
+    nom::multi::separated_list1(tag(" or "), parse_bare_predicate_tail).parse(input)
 }
 
 /// CR 611.3a: "it's a Zombie" / "it isn't white" / "it's a Zombie or a Skeleton" —
