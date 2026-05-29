@@ -51,7 +51,16 @@ fn capture_attachment_snapshot(
 /// (CR 701.37b), counter clearing (CR 122.2), layer pruning, and mana-tap
 /// cleanup.
 fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zone, to: Zone) {
+    // CR 400.7: An object that changes zones becomes a new object with no
+    // memory of its previous existence. Both the short-lived `revealed_cards`
+    // (cleared at action boundaries) and the persistent `public_revealed_cards`
+    // (reveal memory that survives action boundaries so e.g. a Duress-revealed
+    // card stays visible in the opponent's hand) are keyed by ObjectId. Since
+    // ObjectId here is storage identity and persists across the zone change,
+    // we must drop both flags so a card shuffled back into the library and
+    // re-drawn does not surface as "still revealed."
     state.revealed_cards.remove(&object_id);
+    state.public_revealed_cards.remove(&object_id);
     // CR 400.7 + CR 403.4: Activation-use history belongs to the old
     // object. `ObjectId` is storage identity here, so clear per-object counts
     // at the zone-change boundary before the same id can represent a new object.
@@ -171,6 +180,12 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
 
         // CR 122.2: Counters cease to exist when an object changes zones.
         obj_mut.counters.clear();
+    }
+
+    if from == Zone::Battlefield {
+        // CR 701.54e: A player's Ring-bearer designation applies only while
+        // that permanent remains on the battlefield under that player's control.
+        super::effects::ring::clear_ring_bearer_if_object(state, object_id);
     }
 
     // Prune host-bound transient effects and clean up mana-tap tracking
@@ -298,6 +313,16 @@ pub fn move_to_zone(
     remove_from_zone(state, object_id, from, owner);
     add_to_zone(state, object_id, to, owner);
 
+    // CR 603.6c: Drop the leaving permanent from the TriggerIndex. The
+    // leaves-battlefield last-known-information scan in
+    // `collect_pending_triggers` reads `state.objects` directly (the object's
+    // zone is no longer Battlefield), unaffected by this removal. The
+    // authoritative correctness path is the `evaluate_layers` rebuild
+    // (CR 611.2e); this hook is incremental optimization between layer flushes.
+    if from == Zone::Battlefield {
+        state.trigger_index.remove(object_id);
+    }
+
     let obj_mut = state.objects.get_mut(&object_id).unwrap();
     obj_mut.zone = to;
 
@@ -358,6 +383,25 @@ pub fn move_to_zone(
             if needs_transform {
                 let _ = super::transform::transform_permanent(state, object_id, events);
             }
+        }
+    }
+
+    // CR 603.6a: Register the post-reset trigger definitions in the index so
+    // `state.clone()` consumers see a coherent battlefield → trigger candidate
+    // map. AUTHORITATIVE PATH: the end-of-`evaluate_layers` rebuild
+    // (CR 611.2e, `layers.rs`) is the safety net; this hook is incremental
+    // optimization between layer flushes. `state.layers_dirty = true` was set
+    // above, guaranteeing a post-layer rebuild on the next
+    // `collect_pending_triggers` consult.
+    if to == Zone::Battlefield {
+        let registration = state.objects.get(&object_id).map(|obj| {
+            let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
+                obj.trigger_definitions.as_slice().iter().cloned().collect();
+            let synthetic = super::trigger_index::has_synthetic_keyword_trigger_for(obj);
+            (defs, synthetic)
+        });
+        if let Some((defs, synthetic)) = registration {
+            state.trigger_index.add(object_id, &defs, synthetic);
         }
     }
 
@@ -468,6 +512,13 @@ pub fn move_to_library_at_index(
     apply_zone_exit_cleanup(state, object_id, from, Zone::Library);
 
     remove_from_zone(state, object_id, from, owner);
+
+    // CR 603.6c: Drop the leaving permanent from the TriggerIndex when this
+    // path is used to move a battlefield permanent into the library
+    // (Conduit-of-Worlds-style "shuffle a permanent into your library").
+    if from == Zone::Battlefield {
+        state.trigger_index.remove(object_id);
+    }
 
     // Place at specified index or push to end (bottom)
     let player = state
@@ -752,6 +803,57 @@ mod tests {
         assert!(!state.players[0].library.contains(&id));
         assert!(state.players[0].hand.contains(&id));
         assert_eq!(state.objects[&id].zone, Zone::Hand);
+    }
+
+    /// CR 122.2 + CR 400.7: Counters cease to exist when an object changes
+    /// zones. The Personify class ("Exile target creature you control, then
+    /// return that card to the battlefield under its owner's control") moves
+    /// the creature Battlefield → Exile → Battlefield. ObjectId is storage
+    /// identity in this engine (the same slot is reused), so unless the
+    /// exit-cleanup hook actually clears `obj.counters` at the boundary, the
+    /// returning permanent will retain its pre-exile counters — which the
+    /// rules say cease to exist. This test drives `move_to_zone` directly
+    /// (not a shape assertion on the HashMap) and would have caught a
+    /// regression in `apply_zone_exit_cleanup`'s counter-clear branch.
+    #[test]
+    fn counters_cease_to_exist_across_exile_and_return() {
+        use crate::types::counter::CounterType;
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stapled Cat".to_string(),
+            Zone::Battlefield,
+        );
+        // Put -1/-1 counters on the creature while it's on the battlefield —
+        // mirrors the user-reported Personify scenario (the reported leak was
+        // -1/-1 counters specifically, e.g. from a Wither/Infect source).
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Minus1Minus1, 2);
+
+        let mut events = Vec::new();
+        // Personify step 1: Battlefield → Exile. Counters must cease to
+        // exist on the exit boundary (CR 122.2).
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        assert!(
+            state.objects[&id].counters.is_empty(),
+            "counters must cease to exist when leaving the battlefield (CR 122.2); had {:?}",
+            state.objects[&id].counters
+        );
+
+        // Personify step 2: Exile → Battlefield. The new object on the
+        // battlefield must have no counters — there's nothing to restore.
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+        assert!(
+            state.objects[&id].counters.is_empty(),
+            "returning object is a new object per CR 400.7 — no counters carry; had {:?}",
+            state.objects[&id].counters
+        );
     }
 
     #[test]

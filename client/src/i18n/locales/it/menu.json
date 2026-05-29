@@ -10,7 +10,8 @@
       "Easy": "Facile",
       "Medium": "Media",
       "Hard": "Difficile",
-      "VeryHard": "Molto difficile"
+      "VeryHard": "Molto difficile",
+      "CEDH": "cEDH"
     }
   },
   "bracketFilter": {
@@ -38,7 +39,7 @@
     },
     "draft": {
       "title": "Draft",
-      "description": "Quick Draft contro l'IA, più opzioni sperimentali di draft cube e pod."
+      "description": "Quick Draft contro l'IA, draft cube o ospita un pod draft."
     },
     "decks": {
       "title": "Mazzi",
@@ -95,6 +96,11 @@
     "difficulty": "Difficoltà",
     "deckRandom": "Casuale",
     "deckRandomCount": "Casuale ({{count}})",
+    "cedhToggle": {
+      "label": "Modalità cEDH",
+      "hint": "Tutti gli avversari giocano cEDH. Ogni mazzo deve essere bracket 5.",
+      "badge": "cEDH"
+    },
     "source": {
       "feed": "Feed",
       "user": "Utente",
@@ -116,9 +122,16 @@
   "importDeck": {
     "title": "Importa mazzo",
     "tabPaste": "Incolla testo",
+    "tabUrl": "Da URL",
     "tabFile": "Da file",
     "deckNamePlaceholder": "Nome del mazzo",
+    "urlPlaceholder": "https://moxfield.com/decks/… o https://archidekt.com/decks/…",
+    "urlHint": "Importa un mazzo pubblico da Moxfield o Archidekt.",
     "import": "Importa",
+    "importing": "Importazione…",
+    "errorInvalidUrl": "Inserisci un URL di mazzo Moxfield o Archidekt valido.",
+    "errorNetworkFailure": "Impossibile raggiungere il servizio di importazione. Controlla la connessione e riprova.",
+    "errorGeneric": "Importazione del mazzo non riuscita.",
     "fileSupports": "Supporta .dck, .dec, .txt e il formato MTGA",
     "chooseFile": "Scegli file"
   },

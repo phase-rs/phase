@@ -14,7 +14,6 @@ import {
   type ActiveDraftPodMeta,
 } from "../services/draftPersistence";
 import { loadGame } from "../services/gamePersistence";
-import { usePreferencesStore } from "../stores/preferencesStore";
 
 const SET_LABELS: Record<string, string> = {
   otj: "Outlaws of Thunder Junction",
@@ -60,7 +59,6 @@ export function DraftLandingPage() {
   const navigate = useNavigate();
   const [activeDraft, setActiveDraft] = useState<ActiveQuickDraftMeta | null>(null);
   const [activePod, setActivePod] = useState<ActiveDraftPodMeta | null>(null);
-  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
 
   useEffect(() => {
     setActiveDraft(loadActiveQuickDraft());
@@ -91,25 +89,19 @@ export function DraftLandingPage() {
             onClick={() => navigate("/draft/quick")}
           />
 
-          {experimentalFeatures && (
-            <>
-              <DraftModeCard
-                title={t("landing.cubeDraft.title")}
-                description={t("landing.cubeDraft.description")}
-                icon={<CubeIcon />}
-                badge={t("landing.experimental")}
-                onClick={() => navigate("/draft/quick?mode=cube")}
-              />
+          <DraftModeCard
+            title={t("landing.cubeDraft.title")}
+            description={t("landing.cubeDraft.description")}
+            icon={<CubeIcon />}
+            onClick={() => navigate("/draft/quick?mode=cube")}
+          />
 
-              <DraftModeCard
-                title={t("landing.podDraft.title")}
-                description={t("landing.podDraft.description")}
-                icon={<PodIcon />}
-                badge={t("landing.experimental")}
-                onClick={() => navigate("/draft-pod")}
-              />
-            </>
-          )}
+          <DraftModeCard
+            title={t("landing.podDraft.title")}
+            description={t("landing.podDraft.description")}
+            icon={<PodIcon />}
+            onClick={() => navigate("/draft-pod")}
+          />
         </div>
       </div>
     </div>
@@ -283,13 +275,11 @@ function DraftModeCard({
   title,
   description,
   icon,
-  badge,
   onClick,
 }: {
   title: string;
   description: string;
   icon: ReactNode;
-  badge?: string;
   onClick: () => void;
 }) {
   return (
@@ -304,11 +294,6 @@ function DraftModeCard({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <div className="text-base font-semibold text-white">{title}</div>
-          {badge && (
-            <span className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-cyan-200">
-              {badge}
-            </span>
-          )}
         </div>
         <p className="mt-1 text-sm text-white/40">{description}</p>
       </div>

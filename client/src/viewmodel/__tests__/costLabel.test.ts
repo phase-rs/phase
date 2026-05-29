@@ -245,6 +245,33 @@ describe("additionalCostChoices — multikicker (issue #454)", () => {
   });
 });
 
+describe("additionalCostChoices — repeatable additional cost", () => {
+  const repeatableCost: AdditionalCost = {
+    type: "Optional",
+    data: {
+      cost: { type: "Mana", cost: { type: "Cost", shards: [], generic: 1 } },
+      repeatable: true,
+    },
+  };
+
+  it("first prompt offers a non-cancel decline", () => {
+    const { title, options } = additionalCostChoices(repeatableCost, 0);
+
+    expect(title).toContain("Pay additional cost");
+    expect(options.find((o) => o.id === "pay")?.label).toBe("Pay {1}");
+    expect(options.find((o) => o.id === "decline")?.label).toBe("Cast without paying");
+  });
+
+  it("re-prompt shows the payment count and finish-casting decline", () => {
+    const { title, options } = additionalCostChoices(repeatableCost, 2);
+
+    expect(title).toContain("paid 2");
+    const decline = options.find((o) => o.id === "decline")!;
+    expect(decline.label).toContain("finish casting");
+    expect(decline.label).toContain("(paid 2×)");
+  });
+});
+
 describe("formatAbilityCost", () => {
   it("formats disjunctive activation cost branches", () => {
     expect(formatAbilityCost({

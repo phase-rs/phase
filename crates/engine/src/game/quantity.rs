@@ -499,6 +499,26 @@ pub fn resolve_quantity_with_targets(
     }
 }
 
+/// CR 608.2c: Resolve a condition quantity from the printed ability controller's
+/// perspective while preserving target/chosen-X and scoped-player bindings.
+///
+/// Player-scoped effect resolution temporarily rebinds `ability.controller` to
+/// the player being affected. Conditional clauses such as "if creatures you
+/// control have total toughness 40 or greater" still refer to the source's
+/// controller, not that temporary recipient.
+pub(crate) fn resolve_quantity_for_ability_condition(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> i32 {
+    let Some(original_controller) = ability.original_controller else {
+        return resolve_quantity_with_targets(state, expr, ability);
+    };
+    let mut condition_ability = ability.clone();
+    condition_ability.controller = original_controller;
+    resolve_quantity_with_targets(state, expr, &condition_ability)
+}
+
 /// Resolve a QuantityExpr with ability targets/chosen-X plus a per-object
 /// recipient binding for `FilterProp::AttachedToRecipient`.
 pub(crate) fn resolve_quantity_with_targets_and_recipient(
@@ -683,7 +703,7 @@ fn resolve_ref(
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller
     // override used by `resolve_quantity_scoped`. CR 107.2 governs the fallback
-    // path when no ability is in scope (X → 0).
+    // path when no ability is in scope (X -> 0).
     //
     // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
     // `FilterContext::recipient_id` so recipient-relative filter properties
@@ -1202,15 +1222,33 @@ fn resolve_ref(
         QuantityRef::ExiledFromHandThisResolution => {
             u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
         }
-        // CR 608.2c: Numeric value from the triggering event.
-        // Falls back to the preceding effect's count or amount for sub_ability
-        // continuations where current_trigger_event has no amount (e.g.,
-        // "discard up to N, then draw that many"; "dealt excess damage this
-        // way, add that much {R}").
+        // CR 603.2c: Numeric value carried by the triggering event,
+        // resolution-precedence ordered:
+        //
+        //   1. `current_trigger_match_count` — the filtered subject count of a
+        //      batched trigger ("one or more <FILTER> <verb>"), set by
+        //      `stack::resolve_top` for the resolution. This is the canonical
+        //      "that many" for Ur-Dragon-style batched triggers; without it
+        //      the `extract_amount_from_event` cascade below falls through to
+        //      0 on `AttackersDeclared` and similar batched events.
+        //   2. `extract_amount_from_event(current_trigger_event)` — scalar
+        //      events with an inherent amount (damage dealt, life changed,
+        //      cards drawn, counters added/removed, die rolls).
+        //   3. `last_effect_counts_by_player` — APNAP per-player counts from
+        //      the preceding effect in the same resolution.
+        //   4. `last_effect_count` / `last_effect_amount` — sub_ability
+        //      continuation fallbacks (e.g. "discard up to N, then draw that
+        //      many"; "dealt excess damage this way, add that much {R}").
+        //   5. `0` — undefined.
         QuantityRef::EventContextAmount => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_amount_from_event)
+            .current_trigger_match_count
+            .map(u32_to_i32_saturating)
+            .or_else(|| {
+                state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_amount_from_event)
+            })
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -1300,6 +1338,13 @@ fn resolve_ref(
                 }
             }
             usize_to_i32_saturating(seen.len())
+        }
+        // CR 122.1: Count distinct counter kinds among permanents matching the
+        // filter (controller-relative, CR 109.4). Counter-side dual of
+        // `DistinctColorsAmongPermanents`. Each `CounterType` present on at
+        // least one matching permanent contributes once.
+        QuantityRef::DistinctCounterKindsAmong { filter } => {
+            usize_to_i32_saturating(distinct_counter_kinds_among(state, filter, &filter_ctx).len())
         }
         // CR 305.6: Count distinct basic land types among lands controlled by
         // the referenced player. Domain counts distinct land subtypes, not
@@ -1645,6 +1690,11 @@ fn resolve_ref(
             .objects
             .get(&ctx.self_object())
             .map(|obj| usize_to_i32_saturating(obj.kickers_paid.len()))
+            .unwrap_or(0),
+        QuantityRef::AdditionalCostPaymentCount => state
+            .objects
+            .get(&ctx.self_object())
+            .map(|obj| u32_to_i32_saturating(obj.additional_cost_payment_count))
             .unwrap_or(0),
         QuantityRef::ConvokedCreatureCount => state
             .objects
@@ -2056,6 +2106,40 @@ fn object_id_for_scope(
         // referents read through `ability` slots, not `state.objects`.
         ObjectScope::CostPaidObject | ObjectScope::Anaphoric => None,
     }
+}
+
+/// CR 122.1: Distinct counter kinds present on permanents matching `filter`
+/// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmongPermanents`'s
+/// resolver (zone from `filter.extract_in_zone()`, `zone_object_ids`,
+/// `matches_target_filter`), enumerating `obj.counters.keys()` the same way
+/// proliferate does. Returns a `Vec<CounterType>` SORTED by `CounterType::as_str`
+/// for determinism — `CounterType` has no `Ord` (and must not gain one), so the
+/// underlying `HashSet` iteration order is nondeterministic and would cause
+/// replay desync if returned directly. Used both as the `len()` source for
+/// `QuantityRef::DistinctCounterKindsAmong` resolution and as the per-iteration
+/// kind sequence for `repeat_for` counter-kind loops.
+pub(crate) fn distinct_counter_kinds_among(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Vec<CounterType> {
+    let zone = filter
+        .extract_in_zone()
+        .unwrap_or(crate::types::zones::Zone::Battlefield);
+    let mut seen: HashSet<CounterType> = HashSet::new();
+    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
+        if !matches_target_filter(state, id, filter, filter_ctx) {
+            continue;
+        }
+        if let Some(obj) = state.objects.get(&id) {
+            for ct in obj.counters.keys() {
+                seen.insert(ct.clone());
+            }
+        }
+    }
+    let mut kinds: Vec<CounterType> = seen.into_iter().collect();
+    kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    kinds
 }
 
 pub(crate) fn counter_count_from_map(
@@ -3130,6 +3214,89 @@ mod tests {
             obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
         }
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), spell), 0);
+    }
+
+    /// CR 122.1 + CR 109.4: count distinct counter kinds among permanents the
+    /// resolving player controls. An opponent's counter kind must be EXCLUDED,
+    /// and the same kind on two controlled permanents counts once. Order is
+    /// deterministic (sorted by `as_str`).
+    #[test]
+    fn resolve_distinct_counter_kinds_among_controlled_permanents() {
+        let mut state = GameState::new_two_player(42);
+
+        // Controller's permanent A: +1/+1 counter.
+        let perm_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Perm A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+        // Controller's permanent B: Lore counter (distinct kind).
+        let perm_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Perm B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.counters.insert(CounterType::Lore, 1);
+        }
+        // Controller's permanent C: another +1/+1 (same kind as A — counts once).
+        let perm_c = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Perm C".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_c).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 3);
+        }
+        // OPPONENT's permanent: Stun counter — MUST be excluded (CR 109.4).
+        let opp_perm = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Opp Perm".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&opp_perm).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Stun, 1);
+        }
+
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Permanent],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        // Direct helper: distinct kinds among controlled permanents = {P1P1, Lore},
+        // sorted by as_str ("P1P1" < "lore" by byte order; uppercase 'P' = 0x50,
+        // lowercase 'l' = 0x6C).
+        let ctx = FilterContext::from_source_with_controller(perm_a, PlayerId(0));
+        let kinds = distinct_counter_kinds_among(&state, &filter, &ctx);
+        assert_eq!(kinds, vec![CounterType::Plus1Plus1, CounterType::Lore]);
+
+        // QuantityRef resolution returns the count (2).
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong {
+                filter: filter.clone(),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), perm_a), 2);
     }
 
     #[test]
@@ -6268,6 +6435,60 @@ mod tests {
             qty: QuantityRef::EventContextAmount,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    /// CR 603.2c: When the batched-trigger subject count is set,
+    /// `EventContextAmount` reads it ahead of any event-extracted amount
+    /// (issue #707).
+    #[test]
+    fn resolve_event_context_amount_uses_trigger_match_count_when_set() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(3);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
+    }
+
+    /// CR 603.2c: With no match-count set, `EventContextAmount` falls through
+    /// to `extract_amount_from_event` as before — the new precedence rule
+    /// must not regress existing scalar-event resolution.
+    #[test]
+    fn resolve_event_context_amount_falls_through_when_match_count_none() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = None;
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 5,
+            is_combat: false,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 5);
+    }
+
+    /// CR 603.2c: When both the batched match-count and an event-extracted
+    /// amount are present, the match-count wins — the trigger is "one or
+    /// more <FILTER> <verb>" and the "that many" semantics belong to the
+    /// filtered subject count, not the event's intrinsic amount.
+    #[test]
+    fn resolve_event_context_amount_match_count_takes_precedence_over_event() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(7);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 7);
     }
 
     #[test]

@@ -54,6 +54,38 @@ fn strip_search_result_subject(lower: &str) -> &str {
     .unwrap_or(lower)
 }
 
+fn is_search_result_reveal_clause(lower: &str) -> bool {
+    matches!(
+        lower.trim().trim_end_matches('.'),
+        "reveal that card" | "reveal those cards" | "reveal the card" | "reveal them" | "reveal it"
+    )
+}
+
+fn has_conditional_search_result_destination(lower: &str) -> bool {
+    fn parse_clause(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+        let (input, _) = alt((
+            tag::<_, _, OracleError<'_>>("put that card onto the battlefield"),
+            tag("put it onto the battlefield"),
+            tag("put them onto the battlefield"),
+            tag("put those cards onto the battlefield"),
+        ))
+        .parse(input)?;
+        let (input, _) = opt(tag(" tapped")).parse(input)?;
+        let (input, _) = alt((tag(" if it's "), tag(" if it is "))).parse(input)?;
+        let (input, _) = take_until(" card").parse(input)?;
+        let (input, _) = tag(" card").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        Ok((input, ()))
+    }
+
+    let bare = strip_search_result_subject(lower.trim().trim_end_matches('.'));
+    parse_clause(bare).is_ok()
+        || nom_primitives::scan_at_word_boundaries(lower, |input| {
+            parse_clause(strip_search_result_subject(input))
+        })
+        .is_some()
+}
+
 /// Parse count from "choose one/two/three/N of them/those" text using nom combinator.
 /// Handles all chooser prefix forms: "choose ", "you choose ", "an opponent chooses ",
 /// "target opponent chooses ".
@@ -383,6 +415,12 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut paren_depth = 0usize;
     let mut in_single_quote = false;
     let mut in_double_quote = false;
+    // CR 109.5 + CR 115.1: once a compound-subject-each head ("you and" / "~ and"
+    // followed by "<noun> each") is detected, keep the WHOLE distributed body
+    // intact for the rest of the current chunk — its internal " and "s
+    // ("get +2/+0 and gain haste ... and attack this turn if able") are body
+    // delimiters owned by `try_parse_compound_subject_each`, not clause splits.
+    let mut compound_subject_each_sticky = false;
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -405,6 +443,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             '"' if !in_single_quote => {
                 in_double_quote = !in_double_quote;
                 current.push(ch);
+                if !in_double_quote {
+                    let remainder = chars.clone().collect::<String>();
+                    if quote_closes_sentence_before_sequence(&current, &remainder) {
+                        push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
+                        current.clear();
+                        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+                            chars.next();
+                        }
+                    }
+                }
             }
             ',' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 let remainder = chars.clone().collect::<String>();
@@ -413,6 +461,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 {
                     push_clause_chunk(&mut chunks, &current, Some(boundary));
                     current.clear();
+                    compound_subject_each_sticky = false;
                     for _ in 0..chars_to_skip {
                         chars.next();
                     }
@@ -423,6 +472,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             '.' if paren_depth == 0 && !in_single_quote && !in_double_quote => {
                 push_clause_chunk(&mut chunks, &current, Some(ClauseBoundary::Sentence));
                 current.clear();
+                compound_subject_each_sticky = false;
                 while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
                     chars.next();
                 }
@@ -513,14 +563,31 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // distribution logic; here we must keep the text as one chunk so
                     // the combinator sees the full prefix.
                     //
-                    // The detection is tight: the chunk-so-far must be exactly "you"
-                    // (so we do not suppress mid-sentence "you draw a card and that
-                    // player draws a card" — those are two clauses). The remainder
+                    // The detection is tight: the chunk-so-far must be exactly the
+                    // first-subject token — "you" (player axis) or "~" (the
+                    // self-reference, object axis; e.g. Gogo's "~ and that creature
+                    // each ...") — so we do not suppress mid-sentence "you draw a
+                    // card and that player draws a card" (two clauses). The remainder
                     // must start with a compound-subject noun phrase followed by
                     // " each " — distinguishing it from the standard clause-starter
                     // "that player <verb>" (which is a separate clause).
-                    let compound_subject_each = before_lower.trim_end() == "you"
+                    // CR 603.12 + CR 109.5 + CR 115.1: strip leading reflexive
+                    // connector ("if you do, ", "when you do, ", ...) so the
+                    // compound-subject body stays intact even when introduced by
+                    // an "If you do," reflexive frame (Gogo, Mysterious Mime).
+                    let trimmed = before_lower.trim_end();
+                    let first_subject_token =
+                        crate::parser::oracle_nom::condition::parse_reflexive_conditional_connector(
+                            trimmed,
+                        )
+                        .map(|(rest, _)| rest.trim())
+                        .unwrap_or(trimmed);
+                    let compound_subject_each = (first_subject_token == "you"
+                        || first_subject_token == "~")
                         && remainder_trimmed_starts_with_compound_subject_each(remainder_trimmed);
+                    if compound_subject_each {
+                        compound_subject_each_sticky = true;
+                    }
                     // CR 608.2c: "Otherwise, X and Y" — the body following an
                     // "otherwise" prefix is a single Otherwise branch even when
                     // it contains an internal " and ". Without this guard the
@@ -563,6 +630,19 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             ))
                             .parse(remainder_trimmed)
                             .is_ok();
+                    // CR 706.2: "roll a d{N} and (add|subtract) {quantity}" —
+                    // the modifier clause is part of the same RollDie effect
+                    // (it shifts the natural result) and must NOT be peeled
+                    // off as a sibling clause. Without this suppression
+                    // "Roll a d20 and add the number of cards in your hand"
+                    // would split into ["Roll a d20", "add ..."] and the
+                    // modifier silently becomes an Unimplemented sub_ability
+                    // — bypassing the typed modifier path on every D&D-set
+                    // d20 card.
+                    let roll_die_modifier_continuation = ends_with_roll_die_phrase(&before_lower)
+                        && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
+                            .parse(remainder_trimmed)
+                            .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -571,12 +651,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || inside_except_clause
                         || choice_partition_remainder
                         || compound_subject_each
+                        || compound_subject_each_sticky // CR 109.5 + CR 115.1: keep the whole compound-subject body intact
                         || inside_otherwise_body
                         || have_base_pt_continuation
-                        || continuous_modifier_conjunct;
+                        || continuous_modifier_conjunct
+                        || roll_die_modifier_continuation;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
+                        compound_subject_each_sticky = false;
                     } else if !suppress {
                         // CR 508.1d / CR 509.1c: "<subj> gains <keyword> until end
                         // of turn and <attack|must-be-blocked> ... if able" — the
@@ -594,6 +677,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                             current.clear();
+                            compound_subject_each_sticky = false;
                             current.push_str(&prepend);
                         }
                     }
@@ -604,6 +688,30 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
 
     push_clause_chunk(&mut chunks, &current, None);
     chunks
+}
+
+fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool {
+    let quoted_text_ends_sentence = current
+        .chars()
+        .rev()
+        .nth(1)
+        .is_some_and(|ch| matches!(ch, '.' | '!' | '?'));
+    if !quoted_text_ends_sentence {
+        return false;
+    }
+
+    let trimmed = remainder.trim_start();
+    let trimmed_lower = trimmed.to_ascii_lowercase();
+    let sequence_starts = alt((
+        tag::<_, _, OracleError<'_>>("then, if "),
+        tag("then if "),
+        tag("then "),
+        tag("if "),
+        tag("otherwise"),
+    ))
+    .parse(trimmed_lower.as_str())
+    .is_ok();
+    sequence_starts
 }
 
 fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
@@ -664,7 +772,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
-    if starts_clause_text(trimmed) || starts_with_damage_clause(&trimmed_lower) {
+    if starts_clause_text_or_conjugated(trimmed) || starts_with_damage_clause(&trimmed_lower) {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
 
@@ -678,7 +786,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         {
             return None;
         }
-        if starts_clause_text(after_and) || starts_with_damage_clause(after_and) {
+        if starts_clause_text_or_conjugated(after_and) || starts_with_damage_clause(after_and) {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
     }
@@ -794,6 +902,47 @@ pub(super) fn starts_clause_text_or_conjugated(text: &str) -> bool {
     let rest = &lower[first_word.len()..];
     let deconjugated = format!("{base}{rest}");
     starts_clause_text_lower(&deconjugated)
+}
+
+/// CR 706.2: True iff `before_lower` ends with a "roll a d{N}" phrase (with
+/// the standard set of polyhedral side counts) or the word-form variants
+/// "six-sided die", "twenty-sided die", etc. Used by the bare-and splitter to
+/// keep "roll a d20 and add/subtract X" intact so the typed modifier path
+/// fires instead of producing a stray Unimplemented sub_ability.
+fn ends_with_roll_die_phrase(before_lower: &str) -> bool {
+    let trimmed = before_lower.trim_end();
+    // Numeric form: any "roll a d<digits>" tail. allow-noncombinator:
+    // structural rsplit on a runtime ' ' separator (not a literal dispatch
+    // token) followed by a char-class digit scan — no string-method dispatch
+    // against any literal phrase.
+    if let Some(last_word) = trimmed.rsplit(' ').next() {
+        // allow-noncombinator: CR 706.1a "d{digits}" structural shape — single-char prefix `d` followed by an ASCII-digit run on a pre-tokenized last-word slice; this is a CR-spec character-class scan, not dispatch against any literal phrase.
+        if let Some(digits) = last_word.strip_prefix('d') {
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    // Word-form: "...-sided die". The tail must match one of the polyhedral
+    // phrases. Take the last three space-separated tokens (`<N>-sided die`)
+    // and parse them with nom alternatives.
+    let tail = trimmed.rsplitn(3, ' ').collect::<Vec<_>>();
+    if tail.len() != 3 {
+        return false;
+    }
+    // tail is reversed; reconstruct "<N>-sided die" by re-joining.
+    let candidate = format!("{} {}", tail[1], tail[0]);
+    let parsed: Result<((), ()), nom::Err<OracleError<'_>>> = alt((
+        value((), tag::<_, _, OracleError<'_>>("four-sided die")),
+        value((), tag("six-sided die")),
+        value((), tag("eight-sided die")),
+        value((), tag("ten-sided die")),
+        value((), tag("twelve-sided die")),
+        value((), tag("twenty-sided die")),
+    ))
+    .parse(candidate.as_str())
+    .map(|(_, v)| ((), v));
+    parsed.is_ok()
 }
 
 fn starts_you_control_subject_predicate(s: &str) -> bool {
@@ -937,24 +1086,33 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
     .is_ok()
 }
 
-/// CR 109.5 + CR 608.2c + CR 800.4g: Detect that the remainder after "you and"
-/// starts a compound-subject distribution clause: "<player-noun> each <body>".
+/// CR 109.5 + CR 115.1 + CR 608.2c: Detect that the remainder after the first
+/// subject ("you and" / "~ and") starts a compound-subject distribution clause:
+/// "<noun> each <body>".
 ///
 /// Used by the chunk splitter to suppress " and " splitting when the entire
-/// phrase is a single compound subject ("you and that player each Y") rather
-/// than two clauses joined by "and". The recognized noun phrases mirror the
-/// expansion axis in `try_parse_compound_subject_each`; new compound forms
-/// are added by extending both sites in lockstep.
+/// phrase is a single compound subject ("you and that player each Y", "~ and
+/// that creature each Y") rather than two clauses joined by "and". The
+/// recognized noun phrases mirror the expansion axis in
+/// `try_parse_compound_subject_each`; new compound forms are added by extending
+/// both sites in lockstep.
 ///
-/// Currently restricted to "that player each" — the only form produced by
-/// the Council's-dilemma "for each player who chose <choice>" body. Other
-/// compound forms ("target opponent each", "an opponent each") are noted
-/// follow-ups; until they parse on the body side, the chunk splitter can
-/// safely suppress them too.
+/// Recognized second-subject axes (mirror `try_parse_compound_subject_each`):
+/// - "that player each" — the player-axis form (Council's-dilemma "for each
+///   player who chose <choice>" body).
+/// - "target opponent each" / "target player each" — targeted player-axis forms.
+/// - "that creature each" — the object-axis form (CR 115.1 parent-target
+///   binding; e.g. Gogo, Mysterious Mime's "~ and that creature each get
+///   +2/+0 and gain haste ... and attack this turn if able").
 fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool {
     let lower = remainder.to_ascii_lowercase();
-    let result: nom::IResult<&str, (), OracleError<'_>> =
-        alt((value((), tag("that player each ")),)).parse(lower.as_str());
+    let result: nom::IResult<&str, (), OracleError<'_>> = alt((
+        value((), tag("that player each ")),
+        value((), tag("target opponent each ")),
+        value((), tag("target player each ")),
+        value((), tag("that creature each ")),
+    ))
+    .parse(lower.as_str());
     result.is_ok()
 }
 
@@ -1131,6 +1289,12 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
 /// `ParentTarget` (one shared target, not a second slot). For a non-targeted
 /// set-scoped subject ("all Revelers ...") it returns the literal subject text
 /// so `inject_subject_target` threads the typed filter onto conjunct 2.
+///
+/// Anchor-start case: when `before_and` itself BEGINS with the gain/get verb at
+/// offset 0 (the subject was already lifted by an enclosing compound-subject
+/// distribution, e.g. Gogo's "~ and that creature each get +2/+0 and gain haste
+/// ... and attack this turn if able"), there is no subject to thread — return
+/// `Some("")` so the conjunct splits with no prepend.
 fn combat_requirement_conjunct_prepend(
     before_and: &str,
     remainder_trimmed: &str,
@@ -1142,6 +1306,23 @@ fn combat_requirement_conjunct_prepend(
         return None;
     }
     let before_lower = before_and.to_ascii_lowercase();
+    // CR 508.1d / CR 509.1c: chunk begins with the gain/get verb at offset 0
+    // (subject already lifted by the enclosing compound-subject distribution);
+    // emit an empty subject so the trailing combat-requirement conjunct splits.
+    // This anchor-start check has PRIORITY over the interior `take_until` arms
+    // below — those scan for the FIRST " gain"/" get" in the chunk, which would
+    // spuriously bind an interior verb (e.g. "get +2/+0 and gain haste ..." has
+    // " gain" mid-string) and return a bogus non-empty subject. A verb at
+    // offset 0 unambiguously means the subject was already lifted.
+    let anchor_start = {
+        let r: nom::IResult<&str, &str, OracleError<'_>> =
+            alt((tag("gain "), tag("gains "), tag("get "), tag("gets ")))
+                .parse(before_lower.as_str());
+        r.is_ok()
+    };
+    if anchor_start {
+        return Some(String::new());
+    }
     // Conjunct 1 must be a continuous predicate: locate the gain/get verb.
     let subject_text = take_until::<_, _, OracleError<'_>>(" gain")
         .parse(before_lower.as_str())
@@ -1388,7 +1569,7 @@ pub(super) fn apply_clause_continuation(
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped,
                     enters_attacking: false,
                     up_to: false,
@@ -1614,7 +1795,7 @@ pub(super) fn apply_clause_continuation(
                         },
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: is_up_to,
@@ -1637,6 +1818,14 @@ pub(super) fn apply_clause_continuation(
                     constraint: None,
                 },
             ));
+        }
+        ContinuationAst::SearchRevealResult => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::SearchLibrary { reveal, .. } = &mut *previous.effect {
+                *reveal = true;
+            }
         }
         ContinuationAst::SearchResultClauseHandled => {}
         ContinuationAst::PutChoiceRemainderOnBottom => {
@@ -1691,7 +1880,7 @@ pub(super) fn apply_clause_continuation(
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
@@ -1706,7 +1895,7 @@ pub(super) fn apply_clause_continuation(
                         target: TargetFilter::Any,
                         owner_library: false,
                         enter_transformed: false,
-                        under_your_control: false,
+                        enters_under: None,
                         enter_tapped: false,
                         enters_attacking: false,
                         up_to: false,
@@ -1819,6 +2008,7 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::RevealUntilKept {
             destination,
             enter_tapped: tapped,
+            enters_attacking: attacking,
             rest_destination: rest_dest,
             optional_decline,
         } => {
@@ -1828,6 +2018,7 @@ pub(super) fn apply_clause_continuation(
             if let Effect::RevealUntil {
                 kept_destination,
                 enter_tapped,
+                enters_attacking,
                 rest_destination,
                 kept_optional_to,
                 ..
@@ -1842,6 +2033,8 @@ pub(super) fn apply_clause_continuation(
                         *kept_optional_to = Some(destination);
                         *kept_destination = decline;
                         *enter_tapped = tapped;
+                        // CR 508.4: accept zone is the battlefield here.
+                        *enters_attacking = attacking;
                     }
                     // Mandatory kept clause. Refine `kept_destination` without
                     // clobbering a `kept_optional_to` set by a prior chunk (the
@@ -1851,6 +2044,9 @@ pub(super) fn apply_clause_continuation(
                         *kept_destination = destination;
                         if destination == Zone::Battlefield {
                             *enter_tapped = tapped;
+                            // CR 508.4: "put that card onto the battlefield
+                            // tapped and attacking" (Raph & Mikey, Fireflux Squad).
+                            *enters_attacking = attacking;
                         }
                     }
                 }
@@ -1968,6 +2164,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::CantRegenerate => true,
         ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
+        ContinuationAst::SearchRevealResult => true,
         ContinuationAst::SearchResultClauseHandled => true,
         ContinuationAst::PutChoiceRemainderOnBottom => true,
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
@@ -1996,9 +2193,17 @@ pub(super) fn parse_intrinsic_continuation_ast(
             // here so the found set is not collapsed to a single battlefield move
             // (mirrors the `has_positional_put` suppression below).
             if split.is_some() {
-                // MUTATION: suppression disabled
+                return None;
             }
             let full_lower = full_text.to_ascii_lowercase();
+            // CR 608.2c: Conditional result destinations ("put it onto the
+            // battlefield tapped if it's a land card. Otherwise, put it into
+            // your hand" — Archdruid's Charm) are represented by the parsed
+            // conditional ChangeZone/else branch. Do not synthesize the
+            // unconditional SearchDestination continuation ahead of that branch.
+            if has_conditional_search_result_destination(&full_lower) {
+                return None;
+            }
             // CR 701.24b: If later clauses contain "put on top", suppress the default
             // ChangeZone(→Hand) — the card stays in the library and a separate
             // PutAtLibraryPosition effect in the chain handles placement.
@@ -2089,6 +2294,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
 /// - "return a permanent card from among them to your hand"
 /// - "you may reveal a creature card from among them and put it into your hand"
 /// - "put two of them into your hand and the rest on the bottom of your library in any order"
+/// - "put two of those cards into your hand"
 pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<ContinuationAst> {
     // CR 202.3 + CR 107.3i: Strip a trailing "where X is <expression>" defining
     // clause before destination/count/filter parsing. `where_x_expression`
@@ -2132,7 +2338,13 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
 
     // "put N of them into your hand [and the rest on the bottom]" — no filter, count explicit.
     // Must be checked BEFORE the "from among" path since "of them" appears in both forms.
-    if let Ok((_, before_of)) = take_until::<_, _, OracleError<'_>>(" of them").parse(lower) {
+    if let Ok((_, before_of)) = alt((
+        take_until::<_, _, OracleError<'_>>(" of those cards"),
+        take_until(" of those"),
+        take_until(" of them"),
+    ))
+    .parse(lower)
+    {
         let before_of = before_of.trim();
         let after_put = alt((tag::<_, _, OracleError<'_>>("you may put "), tag("put ")))
             .parse(before_of)
@@ -2161,6 +2373,77 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             filter: TargetFilter::Any,
             destination,
             rest_destination,
+        });
+    }
+
+    // CR 701.17c + CR 608.2c: "return a card milled this way to your hand"
+    // is the same tracked-set continuation as "from among the milled cards",
+    // but its filter appears before the "milled this way" marker rather than
+    // before "from among".
+    if let Ok((_, before_milled)) = alt((
+        take_until::<_, _, OracleError<'_>>("that was milled this way"),
+        take_until("milled this way"),
+    ))
+    .parse(lower)
+    {
+        let before_milled = before_milled.trim();
+        let (after_put, prefix_optional) = if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("you may put "),
+            tag("you may reveal "),
+            tag("you may return "),
+        ))
+        .parse(before_milled)
+        {
+            (rest, true)
+        } else if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("put "),
+            tag("reveal "),
+            tag("return "),
+        ))
+        .parse(before_milled)
+        {
+            (rest, false)
+        } else {
+            (before_milled, false)
+        };
+
+        let (count, up_to, filter_text) =
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
+                if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
+                    (n, true, remainder.trim())
+                } else {
+                    (1, true, rest)
+                }
+            } else if let Ok((rest, _)) =
+                tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
+            {
+                (255, true, rest)
+            } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
+                (1, prefix_optional, rest)
+            } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
+                (n, prefix_optional, remainder.trim())
+            } else {
+                (1, prefix_optional, after_put)
+            };
+
+        let filter = if filter_text.is_empty()
+            || filter_text == "card"
+            || filter_text == "cards"
+            || filter_text == "of them"
+        {
+            TargetFilter::Any
+        } else {
+            let (parsed_filter, _) = parse_target(filter_text);
+            parsed_filter
+        };
+        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref());
+
+        return Some(ContinuationAst::DigFromAmong {
+            count,
+            up_to,
+            filter,
+            destination,
+            rest_destination: None,
         });
     }
 
@@ -2274,7 +2557,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // cards" continuation is transparent — the continuation patches the
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
-        Effect::Sacrifice { .. } => true,
+        Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
@@ -2325,6 +2608,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
         | Effect::BecomeCopy { .. }
@@ -2369,7 +2653,6 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::CreateEmblem { .. }
-        | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
@@ -2419,6 +2702,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
@@ -2428,11 +2712,16 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::BlightEffect { .. }
         | Effect::Seek { .. }
         | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
         | Effect::ChooseOneOf { .. }
+        // CR 614.12 + CR 303.4: Return-as-Aura is its own emitted sub-effect
+        // following a `ChangeZone`; it is not a lookback-transparent clause
+        // for the Dig-from-among continuation search.
+        | Effect::ReturnAsAura { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -2445,6 +2734,9 @@ pub(super) fn parse_followup_continuation_ast(
     let lower = text.to_lowercase();
 
     match previous_effect {
+        Effect::SearchLibrary { .. } if is_search_result_reveal_clause(&lower) => {
+            Some(ContinuationAst::SearchRevealResult)
+        }
         Effect::RevealHand { .. }
             if nom_primitives::scan_contains(&lower, "card from it")
                 || nom_primitives::scan_contains(&lower, "card from among")
@@ -2646,13 +2938,16 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "put it")
                 || nom_primitives::scan_contains(&lower, "puts it") =>
         {
-            let (destination, enter_tapped) =
+            let (destination, enter_tapped, enters_attacking) =
                 if nom_primitives::scan_contains(&lower, "onto the battlefield") {
                     let tapped = nom_primitives::scan_contains(&lower, "tapped");
-                    (Zone::Battlefield, tapped)
+                    // CR 508.4: "put that card onto the battlefield tapped and
+                    // attacking" (Raph & Mikey, Fireflux Squad).
+                    let attacking = nom_primitives::scan_contains(&lower, "attacking");
+                    (Zone::Battlefield, tapped, attacking)
                 } else {
                     // Default "into your hand"
-                    (Zone::Hand, false)
+                    (Zone::Hand, false, false)
                 };
             let rest = parse_reveal_until_rest_zone(&lower);
             // CR 701.20a + CR 608.2c: "you may put that card onto the battlefield"
@@ -2672,6 +2967,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::RevealUntilKept {
                 destination,
                 enter_tapped,
+                enters_attacking,
                 rest_destination: rest,
                 optional_decline,
             })
@@ -2902,7 +3198,10 @@ pub(super) fn parse_followup_continuation_ast(
             if (nom_primitives::scan_contains(&lower, "from among them")
                 || nom_primitives::scan_contains(&lower, "from among those cards")
                 || nom_primitives::scan_contains(&lower, "from among the milled cards")
-                || nom_primitives::scan_contains(&lower, "of them"))
+                || nom_primitives::scan_contains(&lower, "milled this way")
+                || nom_primitives::scan_contains(&lower, "of them")
+                || nom_primitives::scan_contains(&lower, "of those cards")
+                || nom_primitives::scan_contains(&lower, "of those"))
                 && (nom_primitives::scan_contains(&lower, "onto the battlefield")
                     || nom_primitives::scan_contains(&lower, "into your hand")
                     || nom_primitives::scan_contains(&lower, "into their hand")
@@ -3231,6 +3530,20 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn quoted_token_ability_boundary_splits_before_then_if() {
+        let chunks = clause_texts(
+            "create a tapped 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\" Then if you control four or more Wizards, transform ~.",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "create a tapped 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\"",
+                "Then if you control four or more Wizards, transform ~",
+            ]
+        );
+    }
+
     // --- Bare " and " splitting: positive cases (should split) ---
 
     #[test]
@@ -3530,6 +3843,21 @@ mod tests {
     fn conjugated_verb_sacrifices_splits_after_then() {
         let chunks = clause_texts("creates a token, then sacrifices a creature");
         assert_eq!(chunks, vec!["creates a token", "sacrifices a creature"]);
+    }
+
+    #[test]
+    fn comma_conjugated_player_predicates_split() {
+        let chunks = clause_texts(
+            "target opponent sacrifices a creature, discards a card, and loses 3 life",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "target opponent sacrifices a creature",
+                "discards a card",
+                "and loses 3 life"
+            ]
+        );
     }
 
     #[test]
@@ -4026,6 +4354,41 @@ mod tests {
         assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
     }
 
+    /// CR 701.17c + CR 608.2c: Ripples of Undeath uses "a card milled this
+    /// way" instead of "from among the milled cards". It must still bind the
+    /// follow-up return to the cards moved by the preceding `Mill`.
+    #[test]
+    fn mill_return_card_milled_this_way_to_hand_emits_dig_from_among() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "Return a card milled this way to your hand.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(count, 1);
+        assert!(
+            !up_to,
+            "after the optional payment is made, returning a card is not optional"
+        );
+        assert_eq!(filter, TargetFilter::Any);
+        assert_eq!(destination, Some(Zone::Hand));
+        assert_eq!(rest_destination, None);
+    }
+
     /// CR 701.17c: `apply_clause_continuation` must PUSH a `ChangeZone`
     /// sub-ability targeting `TrackedSetFiltered` when the preceding def is a
     /// `Mill` — scoping the zone-change to the milled cards rather than the
@@ -4077,6 +4440,45 @@ mod tests {
             TargetFilter::TrackedSetFiltered { id, filter } => {
                 assert_eq!(id.0, 0, "sentinel TrackedSetId(0) — resolved at runtime");
                 assert_eq!(**filter, or_filter, "inner filter preserved");
+            }
+            other => panic!("expected TrackedSetFiltered target, got {other:?}"),
+        }
+    }
+
+    /// CR 118.3 + CR 608.2c: A payment clause between the mill and "milled this
+    /// way" return is lookback-transparent. The return must patch the earlier
+    /// `Mill`, not bind `ParentTarget` to the payment/current source.
+    #[test]
+    fn mill_pay_then_return_milled_this_way_uses_tracked_set() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Mill three cards. Then you may pay {1} and 3 life. If you do, return a card milled this way to your hand.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+
+        assert!(matches!(&*effects[0].effect, Effect::Mill { .. }));
+        assert!(matches!(&*effects[1].effect, Effect::PayCost { .. }));
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = &*effects[2].effect
+        else {
+            panic!("expected ChangeZone return, got {:?}", effects[2].effect);
+        };
+        assert_eq!(*destination, Zone::Hand);
+        match target {
+            TargetFilter::TrackedSetFiltered { id, filter } => {
+                assert_eq!(id.0, 0);
+                assert_eq!(**filter, TargetFilter::Any);
             }
             other => panic!("expected TrackedSetFiltered target, got {other:?}"),
         }
@@ -4596,5 +4998,114 @@ mod tests {
             "The same is true for flying when you attack."
         )
         .is_none());
+    }
+
+    // --- combat_requirement_conjunct_prepend: anchor-start arm (CR 508.1d / 509.1c) ---
+
+    /// A chunk that BEGINS with the gain/get verb at offset 0 (subject already
+    /// lifted by the enclosing compound-subject distribution) yields an empty
+    /// prepend so the trailing combat-requirement conjunct still splits.
+    #[test]
+    fn combat_requirement_anchor_start_gain_haste() {
+        assert_eq!(
+            combat_requirement_conjunct_prepend(
+                "gain haste until end of turn",
+                "attack this turn if able"
+            ),
+            Some(String::new())
+        );
+    }
+
+    /// Anchor-start with a "gains"-conjugated verb and a "must be blocked"
+    /// standalone combat requirement remainder.
+    #[test]
+    fn combat_requirement_anchor_start_gains_must_be_blocked() {
+        assert_eq!(
+            combat_requirement_conjunct_prepend(
+                "gains lifelink until end of turn",
+                "must be blocked this turn"
+            ),
+            Some(String::new())
+        );
+    }
+
+    /// Regression: a leading-space subject case still returns a non-empty
+    /// prepend (targeted subject → anaphor "it ").
+    #[test]
+    fn combat_requirement_leading_space_subject_unchanged() {
+        assert_eq!(
+            combat_requirement_conjunct_prepend(
+                "target creature gets +1/+1",
+                "attacks this turn if able"
+            ),
+            Some("it ".to_string())
+        );
+    }
+
+    /// Negative: a non-gain/get verb head with a combat-requirement remainder
+    /// does not match (no continuous predicate to anchor on).
+    #[test]
+    fn combat_requirement_anchor_start_rejects_non_pump_verb() {
+        assert_eq!(
+            combat_requirement_conjunct_prepend("draw a card", "attack this turn if able"),
+            None
+        );
+    }
+
+    // --- split_clause_sequence: compound-subject-each sticky suppression (CR 109.5 / 115.1) ---
+
+    /// The object-axis compound subject "~ and that creature each <body>" stays
+    /// as a SINGLE chunk even though the body has internal " and "s.
+    #[test]
+    fn compound_subject_each_object_axis_one_chunk() {
+        let input = "~ and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able";
+        let chunks = clause_texts(input);
+        assert_eq!(chunks.len(), 1, "expected one chunk, got {chunks:?}");
+        assert_eq!(chunks[0], input);
+    }
+
+    /// Negative control: a normal "you <verb> ... and <verb> ..." compound where
+    /// the remainder does NOT start with a "<noun> each " distribution head must
+    /// still split at the bare " and " — the sticky suppression must not engage.
+    #[test]
+    fn compound_subject_each_negative_control_splits() {
+        let chunks = clause_texts("you draw a card and create a Treasure token");
+        assert!(
+            chunks.len() > 1,
+            "expected a split (sticky must not engage), got single chunk: {chunks:?}"
+        );
+    }
+
+    /// CR 603.12 + CR 115.1: an object-axis compound subject introduced by an
+    /// "if you do," reflexive connector still stays one chunk — the
+    /// sticky-detection strips the leading connector before the subject test.
+    #[test]
+    fn compound_subject_each_reflexive_connector_object_axis_one_chunk() {
+        let input = "if you do, ~ and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able";
+        let chunks = clause_texts(input);
+        assert_eq!(chunks.len(), 1, "expected one chunk, got {chunks:?}");
+        assert_eq!(chunks[0], input);
+    }
+
+    /// CR 603.12 + CR 109.5: a player-axis compound subject introduced by a
+    /// "when you do," connector stays one chunk despite the internal " and ".
+    #[test]
+    fn compound_subject_each_reflexive_connector_player_axis_one_chunk() {
+        let input = "when you do, you and that player each draw a card and lose 1 life";
+        let chunks = clause_texts(input);
+        assert_eq!(chunks.len(), 1, "expected one chunk, got {chunks:?}");
+        assert_eq!(chunks[0], input);
+    }
+
+    /// Negative: a reflexive "if you do," frame whose body is NOT a compound
+    /// subject distribution still splits at the bare " and " — the connector
+    /// strip must not spuriously engage the sticky suppression.
+    #[test]
+    fn compound_subject_each_reflexive_connector_negative_splits() {
+        let chunks = clause_texts("if you do, draw a card and create a Treasure token");
+        assert!(
+            chunks.len() > 1,
+            "expected a split (sticky must not engage), got single chunk: {chunks:?}"
+        );
     }
 }

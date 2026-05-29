@@ -617,6 +617,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::CounterAll { .. }
         | Effect::GainLife { .. }
         | Effect::LoseLife { .. }
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::Tap { .. }
         | Effect::Untap { .. }
         | Effect::TapAll { .. }
@@ -653,6 +654,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Clash
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
         | Effect::BecomeCopy { .. }
@@ -737,6 +739,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
@@ -750,6 +753,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::CreateDamageReplacement { .. }
+        // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
+        // ContinuousModifications, never conjured card names.
+        | Effect::ReturnAsAura { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -1798,6 +1804,7 @@ mod tests {
                 max: 6,
                 effect: Box::new(conjure_ability("roll", Zone::Hand)),
             }],
+            modifier: None,
         };
         walk_effect(&roll, &mut names);
 

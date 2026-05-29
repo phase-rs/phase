@@ -114,6 +114,7 @@ function currentPromptSummary({
     case "TriggerTargetSelection":
     case "CopyTargetChoice":
     case "CopyRetarget":
+    case "ReturnAsAuraTarget":
       return t("help.prompt.targetSelection");
     case "DeclareAttackers":
       return t("help.prompt.declareAttackers");

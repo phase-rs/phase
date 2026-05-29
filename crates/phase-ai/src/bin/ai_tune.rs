@@ -405,6 +405,7 @@ fn build_matchups() -> Vec<Matchup> {
         .concat(),
         sideboard: vec![],
         commander: vec![],
+        bracket_tier: Default::default(),
     };
 
     let green_midrange = PlayerDeckList {
@@ -424,6 +425,7 @@ fn build_matchups() -> Vec<Matchup> {
         .concat(),
         sideboard: vec![],
         commander: vec![],
+        bracket_tier: Default::default(),
     };
 
     let white_weenie = PlayerDeckList {
@@ -443,6 +445,7 @@ fn build_matchups() -> Vec<Matchup> {
         .concat(),
         sideboard: vec![],
         commander: vec![],
+        bracket_tier: Default::default(),
     };
 
     let blue_control = PlayerDeckList {
@@ -461,6 +464,7 @@ fn build_matchups() -> Vec<Matchup> {
         .concat(),
         sideboard: vec![],
         commander: vec![],
+        bracket_tier: Default::default(),
     };
 
     vec![
@@ -665,7 +669,7 @@ fn main() {
             let deck_list = DeckList {
                 player: m.deck_a.clone(),
                 opponent: m.deck_b.clone(),
-                ai_decks: vec![],
+                ..Default::default()
             };
             (resolve_deck_list(&db, &deck_list), m)
         })

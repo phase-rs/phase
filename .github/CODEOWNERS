@@ -1,0 +1,12 @@
+# CODEOWNERS — required reviewers for protected branches.
+#
+# Every file in the repo requires review from @matthewevans before a PR
+# can merge to main. Admin bypass is intentionally left on
+# (enforce_admins=false) so the owner can merge their own PRs without
+# self-review, which GitHub does not allow.
+#
+# Self-ownership on this file prevents anyone from adding themselves
+# as an owner via PR without @matthewevans approving.
+
+*                       @matthewevans
+/.github/CODEOWNERS     @matthewevans

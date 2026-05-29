@@ -56,7 +56,9 @@
   "seat": {
     "label": "Posto {{number}}",
     "passingLeft": "→ Passaggio a sinistra →",
-    "passingRight": "← Passaggio a destra ←"
+    "passingRight": "← Passaggio a destra ←",
+    "connected": "Connected",
+    "disconnected": "Disconnected"
   },
   "setSelector": {
     "botDifficulty": "Difficoltà bot",
@@ -110,7 +112,6 @@
   "landing": {
     "title": "Draft",
     "startNew": "Inizia nuovo",
-    "experimental": "Sperimentale",
     "quickDraft": {
       "title": "Quick Draft",
       "description": "Drafta 3 buste con 7 draftatori IA, costruisci un mazzo da 40 carte, poi gioca una partita Bo1 contro uno di loro."
@@ -267,7 +268,11 @@
     "loadingPool": "Caricamento dati del pool del set...",
     "roomCode": "Codice stanza",
     "roomCodePlaceholder": "Inserisci codice stanza...",
-    "joinPod": "Unisciti al pod"
+    "joinPod": "Unisciti al pod",
+    "tabs": {
+      "set": "Espansione",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Accoppiamenti torneo",
@@ -281,7 +286,12 @@
     "reviewPool": "Rivedi pool",
     "roundComplete": "Round completato",
     "waitingNextRound": "In attesa che l'host inizi il prossimo round...",
-    "nextRoundShortly": "Il prossimo round inizierà a breve..."
+    "nextRoundShortly": "Il prossimo round inizierà a breve...",
+    "pauseReason": {
+      "PlayerDisconnected": "Draft paused — a player disconnected.",
+      "PausedByHost": "Draft paused by host.",
+      "DisconnectGraceExpired": "A player did not return in time."
+    }
   },
   "betweenGames": {
     "game": "Partita {{number}}",

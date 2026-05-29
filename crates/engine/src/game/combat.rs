@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::types::ability::StaticDefinition;
+use crate::types::ability::{StaticDefinition, TargetRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -157,7 +157,8 @@ pub enum DamageTarget {
 /// CR 508.4: Place a permanent onto the battlefield attacking.
 /// The creature is not "declared as an attacker" — attack triggers do not fire.
 /// Determines the defending player from: (1) source creature's combat info,
-/// (2) current trigger event context, (3) fallback to opponent.
+/// (2) explicit "that player" event context, (3) this controller's declared
+/// attackers in the current combat, (4) fallback to opponent.
 pub fn enter_attacking(
     state: &mut GameState,
     object_id: ObjectId,
@@ -165,31 +166,8 @@ pub fn enter_attacking(
     controller: PlayerId,
 ) {
     // Determine defending player and attack target before mutable combat borrow.
-    let (defending_player, attack_target) = state
-        .combat
-        .as_ref()
-        .and_then(|c| {
-            c.attackers
-                .iter()
-                .find(|a| a.object_id == source_id)
-                .map(|a| (a.defending_player, a.attack_target))
-        })
-        .or_else(|| {
-            state
-                .current_trigger_event
-                .as_ref()
-                .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
-                .map(|pid| (pid, AttackTarget::Player(pid)))
-        })
-        .unwrap_or_else(|| {
-            // CR 508.4: Fallback to first opponent in seat order (multiplayer-aware).
-            // In 2-player, this returns the sole opponent — identical to the old arithmetic.
-            let pid = players::opponents(state, controller)
-                .first()
-                .copied()
-                .unwrap_or(controller);
-            (pid, AttackTarget::Player(pid))
-        });
+    let (defending_player, attack_target) =
+        defending_player_for_enters_attacking(state, source_id, controller);
 
     if let Some(combat) = state.combat.as_mut() {
         combat.attackers.push(AttackerInfo::new(
@@ -198,6 +176,78 @@ pub fn enter_attacking(
             defending_player,
         ));
     }
+}
+
+/// CR 508.4: Resolve which player/planeswalker a permanent that *enters*
+/// attacking should attack. Unlike declared attackers, this path must not use
+/// `extract_player_from_event` wholesale — `AttackersDeclared` and
+/// `PermanentSacrificed` surface the attacking/sacrificing player, which would
+/// make tokens attack their own controller (Caesar #944, Dalkovan Encampment).
+fn defending_player_for_enters_attacking(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> (PlayerId, AttackTarget) {
+    if let Some(combat) = state.combat.as_ref() {
+        if let Some(a) = combat.attackers.iter().find(|a| a.object_id == source_id) {
+            return (a.defending_player, a.attack_target);
+        }
+    }
+
+    if let Some(event) = state.current_trigger_event.as_ref() {
+        match event {
+            GameEvent::DamageDealt {
+                target: TargetRef::Player(pid),
+                ..
+            }
+            | GameEvent::BecomesTarget {
+                target: TargetRef::Player(pid),
+                ..
+            } => return (*pid, AttackTarget::Player(*pid)),
+            GameEvent::AttackersDeclared { attacks, .. } => {
+                if let Some((_, target)) = attacks.iter().find(|(id, _)| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.controller == controller)
+                }) {
+                    return attack_target_defender(state, *target);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(combat) = state.combat.as_ref() {
+        if let Some(a) = combat.attackers.iter().find(|a| {
+            state
+                .objects
+                .get(&a.object_id)
+                .is_some_and(|obj| obj.controller == controller)
+        }) {
+            return (a.defending_player, a.attack_target);
+        }
+    }
+
+    let pid = players::opponents(state, controller)
+        .first()
+        .copied()
+        .unwrap_or(controller);
+    (pid, AttackTarget::Player(pid))
+}
+
+/// Map an `AttackTarget` to the defending player and the target pair stored on
+/// `AttackerInfo` (planeswalker/battle controllers for blocking purposes).
+fn attack_target_defender(state: &GameState, target: AttackTarget) -> (PlayerId, AttackTarget) {
+    let defending = match target {
+        AttackTarget::Player(pid) => pid,
+        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => state
+            .objects
+            .get(&id)
+            .map(|obj| obj.controller)
+            .unwrap_or(state.active_player),
+    };
+    (defending, target)
 }
 
 /// CR 702.49c + CR 702.190b: Place an object onto `combat.attackers` alongside
@@ -576,6 +626,13 @@ pub fn validate_blockers_for_player(
                 }
                 _ => {}
             }
+        }
+
+        if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
+            return Err(format!(
+                "{:?} cannot block {:?} (Ring-bearer can't be blocked by greater power)",
+                blocker_id, attacker_id
+            ));
         }
 
         // CR 702.16f: Protection — an attacking creature with protection can't
@@ -1770,6 +1827,36 @@ pub fn is_landwalk_unblockable(
         return false;
     }
 
+    // CR 509.1b + CR 609.4 + CR 702.14c + CR 702.14d: Global
+    // IgnoreLandwalkForBlocking statics cancel the landwalk *restriction* for
+    // the named qualifier. The keyword itself remains on the attacker
+    // (CR 609.4 — "as though" is scoped to this effect). `game_active_statics`
+    // (battlefield + command zone) iterates both controllers' statics; the
+    // static is global (`affected = None`), so a canceller under either
+    // player's control suppresses the qualifier symmetrically.
+    let cancelled: HashSet<&str> = super::functioning_abilities::game_active_statics(state)
+        .filter_map(|(_src, sd)| match &sd.mode {
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => Some(q.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    #[cfg(debug_assertions)]
+    for q in &cancelled {
+        debug_assert!(
+            !q.is_empty(),
+            "IgnoreLandwalkForBlocking qualifier must match Keyword::Landwalk canonical form"
+        );
+    }
+
+    let qualifiers: Vec<&str> = qualifiers
+        .into_iter()
+        .filter(|q| !cancelled.contains(q))
+        .collect();
+    if qualifiers.is_empty() {
+        return false;
+    }
+
     // CR 702.14c: Check every land the defending player controls on the battlefield.
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
@@ -1866,6 +1953,9 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
             _ => {}
         }
     }
+    if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
+        return false;
+    }
     for kw in &attacker.keywords {
         if let Keyword::Protection(target) = kw {
             if crate::game::keywords::source_matches_protection_target(target, attacker, blocker) {
@@ -1914,6 +2004,17 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         return false;
     }
     true
+}
+
+fn ring_bearer_unblockable_by_greater_power(
+    state: &GameState,
+    attacker: &GameObject,
+    blocker: &GameObject,
+) -> bool {
+    // CR 701.54c: The Ring emblem says "Your Ring-bearer is legendary and
+    // can't be blocked by creatures with greater power."
+    super::effects::ring::is_current_ring_bearer(state, attacker.controller, attacker.id)
+        && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
 }
 
 /// CR 509.1a + CR 509.1b: Compute the maximum number of attackers a creature can block.
@@ -2281,7 +2382,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
-    use crate::types::ability::StaticDefinition;
+    use crate::types::ability::{
+        Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
@@ -2784,6 +2888,125 @@ mod tests {
         let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
 
         assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b + CR 609.4 + CR 702.14c: Ur-Drago's static cancels the swampwalk
+    /// blocking restriction. Attacker with swampwalk + defender controls a Swamp +
+    /// a permanent emitting `IgnoreLandwalkForBlocking(Swamp)` => blockable.
+    #[test]
+    fn swampwalk_cancelled_by_ur_drago_static() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Swampwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Swamp".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _swamp = create_land(&mut state, PlayerId(1), "Swamp", &["Swamp"], &[]);
+        // Place an Ur-Drago-like permanent on the defender's side emitting the static.
+        let ur_drago = create_creature(&mut state, PlayerId(1), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&ur_drago)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        assert!(can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14d: A swampwalk canceller leaves an unrelated islandwalk intact.
+    #[test]
+    fn islandwalk_unaffected_by_swamp_canceller() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Islandwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Island".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
+        let canceller = create_creature(&mut state, PlayerId(1), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&canceller)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14d: Qualifiers cancel independently — an attacker with both
+    /// swampwalk and islandwalk only loses the cancelled qualifier; the other
+    /// landwalk path remains active.
+    #[test]
+    fn multi_qualifier_attacker_preserves_other_landwalks() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Dual Walker", 2, 2);
+        let kws = &mut state.objects.get_mut(&attacker).unwrap().keywords;
+        kws.push(Keyword::Landwalk("Swamp".to_string()));
+        kws.push(Keyword::Landwalk("Island".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _swamp = create_land(&mut state, PlayerId(1), "Swamp", &["Swamp"], &[]);
+        let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
+        let canceller = create_creature(&mut state, PlayerId(1), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&canceller)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        // Islandwalk path still active => attacker is unblockable.
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b + CR 609.4: The static is global (`affected = None`); a canceller
+    /// on the ATTACKING player's side still suppresses the restriction.
+    #[test]
+    fn ur_drago_canceller_controller_independence() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Swampwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Swamp".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _swamp = create_land(&mut state, PlayerId(1), "Swamp", &["Swamp"], &[]);
+        // Canceller is on the ATTACKING side, not defender.
+        let canceller = create_creature(&mut state, PlayerId(0), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&canceller)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        // Cancellation still applies regardless of controller.
+        assert!(can_block_pair(&state, blocker, attacker));
     }
 
     /// CR 702.14a: Legendary landwalk — defender controlling a legendary land makes
@@ -3293,6 +3516,54 @@ mod tests {
         assert!(
             can_block_pair(&state, blue_blocker, granted),
             "blue blocker should be able to block (color differs from chosen)"
+        );
+    }
+
+    #[test]
+    fn source_power_block_restriction_scopes_to_attackers_you_control() {
+        let mut state = setup();
+        let champion = create_creature(&mut state, PlayerId(0), "Champion", 3, 3);
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 1, 1);
+        let other_attacker = create_creature(&mut state, PlayerId(1), "Other Attacker", 1, 1);
+        let small_blocker = create_creature(&mut state, PlayerId(1), "Small Blocker", 2, 2);
+        let large_blocker = create_creature(&mut state, PlayerId(1), "Large Blocker", 4, 4);
+
+        state
+            .objects
+            .get_mut(&champion)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantBeBlockedBy {
+                    filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LT,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Power {
+                                    scope: ObjectScope::Source,
+                                },
+                            },
+                        },
+                    ])),
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            );
+
+        assert!(
+            !can_block_pair(&state, small_blocker, attacker),
+            "blockers with power less than the source's power cannot block creatures its controller controls"
+        );
+        assert!(
+            can_block_pair(&state, large_blocker, attacker),
+            "blockers with power at least the source's power remain legal"
+        );
+        assert!(
+            can_block_pair(&state, small_blocker, other_attacker),
+            "the restriction only protects creatures controlled by the static source controller"
         );
     }
 
@@ -5000,5 +5271,52 @@ mod tests {
             "protected PlayerId(1) must not be a valid attack target, got {:?}",
             targets
         );
+    }
+
+    /// Issue #944 — Caesar, Legion's Emperor: reflexive Soldier tokens must
+    /// attack the same defender as the active player's declared attackers, not
+    /// the attacking player surfaced by `AttackersDeclared` /
+    /// `PermanentSacrificed` trigger context.
+    #[test]
+    fn enter_attacking_matches_controller_declared_defender_not_trigger_actor() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let caesar = create_creature(&mut state, PlayerId(0), "Caesar", 4, 4);
+        let token = create_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+        state.combat = Some(CombatState::default());
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .push(AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+        });
+
+        enter_attacking(&mut state, token, caesar, PlayerId(0));
+
+        let info = state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .find(|a| a.object_id == token)
+            .expect("token must be an attacking creature");
+        assert_eq!(
+            info.defending_player,
+            PlayerId(1),
+            "enters-attacking token must attack the declared defender, not its controller"
+        );
+        assert_eq!(info.attack_target, AttackTarget::Player(PlayerId(1)));
     }
 }

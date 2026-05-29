@@ -158,6 +158,7 @@ function AlternativeCostContent({
       eyebrow={copy.eyebrow}
       title={t("alternativeCost.title")}
       subtitle={copy.subtitle}
+      previewObjectId={objectId}
     >
       {copy.showOracleText && (
         <div className="px-3 pt-3 lg:px-5 lg:pt-4">

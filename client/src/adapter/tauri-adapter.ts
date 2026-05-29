@@ -63,13 +63,32 @@ export class TauriAdapter implements EngineAdapter {
   ): Promise<SubmitResult> {
     this.assertInitialized();
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-    const result = await this.invoke!("initialize_game", {
-      deckData: deckData ?? null,
-      seed,
-      matchConfig: matchConfig ?? null,
-    });
-    const ar = result as ActionResult;
-    return { events: ar.events ?? [], log_entries: ar.log_entries ?? [] };
+    try {
+      const result = await this.invoke!("initialize_game", {
+        deckData: deckData ?? null,
+        seed,
+        matchConfig: matchConfig ?? null,
+      });
+      const ar = result as ActionResult;
+      return { events: ar.events ?? [], log_entries: ar.log_entries ?? [] };
+    } catch (err) {
+      // The Tauri `initialize_game` command returns a structured `CommandError`
+      // (`{ kind, message }`); a rejected command surfaces it as a plain
+      // serialized object, not an Error. Discriminate on `kind` so a cEDH
+      // bracket violation becomes a typed AdapterError that GameProvider can
+      // surface as the blocking modal — matching the WASM worker path's
+      // `cedh_bracket_violation` flag rather than substring-matching Display text.
+      const ce = err as { kind?: string; message?: string } | null;
+      const msg = ce?.message ?? (err instanceof Error ? err.message : String(err));
+      if (ce?.kind === "BracketViolation") {
+        throw new AdapterError(
+          AdapterErrorCode.BRACKET_VIOLATION,
+          msg,
+          false,
+        );
+      }
+      throw err;
+    }
   }
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {

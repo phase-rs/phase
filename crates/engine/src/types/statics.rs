@@ -65,6 +65,12 @@ impl FromStr for ProhibitionScope {
 }
 
 /// CR 101.2: When the casting prohibition applies.
+///
+/// The "pronoun-binding" axis is encoded by the choice of `NotDuringYourTurn`
+/// vs `NotDuringAffectedPlayersTurn`. CR 109.5 binds the "you/your" pronoun to
+/// the static's source controller, while the distributive "their own" reading
+/// (from CR 102.1 plus the template structure of "[every player] can [action]
+/// only during their own [time]") binds the predicate per-affected caster.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CastingProhibitionCondition {
     /// "during your turn" — prohibition active on controller's turn.
@@ -75,6 +81,24 @@ pub enum CastingProhibitionCondition {
     /// — prohibition active when it is NOT the controller's turn.
     /// E.g., Fires of Invention: "You can cast spells only during your turn."
     NotDuringYourTurn,
+    /// CR 102.1 + CR 117.1a + CR 604.1: "only during their own turn(s)" —
+    /// distributive per-affected-player binding. The prohibition is active
+    /// whenever it is NOT the *affected* player's turn.
+    ///
+    /// Contrasts with `NotDuringYourTurn` which binds to the static's source
+    /// controller (CR 109.5 — "your turn" on Fires of Invention).
+    ///
+    /// **Why a separate variant, not a re-use of `NotDuringYourTurn`:**
+    /// `NotDuringYourTurn` says "blocked when it is NOT the source-controller's
+    /// turn" (CR 109.5). For Dosan ("Players can cast spells only during their
+    /// own turns.") the binding is per-affected-caster, not per-source: when
+    /// Alice has Dosan on the battlefield and Bob has priority on Alice's turn,
+    /// Bob is blocked because it's not *Bob's* turn — Alice's possessive doesn't
+    /// reach. The CompRules don't carve out a specific pronoun-binding rule for
+    /// "their" the way CR 109.5 governs "you/your"; the distributive reading
+    /// follows from CR 102.1 (active player definition) + the template structure
+    /// of "[every player] can [action] only during their own [time]".
+    NotDuringAffectedPlayersTurn,
     /// CR 117.1: "only any time they could cast a sorcery" — prohibition active when it is
     /// not sorcery speed (main phase + active player's turn + empty stack).
     /// E.g., Teferi, Time Raveler: "Each opponent can cast spells only any time they could
@@ -88,6 +112,9 @@ impl fmt::Display for CastingProhibitionCondition {
             CastingProhibitionCondition::DuringYourTurn => write!(f, "your_turn"),
             CastingProhibitionCondition::DuringCombat => write!(f, "combat"),
             CastingProhibitionCondition::NotDuringYourTurn => write!(f, "not_your_turn"),
+            CastingProhibitionCondition::NotDuringAffectedPlayersTurn => {
+                write!(f, "not_their_own_turn")
+            }
             CastingProhibitionCondition::NotSorcerySpeed => write!(f, "not_sorcery_speed"),
         }
     }
@@ -101,6 +128,7 @@ impl FromStr for CastingProhibitionCondition {
             "your_turn" => Ok(CastingProhibitionCondition::DuringYourTurn),
             "combat" => Ok(CastingProhibitionCondition::DuringCombat),
             "not_your_turn" => Ok(CastingProhibitionCondition::NotDuringYourTurn),
+            "not_their_own_turn" => Ok(CastingProhibitionCondition::NotDuringAffectedPlayersTurn),
             "not_sorcery_speed" => Ok(CastingProhibitionCondition::NotSorcerySpeed),
             other => Err(format!("unknown CastingProhibitionCondition: {other}")),
         }
@@ -276,6 +304,51 @@ impl FromStr for CastFrequency {
     }
 }
 
+/// CR 118.9 + CR 601.2a: The cost axis for `StaticMode::ExileCastPermission`.
+///
+/// Sibling to `CastFrequency` and `CardPlayMode` — each axis of the exile-cast
+/// permission is a typed enum rather than a `bool` so the design space stays
+/// open. `bool` fields cannot grow to accommodate future cost shapes (e.g. an
+/// alternative life cost analogous to Bolas's Citadel).
+///
+/// - `PayNormalCost` — cast at the spell's normal mana cost. No shipping
+///   printing uses this shape today, but it is the natural default; if a future
+///   card prints "Once each turn, you may cast a spell from among cards exiled
+///   with ~ this turn." (no "without paying" rider), this is the variant.
+/// - `WithoutPayingManaCost` — CR 118.9a: cast without paying the printed mana
+///   cost. Maralen, Fae Ascendant ("...without paying its mana cost.") is the
+///   type specimen and the only shipping printing today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExileCastCost {
+    /// Cast at the spell's normal mana cost — no alternative cost applied.
+    PayNormalCost,
+    /// CR 118.9a: Cast without paying the spell's printed mana cost
+    /// (Maralen, Fae Ascendant).
+    #[default]
+    WithoutPayingManaCost,
+}
+
+impl fmt::Display for ExileCastCost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExileCastCost::PayNormalCost => write!(f, "pay_normal_cost"),
+            ExileCastCost::WithoutPayingManaCost => write!(f, "without_paying_mana_cost"),
+        }
+    }
+}
+
+impl FromStr for ExileCastCost {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pay_normal_cost" => Ok(ExileCastCost::PayNormalCost),
+            "without_paying_mana_cost" => Ok(ExileCastCost::WithoutPayingManaCost),
+            other => Err(format!("unknown ExileCastCost: {other}")),
+        }
+    }
+}
+
 /// CR 603.2d: The cause-predicate axis for trigger-doubling static abilities.
 ///
 /// "An effect that states a triggered ability of an object triggers additional
@@ -424,6 +497,17 @@ pub enum StaticMode {
     /// determines which spells are affected (e.g., "Creature spells you cast have convoke").
     CastWithKeyword {
         keyword: Keyword,
+    },
+    /// CR 118.9 + CR 601.2f: A permanent grants its controller a wholesale
+    /// alternative MANA cost for spells matching `StaticDefinition::affected`
+    /// that the controller casts — they may pay `cost` rather than the spell's
+    /// mana cost. Parallel to `CastWithKeyword`. Distinct from `ReduceCost`
+    /// (subtractive, CR 601.2f) — this REPLACES the mana cost wholesale
+    /// (CR 118.9) and is mutually exclusive with other alternative costs
+    /// (CR 118.9a). Rooftop Storm ({0}, Zombie creature spells), Fist of Suns
+    /// ({WUBRG}, any spell), Jodah (MV 5+).
+    CastWithAlternativeCost {
+        cost: ManaCost,
     },
     /// CR 601.2f: Reduces the cost of spells matching the filter.
     /// Permanent-based cost reduction applied during casting (not self-cost reduction).
@@ -596,6 +680,47 @@ pub enum StaticMode {
         /// CR 601.2b: Per-turn cast frequency.
         frequency: CastFrequency,
     },
+    /// CR 601.2a + CR 113.6b + CR 118.9: Static ability granting permission to
+    /// cast cards exiled with this source — restricted to cards exiled *this
+    /// turn* — typically without paying the mana cost. Maralen, Fae Ascendant
+    /// is the type specimen ("Once each turn, you may cast a spell with mana
+    /// value less than or equal to the number of Elves and Faeries you control
+    /// from among cards exiled with Maralen this turn without paying its mana
+    /// cost.").
+    ///
+    /// The source pool is the per-turn list
+    /// `GameState::cards_exiled_with_source_this_turn[source_id]`. The static's
+    /// `affected: TargetFilter` constrains the eligible cards (type, mana
+    /// value, etc.). Per-turn frequency tracking is keyed on `source_id` in
+    /// `GameState::exile_cast_permissions_used` for `OncePerTurn`; `Unlimited`
+    /// skips tracking.
+    ///
+    /// Distinct from `GraveyardCastPermission`: the source pool is exile
+    /// (per-turn-scoped), not the controller's graveyard. Distinct from
+    /// `TopOfLibraryCastPermission`: the eligible cards are a tracked exile
+    /// set carved out by a prior exile-with-source effect, not the live top
+    /// of library. Distinct from `Effect::CastFromZone` (Court of Locthwain,
+    /// Mizzix's Mastery): that is a one-shot effect that grants per-card
+    /// permissions; this is a continuous static that grants the controller a
+    /// recurring per-turn cast slot.
+    ExileCastPermission {
+        /// CR 601.2a: Per-turn cast frequency. `OncePerTurn` consumes a slot
+        /// in `exile_cast_permissions_used`; `Unlimited` does not.
+        frequency: CastFrequency,
+        /// CR 305.1: Play (lands + spells) vs Cast (spells only). All current
+        /// printings of this class are `Cast` (Maralen, Fae Ascendant); the
+        /// axis is retained for symmetry with the graveyard / top-of-library
+        /// permission classes.
+        play_mode: CardPlayMode,
+        /// CR 118.9a: How the spell's mana cost is paid when cast via this
+        /// permission. `WithoutPayingManaCost` zeroes the printed mana cost
+        /// (mirrors the Omniscience / `CastFromHandFree` flow — Maralen, Fae
+        /// Ascendant). `PayNormalCost` casts at the spell's normal cost (no
+        /// published printings today, but the axis keeps the static composable
+        /// with future patterns).
+        #[serde(default)]
+        cost: ExileCastCost,
+    },
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
     /// CR 101.2 + CR 707.10: This spell can't be copied by spells or abilities.
@@ -611,6 +736,35 @@ pub enum StaticMode {
     CantCastDuring {
         who: ProhibitionScope,
         when: CastingProhibitionCondition,
+    },
+    /// CR 602.5 + CR 117.1b: Continuous activation prohibition — prevents the
+    /// scoped player(s) from activating activated abilities during the specified
+    /// turn condition.
+    ///
+    /// E.g., City of Solitude: "Players can cast spells and activate abilities
+    /// only during their own turns." (Activation half — the cast half is emitted
+    /// as a sibling `CantCastDuring`.)
+    ///
+    /// Distinct from `CantBeActivated`:
+    /// - `CantBeActivated` narrows by **permanent** (which permanent's abilities
+    ///   are blocked) and has no time axis.
+    /// - `CantActivateDuring` narrows by **time** (which turn condition the
+    ///   prohibition is active under) and has no permanent narrowing — every
+    ///   activated ability is blocked when the timing predicate matches.
+    ///
+    /// `exemption: ActivationExemption` carries CR 605.1a's "unless they're mana
+    /// abilities" exemption. City of Solitude per its 2009-10-01 ruling
+    /// ("This stops players from activating mana abilities") emits
+    /// `ActivationExemption::None`. Field is present for structural parallelism
+    /// with `CantBeActivated` and `GameRestriction::ProhibitActivity::ActivateAbilities`.
+    ///
+    /// CR 605.3a permits mana ability activation at priority generally, but
+    /// per-card prohibitions override that general permission per CR 101.1.
+    CantActivateDuring {
+        who: ProhibitionScope,
+        when: CastingProhibitionCondition,
+        #[serde(default)]
+        exemption: ActivationExemption,
     },
     /// CR 101.2 + CR 604.1: Per-turn casting limit — static ability generating a
     /// continuous "can't" effect that restricts how many spells a player may cast.
@@ -740,6 +894,15 @@ pub enum StaticMode {
     CantWinTheGame,
     /// CR 104.3b: This player can't lose the game (Platinum Angel effect).
     CantLoseTheGame,
+    /// CR 704.5j: The "legend rule" doesn't apply to the affected permanents, so
+    /// they are excluded from the same-name legendary grouping in the legend-rule
+    /// SBA. Scope rides on `StaticDefinition::affected`: `None` = global (Mirror
+    /// Gallery, "the legend rule doesn't apply"); a controller-scoped filter =
+    /// "doesn't apply to [permanents/tokens/Slivers/commanders] you control"
+    /// (Sakashima of a Thousand Faces, Mirror Box, Cadric, Sliver Gravemother,
+    /// Try-My-Deck Elemental, ...). Enforced per-permanent in `sba.rs` via
+    /// `check_static_ability` with the candidate as the target object.
+    LegendRuleDoesntApply,
     /// Speed may increase beyond 4, and 4+ still counts as max speed for that player.
     SpeedCanIncreaseBeyondFour,
     /// CR 118.12a: Defiler cycle — "As an additional cost to cast [color] permanent
@@ -793,6 +956,25 @@ pub enum StaticMode {
     /// CR 702.3b: Allows creatures with defender to attack despite having the keyword.
     /// "can attack as though it didn't have defender" overrides the defender restriction.
     CanAttackWithDefender,
+    /// CR 509.1b + CR 609.4 + CR 702.14c: Globally cancel the landwalk blocking
+    /// restriction for the named qualifier. The attacker still has the keyword
+    /// (CR 609.4: "as though" is scoped to the stated effect); only its
+    /// blocking-restriction consequence is suppressed. Per CR 702.14d, qualifiers
+    /// cancel independently: a swampwalk canceller leaves a co-present islandwalk
+    /// intact.
+    ///
+    /// INVARIANT: `qualifier` MUST match `Keyword::Landwalk`'s canonical capitalized
+    /// form (e.g. "Swamp", "Island", "Plains", "Mountain", "Forest"). `None` reserved
+    /// for a hypothetical "all landwalk" global canceller; no printed card currently
+    /// requires this, but the option preserves room for that class.
+    ///
+    /// Class: the Portal/Legends "creatures with Xwalk can be blocked as though
+    /// they didn't have Xwalk" cycle (Ur-Drago and four siblings — one per basic
+    /// land subtype). Global rule modification (`affected: None`); enforced inside
+    /// `is_landwalk_unblockable` rather than as a layer-6 ability removal.
+    IgnoreLandwalkForBlocking {
+        qualifier: Option<String>,
+    },
     /// CR 602.5a: Bypasses the summoning-sickness gate on a creature's `{T}`/`{Q}`
     /// activated abilities — "You may activate abilities of creatures you control as
     /// though those creatures had haste." This is NOT `AddKeyword(Haste)`: only the
@@ -856,6 +1038,7 @@ impl Hash for StaticMode {
                 filter.hash(state);
                 action.hash(state);
             }
+            StaticMode::IgnoreLandwalkForBlocking { qualifier } => qualifier.hash(state),
             StaticMode::Other(s) => s.hash(state),
             StaticMode::GraveyardCastPermission {
                 frequency,
@@ -872,6 +1055,15 @@ impl Hash for StaticMode {
             }
             StaticMode::CastFromHandFree { frequency } => {
                 frequency.hash(state);
+            }
+            StaticMode::ExileCastPermission {
+                frequency,
+                play_mode,
+                cost,
+            } => {
+                frequency.hash(state);
+                play_mode.hash(state);
+                cost.hash(state);
             }
             StaticMode::SkipStep { step } => step.hash(state),
             StaticMode::DoubleTriggers { cause } => cause.hash(state),
@@ -890,7 +1082,9 @@ impl Hash for StaticMode {
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::CastWithKeyword { .. }
+            | StaticMode::CastWithAlternativeCost { .. }
             | StaticMode::CantBeActivated { .. }
+            | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
@@ -924,6 +1118,9 @@ impl fmt::Display for StaticMode {
             StaticMode::GrantsExtraVote => write!(f, "GrantsExtraVote"),
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
+            }
+            StaticMode::CastWithAlternativeCost { cost } => {
+                write!(f, "CastWithAlternativeCost({cost:?})")
             }
             StaticMode::ReduceCost { .. } => write!(f, "ReduceCost"),
             StaticMode::ReduceAbilityCost {
@@ -984,12 +1181,30 @@ impl fmt::Display for StaticMode {
             StaticMode::CastFromHandFree { frequency } => {
                 write!(f, "CastFromHandFree({frequency})")
             }
+            StaticMode::ExileCastPermission {
+                frequency,
+                play_mode,
+                cost,
+            } => match cost {
+                ExileCastCost::WithoutPayingManaCost => {
+                    write!(f, "ExileCastPermission({play_mode},{frequency},free)")
+                }
+                ExileCastCost::PayNormalCost => {
+                    write!(f, "ExileCastPermission({play_mode},{frequency})")
+                }
+            },
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantBeCopied => write!(f, "CantBeCopied"),
             StaticMode::CantEnterBattlefieldFrom => write!(f, "CantEnterBattlefieldFrom"),
             StaticMode::CantCastFrom => write!(f, "CantCastFrom"),
             StaticMode::CantCastDuring { who, when } => {
                 write!(f, "CantCastDuring({who},{when})")
+            }
+            // CR 602.5 + CR 117.1b: Diagnostic-only Display; `exemption` is data-carrying
+            // and omitted (mirrors `CantBeActivated`'s Display which also drops
+            // `source_filter` + `exemption`).
+            StaticMode::CantActivateDuring { who, when, .. } => {
+                write!(f, "CantActivateDuring({who},{when})")
             }
             StaticMode::PerTurnCastLimit { who, max, .. } => {
                 write!(f, "PerTurnCastLimit({who},{max})")
@@ -1061,6 +1276,7 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CantWinTheGame => write!(f, "CantWinTheGame"),
             StaticMode::CantLoseTheGame => write!(f, "CantLoseTheGame"),
+            StaticMode::LegendRuleDoesntApply => write!(f, "LegendRuleDoesntApply"),
             StaticMode::SpeedCanIncreaseBeyondFour => write!(f, "SpeedCanIncreaseBeyondFour"),
             StaticMode::DefilerCostReduction { color, .. } => {
                 write!(f, "DefilerCostReduction({color:?})")
@@ -1075,6 +1291,12 @@ impl fmt::Display for StaticMode {
                 write!(f, "StepEndUnspentMana({filter:?},{action})")
             }
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
+            // CR 509.1b + CR 609.4 + CR 702.14c: Display follows the existing
+            // parenthesized-payload pattern. `None` = all-landwalk canceller.
+            StaticMode::IgnoreLandwalkForBlocking { qualifier } => match qualifier {
+                None => write!(f, "IgnoreLandwalkForBlocking"),
+                Some(q) => write!(f, "IgnoreLandwalkForBlocking({q})"),
+            },
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 write!(f, "CanActivateAbilitiesAsThoughHaste")
             }
@@ -1267,6 +1489,40 @@ impl FromStr for StaticMode {
                     frequency: freq.parse().unwrap_or(CastFrequency::Unlimited),
                 }
             }
+            "ExileCastPermission" => StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::PayNormalCost,
+            },
+            s if s.starts_with("ExileCastPermission(") => {
+                // Display form: "ExileCastPermission(<play_mode>,<frequency>)" or
+                // "ExileCastPermission(<play_mode>,<frequency>,free)" for the
+                // `WithoutPayingManaCost` shape. Parse positionally so a later
+                // 3-segment form survives lossless round-trip.
+                let inner = s
+                    .strip_prefix("ExileCastPermission(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or("");
+                let mut parts = inner.split(',');
+                let play_mode = parts
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(CardPlayMode::Cast);
+                let frequency = parts
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(CastFrequency::Unlimited);
+                let cost = if matches!(parts.next(), Some("free")) {
+                    ExileCastCost::WithoutPayingManaCost
+                } else {
+                    ExileCastCost::PayNormalCost
+                };
+                StaticMode::ExileCastPermission {
+                    frequency,
+                    play_mode,
+                    cost,
+                }
+            }
             "CantBeCountered" => StaticMode::CantBeCountered,
             "CantBeCopied" => StaticMode::CantBeCopied,
             "CantEnterBattlefieldFrom" => StaticMode::CantEnterBattlefieldFrom,
@@ -1308,7 +1564,12 @@ impl FromStr for StaticMode {
             "MayPlayAdditionalLand" => StaticMode::MayPlayAdditionalLand,
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
+            "LegendRuleDoesntApply" => StaticMode::LegendRuleDoesntApply,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
+            // CR 509.1b + CR 609.4 + CR 702.14c: bare form = all-landwalk canceller.
+            "IgnoreLandwalkForBlocking" => {
+                StaticMode::IgnoreLandwalkForBlocking { qualifier: None }
+            }
             "CanActivateAbilitiesAsThoughHaste" => StaticMode::CanActivateAbilitiesAsThoughHaste,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UntapsDuringEachOtherPlayersUntapStep" => {
@@ -1377,6 +1638,26 @@ impl FromStr for StaticMode {
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
+                    .strip_prefix("CantActivateDuring(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 602.5 + CR 117.1b: Round-trip preserves the (who, when) axes;
+                    // `exemption` is data-carrying and defaults to `None` (mirrors the
+                    // `CantBeActivated` round-trip above — diagnostic-only).
+                    if let Some((who_str, when_str)) = inner.split_once(',') {
+                        if let (Ok(who), Ok(when)) = (
+                            ProhibitionScope::from_str(who_str),
+                            CastingProhibitionCondition::from_str(when_str),
+                        ) {
+                            return Ok(StaticMode::CantActivateDuring {
+                                who,
+                                when,
+                                exemption: ActivationExemption::None,
+                            });
+                        }
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
                     .strip_prefix("PerTurnCastLimit(")
                     .and_then(|s| s.strip_suffix(')'))
                 {
@@ -1436,6 +1717,15 @@ impl FromStr for StaticMode {
                 {
                     let keyword = Keyword::from_str(inner).unwrap();
                     StaticMode::CastWithKeyword { keyword }
+                } else if let Some(inner) = other
+                    .strip_prefix("IgnoreLandwalkForBlocking(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 509.1b + CR 609.4 + CR 702.14c: parameterized form carries
+                    // the canonical capitalized land subtype (e.g. "Swamp").
+                    StaticMode::IgnoreLandwalkForBlocking {
+                        qualifier: Some(inner.to_string()),
+                    }
                 } else if let Some(inner) = other
                     .strip_prefix("SkipStep(")
                     .and_then(|s| s.strip_suffix(')'))
@@ -1630,6 +1920,17 @@ mod tests {
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
             },
+            // Exile-cast permission (Maralen, Fae Ascendant).
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::WithoutPayingManaCost,
+            },
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::PayNormalCost,
+            },
             // Casting prohibitions
             StaticMode::CantBeCast {
                 who: ProhibitionScope::Controller,
@@ -1684,6 +1985,22 @@ mod tests {
             StaticMode::Flying,
             StaticMode::MustBeBlocked,
             StaticMode::GrantsExtraVote,
+            // CR 118.9: data-carrying ManaCost — serde must preserve {0} and {WUBRG}.
+            StaticMode::CastWithAlternativeCost {
+                cost: ManaCost::zero(),
+            },
+            StaticMode::CastWithAlternativeCost {
+                cost: ManaCost::Cost {
+                    shards: vec![
+                        super::super::mana::ManaCostShard::White,
+                        super::super::mana::ManaCostShard::Blue,
+                        super::super::mana::ManaCostShard::Black,
+                        super::super::mana::ManaCostShard::Red,
+                        super::super::mana::ManaCostShard::Green,
+                    ],
+                    generic: 0,
+                },
+            },
             StaticMode::Other("Custom".to_string()),
         ];
         let json = serde_json::to_string(&modes).unwrap();
@@ -1764,6 +2081,35 @@ mod tests {
                 exemption: ActivationExemption::None,
             }
         );
+    }
+
+    #[test]
+    fn ignore_landwalk_for_blocking_display_fromstr_roundtrip() {
+        // CR 509.1b + CR 609.4 + CR 702.14c: round-trip the `None` (all-landwalk)
+        // form and each of the five basic-land qualifier forms.
+        let cases = [
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: None },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Plains".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Island".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Swamp".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Mountain".to_string()),
+            },
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some("Forest".to_string()),
+            },
+        ];
+        for case in cases {
+            let s = case.to_string();
+            let parsed = StaticMode::from_str(&s).unwrap();
+            assert_eq!(parsed, case, "round-trip failed for {s}");
+        }
     }
 
     #[test]

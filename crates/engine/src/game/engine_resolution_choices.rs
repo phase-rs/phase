@@ -185,7 +185,7 @@ fn apply_search_partition(
                 target: crate::types::ability::TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: split.primary_enter_tapped,
                 enters_attacking: false,
                 up_to: false,
@@ -317,9 +317,11 @@ pub(super) fn handle_resolution_choice(
             WaitingFor::RevealUntilKeptChoice {
                 player,
                 hit_card,
+                source_id,
                 accept_zone,
                 decline_zone,
                 enter_tapped,
+                enters_attacking,
                 revealed_misses,
                 rest_destination,
             },
@@ -333,6 +335,17 @@ pub(super) fn handle_resolution_choice(
                     if let Some(obj) = state.objects.get_mut(&hit_card) {
                         obj.tapped = true;
                     }
+                }
+                // CR 508.4: "...tapped and attacking" — place the accepted card
+                // in combat. `source_id` (the ability source / trigger attacker)
+                // supplies the defending player, matching the synchronous path.
+                if enters_attacking && accept_zone == Zone::Battlefield {
+                    let controller = state
+                        .objects
+                        .get(&hit_card)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(player);
+                    crate::game::combat::enter_attacking(state, hit_card, source_id, controller);
                 }
             } else if decline_zone == rest_destination {
                 misses.push(hit_card);
@@ -1472,6 +1485,41 @@ pub(super) fn handle_resolution_choice(
                 events,
             )
             .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            // CR 614.12a: For an "enters with your choice of counter" replacement
+            // (Denry Klin), the entering permanent's battlefield-entry ZoneChanged
+            // event was deferred into `state.deferred_entry_events` by the ETB-
+            // replacement capture in `engine_replacement.rs` so observers don't
+            // fire before the choice is made. Now that `resolve_branch` has folded
+            // the chosen counter onto the still-entering permanent, replay the
+            // deferred entry through the trigger pipeline so ETB observers see the
+            // counter as the permanent enters (pre-entry per CR 614.12a, not a
+            // post-entry counter add). For a normal (non-entry) `ChooseOneOf`,
+            // `deferred_entry_events` is empty, so this is a no-op — the
+            // disambiguator. This is safe because `deferred_entry_events` is
+            // populated ONLY by the ETB-replacement capture (sole production
+            // write-site), and `CopyTargetChoice` drains it via its own
+            // `handle_copy_target_choice` handler, so it is never non-empty during
+            // an unrelated `ChooseBranch`.
+            let deferred = std::mem::take(&mut state.deferred_entry_events);
+            let source_still_on_bf = state
+                .objects
+                .get(&source_id)
+                .is_some_and(|o| o.zone == Zone::Battlefield);
+            if !deferred.is_empty() && source_still_on_bf {
+                super::triggers::process_triggers(state, &deferred);
+                let delayed = super::triggers::check_delayed_triggers(state, &deferred);
+                events.extend(delayed);
+            }
+            // CR 608.2c + CR 122.1: advance any paused resolution chain after the
+            // branch resolves. This is the standard post-resolution step every
+            // sibling choice handler runs. It no-ops when no `pending_continuation`
+            // / `pending_repeat_iteration` exists (each drain block is guarded by
+            // `if let Some(..) = ..take()`), so it is safe for existing `ChooseOneOf`
+            // consumers and for the deferred-entry replay above (mutually exclusive
+            // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop
+            // paused on `ChooseOneOfBranch` advances past the first counter kind to
+            // prompt for each remaining kind (Bribe Taker).
+            effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1698,7 +1746,7 @@ pub(super) fn handle_resolution_choice(
                 destination,
                 enter_tapped,
                 enter_transformed,
-                under_your_control,
+                enters_under_player,
                 enters_attacking,
                 owner_library: _,
                 track_exiled_by_source,
@@ -1798,7 +1846,7 @@ pub(super) fn handle_resolution_choice(
                         destination: dest_zone,
                         enter_transformed,
                         enter_tapped,
-                        under_your_control,
+                        enters_under_player,
                         enters_attacking,
                         enter_with_counters: vec![],
                         duration: None,
@@ -1825,7 +1873,7 @@ pub(super) fn handle_resolution_choice(
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
                                         enter_tapped: ctx.enter_tapped,
-                                        under_your_control: ctx.under_your_control,
+                                        enters_under_player: ctx.enters_under_player,
                                         enters_attacking: ctx.enters_attacking,
                                         enter_with_counters: ctx.enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
@@ -1841,6 +1889,49 @@ pub(super) fn handle_resolution_choice(
                                     events,
                                     state.waiting_for.clone(),
                                 ));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Tap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_tap(state, card_id, source_id, events)
+                        {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Untap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_untap(state, card_id, events) {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
                             }
                         }
                     }
@@ -1903,12 +1994,28 @@ pub(super) fn handle_resolution_choice(
             }
             if matches!(
                 effect_kind,
-                EffectKind::ChangeZone | EffectKind::BounceAll | EffectKind::PutAtLibraryPosition
+                EffectKind::Sacrifice
+                    | EffectKind::ChangeZone
+                    | EffectKind::BounceAll
+                    | EffectKind::Tap
+                    | EffectKind::Untap
+                    | EffectKind::PutAtLibraryPosition
             ) && state.pending_continuation.is_some()
             {
+                let tracked = if matches!(effect_kind, EffectKind::Sacrifice) {
+                    events[events_before_effect..]
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    chosen.clone()
+                };
                 let tracked_id = TrackedSetId(state.next_tracked_set_id);
                 state.next_tracked_set_id += 1;
-                state.tracked_object_sets.insert(tracked_id, chosen.clone());
+                state.tracked_object_sets.insert(tracked_id, tracked);
                 state.chain_tracked_set_id = Some(tracked_id);
             }
             state.last_effect_count = Some(chosen.len() as i32);
@@ -2103,6 +2210,7 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             state.ring_bearer.insert(player, Some(target));
+            state.layers_dirty = true;
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {

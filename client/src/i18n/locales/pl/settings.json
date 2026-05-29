@@ -9,8 +9,7 @@
     "combat": "Tempo",
     "audio": "Dźwięk",
     "multiplayer": "Tryb wieloosobowy",
-    "data": "Dane",
-    "experimental": "Eksperymentalne"
+    "data": "Dane"
   },
   "gameplay": {
     "title": "Rozgrywka",
@@ -85,12 +84,28 @@
     "displayNamePlaceholder": "Wprowadź swoją nazwę",
     "serverSelectionNote": "Wybór serwera został przeniesiony do poczekalni — otwórz Tryb wieloosobowy i użyj plakietki serwera (lub „Wybierz serwer” w trybie P2P), aby zmieniać regiony, skonfigurować własną instancję lub przetestować połączenie."
   },
-  "experimental": {
-    "title": "Eksperymentalne",
-    "description": "Te funkcje są wciąż w fazie rozwoju. Mogą być niekompletne, zawierać błędy lub zmieniać się bez ostrzeżenia. Włącz je, aby wypróbować nowości wcześniej.",
-    "draftExperiments": "Eksperymenty draftowe",
-    "enableDraftFeatures": "Włącz eksperymentalne funkcje draftu",
-    "draftFeaturesDescription": "Odblokowuje Cube Draft i Pod Draft. Szybki draft przeciwko AI jest zawsze dostępny."
+  "sync": {
+    "title": "Synchronizacja w chmurze",
+    "description": "Zaloguj się, aby synchronizować talie, preferencje i subskrypcje kanałów między urządzeniami. Twoje dane znajdują się na Twoim koncie i są aktualizowane automatycznie przy każdej zmianie.",
+    "signInWith": "Zaloguj się przez {{provider}}",
+    "signOut": "Wyloguj się",
+    "signedInAs": "Zalogowano jako {{name}}",
+    "syncNow": "Synchronizuj teraz",
+    "statusSyncing": "Synchronizowanie…",
+    "statusError": "Synchronizacja nie powiodła się",
+    "lastSynced": "Ostatnia synchronizacja: {{time}}",
+    "never": "nigdy",
+    "conflictTitle": "Obie kopie mają zmiany",
+    "conflictBody": "To urządzenie i Twoje konto w chmurze zawierają dane, a nie możemy ustalić, która kopia jest aktualna. Wybierz, którą zachować — druga zostanie zastąpiona.",
+    "keepCloud": "Użyj chmury",
+    "keepLocal": "Zachowaj to urządzenie",
+    "savesNote": "Zapisy gier i pamięć podręczna pozostają na tym urządzeniu.",
+    "diffDecks": "Talie: {{added}} dodanych, {{modified}} zmienionych, {{removed}} usuniętych",
+    "diffPrefs": "Preferencje są różne",
+    "diffFeeds": "Subskrypcje kanałów są różne",
+    "diffOther": "Inne ustawienia są różne",
+    "providerDiscord": "Discord",
+    "providerGoogle": "Google"
   },
   "data": {
     "title": "Kopia zapasowa i przywracanie",

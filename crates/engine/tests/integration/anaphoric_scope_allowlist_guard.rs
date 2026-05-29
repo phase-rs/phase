@@ -163,6 +163,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "brightmare",
     "brokers charm",
     "calibrated blast",
+    "captain ripley vance",
     "champion of the path",
     "champion of wits",
     "chastise",
@@ -196,6 +197,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "domri's ambush",
     "doomgape",
     "durkwood tracker",
+    "duskmantle seer",
     "efteekay, flame of the kav",
     "electrosiphon",
     "electryte",
@@ -298,6 +300,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "pandemonium",
     "parallectric feedback",
     "passionate archaeologist",
+    "phthisis",
     "phyrexian delver",
     "planeswalker's fury",
     "planeswalker's mirth",
@@ -342,6 +345,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "sin prodder",
     "singe-mind ogre",
     "sister hospitaller",
+    "sly spy",
     "solitude",
     "sorin the mirthless",
     "sorin, grim nemesis",
@@ -456,23 +460,27 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        262,
-        "Expected exactly 262 cards retaining ObjectScope::Anaphoric (the #495 \
+        266,
+        "Expected exactly 266 cards retaining ObjectScope::Anaphoric (the #495 \
          behavior-neutral floor of 156, minus four cards unlocked by #607's \
-         target-subject DamageAll source wrapper, plus 88 cards from category 4, \
+         target-subject DamageAll source wrapper, plus 89 cards from category 4, \
          plus the UUID-disambiguated Reanimate print key \
          — the Yuriko/Dark Confidant bare-anaphoric-possessive class \
          routed onto the Anaphoric arm by `classify_possessive_referent` \
          — plus 17 category-3 \"pump/tap target creature, then it deals damage \
          equal to its power\" fight spells newly parsed by the token-then-pump \
-         chain fix, anaphoric on the spell's chosen target creature); \
-         count moved to {}.",
+         chain fix, anaphoric on the spell's chosen target creature, plus \
+         Phthisis — destroy-target-creature + LoseLife-equal-to-its-P+T, \
+         category-3 target-spell anaphora, plus Captain Ripley Vance category-1 \
+         trigger-source anaphora, plus Sly Spy category-4 reveal/move anaphora, \
+         plus Thorin, Mountain-King — fresh card data still retains the \
+         category-3 target-creature anaphora tracked by #512); count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        262,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 262 cards."
+        266,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 266 cards."
     );
 }
 

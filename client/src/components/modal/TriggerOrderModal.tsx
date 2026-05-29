@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PendingTriggerSummary } from "../../adapter/types.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
@@ -20,6 +21,7 @@ export function TriggerOrderModal() {
   const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
+  const hoverProps = useInspectHoverProps();
 
   const isOrderTriggers = waitingFor?.type === "OrderTriggers";
   const engineTriggers = isOrderTriggers
@@ -79,6 +81,7 @@ export function TriggerOrderModal() {
             return (
               <li
                 key={`${trigger.source_id}-${engineIndex}`}
+                {...hoverProps(trigger.source_id)}
                 className="flex items-start gap-2 rounded-[16px] border border-white/8 bg-white/5 px-4 py-3"
               >
                 <div className="flex-1 text-left">

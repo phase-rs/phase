@@ -1,6 +1,3 @@
-use std::collections::HashSet;
-
-use crate::game::replacement::{self, ReplacementResult};
 use crate::game::{players, zones};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::{CardType, CoreType};
@@ -92,62 +89,56 @@ fn deliver_card_draw(
     events: &mut Vec<GameEvent>,
     opponent: PlayerId,
 ) -> Result<(), EffectError> {
-    let proposed = ProposedEvent::Draw {
-        player_id: opponent,
-        count: 1,
-        applied: HashSet::new(),
-    };
-
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            if let ProposedEvent::Draw {
+    // CR 614.1a + CR 614.6 + CR 704.3: Route through the single-authority
+    // helper so post-replacement continuations drain in the same step.
+    let _ = super::draw::draw_through_replacement(
+        state,
+        opponent,
+        1,
+        events,
+        |state, event, events| {
+            let ProposedEvent::Draw {
                 player_id, count, ..
             } = event
-            {
-                let player = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player_id)
-                    .ok_or(EffectError::PlayerNotFound)?;
+            else {
+                return;
+            };
+            let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
+                return;
+            };
 
-                let cards_to_draw: Vec<_> = player
-                    .library
-                    .iter()
-                    .take(count as usize)
-                    .copied()
-                    .collect();
+            let cards_to_draw: Vec<_> = player
+                .library
+                .iter()
+                .take(count as usize)
+                .copied()
+                .collect();
 
-                for obj_id in cards_to_draw {
-                    zones::move_to_zone(state, obj_id, Zone::Hand, events);
-                    // CR 121.1 + CR 504.1: Increment counters first; embed the
-                    // resulting per-step ordinal into the event so trigger
-                    // conditions can identify the first draw of the draw step.
-                    let (nth_in_turn, nth_in_step) =
-                        if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                            p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
-                            p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
-                            (p.cards_drawn_this_turn, p.cards_drawn_this_step)
-                        } else {
-                            (1, 1)
-                        };
-                    events.push(GameEvent::CardDrawn {
-                        player_id,
-                        object_id: obj_id,
-                        nth_in_turn,
-                        nth_in_step,
-                    });
-                    super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
-                    // CR 702.94a + CR 603.11: Shared first-draw / miracle-offer hook.
-                    super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
-                }
+            for obj_id in cards_to_draw {
+                zones::move_to_zone(state, obj_id, Zone::Hand, events);
+                // CR 121.1 + CR 504.1: Increment counters first; embed the
+                // resulting per-step ordinal into the event so trigger
+                // conditions can identify the first draw of the draw step.
+                let (nth_in_turn, nth_in_step) =
+                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
+                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
+                        p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
+                        (p.cards_drawn_this_turn, p.cards_drawn_this_step)
+                    } else {
+                        (1, 1)
+                    };
+                events.push(GameEvent::CardDrawn {
+                    player_id,
+                    object_id: obj_id,
+                    nth_in_turn,
+                    nth_in_step,
+                });
+                super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
+                // CR 702.94a + CR 603.11: Shared first-draw / miracle-offer hook.
+                super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
             }
-        }
-        ReplacementResult::Prevented => {}
-        ReplacementResult::NeedsChoice(player) => {
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
-        }
-    }
+        },
+    );
 
     Ok(())
 }

@@ -9,8 +9,7 @@
     "combat": "Pacing",
     "audio": "Audio",
     "multiplayer": "Multiplayer",
-    "data": "Data",
-    "experimental": "Experimental"
+    "data": "Data"
   },
   "gameplay": {
     "title": "Gameplay",
@@ -85,12 +84,28 @@
     "displayNamePlaceholder": "Enter your name",
     "serverSelectionNote": "Server selection moved to the lobby — open Multiplayer and use the server chip (or \"Pick server\" in P2P mode) to switch regions, configure a self-hosted instance, or test connectivity."
   },
-  "experimental": {
-    "title": "Experimental",
-    "description": "These features are still in development. They may be incomplete, buggy, or change without notice. Enable them to try things out early.",
-    "draftExperiments": "Draft Experiments",
-    "enableDraftFeatures": "Enable experimental draft features",
-    "draftFeaturesDescription": "Unlocks Cube Draft and Pod Draft. Quick Draft vs AI is always available."
+  "sync": {
+    "title": "Cloud Sync",
+    "description": "Sign in to sync your decks, preferences, and feed subscriptions across devices. Your data lives in your account and updates automatically whenever it changes.",
+    "signInWith": "Sign in with {{provider}}",
+    "signOut": "Sign out",
+    "signedInAs": "Signed in as {{name}}",
+    "syncNow": "Sync now",
+    "statusSyncing": "Syncing…",
+    "statusError": "Sync failed",
+    "lastSynced": "Last synced {{time}}",
+    "never": "never",
+    "conflictTitle": "Both copies have changes",
+    "conflictBody": "This device and your cloud account both have data and we can't tell which is current. Pick which copy to keep — the other will be replaced.",
+    "keepCloud": "Use cloud",
+    "keepLocal": "Keep this device",
+    "savesNote": "Game saves and caches stay on this device.",
+    "diffDecks": "Decks: {{added}} added, {{modified}} changed, {{removed}} removed",
+    "diffPrefs": "Preferences differ",
+    "diffFeeds": "Feed subscriptions differ",
+    "diffOther": "Other settings differ",
+    "providerDiscord": "Discord",
+    "providerGoogle": "Google"
   },
   "data": {
     "title": "Backup & Restore",

@@ -59,9 +59,13 @@ fn type_filter_references_subtype(filter: &TypeFilter) -> bool {
 
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
-    if tag::<_, _, OracleError<'_>>("if ")
-        .parse(lower.as_str())
-        .is_err()
+    if alt((
+        tag::<_, _, OracleError<'_>>("then, if "),
+        tag("then if "),
+        tag("if "),
+    ))
+    .parse(lower.as_str())
+    .is_err()
     {
         return None;
     }
@@ -128,7 +132,15 @@ pub(crate) fn strip_leading_general_conditional(
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
-            value((), tag("if ")).parse(i)
+            value(
+                (),
+                alt((
+                    tag::<_, _, OracleError<'_>>("then, if "),
+                    tag("then if "),
+                    tag("if "),
+                )),
+            )
+            .parse(i)
         })
         .map(|((), rest)| rest)
         .unwrap_or(&condition_fragment)
@@ -360,28 +372,14 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
 pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
 
+    // CR 603.12 + CR 608.2c: strip a leading reflexive-conditional connector
+    // ("if you do, ", "when you do, ", "if that player doesn't, ", ...) and
+    // return the corresponding AbilityCondition. Delegates to the shared
+    // `parse_reflexive_conditional_connector` combinator in `oracle_nom::condition`
+    // so the connector set stays in lockstep with the sequence-splitter's
+    // sticky-detection consumer.
     if let Some((condition, rest)) = nom_on_lower(text, &lower, |input| {
-        alt((
-            value(AbilityCondition::WhenYouDo, tag("when you do, ")),
-            value(AbilityCondition::IfAPlayerDoes, tag("if a player does, ")),
-            value(AbilityCondition::IfAPlayerDoes, tag("if they do, ")),
-            value(AbilityCondition::IfYouDo, tag("if that player does, ")),
-            value(AbilityCondition::IfYouDo, tag("if the player does, ")),
-            value(
-                AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::IfYouDo),
-                },
-                tag("if that player doesn't, "),
-            ),
-            value(
-                AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::IfYouDo),
-                },
-                tag("if the player doesn't, "),
-            ),
-            value(AbilityCondition::IfYouDo, tag("if you do, ")),
-        ))
-        .parse(input)
+        crate::parser::oracle_nom::condition::parse_reflexive_conditional_connector(input)
     }) {
         return (Some(condition), rest.to_string());
     }
@@ -1754,16 +1752,36 @@ pub(super) fn try_parse_dig_instead_alternative(
 
     // Strip "you may instead " / "instead " / "you may " from the body to get
     // the bare reveal-from-among clause. Composed with nom combinators; the
-    // "you may instead" arm is first so it wins over "you may ".
+    // "you may instead" arm is first so it wins over "you may ". Some cards
+    // print the replacement marker at the end instead ("put two ... instead"),
+    // so accept a trailing marker as the same alternative-selection grammar.
     let trimmed_body = raw_body.trim_end_matches('.').trim();
     let body_lower = trimmed_body.to_lowercase();
-    let ((), body_rest) = nom_on_lower(trimmed_body, &body_lower, |i| {
-        value(
-            (),
-            alt((tag("you may instead "), tag("instead "), tag("you may "))),
-        )
+    let (prefix_had_instead, body_rest) = nom_on_lower(trimmed_body, &body_lower, |i| {
+        alt((
+            value(true, tag::<_, _, OracleError<'_>>("you may instead ")),
+            value(true, tag("instead ")),
+            value(false, tag("you may ")),
+        ))
         .parse(i)
-    })?;
+    })
+    .unwrap_or((false, trimmed_body));
+
+    let body_rest_lower = body_rest.to_lowercase();
+    let body_rest_pair = TextPair::new(body_rest, &body_rest_lower);
+    let (body_rest, suffix_had_instead) =
+        if let Some((before, after)) = body_rest_pair.split_around(" instead") {
+            if after.original.trim().is_empty() {
+                (before.original.trim(), true)
+            } else {
+                (body_rest, false)
+            }
+        } else {
+            (body_rest, false)
+        };
+    if !prefix_had_instead && !suffix_had_instead {
+        return None;
+    }
 
     let body_rest_lower = body_rest.to_lowercase();
     let alt_continuation = parse_dig_from_among(&body_rest_lower, body_rest)?;
@@ -1778,7 +1796,8 @@ pub(super) fn try_parse_dig_instead_alternative(
         return None;
     };
 
-    let condition = try_nom_condition_as_ability_condition(cond_text, ctx)
+    let condition = parse_additional_cost_instead_condition_fragment(cond_text)
+        .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
         .or_else(|| parse_condition_text(cond_text))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
 
@@ -1801,6 +1820,25 @@ pub(super) fn try_parse_dig_instead_alternative(
     let mut result = AbilityDefinition::new(kind, alt_effect);
     result.condition = Some(condition);
     Some(result)
+}
+
+fn parse_additional_cost_instead_condition_fragment(text: &str) -> Option<AbilityCondition> {
+    let lower = text.trim().to_lowercase();
+    let parsed = all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("this spell was kicked"),
+        tag("it was kicked"),
+        tag("this spell was bargained"),
+        tag("it was bargained"),
+        tag("this spell was beheld"),
+        tag("it was beheld"),
+        tag("this spell's additional cost was paid"),
+        tag("its additional cost was paid"),
+        tag("evidence was collected"),
+        tag("the gift was promised"),
+    )))
+    .parse(lower.as_str())
+    .is_ok();
+    parsed.then_some(AbilityCondition::AdditionalCostPaidInstead)
 }
 
 fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityCondition> {
@@ -2088,6 +2126,7 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }
@@ -2195,6 +2234,10 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    if let Some(condition) = parse_die_result_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     // CR 702.62a: "it doesn't have [keyword]" / "it does not have [keyword]" — pronoun
     // subject lacks-keyword check (e.g., "If it doesn't have suspend, it gains suspend").
     // Mirrors the "~ doesn't have" / "this creature doesn't have" handler in oracle_condition.rs.
@@ -2244,7 +2287,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
         if rest.trim().is_empty() {
             return Some(AbilityCondition::Or {
                 conditions: vec![
-                    AbilityCondition::IfYouDo,
+                    AbilityCondition::effect_performed(),
                     static_condition_to_ability_condition(&condition, ctx)?,
                 ],
             });
@@ -2264,7 +2307,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
             .parse(lower.as_str())
             .is_ok()
     {
-        return Some(AbilityCondition::IfYouDo);
+        return Some(AbilityCondition::EventOutcomeWon);
     }
 
     if alt((
@@ -2277,7 +2320,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
     .is_ok()
     {
         return Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::IfYouDo),
+            condition: Box::new(AbilityCondition::effect_performed()),
         });
     }
 
@@ -2813,6 +2856,26 @@ fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityC
     })
 }
 
+/// CR 706.2 + CR 608.2c: "If the result is N or less / N or more / N or
+/// greater / less than N / greater than N / equal to N / N" — a comparator on
+/// the *actual* result of the most recent die roll in this resolution. Maps
+/// to `AbilityCondition::PreviousEffectAmount`, which reads
+/// `state.last_effect_amount` (populated for `Effect::RollDie` by
+/// `previous_effect_amount_from_events`). Covers Deck of Many Things' "If the
+/// result is 0 or less, discard your hand" and the analogous "is N or
+/// less/more" phrasings used by every dice-table rider in the corpus.
+fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
+    let rest = tag::<_, _, OracleError<'_>>("the result is ")
+        .parse(lower)
+        .ok()
+        .map(|(rest, _)| rest)?;
+    let (comparator, value) = parse_comparison_suffix(rest)?;
+    Some(AbilityCondition::PreviousEffectAmount {
+        comparator,
+        rhs: QuantityExpr::Fixed { value },
+    })
+}
+
 fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
     let (type_text, negated) = parse_zone_change_object_type_text(lower).ok()?.1;
     let (filter, leftover) = parse_type_phrase(type_text);
@@ -3088,6 +3151,41 @@ mod tests {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::counter::{CounterMatch, CounterType};
 
+    /// CR 603.12: After refactoring `strip_if_you_do_conditional` to delegate to
+    /// the shared `parse_reflexive_conditional_connector` combinator, all eight
+    /// reflexive connectors must still strip to the same `(condition, rest)`.
+    #[test]
+    fn strip_if_you_do_conditional_reflexive_connectors_unchanged() {
+        let effect = AbilityCondition::effect_performed();
+        let not_effect = AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        };
+        let cases: &[(&str, Option<AbilityCondition>)] = &[
+            (
+                "when you do, draw a card",
+                Some(AbilityCondition::WhenYouDo),
+            ),
+            ("if a player does, draw a card", Some(effect.clone())),
+            ("if they do, draw a card", Some(effect.clone())),
+            ("if that player does, draw a card", Some(effect.clone())),
+            ("if the player does, draw a card", Some(effect.clone())),
+            (
+                "if that player doesn't, draw a card",
+                Some(not_effect.clone()),
+            ),
+            (
+                "if the player doesn't, draw a card",
+                Some(not_effect.clone()),
+            ),
+            ("if you do, draw a card", Some(effect.clone())),
+        ];
+        for (input, expected) in cases {
+            let (condition, rest) = strip_if_you_do_conditional(input);
+            assert_eq!(&condition, expected, "condition mismatch for {input:?}");
+            assert_eq!(rest, "draw a card", "rest mismatch for {input:?}");
+        }
+    }
+
     #[test]
     fn difference_expr_composes_unsigned_gap_from_quantity_check() {
         // CR 609.3: a two-operand comparison yields the difference of its
@@ -3304,13 +3402,13 @@ mod tests {
     }
 
     #[test]
-    fn leading_you_win_maps_to_if_you_do_for_clash() {
+    fn leading_you_win_maps_to_event_outcome_won() {
         let (condition, body) = strip_leading_general_conditional(
             "If you win, put a +1/+1 counter on this creature.",
             &mut ParseContext::default(),
         );
         assert_eq!(body, "put a +1/+1 counter on this creature.");
-        assert_eq!(condition, Some(AbilityCondition::IfYouDo));
+        assert_eq!(condition, Some(AbilityCondition::EventOutcomeWon));
     }
 
     #[test]
@@ -3323,7 +3421,7 @@ mod tests {
         assert_eq!(
             condition,
             Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::IfYouDo)
+                condition: Box::new(AbilityCondition::effect_performed())
             })
         );
     }

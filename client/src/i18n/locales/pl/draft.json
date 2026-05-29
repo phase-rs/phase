@@ -56,7 +56,9 @@
   "seat": {
     "label": "Miejsce {{number}}",
     "passingLeft": "→ Przekazywanie w lewo →",
-    "passingRight": "← Przekazywanie w prawo ←"
+    "passingRight": "← Przekazywanie w prawo ←",
+    "connected": "Connected",
+    "disconnected": "Disconnected"
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
@@ -110,7 +112,6 @@
   "landing": {
     "title": "Draft",
     "startNew": "Rozpocznij nowy",
-    "experimental": "Eksperymentalne",
     "quickDraft": {
       "title": "Szybki draft",
       "description": "Zdraftuj 3 boostery z 7 botami, zbuduj talię z 40 kart, a potem rozegraj mecz Bo1 przeciwko jednemu z nich."
@@ -267,7 +268,11 @@
     "loadingPool": "Wczytywanie danych puli dodatku...",
     "roomCode": "Kod pokoju",
     "roomCodePlaceholder": "Wpisz kod pokoju...",
-    "joinPod": "Dołącz do grupy"
+    "joinPod": "Dołącz do grupy",
+    "tabs": {
+      "set": "Dodatek",
+      "cube": "Cube"
+    }
   },
   "podPhaseView": {
     "tournamentPairings": "Pary turniejowe",
@@ -281,7 +286,12 @@
     "reviewPool": "Przejrzyj pulę",
     "roundComplete": "Runda zakończona",
     "waitingNextRound": "Oczekiwanie, aż gospodarz rozpocznie następną rundę...",
-    "nextRoundShortly": "Następna runda rozpocznie się wkrótce..."
+    "nextRoundShortly": "Następna runda rozpocznie się wkrótce...",
+    "pauseReason": {
+      "PlayerDisconnected": "Draft paused — a player disconnected.",
+      "PausedByHost": "Draft paused by host.",
+      "DisconnectGraceExpired": "A player did not return in time."
+    }
   },
   "betweenGames": {
     "game": "Gra {{number}}",

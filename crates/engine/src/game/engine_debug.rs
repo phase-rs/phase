@@ -93,21 +93,16 @@ pub fn apply_debug_action(
 
         DebugAction::DrawCards { player_id, count } => {
             validate_player(state, player_id)?;
-            let proposed = ProposedEvent::Draw {
+            // CR 614.6 + CR 614.11 + CR 704.3: route through the single-authority
+            // helper so post-replacement continuations (Jace WinTheGame,
+            // Abundance reveal-until) drain in the same step as the draw.
+            let _ = super::effects::draw::draw_through_replacement(
+                state,
                 player_id,
                 count,
-                applied: HashSet::new(),
-            };
-            match super::replacement::replace_event(state, proposed, events) {
-                super::replacement::ReplacementResult::Execute(event) => {
-                    super::effects::draw::apply_draw_after_replacement(state, event, events);
-                }
-                super::replacement::ReplacementResult::Prevented => {}
-                super::replacement::ReplacementResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        super::replacement::replacement_choice_waiting_for(player, state);
-                }
-            }
+                events,
+                super::effects::draw::apply_draw_after_replacement,
+            );
         }
 
         DebugAction::Mill { player_id, count } => {

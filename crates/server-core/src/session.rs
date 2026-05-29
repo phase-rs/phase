@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
+use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
@@ -259,14 +260,19 @@ impl GameSession {
             MatchConfig::default()
         };
         // Preserve sandbox seeding through rematch — the format flag is
-        // immutable, so debug capability survives the new game.
+        // immutable, so debug capability survives the new game. Every seat
+        // is permitted by default (see initial create site for rationale);
+        // explicit revocations from the previous game are dropped at rematch
+        // since the new game is a fresh debug context.
         if self.state.format_config.allow_debug_actions {
             self.state.debug_mode = true;
-            self.state.debug_permitted.insert(PlayerId(0));
+            for i in 0..player_count {
+                self.state.debug_permitted.insert(PlayerId(i));
+            }
         }
     }
 
-    pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta) {
+    pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta, db: &CardDatabase) {
         let old_player_count = self.player_count;
         let new_player_count = new_state.seats.len() as u8;
 
@@ -350,8 +356,37 @@ impl GameSession {
             }
         }
 
-        for &(seat_idx, _, ref deck) in &delta.new_ai {
-            self.decks[seat_idx as usize] = Some(deck.clone());
+        // SeatDelta carries name-only `PlayerDeckList` (see DeckResolver docs);
+        // server-core's `self.decks` stores the fully-resolved `PlayerDeckPayload`
+        // because `start_game` and the broadcast paths consume that shape.
+        // Resolve at the boundary using the live `CardDatabase`. `resolve_deck`
+        // takes a `DeckData` which has the same shape as `PlayerDeckList`.
+        for (seat_idx, _, ref deck) in &delta.new_ai {
+            let deck_data = crate::starter_decks::DeckData {
+                main_deck: deck.main_deck.clone(),
+                sideboard: deck.sideboard.clone(),
+                commander: deck.commander.clone(),
+                bracket_tier: deck.bracket_tier,
+            };
+            // The resolver (`ServerDeckResolver::resolve` in phase-server)
+            // has already validated these names against the same `db`, so
+            // this should never error in practice. The `Err` arm exists as
+            // defense-in-depth — if it does fire, log loudly: `start_game`
+            // below would otherwise substitute an empty deck and silently
+            // eliminate the player on their first draw step (CR 704.5b).
+            self.decks[*seat_idx as usize] = match crate::resolve_deck(db, &deck_data) {
+                Ok(payload) => Some(payload),
+                Err(err) => {
+                    warn!(
+                        seat = *seat_idx,
+                        error = %err,
+                        "AI deck failed re-resolution at apply_seat_delta despite \
+                         passing the resolver gate; seat will start with an empty \
+                         library — investigate the resolver/DB mismatch",
+                    );
+                    None
+                }
+            };
         }
         for &seat_idx in &delta.removed_ai {
             if seat_idx as usize >= self.decks.len() {
@@ -374,26 +409,29 @@ impl GameSession {
         }
     }
 
-    pub fn start_game(&mut self, db: &CardDatabase) {
-        let player_deck = self.decks[0].clone().unwrap_or(PlayerDeckPayload {
-            main_deck: Vec::new(),
-            sideboard: Vec::new(),
-            commander: Vec::new(),
-        });
-        let opponent_deck = self.decks[1].clone().unwrap_or(PlayerDeckPayload {
-            main_deck: Vec::new(),
-            sideboard: Vec::new(),
-            commander: Vec::new(),
-        });
+    pub fn start_game(&mut self, db: &CardDatabase) -> Result<(), CedhBracketError> {
+        // Gate: if any AI seat is configured for cEDH difficulty, validate that
+        // every submitted deck is declared at the cEDH bracket tier before
+        // mutating any session state.
+        let is_cedh = self
+            .ai_configs
+            .values()
+            .any(|c| c.difficulty == AiDifficulty::CEDH);
+
+        if is_cedh {
+            let deck_refs = self
+                .decks
+                .iter()
+                .filter_map(|slot| slot.as_ref())
+                .collect::<Vec<_>>();
+            validate_cedh_bracket(&deck_refs)?;
+        }
+
+        let player_deck = self.decks[0].clone().unwrap_or_default();
+        let opponent_deck = self.decks[1].clone().unwrap_or_default();
         let ai_decks: Vec<PlayerDeckPayload> = self.decks[2..]
             .iter()
-            .map(|deck| {
-                deck.clone().unwrap_or(PlayerDeckPayload {
-                    main_deck: Vec::new(),
-                    sideboard: Vec::new(),
-                    commander: Vec::new(),
-                })
-            })
+            .map(|deck| deck.clone().unwrap_or_default())
             .collect();
 
         self.rebuild_pregame_state(self.player_count);
@@ -409,6 +447,11 @@ impl GameSession {
                 player: player_deck,
                 opponent: opponent_deck,
                 ai_decks,
+                // Multiplayer server does not enforce the cEDH gate at the
+                // session layer (it plumbs bracket tier through separately).
+                // Default to empty so old clients without ai_difficulties
+                // deserialize safely.
+                ai_difficulties: vec![],
             },
             Some(db),
         );
@@ -416,6 +459,7 @@ impl GameSession {
         let _ = start_game(&mut self.state);
         self.game_started = true;
         self.lobby_meta = None;
+        Ok(())
     }
 
     /// Run AI actions and return per-action broadcast data.
@@ -611,11 +655,15 @@ impl SessionManager {
         // Sandbox capability: the engine-level `debug_mode` gate must agree
         // with the transport-level `allow_debug_actions` flag, otherwise a
         // sandbox-permitted action would pass the server gate only to be
-        // rejected inside `apply`. The host (PlayerId(0)) is seeded as the
-        // sole holder of debug permission; they grant/revoke for others.
+        // rejected inside `apply`. Every seat is permitted by default — a
+        // sandbox is a shared playground, not an admin console. The host's
+        // grant/revoke flow remains (for the rare "kick this seat out of
+        // debug" case) but is no longer the gate for normal sandbox use.
         if state.format_config.allow_debug_actions {
             state.debug_mode = true;
-            state.debug_permitted.insert(PlayerId(0));
+            for i in 0..player_count {
+                state.debug_permitted.insert(PlayerId(i));
+            }
         }
 
         let session = GameSession {
@@ -816,7 +864,9 @@ impl SessionManager {
         }
 
         session.state.all_card_names = card_names.into();
-        session.start_game(db);
+        session
+            .start_game(db)
+            .expect("start_game in tests should not hit cEDH validation");
 
         (game_code, player_token)
     }
@@ -1002,7 +1052,12 @@ impl SessionManager {
         let skip_legality = action.is_mana_ability()
             || matches!(action, GameAction::SetAutoPass { .. })
             || (matches!(action, GameAction::SelectCards { .. })
-                && session.state.waiting_for.accepts_freeform_card_selection());
+                && session.state.waiting_for.accepts_freeform_card_selection())
+            || (matches!(action, GameAction::ChooseCounterMoveDistribution { .. })
+                && session
+                    .state
+                    .waiting_for
+                    .accepts_freeform_counter_move_distribution());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
             if !legal_actions.contains(&action) {
@@ -1190,6 +1245,7 @@ mod tests {
             }],
             sideboard: Vec::new(),
             commander: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1486,14 +1542,17 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_game_seeds_host_in_debug_permitted() {
+    fn sandbox_game_seeds_all_seats_in_debug_permitted() {
+        // Sandbox is a shared playground: every seat is permitted by default
+        // so any participant can drive debug tools without an admin gate.
         let mut mgr = SessionManager::new();
         let (code, _token) = create_sandbox_game(&mut mgr);
         let session = mgr.sessions.get(&code).unwrap();
         assert!(session.state.format_config.allow_debug_actions);
         assert!(session.state.debug_mode);
         assert!(session.state.debug_permitted.contains(&PlayerId(0)));
-        assert_eq!(session.state.debug_permitted.len(), 1);
+        assert!(session.state.debug_permitted.contains(&PlayerId(1)));
+        assert_eq!(session.state.debug_permitted.len(), 2);
     }
 
     #[test]
@@ -1565,12 +1624,25 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_rejects_debug_from_non_host_without_permission() {
+    fn sandbox_rejects_debug_from_revoked_seat() {
+        // Default is "all seats permitted" — a guest is only rejected after
+        // an explicit revoke. This exercises the revoke escape hatch.
         let mut mgr = SessionManager::new();
-        let (code, _host_token) = create_sandbox_game(&mut mgr);
+        let (code, host_token) = create_sandbox_game(&mut mgr);
         let (guest_token, _state) = mgr
             .join_game_with_name(&code, make_deck(), "Guest".to_string())
             .expect("guest joins");
+
+        // Host revokes the guest's default permission.
+        let revoke = mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(1),
+            },
+        );
+        assert!(revoke.is_ok(), "revoke must succeed: {:?}", revoke.err());
+
         let result = mgr.handle_action(
             &code,
             &guest_token,
@@ -1679,6 +1751,70 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Sandbox"), "{err}");
+    }
+
+    #[test]
+    fn start_game_rejects_non_cedh_deck_when_any_ai_seat_is_cedh() {
+        use engine::database::legality::CedhBracketError;
+        use engine::game::bracket_estimate::CommanderBracketTier;
+
+        // Build an empty CardDatabase (no real card data needed — the cEDH
+        // bracket gate fires before any deck loading).
+        let db = engine::database::CardDatabase::default();
+
+        // Construct a two-seat session manually: host (seat 0) + AI (seat 1).
+        let pc = 2usize;
+        let state = engine::types::game_state::GameState::new(
+            engine::types::format::FormatConfig::commander(),
+            pc as u8,
+            0,
+        );
+        let ai_pid = PlayerId(1);
+        let cedh_config = phase_ai::config::create_config_for_players(
+            AiDifficulty::CEDH,
+            Platform::Native,
+            pc as u8,
+        );
+
+        let mut session = GameSession {
+            game_code: "TEST01".to_string(),
+            state,
+            player_tokens: vec!["host_token".to_string(), String::new()],
+            connected: vec![true, true],
+            // Both decks present but with non-cEDH bracket tier (Core is the default).
+            decks: vec![
+                Some(PlayerDeckPayload {
+                    bracket_tier: CommanderBracketTier::Core,
+                    ..Default::default()
+                }),
+                Some(PlayerDeckPayload {
+                    bracket_tier: CommanderBracketTier::Core,
+                    ..Default::default()
+                }),
+            ],
+            display_names: vec!["Host".to_string(), "AI (CEDH)".to_string()],
+            reservations: HashMap::new(),
+            timer_seconds: None,
+            player_count: pc as u8,
+            ai_seats: [ai_pid].into_iter().collect(),
+            ai_configs: [(ai_pid, cedh_config)].into_iter().collect(),
+            lobby_meta: None,
+            game_started: false,
+            start_when_full: true,
+        };
+
+        let game_started_before = session.game_started;
+        let result = session.start_game(&db);
+
+        // The gate must reject with DeckNotCedh.
+        assert!(
+            matches!(result, Err(CedhBracketError::DeckNotCedh { .. })),
+            "expected DeckNotCedh, got: {:?}",
+            result
+        );
+        // No session state should have been mutated — game_started stays false.
+        assert_eq!(session.game_started, game_started_before);
+        assert!(!session.game_started);
     }
 
     /// CR 701.22a / CR 701.25a: a reordered (and partial-2+) scry keep-on-top

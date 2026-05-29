@@ -112,9 +112,11 @@ Open a new terminal after installing so the updated PATH takes effect.
 
 ```bash
 git clone https://github.com/phase-rs/phase && cd phase
-./scripts/setup.sh     # Downloads card data, builds WASM, installs deps
+./scripts/setup.sh     # Fetches data, builds WASM, installs deps
 cd client && pnpm dev  # Start dev server at localhost:5173
 ```
+
+If `tilt` is installed, `setup.sh` skips the eager WASM + card-data build and `tilt up` handles them. Flags: `--agent` (LLM mode — skip Scryfall art; see [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md)), `--no-tilt` (force inline build).
 
 ### Manual Steps
 

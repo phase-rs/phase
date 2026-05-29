@@ -392,6 +392,8 @@ export function DeckBuilder({
                         onSetAsCommander={isCommander ? handleSetCommander : undefined}
                         isCommanderEligible={isCommander ? isCommanderEligible : undefined}
                         onOpenArtPicker={handleOpenArtPicker}
+                        commanders={commanders}
+                        onRemoveCommander={handleRemoveCommander}
                       />
                     </div>
                   ) : (
@@ -401,8 +403,10 @@ export function DeckBuilder({
                       cardDataCache={cardDataCache}
                       onAddCard={handleAddCardByName}
                       onRemoveCard={handleRemoveCard}
+                      onMoveCard={handleMoveCard}
                       onRemoveCommander={handleRemoveCommander}
                       onCardHover={onCardHover}
+                      format={format}
                     />
                   )}
                 </div>

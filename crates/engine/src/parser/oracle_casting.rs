@@ -34,7 +34,10 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         let opt_raw = &body_raw[body_raw.len() - opt_lower.len()..];
         let cost = super::oracle_cost::parse_single_cost(opt_raw);
         if !matches!(cost, AbilityCost::Unimplemented { .. }) {
-            return Some(AdditionalCost::Optional(cost));
+            return Some(AdditionalCost::Optional {
+                cost,
+                repeatable: false,
+            });
         }
     }
 
@@ -529,7 +532,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         BeholdCostAction, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr,
-        TargetFilter, TypeFilter,
+        QuantityRef, TargetFilter, TypeFilter,
     };
     use crate::types::mana::ManaCost;
     use crate::types::zones::Zone;
@@ -736,7 +739,10 @@ mod tests {
         let result = parse_additional_cost_line(lower, raw);
         assert_eq!(
             result,
-            Some(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Blight { count: 1 },
+                repeatable: false,
+            })
         );
     }
 
@@ -747,7 +753,10 @@ mod tests {
         let result = parse_additional_cost_line(lower, raw);
         assert_eq!(
             result,
-            Some(AdditionalCost::Optional(AbilityCost::Blight { count: 2 }))
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Blight { count: 2 },
+                repeatable: false,
+            })
         );
     }
 
@@ -759,11 +768,15 @@ mod tests {
             "As an additional cost to cast this spell, you may behold a Dragon. (You may choose a Dragon you control or reveal a Dragon card from your hand.)";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Optional(AbilityCost::Behold {
-                count: 1,
-                filter: TargetFilter::Typed(filter),
-                action: BeholdCostAction::ChooseOrReveal,
-            })) => {
+            Some(AdditionalCost::Optional {
+                cost:
+                    AbilityCost::Behold {
+                        count: 1,
+                        filter: TargetFilter::Typed(filter),
+                        action: BeholdCostAction::ChooseOrReveal,
+                    },
+                repeatable: false,
+            }) => {
                 assert!(filter
                     .type_filters
                     .iter()
@@ -982,12 +995,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_additional_cost_pay_x_life() {
+        let lower = "as an additional cost to cast this spell, pay x life.";
+        let raw = "As an additional cost to cast this spell, pay X life.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
+            }))
+        );
+    }
+
+    #[test]
     fn parse_additional_cost_optional_sacrifice() {
         let lower = "as an additional cost to cast this spell, you may sacrifice an artifact.";
         let raw = "As an additional cost to cast this spell, you may sacrifice an artifact.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Optional(AbilityCost::Sacrifice { count: 1, .. })) => {}
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Sacrifice { count: 1, .. },
+                repeatable: false,
+            }) => {}
             other => panic!("Expected Optional(Sacrifice), got {:?}", other),
         }
     }

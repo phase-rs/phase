@@ -22,10 +22,10 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AggregateFunction, CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator,
-    ControllerRef, CountScope, DamageGroupKey, FilterProp, ObjectProperty, ObjectScope,
-    PlayerScope, QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter, ZoneRef,
+    AbilityCondition, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
+    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageGroupKey, FilterProp,
+    ObjectProperty, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, SharedQuality,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -92,6 +92,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // that group (which only matches numeric thresholds).
         parse_subject_property_superlative_comparison,
         parse_attached_object_is_filter_condition,
+        parse_recipient_is_filter_condition,
         parse_source_state_conditions,
         parse_player_state_conditions,
         parse_you_have_conditions,
@@ -118,6 +119,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_quantity_quantity_comparison,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
+        parse_card_exiled_with_source_condition,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
@@ -592,18 +594,23 @@ fn merge_attached_predicate_filter(
     Some(TargetFilter::Typed(filter))
 }
 
-fn parse_attached_predicate_single<'a>(
-    input: &'a str,
-    subject: &AttachedConditionSubject,
-) -> OracleResult<'a, TargetFilter> {
+/// Parse a bare predicate tail — the type/subtype/color/supertype that follows a
+/// subject's copula ("is"/"'s") — into a `TargetFilter::Typed` carrying ONLY the
+/// predicate's own props (no attachment prop, no subject type). Shared by the
+/// literal-subject attached path (`parse_attached_predicate_single`, which merges
+/// the result into the subject filter) and the anaphoric "it" recipient path
+/// (`parse_recipient_is_filter_condition`, which uses the bare filter directly as
+/// the recipient match). Uses the same color / legendary-basic supertype /
+/// `parse_type_phrase` recognition the attached path historically used, so the
+/// downstream merged output is preserved byte-for-byte.
+fn parse_bare_predicate_tail(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = opt(parse_article).parse(input)?;
     if let Ok((rest, color)) = parse_color(rest) {
         return Ok((
             rest,
-            TargetFilter::Typed(attached_subject_typed_filter(subject).properties(vec![
-                subject.attachment_prop.clone(),
-                FilterProp::HasColor { color },
-            ])),
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+            ),
         ));
     }
 
@@ -624,9 +631,10 @@ fn parse_attached_predicate_single<'a>(
     .parse(rest)
     {
         if rest.is_empty() {
-            let mut filter = attached_subject_typed_filter(subject);
-            filter.properties.push(property);
-            return Ok((rest, TargetFilter::Typed(filter)));
+            return Ok((
+                rest,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![property])),
+            ));
         }
     }
 
@@ -637,7 +645,15 @@ fn parse_attached_predicate_single<'a>(
             nom::error::ErrorKind::Fail,
         )));
     }
-    let Some(filter) = merge_attached_predicate_filter(subject, filter) else {
+    Ok((remainder, filter))
+}
+
+fn parse_attached_predicate_single<'a>(
+    input: &'a str,
+    subject: &AttachedConditionSubject,
+) -> OracleResult<'a, TargetFilter> {
+    let (remainder, bare) = parse_bare_predicate_tail(input)?;
+    let Some(filter) = merge_attached_predicate_filter(subject, bare) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
@@ -682,6 +698,68 @@ fn attached_filter_condition(filter: TargetFilter) -> StaticCondition {
             filter: Some(filter),
         },
     }
+}
+
+/// Parse a predicate tail with optional N-way `" or "` disjunction into one or
+/// more bare predicate filters. Shared shape between the attached and recipient
+/// paths; the recipient path maps each bare filter to a `RecipientMatchesFilter`.
+/// `separated_list1` folds arbitrary arity ("a Zombie or a Skeleton or a Spirit")
+/// because `parse_bare_predicate_tail` stops at the first non-type token, leaving
+/// the `" or "` separator for the next iteration.
+fn parse_bare_predicate_disjunction(input: &str) -> OracleResult<'_, Vec<TargetFilter>> {
+    nom::multi::separated_list1(tag(" or "), parse_bare_predicate_tail).parse(input)
+}
+
+/// CR 611.3a: "it's a Zombie" / "it isn't white" / "it's a Zombie or a Skeleton" —
+/// the anaphoric "it" binds to the recipient (effective subject) of the continuous
+/// effect. Emits `RecipientMatchesFilter` (affirmative), `Not(RecipientMatchesFilter)`
+/// (negated), or `Or([RecipientMatchesFilter, …])` (disjunction). The pronoun subject
+/// is scoped to this combinator only (it is NOT added to the shared source-subject
+/// dispatcher, mirroring `parse_counter_condition_subject`). A terminal-boundary guard
+/// rejects non-clause-ending predicates (e.g. "attacking alone") so the alt backtracks
+/// to the combat combinator.
+fn parse_recipient_is_filter_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("it").parse(input)?;
+    // Negated copulae (" isn't ", " is not ") MUST be tried before the affirmative
+    // " is " so " is not " is not greedily split into " is " + "not …".
+    let (rest, negated) = alt((
+        value(true, alt((tag(" isn't "), tag(" is not ")))),
+        value(false, alt((tag("'s "), tag(" is ")))),
+    ))
+    .parse(rest)?;
+    let (rest, filters) = parse_bare_predicate_disjunction(rest)?;
+
+    // Pronoun-form boundary guard: the predicate must end at a clause boundary
+    // (end of input or one of ",", ".", ";"). Otherwise leftover words (e.g.
+    // "alone" from "it's attacking alone") mean a longer combinator owns the
+    // phrase — backtrack via nom Err so the alt falls through to it.
+    if !(rest.is_empty()
+        || alt((tag::<_, _, OracleError<'_>>(","), tag(";"), tag(".")))
+            .parse(rest)
+            .is_ok())
+    {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    let to_condition = |filter: TargetFilter| StaticCondition::RecipientMatchesFilter { filter };
+    let condition = if filters.len() > 1 {
+        StaticCondition::Or {
+            conditions: filters.into_iter().map(to_condition).collect(),
+        }
+    } else {
+        to_condition(filters.into_iter().next().expect("non-empty"))
+    };
+    let condition = if negated {
+        StaticCondition::Not {
+            condition: Box::new(condition),
+        }
+    } else {
+        condition
+    };
+    Ok((rest, condition))
 }
 
 fn parse_attached_object_is_filter_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -2459,10 +2537,42 @@ fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             },
             alt((tag("~ is suspended"), tag("this card is suspended"))),
         ),
+        // CR 104.2b + CR 104.3c: "your library has no cards in it" / "your
+        // library is empty" — the empty-library antecedent shared by the
+        // alternate-win-on-draw class (Laboratory Maniac, Jace, Wielder of
+        // Mysteries: "If you would draw a card while your library has no cards
+        // in it, you win the game instead"). Maps to a controller library
+        // count of zero so the gate composes through `parse_inner_condition`
+        // for replacement antecedents, trigger intervening-ifs, and statics.
+        parse_library_empty_condition,
         // CR 113.6b: Generic "<source> is <zone> [or <zone>]" form.
         parse_source_in_zone_condition,
     ))
     .parse(input)
+}
+
+/// CR 401.1: Count of cards in the controller's library, compared against zero.
+///
+/// Recognizes "your library has no cards in it" and "your library is empty"
+/// (the empty-library win antecedent). The library count is expressed with the
+/// existing `ZoneCardCount` building block (zone = Library, no type filter,
+/// controller scope) rather than a bespoke leaf, so the resolver path is shared
+/// with every other zone-count condition.
+fn parse_library_empty_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("your library ").parse(input)?;
+    let (rest, _) = alt((tag("has no cards in it"), tag("is empty"))).parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_comparison(
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Library,
+                card_types: Vec::new(),
+                scope: CountScope::Controller,
+            },
+            Comparator::EQ,
+            0,
+        ),
+    ))
 }
 
 fn parse_day_night_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -4135,6 +4245,21 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
     ))
 }
 
+fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("a card is "), tag("one or more cards are "))).parse(input)?;
+    let (rest, _) = tag("exiled with ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("~"),
+        tag("it"),
+        tag("this artifact"),
+        tag("this creature"),
+        tag("this land"),
+        tag("this permanent"),
+    ))
+    .parse(rest)?;
+    Ok((rest, make_quantity_ge(QuantityRef::CardsExiledBySource, 1)))
+}
+
 /// Parse "there is a/an X card and a/an Y card in your <zone>" as two
 /// independent zone-count predicates sharing the same zone/scope suffix.
 fn parse_there_exists_compound_zone_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -4787,6 +4912,46 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     Ok((rest, (filter, negated)))
 }
 
+/// CR 603.12 + CR 608.2c: Recognize a leading reflexive-conditional connector
+/// and return the corresponding AbilityCondition with the connector consumed.
+/// Single authority for this set; consumed by both
+/// `oracle_effect::conditions::strip_if_you_do_conditional` and the
+/// `oracle_effect::sequence` chunk-splitter sticky-detection so they never drift.
+pub(crate) fn parse_reflexive_conditional_connector(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    alt((
+        value(AbilityCondition::WhenYouDo, tag("when you do, ")),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if a player does, "),
+        ),
+        value(AbilityCondition::effect_performed(), tag("if they do, ")),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if that player does, "),
+        ),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if the player does, "),
+        ),
+        value(
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+            tag("if that player doesn't, "),
+        ),
+        value(
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+            tag("if the player doesn't, "),
+        ),
+        value(AbilityCondition::effect_performed(), tag("if you do, ")),
+    ))
+    .parse(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4824,6 +4989,37 @@ mod tests {
                 },
             },
         );
+    }
+
+    // --- parse_reflexive_conditional_connector (CR 603.12 / 608.2c) ---
+
+    #[test]
+    fn reflexive_connector_all_eight_variants() {
+        let effect = AbilityCondition::effect_performed();
+        let not_effect = AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        };
+        let cases: &[(&str, AbilityCondition)] = &[
+            ("when you do, rest", AbilityCondition::WhenYouDo),
+            ("if a player does, rest", effect.clone()),
+            ("if they do, rest", effect.clone()),
+            ("if that player does, rest", effect.clone()),
+            ("if the player does, rest", effect.clone()),
+            ("if that player doesn't, rest", not_effect.clone()),
+            ("if the player doesn't, rest", not_effect.clone()),
+            ("if you do, rest", effect.clone()),
+        ];
+        for (input, expected) in cases {
+            let (rest, cond) = parse_reflexive_conditional_connector(input)
+                .unwrap_or_else(|_| panic!("connector must parse: {input:?}"));
+            assert_eq!(&cond, expected, "condition mismatch for {input:?}");
+            assert_eq!(rest, "rest", "remainder mismatch for {input:?}");
+        }
+    }
+
+    #[test]
+    fn reflexive_connector_rejects_non_reflexive_conditional() {
+        assert!(parse_reflexive_conditional_connector("if you control a creature, ").is_err());
     }
 
     #[test]
@@ -5578,6 +5774,35 @@ mod tests {
     }
 
     #[test]
+    fn test_control_count_ge_creature_subtype() {
+        let (rest, c) = parse_inner_condition("you control four or more wizards").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(typed),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            } => {
+                assert!(
+                    typed
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Wizard".to_string())),
+                    "expected Wizard subtype filter, got {:?}",
+                    typed.type_filters
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected ObjectCount Wizard GE 4, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_graveyard_count_ge() {
         let (rest, c) =
             parse_inner_condition("you have five or more cards in your graveyard").unwrap();
@@ -5880,6 +6105,23 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 2 },
             } => {}
             other => panic!("expected CardsExiledBySource GE 2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_a_card_is_exiled_with_source() {
+        let (rest, c) = parse_inner_condition("a card is exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected CardsExiledBySource GE 1, got {other:?}"),
         }
     }
 
@@ -6673,6 +6915,184 @@ mod tests {
         assert!(angel
             .type_filters
             .contains(&TypeFilter::Subtype("Angel".to_string())));
+    }
+
+    // -- Anaphoric "it" recipient conditions (CR 611.3a) --
+
+    fn recipient_filter(condition: &StaticCondition) -> &TargetFilter {
+        match condition {
+            StaticCondition::RecipientMatchesFilter { filter } => filter,
+            other => panic!("expected RecipientMatchesFilter, got {other:?}"),
+        }
+    }
+
+    fn assert_no_attachment_or_presence(condition: &StaticCondition) {
+        // The recipient is by definition the modified object — it must never be
+        // expressed via an attachment prop, an existence guard, or a source filter.
+        let json = format!("{condition:?}");
+        for forbidden in [
+            "EnchantedBy",
+            "EquippedBy",
+            "IsPresent",
+            "SourceMatchesFilter",
+        ] {
+            // allow-noncombinator: test assertion scanning Debug output, not parser dispatch.
+            assert!(
+                !json.contains(forbidden),
+                "recipient condition leaked {forbidden}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_recipient_is_subtype_apostrophe_s() {
+        let (rest, c) = parse_inner_condition("it's a Zombie").unwrap();
+        assert_eq!(rest, "");
+        let tf = recipient_filter(&c);
+        let TargetFilter::Typed(tf) = tf else {
+            panic!("expected Typed");
+        };
+        // A bare subtype phrase ("a Zombie") yields Subtype only — no implicit
+        // Creature core type. At runtime `matches_target_filter` checks the
+        // recipient's subtype, which a Zombie object carries.
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Subtype("Zombie".to_string())));
+        assert_no_attachment_or_presence(&c);
+    }
+
+    #[test]
+    fn test_recipient_is_subtype_is_form() {
+        let (rest, c) = parse_inner_condition("it is a Zombie").unwrap();
+        assert_eq!(rest, "");
+        let TargetFilter::Typed(tf) = recipient_filter(&c) else {
+            panic!("expected Typed");
+        };
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Subtype("Zombie".to_string())));
+        assert_no_attachment_or_presence(&c);
+    }
+
+    #[test]
+    fn test_recipient_is_color() {
+        let (rest, c) = parse_inner_condition("it's white").unwrap();
+        assert_eq!(rest, "");
+        let TargetFilter::Typed(tf) = recipient_filter(&c) else {
+            panic!("expected Typed");
+        };
+        assert_has_color(tf, ManaColor::White);
+        assert!(tf.type_filters.is_empty(), "bare color has no type: {tf:?}");
+        assert_no_attachment_or_presence(&c);
+    }
+
+    #[test]
+    fn test_recipient_isnt_subtype() {
+        let (rest, c) = parse_inner_condition("it isn't a Zombie").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::Not { condition } = &c else {
+            panic!("expected Not, got {c:?}");
+        };
+        let TargetFilter::Typed(tf) = recipient_filter(condition) else {
+            panic!("expected Typed");
+        };
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Subtype("Zombie".to_string())));
+        // No IsPresent existence guard wrapping (recipient is the modified object).
+        assert_no_attachment_or_presence(&c);
+    }
+
+    #[test]
+    fn test_recipient_is_creature() {
+        let (rest, c) = parse_inner_condition("it's a creature").unwrap();
+        assert_eq!(rest, "");
+        let TargetFilter::Typed(tf) = recipient_filter(&c) else {
+            panic!("expected Typed");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_no_attachment_or_presence(&c);
+    }
+
+    #[test]
+    fn test_recipient_is_wall_keeps_subtype() {
+        let (rest, c) = parse_inner_condition("it's a Wall").unwrap();
+        assert_eq!(rest, "");
+        let TargetFilter::Typed(tf) = recipient_filter(&c) else {
+            panic!("expected Typed");
+        };
+        // "a Wall" is a bare subtype phrase → Subtype only (no implicit Creature).
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Subtype("Wall".to_string())));
+        assert_no_attachment_or_presence(&c);
+    }
+
+    #[test]
+    fn test_recipient_is_subtype_disjunction() {
+        let (rest, c) = parse_inner_condition("it's a Zombie or a Skeleton").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::Or { conditions } = &c else {
+            panic!("expected Or, got {c:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        let TargetFilter::Typed(zombie) = recipient_filter(&conditions[0]) else {
+            panic!("expected Typed");
+        };
+        assert!(zombie
+            .type_filters
+            .contains(&TypeFilter::Subtype("Zombie".to_string())));
+        let TargetFilter::Typed(skeleton) = recipient_filter(&conditions[1]) else {
+            panic!("expected Typed");
+        };
+        assert!(skeleton
+            .type_filters
+            .contains(&TypeFilter::Subtype("Skeleton".to_string())));
+        assert_no_attachment_or_presence(&c);
+    }
+
+    #[test]
+    fn test_recipient_as_long_as_prefix_stripped() {
+        // CR 611.3a: "as long as it's a Zombie" yields the same body after the
+        // duration prefix is consumed by parse_condition.
+        let (rest, c) = parse_condition("as long as it's a Zombie").unwrap();
+        assert_eq!(rest, "");
+        let TargetFilter::Typed(tf) = recipient_filter(&c) else {
+            panic!("expected Typed");
+        };
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Subtype("Zombie".to_string())));
+    }
+
+    #[test]
+    fn test_recipient_guard_backtracks_to_attacking_alone() {
+        // GUARD: "it's attacking alone" leaves "alone" after parse_type_phrase
+        // matches "attacking " — the terminal-boundary guard rejects the pronoun
+        // match so the combat combinator wins.
+        let (rest, c) = parse_inner_condition("it's attacking alone").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceAttackingAlone);
+    }
+
+    #[test]
+    fn test_recipient_its_your_turn_not_captured() {
+        // "it's your turn" is owned by the turn combinator, tried before this one.
+        let (rest, c) = parse_inner_condition("it's your turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::DuringYourTurn);
+    }
+
+    #[test]
+    fn test_recipient_its_night_not_captured() {
+        let (rest, c) = parse_inner_condition("it's night").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::DayNightIs {
+                state: DayNight::Night,
+            }
+        );
     }
 
     // -- Player-state conditions --

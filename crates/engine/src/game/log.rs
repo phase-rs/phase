@@ -106,6 +106,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
+        | GameEvent::CreatureExerted { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. } => LogCategory::Combat,
 
         GameEvent::DamageDealt { is_combat, .. } => {
@@ -147,6 +148,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
+        | GameEvent::Detained { .. }
         | GameEvent::BecamePrepared { .. }
         | GameEvent::BecameUnprepared { .. }
         | GameEvent::CaseSolved { .. }
@@ -301,6 +303,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" becomes plotted for "),
             player_seg(state, *player_id),
         ],
+
+        GameEvent::CreatureExerted { object_id } => {
+            vec![card_seg(state, *object_id), text(" is exerted")]
+        }
 
         GameEvent::StackPushed { object_id } => {
             vec![card_seg(state, *object_id), text(" added to stack")]
@@ -641,6 +647,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![card_seg(state, *object_id), text(" becomes suspected")]
         }
 
+        GameEvent::Detained { object_id } => {
+            vec![card_seg(state, *object_id), text(" is detained")]
+        }
+
         GameEvent::BecamePrepared { object_id } => {
             vec![card_seg(state, *object_id), text(" becomes prepared")]
         }
@@ -698,14 +708,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(&format!("{kind:?}")),
         ],
 
-        GameEvent::BecomesTarget {
-            object_id,
-            source_id,
-        } => vec![
-            card_seg(state, *object_id),
-            text(" is targeted by "),
-            card_seg(state, *source_id),
-        ],
+        GameEvent::BecomesTarget { target, source_id } => {
+            let mut segments = Vec::new();
+            match target {
+                TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),
+                TargetRef::Player(player_id) => segments.push(player_seg(state, *player_id)),
+            }
+            segments.push(text(" is targeted by "));
+            segments.push(card_seg(state, *source_id));
+            segments
+        }
 
         GameEvent::ReplacementApplied {
             source_id,

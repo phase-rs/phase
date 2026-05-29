@@ -2,6 +2,8 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useEffect, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { ObjectId } from "../../adapter/types.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useOptionalDialogPeek } from "./dialogPeekContext.ts";
 
 interface DialogShellProps {
@@ -14,6 +16,10 @@ interface DialogShellProps {
   children: ReactNode;
   footer?: ReactNode;
   onClose?: () => void;
+  /** When set, hovering anywhere on the dialog card fires inspectObject for
+   * the referenced game object. Use this for dialogs that represent a single
+   * card subject (cast prompts, face choices, miracle reveal, etc.). */
+  previewObjectId?: ObjectId;
 }
 
 const SIZE_CLASS: Record<NonNullable<DialogShellProps["size"]>, string> = {
@@ -32,10 +38,14 @@ export function DialogShell({
   children,
   footer,
   onClose,
+  previewObjectId,
 }: DialogShellProps) {
   const { t } = useTranslation("game");
   const peek = useOptionalDialogPeek();
+  const inspectHoverProps = useInspectHoverProps();
   const resolvedEyebrow = eyebrow ?? t("dialogShell.eyebrow");
+  const cardHoverProps =
+    previewObjectId != null ? inspectHoverProps(previewObjectId) : undefined;
 
   // Esc-to-close: standard modal contract. Only attach when the dialog is
   // dismissable (consumers like ChoiceOverlay that omit `onClose` have a
@@ -85,7 +95,7 @@ export function DialogShell({
           exit={{ scale: 0.95, opacity: 0, y: 10 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
         >
-          <div className={cardClass}>
+          <div {...cardHoverProps} className={cardClass}>
             <DialogHeader
               eyebrow={resolvedEyebrow}
               eyebrowClassName={eyebrowClassName}

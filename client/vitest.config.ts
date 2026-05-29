@@ -39,6 +39,7 @@ export default defineConfig({
     __SCRYFALL_PRINTINGS_URL__: JSON.stringify("/scryfall-printings.json"),
     __SCRYFALL_SETS_URL__: JSON.stringify("/scryfall-sets.json"),
     __DECKS_URL__: JSON.stringify("/decks.json"),
+    __CARD_DATA_URL__: JSON.stringify("/card-data.json"),
     __CARD_DATA_LOCALE_URL_TEMPLATE__: JSON.stringify("/card-data.{lng}.json"),
     __APP_VERSION__: JSON.stringify("0.0.0-test"),
     __BUILD_HASH__: JSON.stringify("testhash"),

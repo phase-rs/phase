@@ -9,8 +9,7 @@
     "combat": "Ritmo",
     "audio": "Audio",
     "multiplayer": "Multijugador",
-    "data": "Datos",
-    "experimental": "Experimental"
+    "data": "Datos"
   },
   "gameplay": {
     "title": "Jugabilidad",
@@ -85,12 +84,28 @@
     "displayNamePlaceholder": "Introduce tu nombre",
     "serverSelectionNote": "La selección de servidor se trasladó a la sala de espera — abre Multijugador y usa el chip de servidor (o \"Elegir servidor\" en modo P2P) para cambiar de región, configurar una instancia autoalojada o probar la conectividad."
   },
-  "experimental": {
-    "title": "Experimental",
-    "description": "Estas funciones aún están en desarrollo. Pueden estar incompletas, tener errores o cambiar sin previo aviso. Actívalas para probar cosas pronto.",
-    "draftExperiments": "Experimentos de draft",
-    "enableDraftFeatures": "Activar funciones experimentales de draft",
-    "draftFeaturesDescription": "Desbloquea Cube Draft y Pod Draft. Quick Draft contra la IA siempre está disponible."
+  "sync": {
+    "title": "Sincronización en la nube",
+    "description": "Inicia sesión para sincronizar tus mazos, preferencias y suscripciones de feeds entre dispositivos. Tus datos viven en tu cuenta y se actualizan automáticamente cuando cambian.",
+    "signInWith": "Iniciar sesión con {{provider}}",
+    "signOut": "Cerrar sesión",
+    "signedInAs": "Sesión iniciada como {{name}}",
+    "syncNow": "Sincronizar ahora",
+    "statusSyncing": "Sincronizando…",
+    "statusError": "Error de sincronización",
+    "lastSynced": "Última sincronización: {{time}}",
+    "never": "nunca",
+    "conflictTitle": "Ambas copias tienen cambios",
+    "conflictBody": "Este dispositivo y tu cuenta en la nube tienen datos y no podemos determinar cuál es la actual. Elige qué copia conservar; la otra se reemplazará.",
+    "keepCloud": "Usar la nube",
+    "keepLocal": "Conservar este dispositivo",
+    "savesNote": "Las partidas guardadas y las cachés permanecen en este dispositivo.",
+    "diffDecks": "Mazos: {{added}} añadidos, {{modified}} modificados, {{removed}} eliminados",
+    "diffPrefs": "Las preferencias difieren",
+    "diffFeeds": "Las suscripciones a feeds difieren",
+    "diffOther": "Otros ajustes difieren",
+    "providerDiscord": "Discord",
+    "providerGoogle": "Google"
   },
   "data": {
     "title": "Copia de seguridad y restauración",

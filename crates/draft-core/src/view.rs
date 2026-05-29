@@ -153,7 +153,13 @@ pub fn filter_for_spectator(
                 },
                 is_bot: matches!(seat, DraftSeat::Bot { .. }),
                 connected: match seat {
-                    DraftSeat::Human { connected, .. } => *connected,
+                    // Source of truth: the runtime `connected_seats` bitmap,
+                    // populated via `DraftAction::SetSeatConnected` by the host
+                    // adapter on (dis)connect. Bots are always considered
+                    // connected by construction. `get_or(.., true)` so an
+                    // in-flight save deserialised before `ensure_len` runs
+                    // shows seats as connected, not as a wall of disconnect dots.
+                    DraftSeat::Human { .. } => session.connected_seats.get_or(i as u8, true),
                     DraftSeat::Bot { .. } => true,
                 },
                 has_submitted_deck: player_id_for_seat
@@ -255,7 +261,13 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
                 },
                 is_bot: matches!(seat, DraftSeat::Bot { .. }),
                 connected: match seat {
-                    DraftSeat::Human { connected, .. } => *connected,
+                    // Source of truth: the runtime `connected_seats` bitmap,
+                    // populated via `DraftAction::SetSeatConnected` by the host
+                    // adapter on (dis)connect. Bots are always considered
+                    // connected by construction. `get_or(.., true)` so an
+                    // in-flight save deserialised before `ensure_len` runs
+                    // shows seats as connected, not as a wall of disconnect dots.
+                    DraftSeat::Human { .. } => session.connected_seats.get_or(i as u8, true),
                     DraftSeat::Bot { .. } => true,
                 },
                 has_submitted_deck: player_id_for_seat
@@ -421,7 +433,6 @@ mod tests {
             .map(|i| DraftSeat::Human {
                 player_id: PlayerId(i),
                 display_name: format!("Player {i}"),
-                connected: true,
             })
             .collect();
         let source = FixturePackSource {
@@ -661,7 +672,6 @@ mod tests {
         let mut seats = vec![DraftSeat::Human {
             player_id: PlayerId(0),
             display_name: "Human".to_string(),
-            connected: true,
         }];
         for i in 1..8u8 {
             seats.push(DraftSeat::Bot {

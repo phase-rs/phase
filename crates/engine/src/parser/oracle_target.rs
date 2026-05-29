@@ -7,9 +7,10 @@ use nom::multi::many0;
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, Comparator, ControllerRef, FilterProp, ObjectProperty,
-    ObjectScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter,
-    TargetSelectionMode, TypeFilter, TypedFilter,
+    AggregateFunction, AttachmentKind, CombatRelation, CombatRelationSubject, Comparator,
+    ControllerRef, FilterProp, ObjectProperty, ObjectScope, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -31,6 +32,18 @@ use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
     SELF_REF_TYPE_PHRASES,
 };
+
+/// CR 115.1: Whether a parsed target phrase used the "target" keyword
+/// (`TargetKeyword`) or a controller-scope descriptor like "a creature you
+/// control" (`Descriptor`). Used to distinguish targeted bounce effects from
+/// the Whitemane Lion class at lowering time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetSyntax {
+    /// The phrase contained the "target" keyword.
+    TargetKeyword,
+    /// The phrase used a descriptor (no "target" keyword).
+    Descriptor,
+}
 
 /// Run a nom combinator on lowercased text, returning the result and
 /// remainder from the original (mixed-case) text.
@@ -106,6 +119,10 @@ pub(crate) fn parse_word_bounded<'a>(
     }
 }
 
+fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    parse_word_bounded(input, "cards").or_else(|_| parse_word_bounded(input, "card"))
+}
+
 /// Parse an event-context possessive reference from Oracle text.
 /// These resolve from the triggering event, not from player targeting.
 /// Must be checked BEFORE standard `parse_target` for trigger-based effects.
@@ -177,7 +194,26 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
 
 /// Context-aware variant of `parse_target`. TargetFallback diagnostics are
 /// accumulated on `ctx.diagnostics` instead of being silently lost.
+///
+/// Discards the `TargetSyntax` discriminator returned by
+/// `parse_target_with_syntax`. Use the latter directly when distinguishing
+/// `target`-keyword vs descriptor phrases matters (e.g. Bounce lowering).
 pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
+    let (filter, rest, _syntax) = parse_target_with_syntax(text, ctx);
+    (filter, rest)
+}
+
+/// Context-aware target parser that additionally reports whether the phrase
+/// used the "target" keyword (`TargetKeyword`) or a descriptor scope
+/// (`Descriptor`). CR 115.1 + Whitemane Lion ruling distinguishes these for
+/// `Effect::Bounce` lowering: targeted bounce uses the targeting pipeline,
+/// while descriptor bounce ("return a creature you control") selects at
+/// resolution via `EffectZoneChoice`.
+pub fn parse_target_with_syntax<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str, TargetSyntax) {
+    let mut syntax = TargetSyntax::Descriptor;
     let text = text.trim_start();
     let lower = text.to_lowercase();
 
@@ -202,11 +238,11 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             // allow-noncombinator: TextPair::strip_suffix is the dual-string structural API for postnominal qualifier stripping (PATTERNS.md §9).
             if let Some(prefix) = trimmed.strip_suffix(suffix) {
                 ctx.target_selection_mode = TargetSelectionMode::Random;
-                let (filter, _) = parse_target_with_ctx(prefix.original, ctx);
+                let (filter, _, _) = parse_target_with_syntax(prefix.original, ctx);
                 let filter = use_owner_for_random_non_battlefield_zone(filter);
                 // Return empty remainder — the entire input has been consumed
                 // (prefix + stripped suffix + any trailing punctuation).
-                return (filter, &text[text.len()..]);
+                return (filter, &text[text.len()..], syntax);
             }
         }
     }
@@ -225,9 +261,9 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             let before_original = &text[..before_random.len()];
             let after_original = &text[lower.len() - after_random.len()..];
             let rewritten = format!("{before_original} {after_original}");
-            let (filter, _) = parse_target_with_ctx(&rewritten, ctx);
+            let (filter, _, _) = parse_target_with_syntax(&rewritten, ctx);
             let filter = use_owner_for_random_non_battlefield_zone(filter);
-            return (filter, &text[text.len()..]);
+            return (filter, &text[text.len()..], syntax);
         }
     }
 
@@ -259,7 +295,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         .is_ok()
         {
             let original_rest = &text[lower.len() - after_article.len()..];
-            return parse_target_with_ctx(original_rest, ctx);
+            return parse_target_with_syntax(original_rest, ctx);
         }
         // CR 115.1: Bare-trailing "target" with no following type word — the
         // recipient is the multi-target chain's terminal slot ("a third
@@ -270,7 +306,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         {
             if rest_after_target.is_empty() || rest_after_target.starts_with([',', '.']) {
                 let original_rest = &text[lower.len() - after_article.len()..];
-                return parse_target_with_ctx(original_rest, ctx);
+                return parse_target_with_syntax(original_rest, ctx);
             }
         }
     }
@@ -290,7 +326,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     {
         ctx.target_selection_mode = TargetSelectionMode::Random;
         let original_rest = &text[lower.len() - rest.len()..];
-        return parse_target_with_ctx(original_rest, ctx);
+        return parse_target_with_syntax(original_rest, ctx);
     }
 
     // Quantified target phrases routed here from callers that only need the filter,
@@ -335,7 +371,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                 || (!matches!(*prefix, "one " | "up to one ") && trimmed_rest.starts_with("of "));
             if quantified_target {
                 let original_rest = &text[lower.len() - rest.len()..];
-                return parse_target_with_ctx(original_rest, ctx);
+                return parse_target_with_syntax(original_rest, ctx);
             }
         }
     }
@@ -343,7 +379,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     for prefix in ["or untap ", "untap ", "or tap ", "tap "] {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
             let original_rest = &text[lower.len() - rest.len()..];
-            return parse_target_with_ctx(original_rest, ctx);
+            return parse_target_with_syntax(original_rest, ctx);
         }
     }
 
@@ -354,7 +390,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         "targets",
     ] {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
-            return (TargetFilter::Any, &text[lower.len() - rest.len()..]);
+            return (TargetFilter::Any, &text[lower.len() - rest.len()..], syntax);
         }
     }
 
@@ -363,10 +399,10 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     // dispatches on `ctx.subject` to pick the correct antecedent class — see its
     // doc comment for the typed-subject vs. compound-anaphor split.
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "it")) {
-        return (resolve_pronoun_target(ctx, "it"), rest);
+        return (resolve_pronoun_target(ctx, "it"), rest, syntax);
     }
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "them")) {
-        return (resolve_pronoun_target(ctx, "them"), rest);
+        return (resolve_pronoun_target(ctx, "them"), rest, syntax);
     }
     if tag::<_, _, OracleError<'_>>("one of ")
         .parse(lower.as_str())
@@ -377,16 +413,16 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         {
             // "one" is a quantity word, not an object pronoun — preserve the
             // legacy `ParentTarget` binding (multi-target chains).
-            return (TargetFilter::ParentTarget, rest);
+            return (TargetFilter::ParentTarget, rest, syntax);
         }
     }
     // Gendered object pronouns follow the same trigger-subject vs. compound
     // anaphor dispatch as "it"/"them".
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "him")) {
-        return (resolve_pronoun_target(ctx, "him"), rest);
+        return (resolve_pronoun_target(ctx, "him"), rest, syntax);
     }
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "her")) {
-        return (resolve_pronoun_target(ctx, "her"), rest);
+        return (resolve_pronoun_target(ctx, "her"), rest, syntax);
     }
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
@@ -413,7 +449,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         ))
         .parse(input)
     }) {
-        return (filter, rest);
+        return (filter, rest, syntax);
     }
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("on ").parse(lower.as_str()) {
         let original_rest = &text[lower.len() - rest.len()..];
@@ -421,7 +457,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             rest,
             "it" | "them" | "him" | "her" | "enchanted permanent" | "enchanted creature"
         ) {
-            return parse_target_with_ctx(original_rest, ctx);
+            return parse_target_with_syntax(original_rest, ctx);
         }
     }
     // "that [type phrase]" → anaphoric reference to a typed subject
@@ -429,7 +465,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         let original_rest = &text[lower.len() - rest_subject.len()..];
         let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
         if !matches!(filter, TargetFilter::Any) {
-            return (TargetFilter::ParentTarget, rem);
+            return (TargetFilter::ParentTarget, rem, syntax);
         }
     }
     // "the first [type phrase]" → anaphoric reference to an object identified
@@ -452,7 +488,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             let original_rest = &text[lower.len() - rest_subject.len()..];
             let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
             if !matches!(filter, TargetFilter::Any) {
-                return (TargetFilter::ParentTarget, rem);
+                return (TargetFilter::ParentTarget, rem, syntax);
             }
         }
     }
@@ -462,6 +498,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (
             TargetFilter::SelfRef,
             text[lower.len() - rest.len()..].trim_start(),
+            syntax,
         );
     }
 
@@ -472,6 +509,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (
             TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another])),
             rest,
+            syntax,
         );
     }
 
@@ -483,7 +521,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         )
         .parse(input)
     }) {
-        return (TargetFilter::Any, rest);
+        return (TargetFilter::Any, rest, syntax);
     }
 
     // CR 610.3 / CR 406.6: linked exile and counter-marked exile phrases are
@@ -505,18 +543,19 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (
             TargetFilter::ExiledBySource,
             &text[lower.len() - rest.len()..],
+            syntax,
         );
     }
 
     // "all " + type phrase
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("all ").parse(lower.as_str()) {
         let (filter, rest) = parse_type_phrase_with_ctx(&text[lower.len() - rest.len()..], ctx);
-        return (filter, rest);
+        return (filter, rest, syntax);
     }
 
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "player"))
     {
-        return (TargetFilter::Player, rest);
+        return (TargetFilter::Player, rest, syntax);
     }
 
     for zone_word in ["graveyard", "graveyards"] {
@@ -528,6 +567,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                     zone: Zone::Graveyard,
                 }])),
                 rest,
+                syntax,
             );
         }
     }
@@ -538,7 +578,11 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         .chain(SELF_REF_PARSE_ONLY_PHRASES)
     {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(lower.as_str()) {
-            return (TargetFilter::SelfRef, &text[lower.len() - rest.len()..]);
+            return (
+                TargetFilter::SelfRef,
+                &text[lower.len() - rest.len()..],
+                syntax,
+            );
         }
     }
 
@@ -549,12 +593,21 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     // "targets" or the leading word of "target creature".
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("target").parse(lower.as_str()) {
         if rest.is_empty() || rest.starts_with([',', '.']) {
-            return (TargetFilter::Any, &text[lower.len() - rest.len()..]);
+            // CR 115.1: "target" keyword consumed — surfaced via the returned
+            // `TargetSyntax` for downstream lowering (e.g. Bounce selection).
+            syntax = TargetSyntax::TargetKeyword;
+            return (TargetFilter::Any, &text[lower.len() - rest.len()..], syntax);
         }
     }
 
     // "target" group — longest-match-first within
     if let Ok((after_target, _)) = tag::<_, _, OracleError<'_>>("target ").parse(lower.as_str()) {
+        // CR 115.1: "target" keyword consumed — surfaced via the returned
+        // `TargetSyntax` for downstream lowering (e.g. Bounce selection).
+        // Whitemane Lion's "return a creature you control" parses through
+        // this path's *absence*, so the returned `Descriptor` lets the
+        // lowering pipeline pick the non-targeted variant.
+        syntax = TargetSyntax::TargetKeyword;
         let target_offset = lower.len() - after_target.len();
         // "target player or planeswalker"
         if let Ok((rest, _)) =
@@ -568,6 +621,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                     ],
                 },
                 &text[lower.len() - rest.len()..],
+                syntax,
             );
         }
         // "target opponent"
@@ -575,11 +629,16 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             return (
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                 &text[lower.len() - rest.len()..],
+                syntax,
             );
         }
         // "target player"
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player").parse(after_target) {
-            return (TargetFilter::Player, &text[lower.len() - rest.len()..]);
+            return (
+                TargetFilter::Player,
+                &text[lower.len() - rest.len()..],
+                syntax,
+            );
         }
         // "target" + type phrase (generic). CR 903.3 + CR 108.3: "commander[s]"
         // is recognized as a typed-phrase prefix inside `parse_type_phrase_with_ctx`
@@ -590,6 +649,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (
             scope_target_spell_phrase(filter, &lower[target_offset..consumed_end]),
             rest,
+            syntax,
         );
     }
 
@@ -628,6 +688,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                     id: TrackedSetId(0),
                 },
                 &text[lower.len() - rest.len()..],
+                syntax,
             );
         }
     }
@@ -636,10 +697,11 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (
             TargetFilter::ParentTarget,
             &text[lower.len() - rest.len()..],
+            syntax,
         );
     }
     if let Some((filter, rest)) = parse_definite_parent_reference(lower.as_str()) {
-        return (filter, &text[lower.len() - rest.len()..]);
+        return (filter, &text[lower.len() - rest.len()..], syntax);
     }
 
     // Singular selection from a previously-referenced set.
@@ -673,6 +735,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             return (
                 TargetFilter::ParentTarget,
                 &text[lower.len() - rest.len()..],
+                syntax,
             );
         }
     }
@@ -693,6 +756,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                     id: TrackedSetId(0),
                 },
                 &text[lower.len() - rest.len()..],
+                syntax,
             );
         }
     }
@@ -742,14 +806,18 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         ))
         .parse(input)
     }) {
-        return (filter, rest);
+        return (filter, rest, syntax);
     }
     // Generic "the [noun]'s controller" — any possessive ending in "'s controller"
     // catches subtypes like "the Wall's controller" and similar.
     if let Ok((after_the, _)) = tag::<_, _, OracleError<'_>>("the ").parse(lower.as_str()) {
         if let Some(pos) = after_the.find("'s controller") {
             let consumed = "the ".len() + pos + "'s controller".len();
-            return (TargetFilter::ParentTargetController, &text[consumed..]);
+            return (
+                TargetFilter::ParentTargetController,
+                &text[consumed..],
+                syntax,
+            );
         }
     }
     // "the [type] card" / "the enchanted [type] card" — definite reference to a
@@ -768,13 +836,13 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         let has_type_card =
             if let Ok((after_type, _)) = nom_target::parse_type_filter_word(type_start) {
                 let after_type = after_type.trim_start();
-                after_type.starts_with("card") || after_type.is_empty()
+                parse_card_or_cards_word(after_type).is_ok() || after_type.is_empty()
             } else {
                 false
             };
 
         // Also check bare "card"/"cards" (e.g., "the enchanted card")
-        let is_bare_card = type_start.starts_with("card");
+        let is_bare_card = parse_card_or_cards_word(type_start).is_ok();
 
         if has_type_card || is_bare_card {
             // Find end of "card"/"cards"
@@ -785,23 +853,22 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             } else {
                 type_start
             };
-            let rest_after_card =
-                if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("cards").parse(card_start) {
-                    r
-                } else if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("card").parse(card_start) {
-                    r
-                } else {
-                    card_start
-                };
+            let rest_after_card = parse_card_or_cards_word(card_start)
+                .map(|(r, _)| r)
+                .unwrap_or(card_start);
             let consumed = lower.len() - rest_after_card.len();
-            return (TargetFilter::ParentTarget, &text[consumed..]);
+            return (TargetFilter::ParentTarget, &text[consumed..], syntax);
         }
     }
     // "himself" / "herself" — archaic self-reference (e.g., "deals damage to himself")
     if let Ok((rest, _)) =
         alt((tag::<_, _, OracleError<'_>>("himself"), tag("herself"))).parse(lower.as_str())
     {
-        return (TargetFilter::SelfRef, &text[lower.len() - rest.len()..]);
+        return (
+            TargetFilter::SelfRef,
+            &text[lower.len() - rest.len()..],
+            syntax,
+        );
     }
 
     // CR 115.1 + CR 102.2: Opponent player references — "each opponent",
@@ -828,7 +895,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         ))
         .parse(input)
     }) {
-        return (filter, rest);
+        return (filter, rest, syntax);
     }
 
     for phrase in ["opponent's graveyard", "an opponent's graveyard"] {
@@ -843,6 +910,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                     },
                 ])),
                 &text[lower.len() - rest.len()..],
+                syntax,
             );
         }
     }
@@ -866,6 +934,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (
             TargetFilter::ExiledBySource,
             &text[lower.len() - rest.len()..],
+            syntax,
         );
     }
     if let Ok((rest, _)) =
@@ -876,6 +945,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (
             TargetFilter::ExiledBySource,
             &text[text.len() - after_type.len()..],
+            syntax,
         );
     }
 
@@ -892,13 +962,14 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                 id: TrackedSetId(0),
             },
             &text[lower.len() - rest.len()..],
+            syntax,
         );
     }
 
     // "each " + type phrase
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("each ").parse(lower.as_str()) {
         let (filter, rest) = parse_type_phrase_with_ctx(&text[lower.len() - rest.len()..], ctx);
-        return (filter, rest);
+        return (filter, rest, syntax);
     }
 
     // "enchanted [type]" / "equipped creature"
@@ -910,7 +981,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         )
         .parse(input)
     }) {
-        return (filter, rest);
+        return (filter, rest, syntax);
     }
     // "enchanted [type phrase]" → parse the type after "enchanted " and add EnchantedBy
     if let Ok((rest_lower, _)) = tag::<_, _, OracleError<'_>>("enchanted ").parse(lower.as_str()) {
@@ -924,7 +995,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                 }
                 other => other,
             };
-            return (enchanted, rest);
+            return (enchanted, rest, syntax);
         }
     }
     // "equipped creature" → creature with EquippedBy
@@ -935,7 +1006,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         )
         .parse(input)
     }) {
-        return (filter, rest);
+        return (filter, rest, syntax);
     }
 
     // "exiled cards with [counter] counters on them" — linked only by the
@@ -967,6 +1038,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                 },
             ])),
             &text[lower.len() - rest.len()..],
+            syntax,
         );
     }
     if let Ok((rest, _)) =
@@ -976,19 +1048,20 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (
             TargetFilter::ExiledBySource,
             &text[text.len() - after_type.len()..],
+            syntax,
         );
     }
 
     // "you" — the controller (not a targeted player), with word boundary
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "you")) {
-        return (TargetFilter::Controller, rest);
+        return (TargetFilter::Controller, rest, syntax);
     }
 
     // "the top/bottom [N] [type] card[s] of [possessive] library/graveyard"
     // Zone position references that appear as targets of exile/mill/reveal effects.
     // Returns a filter with InZone for the referenced zone and controller.
     if let Some((filter, rest)) = parse_zone_position_ref(text, &lower) {
-        return (filter, rest);
+        return (filter, rest, syntax);
     }
 
     // CR 400.12: Bare possessive zone references ("their graveyard", "your library").
@@ -1032,6 +1105,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                             ..Default::default()
                         }),
                         &text[consumed..],
+                        syntax,
                     );
                 }
             }
@@ -1055,6 +1129,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                         ..Default::default()
                     }),
                     &text[consumed..],
+                    syntax,
                 );
             }
         }
@@ -1074,6 +1149,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         (
             scope_target_spell_phrase(filter, &lower[..consumed_end]),
             rest,
+            syntax,
         )
     } else {
         ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
@@ -1081,7 +1157,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             text: text.trim().into(),
             line_index: 0,
         });
-        (TargetFilter::Any, text)
+        (TargetFilter::Any, text, syntax)
     }
 }
 
@@ -1283,6 +1359,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("modified ").parse(&lower[pos..]) {
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Modified);
+            pos += lower[pos..].len() - rest.len();
+        }
+    }
+
+    // CR 702.112b: "renowned" is a permanent designation used as an adjective
+    // in filters like "renowned creature you control".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(&lower[pos..]) {
+        if starts_with_type_phrase_lead(rest) {
+            properties.push(FilterProp::Renowned);
             pos += lower[pos..].len() - rest.len();
         }
     }
@@ -1556,6 +1641,11 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    if let Some((prop, consumed)) = parse_combat_relation_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // CR 205.3a: Comma-separated type lists ("artifacts, creatures, and lands") are
     // syntactic sugar for set-union, same as "and" between two types.
     let rest_lower = lower[pos..].trim_start();
@@ -1624,7 +1714,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     }
 
     // Check "with power N or less/greater" suffix
-    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..]) {
+    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
         properties.push(prop);
         pos += consumed;
     }
@@ -1646,8 +1736,8 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
-    if let Some(consumed) = parse_same_name_as_source_suffix(&lower[pos..]) {
-        properties.push(FilterProp::SameName);
+    if let Some((prop, consumed)) = parse_same_name_suffix(&lower[pos..]) {
+        properties.push(prop);
         pos += consumed;
     }
 
@@ -2007,6 +2097,12 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             return true;
         }
     }
+    // CR 702.112b: "renowned <type>" adjective phrase leads a type phrase.
+    if let Ok((after_renowned, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(text) {
+        if starts_with_type_phrase_lead(after_renowned) {
+            return true;
+        }
+    }
     // CR 700.6: "historic <type>" adjective phrase leads a type phrase
     // (e.g., "historic permanents you control"). Consume the adjective and
     // verify a type word follows so the comma/and-list recursion can continue
@@ -2157,6 +2253,8 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
         prop,
         // CR 700.4 + CR 700.9: "modified [type]" adjective prefix.
         FilterProp::Modified
+            // CR 702.112b: "renowned [type]" adjective prefix.
+            | FilterProp::Renowned
             // CR 700.6: "historic [type]" adjective prefix.
             | FilterProp::Historic
             // CR 303.4 + CR 301.5: "enchanted [type]" / "equipped [type]".
@@ -2357,6 +2455,22 @@ fn parse_token_suffix(text: &str) -> Option<usize> {
     None
 }
 
+fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>(" blocking or blocked by target "),
+        tag("creature"),
+    )
+        .parse(text)
+        .ok()?;
+    Some((
+        FilterProp::CombatRelation {
+            relation: CombatRelation::BlockingOrBlockedBy,
+            subject: CombatRelationSubject::ParentTarget,
+        },
+        text.len() - rest.len(),
+    ))
+}
+
 /// Parse a color adjective prefix: "white ", "blue ", "black ", "red ", "green ".
 /// Returns (FilterProp::HasColor, bytes consumed including trailing space).
 ///
@@ -2449,7 +2563,7 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
 /// into the byte-offset return contract this call site expects. Used by Arnyn
 /// Deathbloom Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail,
 /// etc.
-fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
+fn parse_power_suffix(text: &str, ctx: &mut ParseContext) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
 
     // CR 509.1b: "with greater power" — relative to the source object. This is
@@ -2457,6 +2571,12 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     // P/T-comparison combinator, so it is handled here.
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("with greater power").parse(trimmed) {
         return Some((FilterProp::PowerGTSource, text.len() - after.len()));
+    }
+
+    if let Some((prop @ FilterProp::PtComparison { .. }, consumed)) =
+        parse_superlative_property_suffix(text, ctx)
+    {
+        return Some((prop, consumed));
     }
 
     // Delegate the full P/T-comparison grammar to the canonical combinator. It
@@ -2467,22 +2587,76 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     Some((prop, text.len() - rest.len()))
 }
 
-/// CR 202.3 + CR 608.2h: Postnominal superlative mana-value qualifier —
-/// "with the greatest|highest mana value among <type-set> <controller> control(s)".
-/// Encoded as `FilterProp::Cmc { EQ, QuantityRef::Aggregate { Max, ManaValue,
-/// <eligible set> } }`, mirroring the library-search path in
+fn superlative_property_filter_prop(
+    function: AggregateFunction,
+    property: ObjectProperty,
+    filter: TargetFilter,
+) -> FilterProp {
+    let value = QuantityExpr::Ref {
+        qty: QuantityRef::Aggregate {
+            function,
+            property,
+            filter,
+        },
+    };
+    match property {
+        ObjectProperty::ManaValue => FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value,
+        },
+        ObjectProperty::Power => FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value,
+        },
+        ObjectProperty::Toughness => FilterProp::PtComparison {
+            stat: PtStat::Toughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value,
+        },
+    }
+}
+
+/// Postnominal superlative qualifier —
+/// "with the greatest|highest <power|toughness|mana value> among <type-set> <controller> control(s)".
+/// Encoded as a dynamic equality comparison against `QuantityRef::Aggregate`,
+/// mirroring the library-search path in
 /// `oracle_effect/search.rs::parse_highest_mana_value_library_suffix`.
 /// The eligible set after "among " is parsed by the authoritative
 /// `parse_type_phrase_with_ctx` combinator (type list + controller suffix).
 /// Returns (FilterProp, bytes consumed from the original text).
-fn parse_superlative_mana_value_suffix(
+fn parse_superlative_property_suffix(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("with the greatest mana value among "),
-        tag::<_, _, OracleError<'_>>("with the highest mana value among "),
+    let (rest, (function, property)) = alt((
+        value(
+            (AggregateFunction::Max, ObjectProperty::Power),
+            tag::<_, _, OracleError<'_>>("with the greatest power among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Power),
+            tag("with the highest power among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Toughness),
+            tag("with the greatest toughness among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::Toughness),
+            tag("with the highest toughness among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::ManaValue),
+            tag("with the greatest mana value among "),
+        ),
+        value(
+            (AggregateFunction::Max, ObjectProperty::ManaValue),
+            tag("with the highest mana value among "),
+        ),
     ))
     .parse(trimmed)
     .ok()?;
@@ -2490,16 +2664,7 @@ fn parse_superlative_mana_value_suffix(
     // authoritative type-phrase combinator — it parses the multi-type
     // or/and list, any leading article, and the trailing controller suffix.
     let (eligible, after) = parse_type_phrase_with_ctx(rest, ctx);
-    let prop = FilterProp::Cmc {
-        comparator: Comparator::EQ,
-        value: QuantityExpr::Ref {
-            qty: QuantityRef::Aggregate {
-                function: AggregateFunction::Max,
-                property: ObjectProperty::ManaValue,
-                filter: eligible,
-            },
-        },
-    };
+    let prop = superlative_property_filter_prop(function, property, eligible);
     Some((prop, text.len() - after.len()))
 }
 
@@ -2515,7 +2680,7 @@ pub(crate) fn parse_mana_value_suffix(
     let trimmed = text.trim_start();
     // CR 202.3: try the more specific superlative head ("with the
     // greatest/highest mana value among ...") before the comparator forms.
-    if let Some((prop, consumed)) = parse_superlative_mana_value_suffix(text, ctx) {
+    if let Some((prop, consumed)) = parse_superlative_property_suffix(text, ctx) {
         return Some((prop, consumed));
     }
     if let Some((prop, after)) = parse_relative_mana_value_suffix(trimmed) {
@@ -3155,22 +3320,51 @@ fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> 
     }
 }
 
-fn parse_same_name_as_source_suffix(text: &str) -> Option<usize> {
+/// CR 201.2: Parse a "with the same name as <referent>" filter suffix, mapping
+/// the referent class to the matching name-resolution `FilterProp`:
+///   * "~" / "this <type>" → the *source* object's name (`FilterProp::SameName`).
+///   * "that <type>" → the resolving ability's first object target's name
+///     (`FilterProp::SameNameAsParentTarget`). This is the "destroy/exile/return
+///     target X and all other Xs with the same name as that X" class — Maelstrom
+///     Pulse, the Echoing cycle, Bile Blight, Homing Lightning, Detention Sphere.
+///     Without it the secondary mass effect drops the name constraint and
+///     degrades into an unconditional board wipe.
+fn parse_same_name_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
-    for suffix in &[
-        "with the same name as ~",
-        "with the same name as this creature",
-        "with the same name as this permanent",
-        "with the same name as this artifact",
-        "with the same name as this enchantment",
-        "with the same name as this land",
-    ] {
-        if tag::<_, _, OracleError<'_>>(*suffix).parse(trimmed).is_ok() {
-            return Some(leading_ws + suffix.len());
-        }
-    }
-    None
+    let (rest, _) = tag::<_, _, OracleError<'_>>("with the same name as ")
+        .parse(trimmed)
+        .ok()?;
+    let (after, prop) = alt((
+        value(FilterProp::SameName, tag("~")),
+        value(
+            FilterProp::SameName,
+            (tag("this "), parse_same_name_referent_noun),
+        ),
+        value(
+            FilterProp::SameNameAsParentTarget,
+            (tag("that "), parse_same_name_referent_noun),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some((prop, leading_ws + (trimmed.len() - after.len())))
+}
+
+/// CR 205: The permanent-type noun naming the "same name" referent ("that
+/// permanent", "this creature", etc.). The noun only provides grammatical
+/// agreement with the target — name matching is by name, not type.
+fn parse_same_name_referent_noun(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    alt((
+        tag("permanent"),
+        tag("creature"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+        tag("card"),
+    ))
+    .parse(input)
 }
 
 fn parse_ownership_or_controller_suffix(
@@ -4050,35 +4244,38 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
     };
 
     // Optional type word before "card"/"cards": "creature card", "instant card", etc.
-    let after_type = if let Ok((rest, _)) = nom_target::parse_type_filter_word(after_number) {
-        let trimmed = rest.trim_start();
-        // Only consume if followed by "card"/"cards" (not standalone)
-        if trimmed.starts_with("card") {
-            trimmed
+    // CR 109.2a: "creature card" and similar descriptions restrict which
+    // cards qualify in the stated zone, so preserve the type word instead of
+    // only consuming it.
+    let (after_type, type_filter) =
+        if let Ok((rest, tf)) = nom_target::parse_type_filter_word(after_number) {
+            let trimmed = rest.trim_start();
+            // Only consume if followed by "card"/"cards" (not standalone)
+            if parse_card_or_cards_word(trimmed).is_ok() {
+                let captured = if matches!(tf, TypeFilter::Card) {
+                    None
+                } else {
+                    Some(tf)
+                };
+                (trimmed, captured)
+            } else {
+                (after_number, None)
+            }
         } else {
-            after_number
-        }
-    } else {
-        after_number
-    };
+            (after_number, None)
+        };
 
     // Required "card"/"cards" — may be followed by " of [zone]" or be standalone
-    let (after_card, card_is_terminal) =
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(after_type) {
-            let trimmed = rest.trim_start();
-            (
-                rest,
-                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
-            )
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(after_type) {
-            let trimmed = rest.trim_start();
-            (
-                rest,
-                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
-            )
-        } else {
-            return None;
-        };
+    let (after_card, card_is_terminal) = if let Ok((rest, _)) = parse_card_or_cards_word(after_type)
+    {
+        let trimmed = rest.trim_start();
+        (
+            rest,
+            trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
+        )
+    } else {
+        return None;
+    };
 
     // Standalone "the top [N] cards" — default to your library
     if card_is_terminal {
@@ -4086,10 +4283,10 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
         return Some((
             TargetFilter::Typed(TypedFilter {
                 controller: Some(ControllerRef::You),
+                type_filters: type_filter.into_iter().collect(),
                 properties: vec![FilterProp::InZone {
                     zone: Zone::Library,
                 }],
-                ..Default::default()
             }),
             &text[consumed..],
         ));
@@ -4141,7 +4338,8 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
             return None;
         };
 
-    // Required zone word
+    // Required zone word.
+    let type_filters_vec: Vec<TypeFilter> = type_filter.into_iter().collect();
     for &(zone_word, zone_plural, ref zone) in zone_words {
         for word in [zone_word, zone_plural] {
             if let Ok((zone_rest, _)) = tag::<_, _, OracleError<'_>>(word).parse(after_possessive) {
@@ -4149,8 +4347,8 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
                 return Some((
                     TargetFilter::Typed(TypedFilter {
                         controller,
+                        type_filters: type_filters_vec.clone(),
                         properties: vec![FilterProp::InZone { zone: *zone }],
-                        ..Default::default()
                     }),
                     &text[consumed..],
                 ));
@@ -4440,6 +4638,21 @@ mod tests {
     fn target_creature() {
         let (f, _) = parse_target("target creature");
         assert_eq!(f, TargetFilter::Typed(TypedFilter::creature()));
+    }
+
+    #[test]
+    fn creatures_blocking_or_blocked_by_target_creature() {
+        let (filter, rest) = parse_target("creatures blocking or blocked by target creature");
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockingOrBlockedBy,
+                    subject: CombatRelationSubject::ParentTarget,
+                }
+            ]))
+        );
     }
 
     #[test]
@@ -5673,10 +5886,30 @@ mod tests {
     }
 
     #[test]
+    fn creature_you_control_with_exact_base_power() {
+        let (f, rest) = parse_type_phrase("creature you control with base power 1");
+        assert_eq!(rest, "");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Fixed { value: 1 }
+                    }])
+            )
+        );
+    }
+
+    #[test]
     fn creature_with_power_x_or_less() {
         // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
         // `Variable("X")` marker so it can resolve against `chosen_x` at effect time.
-        let (prop, _) = parse_power_suffix("with power x or less").expect("parses");
+        let (prop, _) = parse_power_suffix("with power x or less", &mut ParseContext::default())
+            .expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -5694,7 +5927,8 @@ mod tests {
 
     #[test]
     fn creature_with_power_x_or_greater() {
-        let (prop, _) = parse_power_suffix("with power x or greater").expect("parses");
+        let (prop, _) = parse_power_suffix("with power x or greater", &mut ParseContext::default())
+            .expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -5801,6 +6035,91 @@ mod tests {
                 zone: Zone::Graveyard
             }]))
         );
+    }
+
+    /// Issue #586: Mistmoon Griffin needs "top creature card of your graveyard"
+    /// to keep the creature filter, not become any card in the graveyard.
+    #[test]
+    fn target_top_creature_card_of_your_graveyard_keeps_type_filter() {
+        let (f, rest) = parse_target("the top creature card of your graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_instant_card_of_target_opponents_library_keeps_type_filter() {
+        let (f, rest) = parse_target("the top instant card of target opponent's library");
+        // The targeted player is resolved at runtime, not encoded here.
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Library
+                }
+            ]))
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_card_no_type_word_has_empty_type_filters() {
+        // No type word before "card" means no type filter is captured.
+        let (f, rest) = parse_target("the top card of your library");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Library
+                }],
+                ..Default::default()
+            })
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_creature_cards_plural_keeps_type_filter() {
+        // Plural "cards" must thread the same filter as the singular path.
+        let (f, rest) = parse_target("the top three creature cards of your library");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Library
+                    }])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn target_top_subtype_card_of_zone_captures_subtype() {
+        // Subtype words should be preserved as filters too.
+        let (f, rest) = parse_target("the top spirit card of your graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Spirit".to_string())
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }])
+            )
+        );
+        assert_eq!(rest.trim(), "");
     }
 
     #[test]
@@ -6889,6 +7208,21 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::Modified])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn renowned_adjective_creates_filter_prop() {
+        // CR 702.112b: "renowned creature" is a designation adjective.
+        let (f, rest) = parse_type_phrase("renowned creature you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Renowned])
             )
         );
         assert_eq!(rest.trim(), "");
@@ -9177,6 +9511,43 @@ mod tests {
             }
             other => panic!("expected Or eligible set, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn superlative_power_suffix_emits_aggregate_pt_comparison() {
+        let mut ctx = ParseContext::default();
+        let input = "with the greatest power among creatures they control";
+        let (prop, consumed) =
+            parse_power_suffix(input, &mut ctx).expect("superlative suffix should parse");
+        assert_eq!(consumed, input.len(), "should consume the whole suffix");
+        let FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } = prop
+        else {
+            panic!("expected FilterProp::PtComparison, got {prop:?}");
+        };
+        assert_eq!(stat, PtStat::Power);
+        assert_eq!(scope, PtValueScope::Current);
+        assert_eq!(comparator, Comparator::EQ);
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } = value
+        else {
+            panic!("expected QuantityRef::Aggregate, got {value:?}");
+        };
+        assert_eq!(function, AggregateFunction::Max);
+        assert_eq!(property, ObjectProperty::Power);
+        let tf = typed_leg(&filter).expect("eligible set should be Typed");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(has_type(tf, TypeFilter::Creature));
     }
 
     /// Issue #463: Soul Shatter's full target phrase must carry the superlative

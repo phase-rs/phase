@@ -3,6 +3,7 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { DistributionUnit, TargetRef, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
@@ -24,6 +25,7 @@ export function DistributeAmongModal({ data }: { data: DistributeAmong["data"] }
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
 
   // One amount per target index; initialize with 0 each.
   const [amounts, setAmounts] = useState<number[]>(() =>
@@ -63,6 +65,7 @@ export function DistributeAmongModal({ data }: { data: DistributeAmong["data"] }
         {data.targets.map((target, i) => (
           <div
             key={i}
+            {...("Object" in target ? hoverProps(target.Object) : undefined)}
             className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3"
           >
             <span className="text-sm font-medium text-gray-200">

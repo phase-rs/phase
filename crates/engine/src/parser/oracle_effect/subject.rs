@@ -920,6 +920,19 @@ pub(super) fn parse_subject_application(
             false,
         );
     }
+    // CR 102.2: In a two-player game, a player's opponent is the other player.
+    // Parse both singular/plural bare subject forms via combinators and require
+    // full consumption so possessive/modal tails don't get coerced.
+    let mut your_opponent_subject = map(
+        all_consuming(preceded(
+            tag("your "),
+            alt((tag("opponents"), tag::<_, _, OracleError<'_>>("opponent"))),
+        )),
+        |_| TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+    );
+    if let Ok((_, filter)) = your_opponent_subject.parse(lower.as_str()) {
+        return subject_filter_application(filter, false);
+    }
     // CR 506.3d: "defending player" as subject — resolves from combat state.
     if lower == "defending player" {
         return Some(SubjectApplication {
@@ -1147,6 +1160,14 @@ pub(super) fn parse_subject_application(
     None
 }
 
+pub(super) fn parse_leading_subject_application(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
+    let subject_text = extract_subject_text(text)?;
+    parse_subject_application(&subject_text, ctx)
+}
+
 /// CR 608.2k: Resolve bare pronoun "they" based on parser context.
 /// In trigger effects where the subject is a player (e.g., "an opponent"),
 /// "they" refers to the triggering player (`TriggeringPlayer`). A player-type
@@ -1157,6 +1178,17 @@ pub(super) fn parse_subject_application(
 fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
+    }
+    // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
+    // "attacks a player" trigger introduces the damaged/attacked player as the
+    // event referent (the parser stamps `relative_player_scope = TargetPlayer`).
+    // "They" inside such an effect ("they lose half their life") refers to that
+    // event player, which auto-resolves from the triggering event
+    // (`TriggeringPlayer`) — NOT a chosen target. Without this, "they" fell
+    // through to `ParentTarget`, leaving the effect with no player to act on
+    // (Unstoppable Slasher's half-life loss silently resolved as "lose 0").
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
+        return TargetFilter::TriggeringPlayer;
     }
     // CR 608.2c + CR 109.4: "They" after a `Choose(Player)` clause refers to
     // the chosen player — a player-only `Typed` filter carrying the chosen
@@ -2585,6 +2617,8 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
         alt((
             value((), tag::<_, _, OracleError<'_>>("all ")),
             value((), tag("an opponent ")),
+            value((), tag("your opponent ")),
+            value((), tag("your opponents ")),
             value((), tag("any number of ")),
             value((), tag("defending player ")),
             value((), tag("each of ")),
@@ -2886,10 +2920,10 @@ mod tests {
         );
 
         let sub_ability = ability.sub_ability.as_ref().expect("If you do sub-ability");
-        assert!(matches!(
-            sub_ability.condition,
-            Some(crate::types::ability::AbilityCondition::IfYouDo)
-        ));
+        assert!(sub_ability
+            .condition
+            .as_ref()
+            .is_some_and(crate::types::ability::AbilityCondition::is_optional_effect_performed));
         let Effect::GenericEffect {
             static_abilities, ..
         } = &*sub_ability.effect
@@ -2922,6 +2956,14 @@ mod tests {
         assert!(starts_with_subject_prefix(
             "an opponent sacrifices a creature"
         ));
+    }
+
+    #[test]
+    fn starts_with_subject_prefix_your_opponents() {
+        assert!(starts_with_subject_prefix(
+            "your opponents can't gain life this turn"
+        ));
+        assert!(starts_with_subject_prefix("your opponent discards a card"));
     }
 
     #[test]
@@ -3038,6 +3080,78 @@ mod tests {
             app.affected,
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
         );
+    }
+
+    #[test]
+    fn parse_subject_your_opponents() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("your opponents", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert_eq!(
+            app.affected,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert!(app.target.is_none());
+    }
+
+    #[test]
+    fn parse_subject_your_opponents_possessive_is_not_bare_opponent_scope() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("your opponents' creatures", &mut ctx);
+        if let Some(app) = result {
+            assert_ne!(
+                app.affected,
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+            );
+        }
+    }
+
+    #[test]
+    fn parse_subject_your_opponent_may_is_not_treated_as_bare_subject() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("your opponent may", &mut ctx);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn your_opponents_cant_gain_life_builds_restriction() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "Your opponents can't gain life this turn",
+            &mut ctx,
+        )
+        .expect("your opponents life-lock should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+
+        assert_eq!(target, None);
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        let def = &static_abilities[0];
+        assert_eq!(def.mode, StaticMode::CantGainLife);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantGainLife
+            }
+        )));
     }
 
     #[test]

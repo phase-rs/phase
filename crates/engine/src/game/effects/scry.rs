@@ -38,7 +38,22 @@ pub fn resolve(
     };
 
     match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => apply_scry_after_replacement(state, event, events),
+        ReplacementResult::Execute(event) => {
+            apply_scry_after_replacement(state, event, events);
+            // CR 614.6 + CR 614.11 + CR 704.3: A scry replacement may substitute
+            // scry→draw (handled inside `apply_scry_after_replacement` → calls
+            // `apply_draw_after_replacement`); if the substituted draw stashes a
+            // mandatory-post-effect continuation, drain it in the same step.
+            // Mirrors the pipeline ceremony in
+            // `effects::draw::draw_through_replacement` — scry's own propose
+            // event variant means we can't use that helper directly, but the
+            // CR-mandated drain is identical.
+            if state.post_replacement_continuation.is_some() {
+                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                    state, None, None, None, events,
+                );
+            }
+        }
         ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =

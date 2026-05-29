@@ -68,7 +68,10 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
         // additional cost". Same shape that `Keyword::Kicker` synthesises.
         E::OptionalAdditionalCastingCost(cost) => set_additional_cost(
             stub,
-            AdditionalCost::Optional(cost_conv::convert(cost)?),
+            AdditionalCost::Optional {
+                cost: cost_conv::convert(cost)?,
+                repeatable: false,
+            },
             "OptionalAdditionalCastingCost",
         ),
         // CR 207.2c + CR 601.2f: Strive — per-target surcharge. The engine

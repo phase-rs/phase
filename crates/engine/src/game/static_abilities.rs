@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{battlefield_active_statics, game_functioning_statics};
@@ -30,6 +31,20 @@ pub struct StaticCheckContext {
     pub target_id: Option<ObjectId>,
     pub player_id: Option<PlayerId>,
     pub card_name: Option<String>,
+}
+
+/// Process-wide cached static-ability registry.
+///
+/// Mirrors [`crate::game::trigger_matchers::trigger_registry`]: the registry
+/// is a pure constant (`StaticMode` → fn-pointer), so it is built once.
+/// `unimplemented_mechanics` consults it per battlefield object per `apply()`;
+/// rebuilding it per call was a display-derivation hot-path cost.
+static STATIC_REGISTRY: LazyLock<HashMap<StaticMode, StaticAbilityHandler>> =
+    LazyLock::new(build_static_registry);
+
+/// Cached accessor for the static-ability registry. Built once on first use.
+pub fn static_registry() -> &'static HashMap<StaticMode, StaticAbilityHandler> {
+    &STATIC_REGISTRY
 }
 
 /// CR 604.1: Static ability registry — maps StaticMode keys to handlers.
@@ -142,6 +157,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // via player_has_cant_win(). Per CR 104.2a, the last-player-standing case
     // is not blocked by this static and is enforced by elimination::check_game_over.
     registry.insert(StaticMode::CantWinTheGame, handle_rule_mod);
+    // CR 704.5j: LegendRuleDoesntApply — affected permanents are excluded from
+    // the legend-rule SBA. Runtime enforcement is in sba.rs::legend_rule_exempt().
+    registry.insert(StaticMode::LegendRuleDoesntApply, handle_rule_mod);
     // CR 702.179e: Card-specific rule modification allowing speed to exceed 4.
     registry.insert(StaticMode::SpeedCanIncreaseBeyondFour, handle_rule_mod);
     // CR 609.4b: "You may spend mana as though it were mana of any color."
@@ -159,6 +177,23 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 702.3b: CanAttackWithDefender — allows creatures with defender to attack.
     // Runtime enforcement is in combat.rs::validate_attack().
     registry.insert(StaticMode::CanAttackWithDefender, handle_rule_mod);
+    // CR 509.1b + CR 609.4 + CR 702.14c: IgnoreLandwalkForBlocking — global
+    // rule-modification static observed inside is_landwalk_unblockable.
+    // Registered per discriminant shape (the `None` instance plus the five
+    // basic-subtype instances) to mirror the data-carrying static precedent
+    // (e.g., ExtraBlockers { count: None } row).
+    registry.insert(
+        StaticMode::IgnoreLandwalkForBlocking { qualifier: None },
+        handle_rule_mod,
+    );
+    for q in ["Plains", "Island", "Swamp", "Mountain", "Forest"] {
+        registry.insert(
+            StaticMode::IgnoreLandwalkForBlocking {
+                qualifier: Some(q.to_string()),
+            },
+            handle_rule_mod,
+        );
+    }
     // CR 602.5a: CanActivateAbilitiesAsThoughHaste — bypasses the summoning-sickness
     // gate on a creature's {T}/{Q} activated abilities (Tyvar, Jubilant Brawler).
     // Runtime enforcement is in restrictions.rs::summoning_sick_for_tap_ability().
@@ -186,6 +221,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantCastFrom, handle_rule_mod);
     // Note: CantCastDuring is a data-carrying variant — runtime enforcement will be in
     // casting.rs. Coverage support is via is_data_carrying_static().
+    // Note: CantActivateDuring is a data-carrying variant — runtime enforcement is in
+    // casting.rs::is_blocked_by_cant_activate_during(). Coverage support is via
+    // is_data_carrying_static(). Like CantBeActivated, parameterized — no registry entry.
     // Note: PerTurnCastLimit is a data-carrying variant — runtime enforcement is in
     // casting.rs::is_blocked_by_per_turn_cast_limit(). Coverage support is via is_data_carrying_static().
 

@@ -87,9 +87,20 @@ export type P2PAdapterEvent =
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
 
 interface DeckListPayload {
-  player: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
+  player: { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier?: string };
+  opponent: { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier?: string };
+  ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier?: string }>;
+  /** AI difficulty strings per seat. See `DeckList.ai_difficulties` in engine. */
+  ai_difficulties?: string[];
+}
+
+function isDeckListPlayerShape(x: unknown): x is DeckListPayload["player"] {
+  return (
+    x !== null &&
+    typeof x === "object" &&
+    "main_deck" in x &&
+    Array.isArray((x as { main_deck: unknown }).main_deck)
+  );
 }
 
 /**
@@ -367,10 +378,14 @@ export class P2PHostAdapter implements EngineAdapter {
       this.playerTokens.set(Number(pidStr), token);
     }
     for (const [pidStr, deck] of Object.entries(session.guestDecks)) {
-      this.guestDecks.set(Number(pidStr), deck as DeckListPayload["player"]);
+      if (isDeckListPlayerShape(deck)) {
+        this.guestDecks.set(Number(pidStr), deck);
+      }
     }
     for (const [pidStr, deck] of Object.entries(session.aiDecks ?? {})) {
-      this.aiDecks.set(Number(pidStr), deck as DeckListPayload["player"]);
+      if (isDeckListPlayerShape(deck)) {
+        this.aiDecks.set(Number(pidStr), deck);
+      }
     }
     for (const token of session.kickedTokens) this.kickedTokens.add(token);
     for (const pid of session.eliminatedSeats) {
@@ -470,9 +485,31 @@ export class P2PHostAdapter implements EngineAdapter {
       return this.hostDisplayName ?? "Host";
     }
     if (kind.type === "Ai") {
+      // Use the AI's commander as their persona — matches the feel of offline
+      // play where opponents are recognizable rather than anonymous "AI"
+      // labels. Strip everything after the first comma so
+      // "Otrimi, the Ever-Playful" → "Otrimi". Falls back to the difficulty
+      // label if the seat has no resolved commander yet (transient pregame
+      // state before `applySeatMutation` lands the deck).
+      const deck = this.aiDecks.get(playerId);
+      const commander = deck?.commander?.[0];
+      if (commander) {
+        const shortName = commander.split(",")[0].trim();
+        return `${shortName} (AI · ${kind.data.difficulty})`;
+      }
       return `AI (${kind.data.difficulty})`;
     }
-    return this.guestNames.get(playerId) ?? "";
+    // Human guest. Prefer the displayName the guest sent over the wire; fall
+    // back to their commander short name (mirroring the AI seat). The guest's
+    // displayName is optional and absent for users who never set one in the
+    // multiplayer store — without this fallback, the host's UI labels the
+    // seat "Opp N" while every other client (which receives the same name
+    // map) sees nothing missing for their own perspective.
+    const stored = this.guestNames.get(playerId);
+    if (stored) return stored;
+    const guestCommander = this.guestDecks.get(playerId)?.commander?.[0];
+    if (guestCommander) return guestCommander.split(",")[0].trim();
+    return "";
   }
 
   /**
@@ -545,6 +582,15 @@ export class P2PHostAdapter implements EngineAdapter {
     this.emit({ type: "playerSlotsUpdated", slots: this.getPlayerSlots() });
   }
 
+  private playerNamesForSeats(): Record<number, string> {
+    const names: Record<number, string> = {};
+    for (const [playerId, kind] of this.pregameSeatState.seats.entries()) {
+      const name = this.displayNameForSeat(playerId, kind);
+      if (name) names[playerId] = name;
+    }
+    return names;
+  }
+
   private syncLobbyMetadata(consumedReservationTokens: string[] = []): void {
     const currentPlayers = occupiedSeatCount(this.pregameSeatState);
     const maxPlayers = this.pregameSeatState.seats.length;
@@ -597,7 +643,11 @@ export class P2PHostAdapter implements EngineAdapter {
         this.aiDecks.delete(seatIndex);
       }
       for (const [seatIndex, _difficulty, deck] of result.delta.newAi) {
-        this.aiDecks.set(seatIndex, deck as DeckListPayload["player"]);
+        // Rust SeatDelta now carries name-only PlayerDeckList — match the
+        // shape with a type guard, no cast.
+        if (isDeckListPlayerShape(deck)) {
+          this.aiDecks.set(seatIndex, deck);
+        }
       }
 
       if (result.delta.renumbering) {
@@ -774,7 +824,20 @@ export class P2PHostAdapter implements EngineAdapter {
       return;
     }
 
-    const guestDeck = (deckData as DeckListPayload).player;
+    // `deckData` is typed `unknown` at the wire boundary (see
+    // network/protocol.ts). The guest sends a `DeckListPayload`-shaped object
+    // and we only need its `.player` slot here. If a malformed wire payload
+    // arrives, fall through to an empty deck — the engine's
+    // `deck_pools.is_empty()` invariant will reject it loudly at game start.
+    const guestDeckRaw =
+      deckData !== null && typeof deckData === "object" && "player" in deckData
+        ? (deckData as { player: unknown }).player
+        : undefined;
+    const guestDeck: DeckListPayload["player"] = isDeckListPlayerShape(
+      guestDeckRaw,
+    )
+      ? guestDeckRaw
+      : { main_deck: [], sideboard: [], commander: [] };
 
     const token = crypto.randomUUID();
     this.playerTokens.set(pid, token);
@@ -864,6 +927,7 @@ export class P2PHostAdapter implements EngineAdapter {
 
       const hostDeck = this.hostDeckData as DeckListPayload;
       const orderedOpponents: DeckListPayload["player"][] = [];
+      const orderedDifficulties: string[] = [];
       for (let seat = 1; seat < this.pregameSeatState.seats.length; seat++) {
         const kind = this.pregameSeatState.seats[seat];
         if (kind.type === "JoinedHuman") {
@@ -872,6 +936,7 @@ export class P2PHostAdapter implements EngineAdapter {
             throw new AdapterError("P2P_ERROR", `Seat ${seat} has no submitted deck`, false);
           }
           orderedOpponents.push(deck);
+          orderedDifficulties.push("");
           continue;
         }
         if (kind.type === "Ai") {
@@ -880,6 +945,7 @@ export class P2PHostAdapter implements EngineAdapter {
             throw new AdapterError("P2P_ERROR", `AI seat ${seat} is missing a resolved deck`, false);
           }
           orderedOpponents.push(deck);
+          orderedDifficulties.push(kind.data.difficulty);
         }
       }
       if (orderedOpponents.length === 0) {
@@ -890,6 +956,7 @@ export class P2PHostAdapter implements EngineAdapter {
         player: hostDeck.player,
         opponent: orderedOpponents[0],
         ai_decks: orderedOpponents.slice(1),
+        ai_difficulties: orderedDifficulties,
       };
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1
@@ -905,9 +972,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.pregameSeatState.gameStarted = true;
       this.saveSession();
 
-      const allNames: Record<number, string> = {};
-      if (this.hostDisplayName) allNames[0] = this.hostDisplayName;
-      for (const [pid, name] of this.guestNames) allNames[pid] = name;
+      const allNames = this.playerNamesForSeats();
       this.emit({ type: "playerIdentity", playerId: 0, playerNames: allNames });
 
       if (this.broker && this.brokerGameCode) {
@@ -1132,6 +1197,10 @@ export class P2PHostAdapter implements EngineAdapter {
           // guard meaningful for P2P.
           const result = await this.wasm.submitAction(msg.action, pid);
           await this.broadcastStateUpdate(result.events);
+          // Wake the AI loop. After a guest's action lands, priority may have
+          // shifted to an AI seat — without this, the AI never gets a turn
+          // and the game stalls (same pattern as concedePlayer/host submit).
+          await this.runAiLoop();
           // Emit local stateChanged so host UI updates for opponent actions.
           const state = await this.wasm.getState();
           const legalResult = await this.wasm.getLegalActions();
@@ -1276,6 +1345,7 @@ export class P2PHostAdapter implements EngineAdapter {
         wireProtocolVersion: WIRE_PROTOCOL_VERSION,
         assignedPlayerId: pid as PlayerId,
         state: snapshot.state,
+        playerNames: this.playerNamesForSeats(),
         ...legalActionsToWire(snapshot),
       });
     })();
@@ -1684,7 +1754,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         }
         this.gameState = msg.state;
         this.legalActions = legalActionsFromWire(msg);
-        this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId });
+        this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.emit({
           type: "stateChanged",
           state: msg.state,

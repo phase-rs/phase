@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -222,57 +223,24 @@ pub fn parse_mtgjson_mana_cost(s: &str) -> ManaCost {
     let mut generic: u32 = 0;
     let mut shards = Vec::new();
 
-    // Extract symbols between braces
+    // CR 107.4: `ManaCostShard::from_str` is the single authority for the
+    // symbol→shard mapping. Routing every symbol through it keeps the loader
+    // from drifting out of sync with the rest of the engine — previously this
+    // function kept its own hand-maintained list that recognized mono-Phyrexian
+    // (`{W/P}`) but not Phyrexian-hybrid (`{G/U/P}`) symbols, silently dropping
+    // the pip from compleated planeswalkers and undercounting their cost by 1
+    // (issue #1416, same class as #493's `{C/W}` drop). Anything `from_str`
+    // doesn't recognize is either a bare number (generic mana) or ignorable.
     for segment in s.split('{').filter(|seg| !seg.is_empty()) {
         let symbol = segment.trim_end_matches('}');
         let symbol = symbol.to_ascii_uppercase();
-        match symbol.as_str() {
-            "W" => shards.push(ManaCostShard::White),
-            "U" => shards.push(ManaCostShard::Blue),
-            "B" => shards.push(ManaCostShard::Black),
-            "R" => shards.push(ManaCostShard::Red),
-            "G" => shards.push(ManaCostShard::Green),
-            "C" => shards.push(ManaCostShard::Colorless),
-            "S" => shards.push(ManaCostShard::Snow),
-            "X" => shards.push(ManaCostShard::X),
-            // Hybrid and phyrexian symbols
-            "W/U" => shards.push(ManaCostShard::WhiteBlue),
-            "W/B" => shards.push(ManaCostShard::WhiteBlack),
-            "U/B" => shards.push(ManaCostShard::BlueBlack),
-            "U/R" => shards.push(ManaCostShard::BlueRed),
-            "B/R" => shards.push(ManaCostShard::BlackRed),
-            "B/G" => shards.push(ManaCostShard::BlackGreen),
-            "R/W" => shards.push(ManaCostShard::RedWhite),
-            "R/G" => shards.push(ManaCostShard::RedGreen),
-            "G/W" => shards.push(ManaCostShard::GreenWhite),
-            "G/U" => shards.push(ManaCostShard::GreenBlue),
-            "2/W" => shards.push(ManaCostShard::TwoWhite),
-            "2/U" => shards.push(ManaCostShard::TwoBlue),
-            "2/B" => shards.push(ManaCostShard::TwoBlack),
-            "2/R" => shards.push(ManaCostShard::TwoRed),
-            "2/G" => shards.push(ManaCostShard::TwoGreen),
-            "W/P" => shards.push(ManaCostShard::PhyrexianWhite),
-            "U/P" => shards.push(ManaCostShard::PhyrexianBlue),
-            "B/P" => shards.push(ManaCostShard::PhyrexianBlack),
-            "R/P" => shards.push(ManaCostShard::PhyrexianRed),
-            "G/P" => shards.push(ManaCostShard::PhyrexianGreen),
-            // CR 107.4e: Colorless-hybrid symbols. Only printed exemplar
-            // is Ulalek, Fused Atrocity (Foundations) with cost
-            // `{C/W}{C/U}{C/B}{C/R}{C/G}`. Without these arms the cost
-            // silently fell through to the `other =>` ignore branch and
-            // parsed as empty (issue #493), letting the AI cast Ulalek
-            // for free on turn 1.
-            "C/W" => shards.push(ManaCostShard::ColorlessWhite),
-            "C/U" => shards.push(ManaCostShard::ColorlessBlue),
-            "C/B" => shards.push(ManaCostShard::ColorlessBlack),
-            "C/R" => shards.push(ManaCostShard::ColorlessRed),
-            "C/G" => shards.push(ManaCostShard::ColorlessGreen),
-            other => {
-                // Try to parse as a number (generic mana)
-                if let Ok(n) = other.parse::<u32>() {
+        match ManaCostShard::from_str(&symbol) {
+            Ok(shard) => shards.push(shard),
+            Err(_) => {
+                // A bare number is generic mana; any other unknown symbol is ignored.
+                if let Ok(n) = symbol.parse::<u32>() {
                     generic += n;
                 }
-                // Ignore unrecognized symbols
             }
         }
     }
@@ -490,6 +458,124 @@ mod tests {
                 ],
             }
         );
+    }
+
+    /// CR 107.4f + CR 202.3g regression for #1416 — Phyrexian-hybrid
+    /// `{C1/C2/P}` symbols on the compleated planeswalkers must populate the
+    /// cost shards rather than fall through to the "ignore unrecognized
+    /// symbols" branch. The dropped pip undercounted mana value by 1, letting
+    /// the cards be cast a mana too cheaply. Each printed cost below carries
+    /// exactly one Phyrexian-hybrid pip; the assertions pin both the shard
+    /// list and the resulting mana value.
+    #[test]
+    fn parse_mana_cost_phyrexian_hybrid_compleated_walkers() {
+        // Tamiyo, Compleated Sage — {2}{G}{G/U/P}{U} → MV 5.
+        let tamiyo = parse_mtgjson_mana_cost("{2}{G}{G/U/P}{U}");
+        assert_eq!(
+            tamiyo,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![
+                    ManaCostShard::Green,
+                    ManaCostShard::PhyrexianGreenBlue,
+                    ManaCostShard::Blue,
+                ],
+            }
+        );
+        assert_eq!(tamiyo.mana_value(), 5);
+
+        // Ajani, Sleeper Agent — {1}{G}{G/W/P}{W} → MV 4.
+        let ajani = parse_mtgjson_mana_cost("{1}{G}{G/W/P}{W}");
+        assert_eq!(
+            ajani,
+            ManaCost::Cost {
+                generic: 1,
+                shards: vec![
+                    ManaCostShard::Green,
+                    ManaCostShard::PhyrexianGreenWhite,
+                    ManaCostShard::White,
+                ],
+            }
+        );
+        assert_eq!(ajani.mana_value(), 4);
+
+        // Lukka, Bound to Ruin — {2}{R}{R/G/P}{G} → MV 5.
+        let lukka = parse_mtgjson_mana_cost("{2}{R}{R/G/P}{G}");
+        assert_eq!(
+            lukka,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![
+                    ManaCostShard::Red,
+                    ManaCostShard::PhyrexianRedGreen,
+                    ManaCostShard::Green,
+                ],
+            }
+        );
+        assert_eq!(lukka.mana_value(), 5);
+
+        // Nahiri, the Unforgiving — {1}{R}{R/W/P}{W} → MV 4.
+        let nahiri = parse_mtgjson_mana_cost("{1}{R}{R/W/P}{W}");
+        assert_eq!(
+            nahiri,
+            ManaCost::Cost {
+                generic: 1,
+                shards: vec![
+                    ManaCostShard::Red,
+                    ManaCostShard::PhyrexianRedWhite,
+                    ManaCostShard::White,
+                ],
+            }
+        );
+        assert_eq!(nahiri.mana_value(), 4);
+    }
+
+    /// CR 107.4: The symbol→shard mapping lives in three places —
+    /// `ManaCostShard::from_str` (the authority), the MTGJSON loader (this
+    /// module), and the nom combinator `parse_mana_symbol`. They drifted once
+    /// (issue #493 colorless-hybrid, issue #1416 Phyrexian-hybrid). This parity
+    /// test pins every `from_str` symbol to parse identically through the loader
+    /// and the nom path so the three can never silently diverge again.
+    #[test]
+    fn every_shard_symbol_round_trips_through_loader_and_nom() {
+        use crate::parser::oracle_nom::primitives::parse_mana_symbol;
+
+        // Every symbol string `from_str` accepts that denotes a single shard.
+        // Bare-number generic mana is excluded — it is accumulated as `generic`,
+        // not pushed as a shard, in both the loader and `parse_mana_cost`.
+        const SYMBOLS: &[&str] = &[
+            "W", "U", "B", "R", "G", "C", "S", "X", "Z", // basic + special
+            "W/U", "W/B", "U/B", "U/R", "B/R", "B/G", "R/W", "R/G", "G/W", "G/U", // hybrid
+            "2/W", "2/U", "2/B", "2/R", "2/G", // two-generic hybrid
+            "W/P", "U/P", "B/P", "R/P", "G/P", // Phyrexian
+            "W/U/P", "W/B/P", "U/B/P", "U/R/P", "B/R/P", "B/G/P", "R/W/P", "R/G/P", "G/W/P",
+            "G/U/P", // Phyrexian-hybrid
+            "C/W", "C/U", "C/B", "C/R", "C/G", // colorless hybrid
+        ];
+
+        for symbol in SYMBOLS {
+            let expected = ManaCostShard::from_str(symbol)
+                .unwrap_or_else(|_| panic!("from_str must accept {symbol}"));
+
+            // Loader path: `{SYMBOL}` parses to exactly that one shard.
+            assert_eq!(
+                parse_mtgjson_mana_cost(&format!("{{{symbol}}}")),
+                ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![expected],
+                },
+                "loader disagrees with from_str for {symbol}"
+            );
+
+            // Nom path: `{SYMBOL}` parses to the same shard with no remainder.
+            // Bind the braced string to a local so `rest` (which borrows from
+            // the input) outlives the `format!` temporary.
+            let braced = format!("{{{symbol}}}");
+            let (rest, shard) = parse_mana_symbol(&braced)
+                .unwrap_or_else(|_| panic!("nom parser must accept {braced}"));
+            assert!(rest.is_empty(), "nom left remainder {rest:?} for {symbol}");
+            assert_eq!(shard, expected, "nom disagrees with from_str for {symbol}");
+        }
     }
 
     #[test]
