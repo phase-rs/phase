@@ -381,3 +381,35 @@ async function openPr(card, ctx) {
     schema: PR_SCHEMA,
   })
 }
+
+phase('Select')
+const { explicitCard, count } = normalizeArgs(args)
+const cards = await selectCards({ explicitCard, count })
+log(`Work-list (${cards.length}): ${cards.join(', ') || '(none)'}`)
+
+const summary = []
+for (const card of cards) {
+  try {
+    const branch = await createBranch(card)
+    const plan = await planCard(card)
+    const impl = await implementCard(card, plan)
+    const implReviewClean = await reviewImpl(card)
+    const cross = await crossCheck(card)
+    const verify = await verifyCard(card)
+    const partial = !implReviewClean || !cross.clean || !verify.passed
+    const pr = await openPr(card, { impl, verify, partial })
+    const status = partial ? 'partial' : 'success'
+    summary.push({
+      card,
+      branch: branch,
+      prUrl: pr && pr.prUrl ? pr.prUrl : null,
+      status,
+    })
+    log(`${card}: ${status}${pr && pr.prUrl ? ' -> ' + pr.prUrl : ''}`)
+  } catch (e) {
+    summary.push({ card, branch: null, prUrl: null, status: 'aborted' })
+    log(`${card}: aborted -- ${e && e.message ? e.message : 'error'}`)
+  }
+}
+
+return summary
