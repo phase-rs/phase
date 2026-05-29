@@ -1266,12 +1266,37 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 
 /// CR 503.1 / CR 504.2 / CR 507.1 / CR 513.1: Process phase triggers for the current step.
 /// Fabricates a PhaseChanged event for `state.phase` and runs trigger matching.
-/// Returns `true` if any triggers were placed on the stack or are pending target selection.
-fn process_phase_triggers(state: &mut GameState) -> bool {
+///
+/// Returns `(fired, ordering_prompt)`:
+/// * `fired` is `true` if any triggers were placed on the stack, are pending
+///   target selection, or are awaiting CR 603.3b ordering. The combat arms
+///   (BeginCombat / EndCombat) use this to decide whether to set up / tear down
+///   combat and grant a priority window.
+/// * `ordering_prompt` is `Some(WaitingFor::OrderTriggers { .. })` when 2+
+///   simultaneous triggers controlled by the same player fired and that player
+///   must order them (CR 603.3b) before anyone receives priority. The caller
+///   MUST surface this prompt instead of granting priority — `process_triggers`
+///   populated `state.pending_trigger_order` and set `state.waiting_for` to the
+///   prompt, but the phase arm's return value is what `apply` writes back to
+///   `state.waiting_for`. Returning `Priority` here would overwrite the prompt
+///   and strand the queued triggers in `pending_trigger_order` forever (they
+///   never reach the stack). Single-trigger steps take the `NoChoiceNeeded`
+///   path with no prompt and fall through to the normal priority grant.
+fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     let phase_event = [GameEvent::PhaseChanged { phase: state.phase }];
     let stack_before = state.stack.len();
     super::triggers::process_triggers(state, &phase_event);
-    state.stack.len() > stack_before || state.pending_trigger.is_some()
+    // CR 603.3b: an unresolved ordering pass keeps its triggers in
+    // `pending_trigger_order` (not on the stack, not in `pending_trigger`), so
+    // it must count toward `fired` and surface its prompt.
+    let ordering_prompt = state
+        .pending_trigger_order
+        .is_some()
+        .then(|| state.waiting_for.clone());
+    let fired = state.stack.len() > stack_before
+        || state.pending_trigger.is_some()
+        || ordering_prompt.is_some();
+    (fired, ordering_prompt)
 }
 
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
@@ -1319,7 +1344,12 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     continue;
                 }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
-                process_phase_triggers(state);
+                // CR 603.3b: 2+ same-controller upkeep triggers (multiple suspended
+                // cards, two Howling Mines) require an ordering choice that must be
+                // surfaced before priority — see `process_phase_triggers`.
+                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                    return prompt;
+                }
                 // CR 503.2 + CR 117.1c: The active player ALWAYS receives priority
                 // during the upkeep step, regardless of whether triggers fired.
                 // Whether to auto-pass through this priority window (or honor the
@@ -1348,7 +1378,10 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     return wf;
                 }
                 // CR 504.2: "At the beginning of [your] draw step" triggers fire here.
-                process_phase_triggers(state);
+                // CR 603.3b: surface a same-controller ordering prompt before priority.
+                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                    return prompt;
+                }
                 // CR 504.3 + CR 117.1c: The active player ALWAYS receives priority
                 // during the draw step (after the turn-based draw and any triggers).
                 // See the Upkeep arm above for the rationale — same pattern.
@@ -1375,10 +1408,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 }
                 // CR 603.2b + CR 603.3: beginning-of-main-phase triggers are
                 // put on the stack before the active player receives priority.
-                if process_phase_triggers(state) {
-                    return WaitingFor::Priority {
-                        player: state.active_player,
-                    };
+                // CR 603.3b: surface a same-controller ordering prompt first.
+                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                    return prompt;
                 }
                 // CR 505.6: The active player receives priority during a main phase.
                 return WaitingFor::Priority {
@@ -1390,9 +1422,15 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // Process triggers regardless of attackers — CR 507.1 says the step
                 // happens unconditionally; trigger conditions (e.g., ControlCount)
                 // are checked by the trigger system, not by skipping the step.
-                let triggers_fired = process_phase_triggers(state);
+                let (triggers_fired, ordering_prompt) = process_phase_triggers(state);
                 if triggers_fired {
                     state.combat = Some(crate::game::combat::CombatState::default());
+                    // CR 603.3b: surface a same-controller ordering prompt before
+                    // priority; combat state is set first so it exists when the
+                    // ordered begin-combat triggers later resolve.
+                    if let Some(prompt) = ordering_prompt {
+                        return prompt;
+                    }
                     return WaitingFor::Priority {
                         player: state.active_player,
                     };
@@ -1480,7 +1518,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::EndCombat => {
                 // CR 511.1: "At end of combat" triggers fire here.
-                let triggers_fired = process_phase_triggers(state);
+                let (triggers_fired, ordering_prompt) = process_phase_triggers(state);
                 // CR 511.3: At end of combat, all creatures are removed from combat.
                 state.combat = None;
                 super::layers::prune_end_of_combat_effects(state);
@@ -1492,6 +1530,10 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     .pending_damage_replacements
                     .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
                 if triggers_fired {
+                    // CR 603.3b: surface a same-controller ordering prompt before priority.
+                    if let Some(prompt) = ordering_prompt {
+                        return prompt;
+                    }
                     return WaitingFor::Priority {
                         player: state.active_player,
                     };
@@ -1515,7 +1557,10 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 super::layers::prune_until_next_end_step_effects(state, state.active_player);
                 // CR 513.1: End step — active player receives priority.
                 // CR 513.1a: "At the beginning of [your] end step" triggers fire here.
-                process_phase_triggers(state);
+                // CR 603.3b: surface a same-controller ordering prompt before priority.
+                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                    return prompt;
+                }
                 return WaitingFor::Priority {
                     player: state.active_player,
                 };
