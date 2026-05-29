@@ -408,6 +408,42 @@ fn parse_exile_rest_after_dig(lower: &str) -> bool {
         .is_ok()
 }
 
+/// CR 406.3 + CR 701.16a: Recognize the "[then] exile it/them/that card/those
+/// cards/the card [face down]" clause that follows a private `Dig` look step —
+/// the Gonti, Canny Acquisitor impulse idiom. Returns `Some(face_down)` when the
+/// whole clause matches (`face_down = true` only for the explicit hidden-
+/// information suffix). Composes the (pronoun × optional "face down") axes with
+/// nom combinators rather than enumerating the permutations as match-arm
+/// literals; the clause-boundary splitter has already stripped the leading
+/// "then" connector.
+fn parse_exile_looked_at_card(lower: &str) -> Option<bool> {
+    let trimmed = lower.trim().trim_end_matches('.').trim_end();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("exile ").parse(trimmed).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it"),
+        tag("them"),
+        tag("that card"),
+        tag("those cards"),
+        tag("the card"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, face_down) = alt((
+        value(
+            true,
+            preceded(
+                multispace1::<_, OracleError<'_>>,
+                tag::<_, _, OracleError<'_>>("face down"),
+            ),
+        ),
+        value(false, eof::<_, OracleError<'_>>),
+    ))
+    .parse(rest)
+    .ok()?;
+    eof::<_, OracleError<'_>>(rest).ok()?;
+    Some(face_down)
+}
+
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -2008,6 +2044,7 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::RevealUntilKept {
             destination,
             enter_tapped: tapped,
+            enters_attacking: attacking,
             rest_destination: rest_dest,
             optional_decline,
         } => {
@@ -2017,6 +2054,7 @@ pub(super) fn apply_clause_continuation(
             if let Effect::RevealUntil {
                 kept_destination,
                 enter_tapped,
+                enters_attacking,
                 rest_destination,
                 kept_optional_to,
                 ..
@@ -2031,6 +2069,8 @@ pub(super) fn apply_clause_continuation(
                         *kept_optional_to = Some(destination);
                         *kept_destination = decline;
                         *enter_tapped = tapped;
+                        // CR 508.4: accept zone is the battlefield here.
+                        *enters_attacking = attacking;
                     }
                     // Mandatory kept clause. Refine `kept_destination` without
                     // clobbering a `kept_optional_to` set by a prior chunk (the
@@ -2040,6 +2080,9 @@ pub(super) fn apply_clause_continuation(
                         *kept_destination = destination;
                         if destination == Zone::Battlefield {
                             *enter_tapped = tapped;
+                            // CR 508.4: "put that card onto the battlefield
+                            // tapped and attacking" (Raph & Mikey, Fireflux Squad).
+                            *enters_attacking = attacking;
                         }
                     }
                 }
@@ -2075,6 +2118,33 @@ pub(super) fn apply_clause_continuation(
                 *kept_destination = destination;
                 *rest_destination = destination;
             }
+        }
+        // CR 406.3 + CR 701.16a: Rewrite the preceding private `Dig` (the
+        // "look at the top N cards of <player>'s library" look step) into an
+        // `Effect::ExileTop` so the looked-at card(s) actually leave the
+        // library — the Gonti, Canny Acquisitor impulse idiom. `player`/`count`
+        // were lifted from the `Dig` (with `ParentTarget` re-bound to the
+        // triggering player) during recognition; `face_down` carries the
+        // hidden-information suffix. ExileTop publishes a tracked set the
+        // following `GrantCastingPermission(PlayFromExile)` binds to, so the
+        // exiled card becomes playable.
+        ContinuationAst::ExileLookedAtCard {
+            player,
+            count,
+            face_down,
+        } => {
+            let Some(previous) = defs
+                .iter_mut()
+                .rev()
+                .find(|d| matches!(&*d.effect, Effect::Dig { .. }))
+            else {
+                return;
+            };
+            *previous.effect = Effect::ExileTop {
+                player,
+                count,
+                face_down,
+            };
         }
     }
 }
@@ -2169,6 +2239,10 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::GrantExtraTurnAfterControlledTurn => true,
         ContinuationAst::RevealUntilKept { .. } => true,
         ContinuationAst::RevealUntilAllToZone { .. } => true,
+        // Recognition was already gated on a preceding `Dig` in
+        // parse_followup_continuation_ast; the "exile it [face down]" clause is
+        // folded into that Dig (rewritten to ExileTop) and emits no sibling def.
+        ContinuationAst::ExileLookedAtCard { .. } => true,
     }
 }
 
@@ -2894,6 +2968,43 @@ pub(super) fn parse_followup_continuation_ast(
                 reorder_all: false,
             })
         }
+        // CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a
+        // private `Dig` (the "look at the top N cards of <player>'s library"
+        // look step). This is the Gonti, Canny Acquisitor impulse idiom —
+        // "look at the top card of that player's library, then exile it face
+        // down. You may play that card ...". Plain `Dig` only inspects the top
+        // cards (CR 701.16a); without a destination they stay in the library,
+        // so the exile clause must rewrite the `Dig` into an `Effect::ExileTop`
+        // (the face-down impulse-exile primitive shared with Cunning Rhetoric /
+        // Bomat Courier) for the looked-at card to actually leave the library.
+        //
+        // `reveal: false` scopes this to the private "look at" form — a public
+        // "reveal the top card ... then exile it" is a different visibility
+        // class and is not the impulse idiom. `parse_exile_looked_at_card`
+        // composes the pronoun and optional "face down" axes with combinators.
+        Effect::Dig {
+            player: dig_player,
+            count,
+            reveal: false,
+            ..
+        } if parse_exile_looked_at_card(&lower).is_some() => {
+            // CR 406.3: hidden-information suffix → the card is exiled face down.
+            let face_down = parse_exile_looked_at_card(&lower).unwrap_or(false);
+            // CR 608.2c: "that player's library" parsed to `ParentTarget` at the
+            // Dig site; re-resolve it through the shared library-owner combinator
+            // so a damage/attack trigger binds to `TriggeringPlayer` (the proven
+            // Cunning Rhetoric path) rather than the blocked-attacker object that
+            // `ParentTarget` resolves to in a combat-damage context.
+            let player = match dig_player {
+                TargetFilter::ParentTarget => super::imperative::that_player_library_filter(ctx),
+                other => other.clone(),
+            };
+            Some(ContinuationAst::ExileLookedAtCard {
+                player,
+                count: count.clone(),
+                face_down,
+            })
+        }
         // "put the rest on the bottom" / "put those cards into your graveyard"
         // after Dig — sets rest_destination on the preceding Dig effect.
         Effect::Dig { .. }
@@ -2931,13 +3042,16 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "put it")
                 || nom_primitives::scan_contains(&lower, "puts it") =>
         {
-            let (destination, enter_tapped) =
+            let (destination, enter_tapped, enters_attacking) =
                 if nom_primitives::scan_contains(&lower, "onto the battlefield") {
                     let tapped = nom_primitives::scan_contains(&lower, "tapped");
-                    (Zone::Battlefield, tapped)
+                    // CR 508.4: "put that card onto the battlefield tapped and
+                    // attacking" (Raph & Mikey, Fireflux Squad).
+                    let attacking = nom_primitives::scan_contains(&lower, "attacking");
+                    (Zone::Battlefield, tapped, attacking)
                 } else {
                     // Default "into your hand"
-                    (Zone::Hand, false)
+                    (Zone::Hand, false, false)
                 };
             let rest = parse_reveal_until_rest_zone(&lower);
             // CR 701.20a + CR 608.2c: "you may put that card onto the battlefield"
@@ -2957,6 +3071,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::RevealUntilKept {
                 destination,
                 enter_tapped,
+                enters_attacking,
                 rest_destination: rest,
                 optional_decline,
             })

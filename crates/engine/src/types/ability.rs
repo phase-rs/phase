@@ -6425,6 +6425,12 @@ pub enum Effect {
         /// CR 110.5b: When true, the matching card enters the battlefield tapped.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_tapped: bool,
+        /// CR 508.4: When true, a matching card sent to the battlefield enters
+        /// attacking (e.g. Raph & Mikey, Fireflux Squad — "put that card onto
+        /// the battlefield tapped and attacking"). Its controller's existing
+        /// attacker (the trigger source) supplies the defending player.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        enters_attacking: bool,
         /// CR 701.20a + CR 608.2c: Optional kept destination — `Some(accept_zone)`
         /// encodes "you may put that card onto the battlefield": the controller
         /// chooses the kept card's destination. Accept → `accept_zone`; decline →

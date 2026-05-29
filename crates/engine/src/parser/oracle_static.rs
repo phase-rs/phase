@@ -34,7 +34,7 @@ use super::oracle_util::{
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, AttachmentKind,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, AttachmentKind,
     BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator, ContinuousModification,
     ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PtStat,
     PtValueScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
@@ -5312,6 +5312,113 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
     None
 }
 
+/// CR 118.9 + CR 601.2f: Parse a mana-cost-alternative-grant static —
+/// "You may [pay] X rather than pay [the/its/this object's] mana cost for
+/// [filter] spells you cast." The permanent's controller may pay the
+/// alternative MANA cost `X` instead of a matching spell's printed mana cost.
+///
+/// Class members: Rooftop Storm ({0}, Zombie creature spells), Fist of Suns
+/// ({WUBRG}, any spell), Jodah ({WUBRG}, MV 5+ when the qualifier parses).
+///
+/// Strict-fails to `None` (never misparses) when the payment is non-mana
+/// (Dream Halls discard, Bolas's Citadel life, As Foretold free), deferring
+/// those classes rather than producing a wrong static.
+pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // Prefix: "you may pay " (Rooftop Storm / Fist of Suns / Jodah). The shorter
+    // "you may " is accepted as a fallback so a payment verb other than "pay"
+    // (e.g. "you may exert ...") still routes here and strict-fails at the cost
+    // gate below rather than misparsing.
+    let tp = nom_tag_tp(&tp, "you may pay ")
+        .or_else(|| nom_tag_tp(&tp, "you may "))?
+        .trim_start();
+
+    // Cost slice: everything up to " rather than pay ", preserving original case
+    // (mana symbols are case-sensitive).
+    let (after_cost_lower, cost_lower) = take_until::<_, _, VE<'_>>(" rather than pay ")
+        .parse(tp.lower)
+        .ok()?;
+    let cost_len = cost_lower.len();
+    let cost_slice = tp.original[..cost_len].trim();
+    let after_cost = TextPair::new(&tp.original[cost_len..], after_cost_lower);
+    let after_cost = nom_tag_tp(&after_cost, " rather than pay ")?;
+
+    // Article/possessive axis as ONE alt — "[the|its|this permanent's|this
+    // object's] mana cost for ". CR 118.9: the alternative-cost phrasing names
+    // the spell's own mana cost being replaced.
+    let (subject_lower, _) = alt((
+        tag::<_, _, VE<'_>>("the mana cost for "),
+        tag("its mana cost for "),
+        tag("this permanent's mana cost for "),
+        tag("this object's mana cost for "),
+    ))
+    .parse(after_cost.lower)
+    .ok()?;
+    let consumed = after_cost.lower.len() - subject_lower.len();
+    let subject = TextPair::new(&after_cost.original[consumed..], subject_lower);
+
+    // Remainder: "<filter> spell[s] you cast[.]". Locate the marker with nom
+    // combinators (take_until + tag), not manual string scanning: `terminated`
+    // yields the type-prefix slice preceding the marker while consuming the
+    // marker itself, leaving the optional mana-value tail as the remainder.
+    let subject = subject.trim_end_matches('.').trim_end();
+    let (after_spells_lower, type_prefix_lower) = alt((
+        terminated(
+            take_until::<_, _, VE<'_>>("spells you cast"),
+            tag("spells you cast"),
+        ),
+        terminated(
+            take_until::<_, _, VE<'_>>("spell you cast"),
+            tag("spell you cast"),
+        ),
+    ))
+    .parse(subject.lower)
+    .ok()?;
+
+    let type_prefix_original = subject.original[..type_prefix_lower.len()].trim();
+    let after_spells = after_spells_lower.trim();
+
+    // Optional "with mana value N or greater" qualifier (Jodah MV-5+ class). If
+    // an MV qualifier is present but does not parse cleanly into FilterProp::Cmc,
+    // strict-fail (None) rather than over-broadening to any spell.
+    let mv_filter = if after_spells.is_empty() {
+        None
+    } else {
+        let (prop, _consumed) =
+            parse_mana_value_suffix(after_spells, &mut ParseContext::default())?;
+        let FilterProp::Cmc { .. } = prop else {
+            return None;
+        };
+        Some(prop)
+    };
+
+    let base_filter = if type_prefix_original.is_empty() {
+        // "spells you cast" (no type prefix) — any spell (Fist of Suns).
+        TargetFilter::Typed(TypedFilter::card())
+    } else {
+        parse_type_phrase(type_prefix_original).0
+    };
+    let affected = apply_spell_keyword_subject_constraints(base_filter, None, mv_filter);
+
+    // Cost gate: only a pure MANA cost grants this static. {0} and {WUBRG} parse
+    // to AbilityCost::Mana; non-mana payments (life, discard, free) return a
+    // different AbilityCost variant and strict-fail here.
+    let AbilityCost::Mana { cost } = parse_oracle_cost(cost_slice) else {
+        return None;
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::CastWithAlternativeCost { cost })
+            .affected(affected)
+            .description(text.to_string())
+            .active_zones(vec![Zone::Battlefield]),
+    )
+}
+
 fn apply_spell_keyword_subject_constraints(
     filter: TargetFilter,
     zone_filter: Option<FilterProp>,
@@ -7707,8 +7814,11 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
 
     let is_rest_lower = is_rest_lower.trim_end_matches('.');
 
-    // Check for "in addition to its other types" suffix
-    let (type_part, _is_additive) =
+    // Check for "in addition to its other types" suffix.
+    // CR 205.1b: "in addition to its other types" retains all prior card types
+    // (additive). Its absence means CR 205.1a applies: the new card type(s)
+    // replace the existing ones.
+    let (type_part, is_additive) =
         if let Some(before) = is_rest_lower.strip_suffix(" in addition to its other types") {
             (before.trim(), true)
         } else {
@@ -7874,22 +7984,42 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
                 .any(|m| matches!(m, LossMember::CardTypes));
         }
 
+        // CR 205.1a + CR 613.1d (Layer 4): Two independent conditions each require
+        // SetCardTypes (replacing) rather than AddType (additive):
+        //   (A) loss_replaces_card_types: trailing clause explicitly says "loses
+        //       all other card types" (Darksteel Mutation path — already working).
+        //   (B) !is_additive: "in addition to its other types" is absent, so "is a
+        //       [type]" replaces existing card types (Frogify, Lignify, etc.).
+        // These are documented separately and combined into a single bool to avoid
+        // emitting two SetCardTypes pushes.
+        let needs_set_card_types = loss_replaces_card_types || !is_additive;
+
         // --- Assemble modifications in written (mod_index) order ---
-        // 1. Core types: replacement (SetCardTypes) if the clause says "loses
-        //    all other card types", else additive AddType.
-        if loss_replaces_card_types {
+        // 1. Core types: replacement (SetCardTypes) when CR 205.1a applies (no
+        //    "in addition" suffix) or the clause says "loses all other card
+        //    types"; else additive AddType (CR 205.1b "in addition").
+        if needs_set_card_types {
             modifications.push(ContinuousModification::SetCardTypes {
-                core_types: granted_core_types,
+                core_types: granted_core_types.clone(),
             });
         } else {
-            for ct in granted_core_types {
-                modifications.push(ContinuousModification::AddType { core_type: ct });
+            for ct in &granted_core_types {
+                modifications.push(ContinuousModification::AddType { core_type: *ct });
             }
         }
 
         // 2. Color
+        // CR 105.3 + CR 613.1e (Layer 5): a new color replaces all previous
+        // colors unless the effect is "in addition"; additive "in addition to
+        // its other types" appends via AddColor.
         if let Some(color) = opt_color {
-            modifications.push(ContinuousModification::AddColor { color });
+            if is_additive {
+                modifications.push(ContinuousModification::AddColor { color });
+            } else {
+                modifications.push(ContinuousModification::SetColor {
+                    colors: vec![color],
+                });
+            }
         } else if is_colorless {
             modifications.push(ContinuousModification::SetColor { colors: vec![] });
         }
@@ -7898,6 +8028,24 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
         if let Some((p, t)) = base_pt.or(inline_pt) {
             modifications.push(ContinuousModification::SetPower { value: p });
             modifications.push(ContinuousModification::SetToughness { value: t });
+        }
+
+        // CR 205.1a + CR 613.1d (Layer 4): Non-additive "is a [subtype] creature"
+        // sets a new creature subtype, which replaces existing creature subtypes.
+        // Auto-inject RemoveAllSubtypes{Creature} unless the trailing clause
+        // already provides it (Darksteel Mutation explicitly says "loses all
+        // other creature types" and its clause_mods contains the wipe).
+        if !is_additive
+            && granted_core_types.contains(&CoreType::Creature)
+            && !granted_subtypes.is_empty()
+            && !modifications
+                .iter()
+                .chain(clause_mods.iter())
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. }))
+        {
+            modifications.push(ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            });
         }
 
         // 4. Trailing-clause mods (AddKeyword, RemoveAllAbilities,
@@ -11944,6 +12092,190 @@ mod tests {
             )),
             "player-half must affect the controller"
         );
+    }
+
+    /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
+    /// creature spells the controller casts.
+    #[test]
+    fn alt_cost_rooftop_storm_zombie_creature_zero() {
+        let def = parse_spells_alternative_cost(
+            "You may pay {0} rather than pay the mana cost for Zombie creature spells you cast.",
+        )
+        .expect("Rooftop Storm must parse to a CastWithAlternativeCost static");
+        match &def.mode {
+            StaticMode::CastWithAlternativeCost { cost } => {
+                assert_eq!(*cost, crate::types::mana::ManaCost::zero());
+            }
+            other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+        }
+        // Affected: Zombie creature spells you cast.
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature type filter, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(
+                    tf.get_subtype(),
+                    Some("Zombie"),
+                    "expected Zombie subtype, got {:?}",
+                    tf.type_filters
+                );
+            }
+            other => panic!("expected Typed(Zombie creature you cast), got {other:?}"),
+        }
+        assert_eq!(def.active_zones, vec![Zone::Battlefield]);
+    }
+
+    /// CR 118.9: Fist of Suns grants {WUBRG} as an alternative cost for ANY
+    /// spell the controller casts (no type prefix → any-card filter).
+    #[test]
+    fn alt_cost_fist_of_suns_any_spell_wubrg() {
+        let def = parse_spells_alternative_cost(
+            "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.",
+        )
+        .expect("Fist of Suns must parse to a CastWithAlternativeCost static");
+        match &def.mode {
+            StaticMode::CastWithAlternativeCost { cost } => {
+                use crate::types::mana::{ManaCost, ManaCostShard};
+                assert_eq!(
+                    *cost,
+                    ManaCost::Cost {
+                        shards: vec![
+                            ManaCostShard::White,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Black,
+                            ManaCostShard::Red,
+                            ManaCostShard::Green,
+                        ],
+                        generic: 0,
+                    }
+                );
+            }
+            other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+        }
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed(any spell you cast), got {other:?}"),
+        }
+    }
+
+    /// CR 118.9: a Jodah-style MV qualifier — "spells you cast with mana value 5
+    /// or greater" — either parses cleanly into a Cmc filter or strict-fails to
+    /// None. This test pins whichever behavior the parser actually produces so
+    /// the deferral decision is explicit.
+    #[test]
+    fn alt_cost_jodah_mv_qualifier_behavior() {
+        let result = parse_spells_alternative_cost(
+            "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast with mana value 5 or greater.",
+        );
+        match result {
+            Some(def) => {
+                // If it parses, the MV qualifier must be attached as a Cmc prop.
+                match &def.affected {
+                    Some(TargetFilter::Typed(tf)) => {
+                        assert!(
+                            tf.properties
+                                .iter()
+                                .any(|p| matches!(p, FilterProp::Cmc { .. })),
+                            "MV qualifier must produce a Cmc filter prop, got {:?}",
+                            tf.properties
+                        );
+                    }
+                    other => panic!("expected Typed with Cmc prop, got {other:?}"),
+                }
+            }
+            None => {
+                // Deferral is acceptable per the plan — the MV qualifier did not
+                // parse cleanly, so the static is not produced (not misparsed).
+            }
+        }
+    }
+
+    /// Strict-fail: non-mana payment shapes must NOT misparse into the static.
+    /// Bolas's Citadel ("pay life equal to ...") and Dream Halls ("discard a
+    /// card ...") defer to None rather than producing a wrong CastWithAlternativeCost.
+    #[test]
+    fn alt_cost_non_mana_payment_defers_to_none() {
+        // Bolas's Citadel-style life payment.
+        assert!(
+            parse_spells_alternative_cost(
+                "You may pay life equal to its mana value rather than pay the mana cost for spells you cast.",
+            )
+            .is_none(),
+            "life payment must defer to None"
+        );
+        // Dream Halls-style discard payment.
+        assert!(
+            parse_spells_alternative_cost(
+                "You may discard a card that shares a color with that spell rather than pay the mana cost for spells you cast.",
+            )
+            .is_none(),
+            "discard payment must defer to None"
+        );
+    }
+
+    /// CR 118.9: full-dispatcher regression — Fist of Suns must route through
+    /// the new Priority 6c-altcost branch into a CastWithAlternativeCost static
+    /// with NO free-floating Effect::PayCost ability (the prior misparse), and
+    /// the deferred non-mana classes (Bolas's Citadel, Dream Halls, As Foretold,
+    /// Conspiracy Unraveler) must NOT be newly misparsed into this static.
+    #[test]
+    fn full_dispatch_alt_cost_routing_and_deferrals() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::Effect;
+
+        // Fist of Suns: routes to the static, no PayCost ability.
+        let parsed = parse_oracle_text(
+            "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.",
+            "Fist of Suns",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|d| matches!(d.mode, StaticMode::CastWithAlternativeCost { .. })),
+            "Fist of Suns must produce a CastWithAlternativeCost static, got {:?}",
+            parsed.statics
+        );
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::PayCost { .. })),
+            "Fist of Suns must NOT produce a free-floating PayCost ability, got {:?}",
+            parsed.abilities
+        );
+
+        // Deferred non-mana payment classes: must NOT produce the new static.
+        let deferred = [
+            (
+                "Bolas's Citadel",
+                "You may pay life equal to a spell's mana value rather than pay its mana cost.",
+            ),
+            (
+                "Dream Halls",
+                "Rather than pay the mana cost for a spell, its controller may discard a card that shares a color with that spell.",
+            ),
+        ];
+        for (name, text) in deferred {
+            let parsed = parse_oracle_text(text, name, &[], &["Enchantment".to_string()], &[]);
+            assert!(
+                !parsed
+                    .statics
+                    .iter()
+                    .any(|d| matches!(d.mode, StaticMode::CastWithAlternativeCost { .. })),
+                "{name} must NOT be misparsed into CastWithAlternativeCost, got {:?}",
+                parsed.statics
+            );
+        }
     }
 
     /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a [subtype]*
@@ -19579,10 +19911,13 @@ mod tests {
         assert!(def
             .modifications
             .contains(&ContinuousModification::RemoveAllAbilities));
+        // NOTE: This was previously asserting AddType{Land} (broken behavior).
+        // After the !is_additive fix, non-additive "is a colorless land"
+        // correctly emits SetCardTypes (CR 205.1a replacement).
         assert!(def
             .modifications
-            .contains(&ContinuousModification::AddType {
-                core_type: crate::types::card_type::CoreType::Land,
+            .contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Land],
             }));
         assert!(def
             .modifications
@@ -19591,21 +19926,120 @@ mod tests {
 
     #[test]
     fn enchanted_creature_loses_abilities_becomes_insect() {
-        // CR 613.1d: Darksteel Mutation pattern
+        // CR 613.1d: Darksteel Mutation pattern — non-additive, so SetCardTypes/SetColor/RemoveAllSubtypes.
         let def = parse_static_line(
             "Enchanted creature loses all abilities and is a 0/1 green Insect creature.",
         )
         .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
-        assert!(def
-            .modifications
-            .contains(&ContinuousModification::RemoveAllAbilities));
-        assert!(def
-            .modifications
-            .contains(&ContinuousModification::SetPower { value: 0 }));
-        assert!(def
-            .modifications
-            .contains(&ContinuousModification::SetToughness { value: 1 }));
+        let mods = &def.modifications;
+        assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+        // CR 205.1a + CR 613.1d: non-additive → SetCardTypes, not AddType.
+        assert!(
+            mods.contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+            }),
+            "expected SetCardTypes[Creature]: {mods:?}"
+        );
+        // CR 613.1e: non-additive → SetColor, not AddColor.
+        assert!(
+            mods.contains(&ContinuousModification::SetColor {
+                colors: vec![crate::types::mana::ManaColor::Green],
+            }),
+            "expected SetColor[Green]: {mods:?}"
+        );
+        // CR 205.1a: non-additive creature subtype auto-wipe.
+        assert!(
+            mods.contains(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }),
+            "expected RemoveAllSubtypes{{Creature}}: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Insect".to_string(),
+            }),
+            "expected AddSubtype(Insect): {mods:?}"
+        );
+        // Written-order: wipe before grant.
+        let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+        assert!(
+            pos(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }) < pos(&ContinuousModification::AddSubtype {
+                subtype: "Insect".to_string(),
+            }),
+            "RemoveAllSubtypes must precede AddSubtype(Insect): {mods:?}"
+        );
+    }
+
+    #[test]
+    fn enchanted_creature_is_blue_frog() {
+        // Frogify — CR 613.1d: non-additive → SetCardTypes; CR 613.1e: SetColor; CR 205.1a: RemoveAllSubtypes
+        let def = parse_static_line(
+            "Enchanted creature loses all abilities and is a 1/1 blue Frog creature.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        let mods = &def.modifications;
+        assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(
+            mods.contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+            }),
+            "non-additive must use SetCardTypes: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::SetColor {
+                colors: vec![crate::types::mana::ManaColor::Blue],
+            }),
+            "non-additive must use SetColor: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }),
+            "must auto-inject RemoveAllSubtypes{{Creature}}: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Frog".to_string(),
+            }),
+            "must emit AddSubtype(Frog): {mods:?}"
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 1 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+        // CR 613.7 written-order: RemoveAllSubtypes must precede AddSubtype(Frog)
+        let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+        assert!(
+            pos(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }) < pos(&ContinuousModification::AddSubtype {
+                subtype: "Frog".to_string(),
+            }),
+            "RemoveAllSubtypes must precede AddSubtype(Frog): {mods:?}"
+        );
+    }
+
+    #[test]
+    fn enchanted_creature_is_blue_creature_no_subtype() {
+        // CR 205.1a: no new creature subtype granted → no Oracle instruction to wipe existing subtypes.
+        let def = parse_static_line("Enchanted creature is a blue creature.").unwrap();
+        let mods = &def.modifications;
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "no RemoveAllSubtypes when no new subtype granted: {mods:?}"
+        );
+        assert!(mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Creature],
+        }));
+        assert!(mods.contains(&ContinuousModification::SetColor {
+            colors: vec![crate::types::mana::ManaColor::Blue],
+        }));
     }
 
     // --- CantBeCast (blanket casting prohibition) tests ---

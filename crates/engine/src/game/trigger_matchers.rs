@@ -1010,6 +1010,50 @@ pub(super) fn match_damage_done_once_by_controller(
     source_ids.contains(&source_id)
 }
 
+pub(super) fn matching_damage_done_once_by_controller_event(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Option<GameEvent> {
+    // CR 603.2c + CR 608.2c: Preserve the single aggregate combat-damage
+    // trigger event while narrowing its source set to the objects that
+    // satisfied this trigger's source filter. Downstream "those creatures"
+    // effects read this filtered event context.
+    let GameEvent::CombatDamageDealtToPlayer {
+        player_id,
+        source_ids,
+    } = event
+    else {
+        return None;
+    };
+
+    if !valid_player_matches(trigger, state, *player_id, source_id) {
+        return None;
+    }
+
+    let matching_sources = if let Some(filter) = &trigger.valid_source {
+        source_ids
+            .iter()
+            .copied()
+            .filter(|source| target_filter_matches_object(state, *source, filter, source_id))
+            .collect::<Vec<_>>()
+    } else if source_ids.contains(&source_id) {
+        vec![source_id]
+    } else {
+        Vec::new()
+    };
+
+    if matching_sources.is_empty() {
+        None
+    } else {
+        Some(GameEvent::CombatDamageDealtToPlayer {
+            player_id: *player_id,
+            source_ids: matching_sources,
+        })
+    }
+}
+
 /// CR 601.2a vs CR 707.10: whether an event placed a spell on the stack by
 /// *casting* it or by *copying* it. These are distinct game events — a copy
 /// isn't cast — so copy-sensitive and cast-only triggers must be told apart.
@@ -2436,7 +2480,8 @@ pub(super) fn match_becomes_blocked(
 /// Uses DamageDealt event but checks the *target* (not the damage source) against the trigger.
 ///
 /// Two target patterns are supported:
-/// - Object target: "Whenever ~ is dealt damage" — `target == source_id`.
+/// - Object target: "Whenever ~ is dealt damage" — `valid_card` scopes the object;
+///   runtime checks `target == source_id` for SelfRef triggers.
 /// - Player target: "Whenever you're dealt damage" — `valid_target` scopes the player.
 ///
 /// `valid_source` optionally scopes the damage source for either target shape.
@@ -2471,11 +2516,21 @@ pub(super) fn match_damage_received(
         }
         match target {
             TargetRef::Object(target_id) => {
+                // CR 120.3: Player-scoped triggers ("you're dealt damage") must not
+                // fire when the trigger source object takes damage.
+                if trigger.valid_card.is_none() && trigger.valid_target.is_some() {
+                    return false;
+                }
                 // Object target: trigger source is the damaged permanent.
                 *target_id == source_id
                     && valid_source_matches(trigger, state, *damage_source_id, source_id)
             }
             TargetRef::Player(pid) => {
+                // CR 120.3: Object-scoped triggers ("~ is dealt damage", Enrage) must
+                // not fire when the controller takes damage.
+                if trigger.valid_card.is_some() {
+                    return false;
+                }
                 // Player target: check the damaged player matches valid_target
                 // (e.g., "you" → Controller) and optionally that the damage
                 // source matches valid_source. CR 120.1 + CR 120.3.
@@ -5355,6 +5410,51 @@ mod tests {
     }
 
     #[test]
+    fn matching_damage_done_once_event_respects_valid_target() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Combat Damage Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_ids: vec![source],
+        };
+
+        assert!(matching_damage_done_once_by_controller_event(
+            &event,
+            &trigger,
+            trigger_source,
+            &state,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn spell_cast_matches() {
         let state = setup();
         let trigger = make_trigger(TriggerMode::SpellCast);
@@ -7165,6 +7265,86 @@ mod tests {
         assert!(
             !match_damage_received(&event3, &trigger, source, &state),
             "must not fire when opponent is damaged, not controller"
+        );
+    }
+
+    /// CR 120.3: Enrage / "~ is dealt damage" — object-scoped triggers must not
+    /// fire when the controller takes damage (Vrondiss #1306).
+    #[test]
+    fn damage_received_object_scoped_rejects_player_damage() {
+        let mut state = setup();
+        let vrondiss = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vrondiss, Rage of Ancients".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let controller_damaged = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_received(&controller_damaged, &trigger, vrondiss, &state),
+            "Enrage-style triggers must not fire on controller damage"
+        );
+
+        let self_damage = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(vrondiss),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            match_damage_received(&self_damage, &trigger, vrondiss, &state),
+            "Enrage-style triggers must fire when the source object is dealt damage"
+        );
+    }
+
+    /// CR 120.1: "Whenever you're dealt damage" must not fire when the trigger
+    /// source object takes damage instead of the controller.
+    #[test]
+    fn damage_received_player_scoped_rejects_object_damage_to_source() {
+        let mut state = setup();
+        let stuffy_doll = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stuffy Doll".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let object_damage = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(stuffy_doll),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_received(&object_damage, &trigger, stuffy_doll, &state),
+            "player-scoped damage triggers must not fire on object damage"
+        );
+
+        let player_damage = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            match_damage_received(&player_damage, &trigger, stuffy_doll, &state),
+            "player-scoped damage triggers must fire on controller damage"
         );
     }
 

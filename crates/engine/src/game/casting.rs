@@ -715,6 +715,51 @@ fn granted_spell_keywords(
     keywords
 }
 
+/// CR 118.9 + CR 604.1: Collect an alternative MANA cost granted to `object_id`
+/// by a `CastWithAlternativeCost` static on the battlefield whose `affected`
+/// filter matches this spell.
+///
+/// CR 118.9a: only one alternative cost is ultimately applied to a spell, and
+/// the spell's controller chooses which. The casting pipeline currently surfaces
+/// a single alternative-vs-printed choice (`AdditionalCost::Choice`), so when
+/// multiple grants match (e.g. Rooftop Storm and Fist of Suns both active) this
+/// returns the first in deterministic battlefield-scan order rather than
+/// prompting the controller to choose among them. Offering a choice across
+/// multiple simultaneous grants needs a multi-alternative choice surface and is
+/// a known limitation tracked for follow-up, not implemented here.
+pub(super) fn granted_spell_alternative_cost(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Option<AbilityCost> {
+    let spell_obj = state.objects.get(&object_id)?;
+    let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
+
+    // CR 604.1: Functioning gate owned by `game_active_statics`.
+    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
+        let StaticMode::CastWithAlternativeCost { cost } = &def.mode else {
+            continue;
+        };
+
+        let matches = def.affected.as_ref().is_none_or(|filter| {
+            super::filter::spell_object_matches_filter_from_state(
+                state,
+                spell_obj,
+                origin_zone,
+                caster,
+                filter,
+                source_obj.id,
+                &state.all_creature_types,
+            )
+        });
+        if matches {
+            return Some(AbilityCost::Mana { cost: cost.clone() });
+        }
+    }
+
+    None
+}
+
 pub(crate) fn effective_spell_keywords(
     state: &GameState,
     caster: PlayerId,
@@ -2548,9 +2593,43 @@ fn apply_all_cost_modifiers(
     apply_affinity_reduction(state, player, object_id, mana_cost);
     // CR 601.2f: One-shot pending cost reductions ("the next spell costs {N} less").
     apply_pending_spell_cost_reductions(state, player, object_id, mana_cost);
-    // CR 601.2f: Cost-floor statics (Trinisphere class) — LAST, after every
-    // additive/subtractive modifier so the floor sees the final mana component.
-    apply_cost_floor(state, player, object_id, mana_cost);
+    // CR 601.2b + CR 601.2f: Cost-floor statics (Trinisphere class) — LAST, after
+    // every additive/subtractive modifier so the floor sees the final mana
+    // component. While the cost still contains `{X}`, X has mana value 0
+    // (CR 107.3b), so flooring now would over-count the spell once X is paid
+    // (CR 601.2b locks in the chosen X *before* the "directly affect the total
+    // cost" step of CR 601.2f). Defer the floor for `{X}` costs to
+    // `apply_post_x_cost_floor`, run from the ChooseX handler once X is concrete.
+    if !casting_costs::cost_has_x(mana_cost) {
+        apply_cost_floor(state, player, object_id, mana_cost);
+    }
+}
+
+/// CR 601.2b + CR 601.2f: Apply cost-floor statics (Trinisphere class) to a
+/// pending `{X}` spell's cost AFTER the chosen X has been concretized into the
+/// cost. The floor is skipped during prepare and target selection while X is
+/// still symbolic (mana value 0); this runs the deferred "directly affect the
+/// total cost" lock-in step against the real total once X is known.
+///
+/// The two floor channels are disjoint — `apply_cost_floor` handles untargeted
+/// floors (the prepare-time channel) and `apply_cost_floor_with_selected_targets`
+/// handles target-dependent floors (the target-selection channel) — so applying
+/// both here floors the concrete cost exactly once.
+pub(super) fn apply_post_x_cost_floor(
+    state: &mut GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) {
+    let Some(pending) = state.pending_cast.as_ref() else {
+        return;
+    };
+    let mut cost = pending.cost.clone();
+    let ability = pending.ability.clone();
+    apply_cost_floor(state, caster, object_id, &mut cost);
+    apply_cost_floor_with_selected_targets(state, caster, object_id, &ability, &mut cost);
+    if let Some(pending) = state.pending_cast.as_mut() {
+        pending.cost = cost;
+    }
 }
 
 /// CR 601.2f + CR 118.9d: Apply the full cost-modifier stack (commander tax,
@@ -26865,6 +26944,89 @@ mod tests {
         assert_eq!(
             cost, original,
             "Trinisphere must not modify a spell whose mv already meets the floor"
+        );
+    }
+
+    /// CR 601.2b + CR 601.2f: While `{X}` is still symbolic (mana value 0), the
+    /// cost floor must NOT fire — otherwise the floored generic is baked in and
+    /// then X is added on top, permanently over-charging the spell. The floor is
+    /// deferred until X is concretized.
+    #[test]
+    fn cost_floor_deferred_while_x_symbolic() {
+        let mut state = setup_game_at_main_phase();
+        add_trinisphere(&mut state, PlayerId(0));
+        let spell = create_stack_spell(
+            &mut state,
+            PlayerId(0),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            },
+        );
+
+        let mut cost = state.objects[&spell].mana_cost.clone();
+        apply_all_cost_modifiers(&state, PlayerId(0), spell, &mut cost);
+
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            },
+            "floor must be deferred while X is symbolic — applying it now would wrongly add {{3}}"
+        );
+    }
+
+    /// CR 601.2b + CR 601.2f: Once X is concretized to a value that brings the
+    /// total to or above the floor, the floor adds nothing. {X}{X} at X=2 = mv 4,
+    /// so a 3-mana floor is a no-op — the spell costs 4, not 7.
+    #[test]
+    fn cost_floor_after_x_concretized_meets_floor() {
+        let mut state = setup_game_at_main_phase();
+        add_trinisphere(&mut state, PlayerId(0));
+        let spell = create_stack_spell(
+            &mut state,
+            PlayerId(0),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            },
+        );
+
+        let mut cost = state.objects[&spell].mana_cost.clone();
+        cost.concretize_x(2);
+        apply_cost_floor(&state, PlayerId(0), spell, &mut cost);
+
+        assert_eq!(
+            cost.mana_value(),
+            4,
+            "{{X}}{{X}} at X=2 is mv 4 (>= floor 3); floor must add nothing"
+        );
+    }
+
+    /// CR 601.2b + CR 601.2f: When the concrete total is still below the floor
+    /// (X=0 → mv 0), the floor brings it up to 3 — applied after X, not before.
+    #[test]
+    fn cost_floor_after_x_concretized_below_floor() {
+        let mut state = setup_game_at_main_phase();
+        add_trinisphere(&mut state, PlayerId(0));
+        let spell = create_stack_spell(
+            &mut state,
+            PlayerId(0),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            },
+        );
+
+        let mut cost = state.objects[&spell].mana_cost.clone();
+        cost.concretize_x(0);
+        apply_cost_floor(&state, PlayerId(0), spell, &mut cost);
+
+        assert_eq!(
+            cost.mana_value(),
+            3,
+            "{{X}}{{X}} at X=0 is mv 0; floor brings it to 3"
         );
     }
 

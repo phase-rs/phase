@@ -498,6 +498,17 @@ pub enum StaticMode {
     CastWithKeyword {
         keyword: Keyword,
     },
+    /// CR 118.9 + CR 601.2f: A permanent grants its controller a wholesale
+    /// alternative MANA cost for spells matching `StaticDefinition::affected`
+    /// that the controller casts — they may pay `cost` rather than the spell's
+    /// mana cost. Parallel to `CastWithKeyword`. Distinct from `ReduceCost`
+    /// (subtractive, CR 601.2f) — this REPLACES the mana cost wholesale
+    /// (CR 118.9) and is mutually exclusive with other alternative costs
+    /// (CR 118.9a). Rooftop Storm ({0}, Zombie creature spells), Fist of Suns
+    /// ({WUBRG}, any spell), Jodah (MV 5+).
+    CastWithAlternativeCost {
+        cost: ManaCost,
+    },
     /// CR 601.2f: Reduces the cost of spells matching the filter.
     /// Permanent-based cost reduction applied during casting (not self-cost reduction).
     ReduceCost {
@@ -1071,6 +1082,7 @@ impl Hash for StaticMode {
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::CastWithKeyword { .. }
+            | StaticMode::CastWithAlternativeCost { .. }
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
@@ -1106,6 +1118,9 @@ impl fmt::Display for StaticMode {
             StaticMode::GrantsExtraVote => write!(f, "GrantsExtraVote"),
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
+            }
+            StaticMode::CastWithAlternativeCost { cost } => {
+                write!(f, "CastWithAlternativeCost({cost:?})")
             }
             StaticMode::ReduceCost { .. } => write!(f, "ReduceCost"),
             StaticMode::ReduceAbilityCost {
@@ -1970,6 +1985,22 @@ mod tests {
             StaticMode::Flying,
             StaticMode::MustBeBlocked,
             StaticMode::GrantsExtraVote,
+            // CR 118.9: data-carrying ManaCost — serde must preserve {0} and {WUBRG}.
+            StaticMode::CastWithAlternativeCost {
+                cost: ManaCost::zero(),
+            },
+            StaticMode::CastWithAlternativeCost {
+                cost: ManaCost::Cost {
+                    shards: vec![
+                        super::super::mana::ManaCostShard::White,
+                        super::super::mana::ManaCostShard::Blue,
+                        super::super::mana::ManaCostShard::Black,
+                        super::super::mana::ManaCostShard::Red,
+                        super::super::mana::ManaCostShard::Green,
+                    ],
+                    generic: 0,
+                },
+            },
             StaticMode::Other("Custom".to_string()),
         ];
         let json = serde_json::to_string(&modes).unwrap();

@@ -300,6 +300,9 @@ pub(crate) enum ContinuationAst {
     RevealUntilKept {
         destination: Zone,
         enter_tapped: bool,
+        /// CR 508.4: the kept card enters the battlefield attacking
+        /// ("tapped and attacking"). Absorbs into `enters_attacking`.
+        enters_attacking: bool,
         rest_destination: Option<Zone>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
         /// optional ("you may put that card onto the battlefield"). `destination`
@@ -316,6 +319,20 @@ pub(crate) enum ContinuationAst {
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
     RevealUntilAllToZone { destination: Zone },
+    /// CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a private
+    /// `Dig` (the "look at the top N cards of <player>'s library" look step).
+    /// Rewrites the preceding `Dig` into an `Effect::ExileTop` so the looked-at
+    /// card(s) actually leave the library — the Gonti, Canny Acquisitor impulse
+    /// idiom ("look at the top card of that player's library, then exile it face
+    /// down. You may play that card ..."). `player`/`count` are lifted from the
+    /// `Dig` (with `ParentTarget` re-bound to the triggering player via
+    /// `that_player_library_filter`); `face_down` reflects the explicit
+    /// hidden-information suffix.
+    ExileLookedAtCard {
+        player: TargetFilter,
+        count: QuantityExpr,
+        face_down: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

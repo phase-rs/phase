@@ -154,6 +154,11 @@ pub fn parse_mana_symbol(input: &str) -> OracleResult<'_, ManaCostShard> {
 /// Parse the inner content of a mana symbol (between `{` and `}`).
 fn parse_mana_symbol_inner(input: &str) -> OracleResult<'_, ManaCostShard> {
     alt((
+        // Phyrexian-hybrid symbols (longest match first). These 3-part `{C1/C2/P}`
+        // symbols must be tried before the 2-part hybrid arms below — otherwise
+        // `alt` matches the `W/U` prefix of `{W/U/P}` and the trailing `/P`
+        // breaks the `}` delimiter, silently dropping the pip (issue #1416).
+        parse_phyrexian_hybrid_symbol_inner,
         // Hybrid symbols (longest match first)
         value(ManaCostShard::WhiteBlue, tag("W/U")),
         value(ManaCostShard::WhiteBlack, tag("W/B")),
@@ -251,6 +256,28 @@ fn parse_two_generic_hybrid_symbol_inner(input: &str) -> OracleResult<'_, ManaCo
         value(ManaCostShard::TwoBlack, tag("2/B")),
         value(ManaCostShard::TwoRed, tag("2/R")),
         value(ManaCostShard::TwoGreen, tag("2/G")),
+    ))
+    .parse(input)
+}
+
+/// CR 107.4f: Phyrexian-hybrid symbols `{C1/C2/P}` may be paid with one mana of
+/// either color or 2 life. Mirrors the 10 such symbols in
+/// `ManaCostShard::from_str`. Kept as a dedicated combinator (like
+/// `parse_two_generic_hybrid_symbol_inner`) so the 3-part forms can be matched
+/// ahead of the 2-part hybrid arms in `parse_mana_symbol_inner` — `alt` does not
+/// backtrack, so the longer form must be tried first.
+fn parse_phyrexian_hybrid_symbol_inner(input: &str) -> OracleResult<'_, ManaCostShard> {
+    alt((
+        value(ManaCostShard::PhyrexianWhiteBlue, tag("W/U/P")),
+        value(ManaCostShard::PhyrexianWhiteBlack, tag("W/B/P")),
+        value(ManaCostShard::PhyrexianBlueBlack, tag("U/B/P")),
+        value(ManaCostShard::PhyrexianBlueRed, tag("U/R/P")),
+        value(ManaCostShard::PhyrexianBlackRed, tag("B/R/P")),
+        value(ManaCostShard::PhyrexianBlackGreen, tag("B/G/P")),
+        value(ManaCostShard::PhyrexianRedWhite, tag("R/W/P")),
+        value(ManaCostShard::PhyrexianRedGreen, tag("R/G/P")),
+        value(ManaCostShard::PhyrexianGreenWhite, tag("G/W/P")),
+        value(ManaCostShard::PhyrexianGreenBlue, tag("G/U/P")),
     ))
     .parse(input)
 }
