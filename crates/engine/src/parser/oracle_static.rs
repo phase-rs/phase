@@ -6030,9 +6030,10 @@ fn descriptor_is_negation(descriptor: &str) -> bool {
 /// fall through to `parse_type_phrase` instead of becoming fabricated subtypes.
 fn descriptor_is_supertype(descriptor: &str) -> bool {
     let lower = descriptor.to_lowercase();
-    all_consuming(nom_target::parse_supertype_word)
+    let is_supertype = all_consuming(nom_target::parse_supertype_word)
         .parse(lower.as_str())
-        .is_ok()
+        .is_ok();
+    is_supertype
 }
 
 fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
