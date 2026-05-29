@@ -2008,6 +2008,7 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::RevealUntilKept {
             destination,
             enter_tapped: tapped,
+            enters_attacking: attacking,
             rest_destination: rest_dest,
             optional_decline,
         } => {
@@ -2017,6 +2018,7 @@ pub(super) fn apply_clause_continuation(
             if let Effect::RevealUntil {
                 kept_destination,
                 enter_tapped,
+                enters_attacking,
                 rest_destination,
                 kept_optional_to,
                 ..
@@ -2031,6 +2033,8 @@ pub(super) fn apply_clause_continuation(
                         *kept_optional_to = Some(destination);
                         *kept_destination = decline;
                         *enter_tapped = tapped;
+                        // CR 508.4: accept zone is the battlefield here.
+                        *enters_attacking = attacking;
                     }
                     // Mandatory kept clause. Refine `kept_destination` without
                     // clobbering a `kept_optional_to` set by a prior chunk (the
@@ -2040,6 +2044,9 @@ pub(super) fn apply_clause_continuation(
                         *kept_destination = destination;
                         if destination == Zone::Battlefield {
                             *enter_tapped = tapped;
+                            // CR 508.4: "put that card onto the battlefield
+                            // tapped and attacking" (Raph & Mikey, Fireflux Squad).
+                            *enters_attacking = attacking;
                         }
                     }
                 }
@@ -2931,13 +2938,16 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "put it")
                 || nom_primitives::scan_contains(&lower, "puts it") =>
         {
-            let (destination, enter_tapped) =
+            let (destination, enter_tapped, enters_attacking) =
                 if nom_primitives::scan_contains(&lower, "onto the battlefield") {
                     let tapped = nom_primitives::scan_contains(&lower, "tapped");
-                    (Zone::Battlefield, tapped)
+                    // CR 508.4: "put that card onto the battlefield tapped and
+                    // attacking" (Raph & Mikey, Fireflux Squad).
+                    let attacking = nom_primitives::scan_contains(&lower, "attacking");
+                    (Zone::Battlefield, tapped, attacking)
                 } else {
                     // Default "into your hand"
-                    (Zone::Hand, false)
+                    (Zone::Hand, false, false)
                 };
             let rest = parse_reveal_until_rest_zone(&lower);
             // CR 701.20a + CR 608.2c: "you may put that card onto the battlefield"
@@ -2957,6 +2967,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::RevealUntilKept {
                 destination,
                 enter_tapped,
+                enters_attacking,
                 rest_destination: rest,
                 optional_decline,
             })

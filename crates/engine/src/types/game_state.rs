@@ -2480,9 +2480,17 @@ pub enum WaitingFor {
     RevealUntilKeptChoice {
         player: PlayerId,
         hit_card: ObjectId,
+        /// CR 508.4: The ability source (e.g. the attacking creature whose
+        /// trigger revealed this card). Supplies the defending player when the
+        /// accepted card enters the battlefield attacking.
+        source_id: ObjectId,
         accept_zone: Zone,
         decline_zone: Zone,
         enter_tapped: bool,
+        /// CR 508.4: When the accepted card goes to the battlefield, it enters
+        /// attacking ("tapped and attacking"). Carried from `Effect::RevealUntil`.
+        #[serde(default)]
+        enters_attacking: bool,
         revealed_misses: Vec<ObjectId>,
         rest_destination: Zone,
     },

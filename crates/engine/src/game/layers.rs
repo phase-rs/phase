@@ -1249,6 +1249,15 @@ fn active_continuous_effects_from_static_definitions(
 /// the next layer evaluation triggered by `layers_dirty`. No known Magic card
 /// exercises a quoted-within-quoted grant, so this is acceptable for now;
 /// revisit if such a card appears.
+///
+/// Intra-static identity-key limitation: synthesized inner effects use
+/// `(source_id = recipient_id, def_index = None, transient_id = None)`, the same
+/// triple `depends_on` keys on to suppress dependency edges between one static's
+/// own clauses (CR 613.7a). Two DISTINCT grants of type-changing + type-referencing
+/// inner modifications onto the SAME recipient therefore share one identity key, so
+/// `depends_on` would suppress the cross-grant edge between them as if they were one
+/// static. No known card grants two such interacting static abilities to the same
+/// recipient; documented here for the next maintainer who hits that case.
 fn expand_granted_static_effects(
     state: &GameState,
     host_source_id: ObjectId,
@@ -1641,6 +1650,18 @@ pub(crate) fn order_active_continuous_effects(
 /// Check if effect `a` depends on effect `b`.
 /// If `b` changes types and `a`'s filter is type-based, `a` depends on `b`.
 fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &GameState) -> bool {
+    // CR 613.7a + CR 613.8a: A single static ability's modifications share one
+    // timestamp and apply in the order written (613.7a). "Depend on" (613.8a) is a
+    // relationship between an effect and ANOTHER effect (distinct generators) — it
+    // never governs the internal sequencing of one ability's own clauses. Suppress
+    // dependency edges between modifications flattened from the same static so that
+    // e.g. RemoveAllSubtypes{Creature} wipes pre-existing subtypes and a later
+    // AddSubtype survives, exactly as written.
+    if a.source_id == b.source_id && a.def_index == b.def_index && a.transient_id == b.transient_id
+    {
+        return false;
+    }
+
     if matches!(b.modification, ContinuousModification::CopyValues { .. }) {
         return true;
     }
@@ -8382,6 +8403,209 @@ mod tests {
             bear_obj.toughness,
             Some(2),
             "Non-Zombie recipient must NOT be buffed (per-recipient gate)"
+        );
+    }
+
+    /// CR 205.1a + CR 613.1d (Layer 4) + CR 105.3 + CR 613.1e (Layer 5):
+    /// End-to-end confirmation of the Frogify class — a non-additive "is a 1/1
+    /// blue Frog creature" Aura *replaces* the enchanted creature's card types,
+    /// creature subtypes, and color, rather than adding to them. A Red Human
+    /// Wizard 2/2 becomes exactly a 1/1 blue Frog creature with no residual
+    /// Human/Wizard subtypes and no residual red color.
+    #[test]
+    fn frogify_aura_replaces_subtypes_color_and_type() {
+        let mut state = setup();
+        // RemoveAllSubtypes{Creature} resolves creature-type membership against
+        // state.all_creature_types — the wipe and the new Frog must be known.
+        state.all_creature_types = vec![
+            "Human".to_string(),
+            "Wizard".to_string(),
+            "Frog".to_string(),
+        ];
+
+        let creature = make_creature(&mut state, "Human Wizard", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.subtypes.push("Human".to_string());
+            obj.card_types.subtypes.push("Wizard".to_string());
+            obj.color = vec![ManaColor::Red];
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_color = obj.color.clone();
+        }
+
+        // Create the Frogify Aura carrying the modifications the parser now emits.
+        let aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Frogify".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(creature.into());
+            obj.timestamp = ts;
+
+            let enchanted_creature = TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(enchanted_creature)
+                    .modifications(vec![
+                        ContinuousModification::RemoveAllAbilities,
+                        ContinuousModification::SetCardTypes {
+                            core_types: vec![CoreType::Creature],
+                        },
+                        ContinuousModification::SetColor {
+                            colors: vec![ManaColor::Blue],
+                        },
+                        ContinuousModification::SetPower { value: 1 },
+                        ContinuousModification::SetToughness { value: 1 },
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: SubtypeSet::Creature,
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Frog".to_string(),
+                        },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let c = state.objects.get(&creature).unwrap();
+        assert_eq!(c.power, Some(1), "Frogify sets base power to 1");
+        assert_eq!(c.toughness, Some(1), "Frogify sets base toughness to 1");
+        assert_eq!(
+            c.color,
+            vec![ManaColor::Blue],
+            "non-additive color must replace Red with Blue"
+        );
+        assert_eq!(
+            c.card_types.subtypes,
+            vec!["Frog".to_string()],
+            "Human and Wizard must be wiped, only Frog remains: {:?}",
+            c.card_types.subtypes
+        );
+        assert_eq!(
+            c.card_types.core_types,
+            vec![CoreType::Creature],
+            "card types must be replaced with exactly Creature: {:?}",
+            c.card_types.core_types
+        );
+    }
+
+    /// CR 613.7a + CR 613.8a: A single static ability's modifications share one
+    /// timestamp and apply in WRITTEN order; "depend on" (CR 613.8a) only
+    /// sequences effects from DISTINCT generators and must never reorder one
+    /// static's own clauses. This is the discriminating regression guard for
+    /// the Frogify/Aura type-clearing bug.
+    ///
+    /// The graph is deliberately PARTIAL and ASYMMETRIC so the CR 613.8b
+    /// cycle-fallback (which would otherwise silently return the pre-sorted
+    /// written order and mask the bug) cannot rescue it. Two Type-layer (CR
+    /// 613.1d) clauses share the static's one type-referencing filter:
+    ///   0. `RemoveAllSubtypes{Creature}` — NOT in `depends_on`'s
+    ///      `b_changes_types` set (it is a bulk wipe, not an Add/Remove of a
+    ///      named type).
+    ///   1. `AddSubtype{Frog}`            — IS in `b_changes_types`.
+    ///
+    /// With the guard suppressed, `depends_on` yields exactly ONE directed
+    /// edge: `depends_on(RemoveAllSubtypes, AddSubtype) == true` (b adds a
+    /// type, a's filter references a type) while the reverse is `false`
+    /// (RemoveAllSubtypes is not a `b_changes_types` variant). One edge, no
+    /// cycle → the toposort REORDERS `AddSubtype{Frog}` ahead of the wipe, so
+    /// Frog is added then immediately wiped → subtypes become EMPTY.
+    ///
+    /// With the guard intact the intra-static edge is suppressed, the toposort
+    /// falls through to the `mod_index` pre-sort (written) order: the wipe
+    /// clears Human/Wizard FIRST, then `AddSubtype{Frog}` survives → exactly
+    /// `[Frog]`. The assertion therefore passes ONLY when the guard preserves
+    /// written order, and fails if the dependency reorder is allowed.
+    #[test]
+    fn same_static_modifications_apply_in_written_order() {
+        let mut state = setup();
+        state.all_creature_types = vec![
+            "Human".to_string(),
+            "Wizard".to_string(),
+            "Frog".to_string(),
+        ];
+
+        // Creature with pre-existing creature subtypes that RemoveAllSubtypes
+        // must wipe.
+        let creature = make_creature(&mut state, "Human Wizard", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.subtypes.push("Human".to_string());
+            obj.card_types.subtypes.push("Wizard".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // One static carrying, in written order:
+        //   RemoveAllSubtypes{Creature} -> wipes Human, Wizard (applied FIRST)
+        //   AddSubtype{Frog}            -> added AFTER the wipe, MUST survive
+        // Written order is Frogify-correct; a dependency reorder would put the
+        // Add before the wipe and erase Frog.
+        let aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "TypeClearingAura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(creature.into());
+            obj.timestamp = ts;
+
+            let enchanted_creature = TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(enchanted_creature)
+                    .modifications(vec![
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: SubtypeSet::Creature,
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Frog".to_string(),
+                        },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let c = state.objects.get(&creature).unwrap();
+        assert_eq!(
+            c.card_types.subtypes,
+            vec!["Frog".to_string()],
+            "written-order wipe-then-add must yield exactly [Frog]; a dependency \
+             reorder of the Add ahead of RemoveAllSubtypes would erase Frog and \
+             leave the subtype list empty: {:?}",
+            c.card_types.subtypes
         );
     }
 }

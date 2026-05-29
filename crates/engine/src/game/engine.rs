@@ -2447,11 +2447,16 @@ fn apply_action(
             })?;
             pending.ability.set_chosen_x_recursive(value);
             pending.cost.concretize_x(value);
+            let object_id = pending.object_id;
             events.push(GameEvent::XValueChosen {
                 player,
-                object_id: pending.object_id,
+                object_id,
                 value,
             });
+            // CR 601.2b + CR 601.2f: X is now locked in. Apply the cost floor
+            // (Trinisphere class) that was deferred while X was symbolic, against
+            // the now-concrete total, before payment is determined.
+            casting::apply_post_x_cost_floor(state, player, object_id);
             casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?
         }
         // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
