@@ -4770,6 +4770,12 @@ fn parse_damage_prevention_replacement(
     if let Some(sf) = damage_source_filter {
         def = def.damage_source_filter(sf);
     }
+    // Capture whether the recipient filter was event-driven (typed
+    // `valid_card`) before moving it onto `def` — the follow-up rewrite
+    // below uses this signal to distinguish the Vigor cohort (rewrite
+    // `ParentTarget` → `PostReplacementDamageTarget`) from the spell-driven
+    // cohort (keep `ParentTarget` for the real spell target).
+    let recipient_is_event_filter = valid_card_filter.is_some();
     if let Some(vc) = valid_card_filter {
         def = def.valid_card(vc);
     }
@@ -4785,14 +4791,29 @@ fn parse_damage_prevention_replacement(
     // consumes the damage. Class members: Phyrexian Hydra, Vigor, Stormwild
     // Capridor, Hostility.
     if let Some(followup) = extract_prevention_followup(original_text) {
-        // CR 608.2k: Static self-prevention replacements (Anti-Venom, Vigor,
-        // Phyrexian Hydra, Stormwild Capridor) host their followup on the
-        // shield-bearing permanent itself. Bare pronouns ("him"/"it"/"this
-        // creature"/"this enchantment") in the rider must bind to `SelfRef`
-        // so PutCounter targets the permanent, not a non-existent parent
-        // target. The rider parse runs through the standard chain pipeline
-        // with `subject: SelfRef` so `resolve_pronoun_target` returns
-        // `SelfRef` per its typed-subject carve-out.
+        // CR 608.2k: Static self-prevention replacements split into two
+        // anaphor cohorts depending on what the rider counter/effect targets:
+        //
+        // 1. Rider targets the shield-bearing permanent itself (Anti-Venom,
+        //    Phyrexian Hydra, Stormwild Capridor, Hostility). The rider's
+        //    bare pronouns ("him"/"it"/"this creature"/"this enchantment"/
+        //    "~") must bind to `SelfRef` so the counter lands on the source.
+        //    Threading `subject: SelfRef` makes `resolve_pronoun_target`
+        //    return `SelfRef` per its typed-subject carve-out.
+        //
+        // 2. Rider targets the prevented event's damage recipient (Vigor:
+        //    "If damage would be dealt to another creature you control,
+        //    prevent that damage. Put a +1/+1 counter on that creature ..."
+        //    — "that creature" is the recipient, not the source). The rider
+        //    parser lowers "that creature" to `TargetFilter::ParentTarget`
+        //    by the generic CR 608.2c anaphor path, but there is no parent
+        //    target slot in a passive replacement context, so the binding
+        //    is dangling. Post-parse rewrite (below) remaps it to
+        //    `PostReplacementDamageTarget`. Cohort 2 is detected by the
+        //    presence of a typed `valid_card` recipient filter — that's the
+        //    structural signal that the shield is event-driven (no spell
+        //    target), so any `ParentTarget` in the rider can only refer to
+        //    the event recipient.
         let mut followup_ctx = ParseContext {
             subject: Some(TargetFilter::SelfRef),
             in_replacement: true,
@@ -4810,12 +4831,35 @@ fn parse_damage_prevention_replacement(
         // avoids parser-context plumbing. Single building-block walker
         // (`each_target_filter_mut`) handles every target-bearing effect arm.
         rewrite_parent_target_controller_to_post_replacement_source(&mut followup_def);
+        // CR 615.5 + CR 608.2c: Object-anaphor rewrite for cohort 2 (Vigor
+        // class). When the shield is event-driven (signalled by a typed
+        // `valid_card_filter`), `ParentTarget` in the rider can only refer
+        // to the prevented event's damage recipient — there is no parent
+        // target slot. Remap dangling `ParentTarget` to
+        // `PostReplacementDamageTarget` so the runtime resolves it against
+        // `state.post_replacement_event_target`. Spell-driven prevention
+        // (Test of Faith — "prevent the next 3 damage that would be dealt to
+        // target creature this turn") has `valid_card_filter = None` because
+        // its all-consuming recipient terminator fails, so this rewrite
+        // does not fire and `ParentTarget` correctly inherits the spell's
+        // chosen target.
+        if recipient_is_event_filter {
+            rewrite_parent_target_to_post_replacement_damage_target(&mut followup_def);
+        }
         def = def.execute(followup_def);
     }
 
     Some(def)
 }
 
+/// CR 614.1a: Extract the typed event-recipient filter from a damage-prevention
+/// shield's "dealt to <filter>" clause. The clause may close at the end of the
+/// sentence (`.`, `this turn`, `until end of turn`, or input end) or continue
+/// into a sibling prevention imperative (`, prevent that damage. ...` — Vigor,
+/// Phyrexian Hydra, Stormwild Capridor class of static prevention shields with
+/// follow-up rider). The `peek(", prevent")` boundary keeps the filter scoped
+/// to the recipient phrase without consuming the comma + imperative, leaving
+/// the follow-up extractor (`extract_prevention_followup`) to claim it.
 fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<TargetFilter> {
     nom_primitives::scan_at_word_boundaries(working_lower, |input| {
         let (after_to, _) = tag::<_, _, OracleError<'_>>("dealt to ").parse(input)?;
@@ -4828,7 +4872,7 @@ fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<Targe
         }
 
         let rest = rest.trim_start();
-        if all_consuming(alt((
+        let fully_consumed = all_consuming(alt((
             value((), eof::<&str, OracleError<'_>>),
             value((), tag::<_, _, OracleError<'_>>(".")),
             value(
@@ -4847,8 +4891,16 @@ fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<Targe
             ),
         )))
         .parse(rest)
-        .is_ok()
-        {
+        .is_ok();
+        // CR 614.1a + CR 615.5: A static prevention shield with a same-sentence
+        // imperative ("if damage would be dealt to <filter>, prevent that damage")
+        // closes the recipient phrase at the clause boundary `, prevent`, not at
+        // sentence end. `peek` acknowledges the boundary without consuming so
+        // the follow-up extractor still claims the imperative and its rider.
+        let clause_boundary = peek(tag::<_, _, OracleError<'_>>(", prevent"))
+            .parse(rest)
+            .is_ok();
+        if fully_consumed || clause_boundary {
             Ok((rest, filter))
         } else {
             Err(nom::Err::Error(OracleError::new(
@@ -4874,6 +4926,37 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_parent_target_controller_to_post_replacement_source(else_branch);
+    }
+}
+
+/// CR 615.5 + CR 608.2c: In a prevention follow-up whose shield is event-driven
+/// (Vigor class: "If damage would be dealt to <typed filter>, prevent that
+/// damage. Put a +1/+1 counter on that creature ..."), the rider's anaphor
+/// "that creature" refers to the prevented event's damage recipient. The
+/// ordinary `parse_target` path lowers "that <type phrase>" to
+/// `TargetFilter::ParentTarget` per CR 608.2c, but in a passive replacement
+/// there is no parent target slot to bind against. Rewrite each dangling
+/// `ParentTarget` to `PostReplacementDamageTarget` so the runtime resolves
+/// it against `state.post_replacement_event_target`.
+///
+/// Sibling of `rewrite_damage_recipient_to_post_replacement_target` which
+/// handles the player-anaphor cohort ("that player draws cards ..."). Kept
+/// separate so the player walker stays scoped to player refs and this walker
+/// only fires when the caller has confirmed the shield is event-driven (via
+/// a typed `valid_card_filter` signal) — spell-driven prevention with a real
+/// `target creature` slot must keep its `ParentTarget` binding intact (Test
+/// of Faith).
+fn rewrite_parent_target_to_post_replacement_damage_target(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::ParentTarget) {
+            *f = TargetFilter::PostReplacementDamageTarget;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_parent_target_to_post_replacement_damage_target(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_parent_target_to_post_replacement_damage_target(else_branch);
     }
 }
 
@@ -5748,6 +5831,95 @@ mod tests {
                 target: TargetFilter::ParentTarget,
             } if *counter_type == CounterType::Plus1Plus1
         ));
+    }
+
+    /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
+    /// another creature you control, prevent that damage. Put a +1/+1 counter
+    /// on that creature for each 1 damage prevented this way."
+    ///
+    /// Three building-block assertions:
+    ///
+    /// 1. The recipient phrase parses through `parse_damage_recipient_valid_card_filter`
+    ///    even though it closes at `", prevent"` (the same-sentence clause
+    ///    boundary), and the resulting typed filter retains `controller: You`
+    ///    and `FilterProp::Another`. Previously the all-consuming terminator
+    ///    rejected the comma + imperative, silently dropping `valid_card` and
+    ///    causing the shield to fire on ANY creature (including opponents').
+    ///
+    /// 2. The rider's anaphor "that creature" (which `parse_target` lowers to
+    ///    `TargetFilter::ParentTarget` per CR 608.2c) is rewritten at the
+    ///    parser call site to `TargetFilter::PostReplacementDamageTarget` so
+    ///    the +1/+1 counter lands on the prevented event's damage recipient
+    ///    rather than dangling against a nonexistent parent target slot.
+    ///
+    /// 3. The rider count resolves to `QuantityRef::EventContextAmount` (the
+    ///    prevented amount), via the existing `for each 1 damage prevented
+    ///    this way` post-target suffix path.
+
+    #[test]
+    fn vigor_event_recipient_filter_and_counter_target_rewrite() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to another creature you control, prevent that damage. \
+             Put a +1/+1 counter on that creature for each 1 damage prevented this way.",
+            "Vigor",
+        )
+        .expect("Vigor should parse as a damage prevention replacement");
+
+        // (1) valid_card recipient filter — Typed Creature, controller=You, Another.
+        let valid_card = def
+            .valid_card
+            .as_ref()
+            .expect("Vigor's recipient filter must survive the parser");
+        match valid_card {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature type filter, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "expected controller=You, got {:?}",
+                    tf.controller
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "expected FilterProp::Another in {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed recipient filter, got {other:?}"),
+        }
+
+        // (2) + (3) rider PutCounter targets the event recipient with
+        // EventContextAmount on the `count` field.
+        let execute = def.execute.as_ref().expect("execute present");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+                // The suffix-form for-each ("... for each 1 damage prevented
+                // this way") lands the prevented amount on the PutCounter
+                // `count` field via `try_parse_for_each_effect`, so pin the
+                // exact field rather than accepting an either/or shape.
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }
+                    ),
+                    "expected count to be EventContextAmount; got count={count:?}, repeat_for={:?}",
+                    execute.repeat_for
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
     }
 
     #[test]
