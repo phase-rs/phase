@@ -6025,6 +6025,9 @@ fn descriptor_is_negation(descriptor: &str) -> bool {
     after_non.chars().next().is_some_and(|c| !c.is_whitespace())
 }
 
+/// CR 205.4a: Supertype descriptors include legendary, basic, snow, and world;
+/// parse supported supertype words through the shared target combinator so they
+/// fall through to `parse_type_phrase` instead of becoming fabricated subtypes.
 fn descriptor_is_supertype(descriptor: &str) -> bool {
     let lower = descriptor.to_lowercase();
     let is_supertype = all_consuming(nom_target::parse_supertype_word)
