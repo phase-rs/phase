@@ -1196,6 +1196,17 @@ fn exile_objects_castable_by_permission(
     state: &GameState,
     player: PlayerId,
 ) -> Vec<(ObjectId, ObjectId, CastFrequency)> {
+    // Hot-path fast exit: this runs once per legal-actions computation (and so
+    // once per AI-search node). When nothing was exiled "with" a source this
+    // turn, no `ExileCastPermission` static can offer a card — short-circuit
+    // before `exile_permission_sources` scans the whole battlefield and
+    // allocates an `active_static_definitions` iterator per controlled
+    // permanent. Equivalent to the empty-pool `else { continue }` below, but
+    // pays a single `HashMap::is_empty()` instead in the ~100% of board states
+    // with no Maralen-class permanent in play.
+    if state.cards_exiled_with_source_this_turn.is_empty() {
+        return Vec::new();
+    }
     let mut results = Vec::new();
     let sources = exile_permission_sources(state, player);
     for source in &sources {
@@ -1272,6 +1283,12 @@ pub(crate) fn exile_cast_permission_source(
 ) -> Option<(ObjectId, CastFrequency, ExileCastCost)> {
     let obj = state.objects.get(&exiled_id)?;
     if obj.zone != Zone::Exile {
+        return None;
+    }
+    // Same empty-pool fast exit as `exile_objects_castable_by_permission`: with
+    // nothing exiled-with-a-source this turn, no static can authorize the cast,
+    // so skip the battlefield scan in `exile_permission_sources`.
+    if state.cards_exiled_with_source_this_turn.is_empty() {
         return None;
     }
     let sources = exile_permission_sources(state, player);
