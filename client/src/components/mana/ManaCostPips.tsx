@@ -8,7 +8,7 @@ const PIP_SIZES: Record<PipSize, { container: string; gap: string; backdrop: str
   xs: { container: "w-[12px] h-[12px] p-[0px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[1px] top-[2px] -bottom-[4px]" },
   sm: { container: "w-[18px] h-[18px] p-[0px]", gap: "gap-[1px]", backdrop: "-inset-x-[2px] top-[4px] -bottom-[8px]" },
   md: { container: "w-[22px] h-[22px] p-[2px]", gap: "gap-[1px]", backdrop: "-inset-x-[3px] -top-[2px] -bottom-[4px]" },
-  lg: { container: "w-[28px] h-[28px] pt-[1px] pb-[3px] px-[2.5px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[3px] -top-[2px] -bottom-[4px]" },
+  lg: { container: "w-[28px] h-[28px] py-[2px] px-[2.5px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[3px] -top-[2px] -bottom-[4px]" },
 };
 
 interface ManaCostPipsProps {
@@ -34,7 +34,7 @@ export function ManaCostPips({ cost, isReduced, size = "md", className = "" }: M
         {shards.map((shard, i) => (
           <div
             key={i}
-            className={`relative ${s.container} rounded-full bg-gray-900/80 shadow-[0_1px_3px_rgba(0,0,0,0.6)] ${
+            className={`relative flex items-center justify-center ${s.container} rounded-full bg-gray-900/80 shadow-[0_1px_3px_rgba(0,0,0,0.6)] ${
               isReduced ? "ring-[1.5px] ring-green-400" : ""
             }`}
           >

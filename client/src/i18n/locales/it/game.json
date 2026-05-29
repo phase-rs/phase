@@ -62,6 +62,7 @@
   },
   "permanent": {
     "expandGroup": "Espandi gruppo {{name}}",
+    "collapseGroup": "Comprimi gruppo {{name}}",
     "chooseToken": "Scegli pedina {{name}}",
     "pick": "Scegli",
     "close": "chiudi",
