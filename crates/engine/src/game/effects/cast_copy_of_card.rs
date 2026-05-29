@@ -179,6 +179,11 @@ fn cast_one_copy(
             ability: resolved,
             casting_variant: CastingVariant::Normal,
             // CR 118.9 + CR 601.2f: "Without paying its mana cost" is an alternative cost.
+            // DEFERRED: the parsed `Effect::CastCopyOfCard.cost` is intentionally
+            // ignored here. Every card in this class today is a free recast, so
+            // the parser only ever emits `ManaCost::zero()`; the copy is cast for
+            // free (`actual_mana_spent: 0`). A future "cast a copy and pay {cost}"
+            // card must thread that alt-cost into this stack entry at this site.
             actual_mana_spent: 0,
         },
     });

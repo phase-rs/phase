@@ -7,19 +7,20 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
-/// CR 701.12a: Exchange a player's life total with the source permanent's power
+/// CR 701.12g: Exchange a player's life total with the source permanent's power
 /// or toughness (Tree of Perdition, Tree of Redemption, Evra, Halcyon Witness).
 ///
-/// CR 701.12a requires both previous values to be read before either changes
-/// and makes the exchange all-or-nothing: if the life change is forbidden
-/// (CR 119.7 can't-gain when raising, CR 119.8 can't-lose when lowering), no
-/// part of the exchange occurs. Both writes use the captured previous values,
-/// so their order is irrelevant.
+/// CR 701.12g: each value becomes equal to the previous value of the other, so
+/// both previous values must be read before either changes. When a life total
+/// is involved the player gains or loses the amount of life necessary to reach
+/// the other value (it is a gain/loss, not a set), and the exchange is
+/// all-or-nothing: if the life change is forbidden (CR 119.7 can't-gain when
+/// raising, CR 119.8 can't-lose when lowering), no part of the exchange occurs.
 ///
 /// The stat side becomes an indefinite layer-7b continuous "set" effect
 /// (CR 613.4b) on the source: its base power/toughness is set to the player's
-/// previous life total, so counters (layer 7d) and +N/+N modifiers (layer 7c)
-/// still apply on top per the card's rulings.
+/// previous life total, so counters and +N/+N modifiers (both CR 613.4c) still
+/// apply on top per the card's rulings.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -74,9 +75,9 @@ pub fn resolve(
         .ok_or(EffectError::PlayerNotFound)?
         .life;
 
-    // CR 701.12a + CR 119.7 / CR 119.8: All-or-nothing. The player's life total
-    // would be set to `stat_value` (CR 119.5). If that change is forbidden, no
-    // part of the exchange occurs.
+    // CR 701.12g + CR 119.7 / CR 119.8: All-or-nothing. The player would gain or
+    // lose life to reach `stat_value`. If that change is forbidden (can't-gain
+    // when raising, can't-lose when lowering), no part of the exchange occurs.
     let life_blocked = match stat_value.cmp(&old_life) {
         std::cmp::Ordering::Greater => player_has_cant_gain_life(state, player_id),
         std::cmp::Ordering::Less => player_has_cant_lose_life(state, player_id),
@@ -107,9 +108,9 @@ pub fn resolve(
         None,
     );
 
-    // CR 119.5: Set the player's life total to the stat's previous value by
-    // gaining or losing the difference. The helpers re-check CR 119.7/119.8 and
-    // route through the replacement pipeline.
+    // CR 701.12g: the player gains or loses the difference to reach the stat's
+    // previous value (a gain/loss, not a set). The helpers re-check CR
+    // 119.7/119.8 and route through the replacement pipeline.
     let diff = stat_value - old_life;
     let deferred = match diff.signum() {
         1 => apply_life_gain(state, player_id, diff as u32, events).err(),

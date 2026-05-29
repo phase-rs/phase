@@ -62,6 +62,7 @@
   },
   "permanent": {
     "expandGroup": "Expandir o grupo {{name}}",
+    "collapseGroup": "Recolher o grupo {{name}}",
     "chooseToken": "Escolher ficha {{name}}",
     "pick": "Escolher",
     "close": "fechar",

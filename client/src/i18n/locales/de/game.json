@@ -62,6 +62,7 @@
   },
   "permanent": {
     "expandGroup": "{{name}}-Gruppe aufklappen",
+    "collapseGroup": "{{name}}-Gruppe zuklappen",
     "chooseToken": "{{name}}-Spielstein wählen",
     "pick": "Wählen",
     "close": "schließen",

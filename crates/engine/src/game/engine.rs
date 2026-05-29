@@ -38,7 +38,8 @@ use super::mulligan;
 use super::planeswalker;
 use super::priority;
 use super::public_state::{
-    bump_state_revision, finalize_public_state, mark_public_state_all_dirty, sync_waiting_for,
+    bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
+    mark_public_state_from_events, sync_waiting_for,
 };
 use super::sba;
 use super::triggers;
@@ -148,11 +149,15 @@ pub fn apply(
     let mut result = apply_action(state, actor, action)?;
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
-    mark_public_state_all_dirty(state);
     sync_waiting_for(state, &result.waiting_for);
     run_auto_pass_loop(state, &mut result);
     reconcile_terminal_result(state, &mut result);
     remember_public_reveals(state, &result.events);
+    // Targeted public-state dirty marking over the full accumulated event set
+    // (the auto-pass loop appends events). `finalize_public_state` is the only
+    // consumer of `public_state_dirty`, so marking once here over the complete
+    // event stream is correct and cheapest.
+    mark_public_state_from_events(state, &result.events);
     finalize_public_state(state);
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
     Ok(result)

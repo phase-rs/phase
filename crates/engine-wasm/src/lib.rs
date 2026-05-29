@@ -1096,18 +1096,12 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 }
 
 /// Get the AI's chosen action for the current game state.
-/// `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard".
+/// `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard",
+/// "CEDH" (case-insensitive; see `AiDifficulty::from_label`).
 /// `player_id` is the seat index of the AI player (0-based).
 #[wasm_bindgen]
 pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue> {
-    let ai_difficulty = match difficulty {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Medium,
-    };
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
 
     with_state(|state| {
         let config =
@@ -1134,14 +1128,7 @@ pub fn get_ai_scored_candidates(
     player_id: u8,
     rng_seed: u64,
 ) -> Result<JsValue, JsValue> {
-    let ai_difficulty = match difficulty {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Medium,
-    };
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
 
     with_state_mut(|state| {
         // Re-seed the state RNG so each parallel worker explores different
@@ -1167,14 +1154,7 @@ pub fn select_action_from_scores(
     difficulty: &str,
     rng_seed: u64,
 ) -> Result<JsValue, JsValue> {
-    let ai_difficulty = match difficulty {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Medium,
-    };
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
     let config = phase_ai::config::create_config(ai_difficulty, Platform::Wasm);
     let scored: Vec<(GameAction, f64)> = serde_json::from_str(scores_json)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize scores: {e}")))?;
@@ -1280,14 +1260,7 @@ pub fn resolve_all(
                 GameAction::PassPriority
             } else if let Some(seat) = ai_seats.iter().find(|s| PlayerId(s.player_id) == acting) {
                 // AI player — ask the AI what to do
-                let ai_difficulty = match seat.difficulty.as_str() {
-                    "VeryEasy" => AiDifficulty::VeryEasy,
-                    "Easy" => AiDifficulty::Easy,
-                    "Medium" => AiDifficulty::Medium,
-                    "Hard" => AiDifficulty::Hard,
-                    "VeryHard" => AiDifficulty::VeryHard,
-                    _ => AiDifficulty::Medium,
-                };
+                let ai_difficulty = AiDifficulty::from_label(&seat.difficulty);
                 let config = create_config_for_players(
                     ai_difficulty,
                     Platform::Wasm,

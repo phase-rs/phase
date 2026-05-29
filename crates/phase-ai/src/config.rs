@@ -44,6 +44,30 @@ pub enum AiDifficulty {
     CEDH,
 }
 
+impl AiDifficulty {
+    /// Parse a difficulty label supplied by a transport boundary (WASM bridge,
+    /// Tauri IPC, CLI). Case-insensitive; unknown labels fall back to `Medium`.
+    ///
+    /// This is the single authority for the label → enum mapping. The frontend
+    /// sends one label per AI seat and uses `"CEDH"` for competitive Commander
+    /// games, so this MUST include the `cedh` arm — every transport that maps a
+    /// difficulty string routes through here precisely so a missing arm can't
+    /// silently downgrade a preset (cEDH previously fell through to `Medium`).
+    pub fn from_label(label: &str) -> AiDifficulty {
+        // Trim first: transport boundaries (config files, CLI args via ai_duel)
+        // may carry surrounding whitespace.
+        match label.trim().to_lowercase().as_str() {
+            "veryeasy" => AiDifficulty::VeryEasy,
+            "easy" => AiDifficulty::Easy,
+            "medium" => AiDifficulty::Medium,
+            "hard" => AiDifficulty::Hard,
+            "veryhard" => AiDifficulty::VeryHard,
+            "cedh" => AiDifficulty::CEDH,
+            _ => AiDifficulty::Medium,
+        }
+    }
+}
+
 /// Platform the AI runs on (affects budget constraints).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -783,6 +807,33 @@ mod tests {
             let parsed: AiDifficulty = serde_json::from_str(&json).unwrap();
             assert_eq!(diff, parsed);
         }
+    }
+
+    #[test]
+    fn from_label_maps_every_difficulty_including_cedh() {
+        // The transport layers (WASM, Tauri, CLI) all route difficulty strings
+        // through this one mapping; a missing arm silently downgrades a preset.
+        assert_eq!(AiDifficulty::from_label("VeryEasy"), AiDifficulty::VeryEasy);
+        assert_eq!(AiDifficulty::from_label("Easy"), AiDifficulty::Easy);
+        assert_eq!(AiDifficulty::from_label("Medium"), AiDifficulty::Medium);
+        assert_eq!(AiDifficulty::from_label("Hard"), AiDifficulty::Hard);
+        assert_eq!(AiDifficulty::from_label("VeryHard"), AiDifficulty::VeryHard);
+        // The cEDH bug: "CEDH" must not fall through to Medium.
+        assert_eq!(AiDifficulty::from_label("CEDH"), AiDifficulty::CEDH);
+        // Case-insensitive (matches the lobby's case-insensitive "cedh" checks).
+        assert_eq!(AiDifficulty::from_label("cedh"), AiDifficulty::CEDH);
+        assert_eq!(AiDifficulty::from_label("cEDH"), AiDifficulty::CEDH);
+        // Surrounding whitespace from transport/config boundaries is trimmed.
+        assert_eq!(AiDifficulty::from_label("  CEDH  "), AiDifficulty::CEDH);
+        // The CEDH preset actually engages, not the Medium fallback.
+        assert_eq!(
+            create_config(AiDifficulty::from_label("CEDH"), Platform::Native)
+                .search
+                .max_nodes,
+            96
+        );
+        // Unknown labels fall back to Medium.
+        assert_eq!(AiDifficulty::from_label("nonsense"), AiDifficulty::Medium);
     }
 
     #[test]

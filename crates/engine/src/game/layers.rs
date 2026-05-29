@@ -374,6 +374,7 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         }
         StaticCondition::Not { condition } => condition_uses_recipient_context(condition),
         StaticCondition::RecipientHasCounters { .. } => true,
+        StaticCondition::RecipientMatchesFilter { .. } => true,
         _ => false,
     }
 }
@@ -492,6 +493,21 @@ fn evaluate_condition_with_context(
         } => recipient_id
             .and_then(|id| state.objects.get(&id))
             .map(|obj| counter_condition_matches(obj, counters, *minimum, *maximum))
+            .unwrap_or(false),
+        // CR 611.3a: True when the recipient (effective subject) of the continuous
+        // effect matches `filter`. The anaphoric "it" binds to the per-recipient
+        // object being modified this layer cycle; tests THIS recipient against the
+        // type/subtype/color filter (not mere existence of some matching object).
+        // No recipient → false (mirrors the RecipientHasCounters defensive default).
+        StaticCondition::RecipientMatchesFilter { filter } => recipient_id
+            .map(|id| {
+                matches_target_filter(
+                    state,
+                    id,
+                    filter,
+                    &FilterContext::from_source_with_recipient(state, source_id, id),
+                )
+            })
             .unwrap_or(false),
         // CR 716.3: Level abilities are active at or above the specified level.
         StaticCondition::ClassLevelGE { level } => state
@@ -3305,6 +3321,57 @@ mod tests {
         assert!(
             !b.has_keyword(&Keyword::Trample),
             "Non-enchanted bear has no trample"
+        );
+    }
+
+    /// CR 509.1b + CR 613.1f + CR 702.18a: End-to-end runtime confirmation that
+    /// Whispersilk Cloak's compound "Equipped creature can't be blocked and has
+    /// shroud." drives a real `parse_static_line_multi` output through the layer
+    /// pipeline and grants Shroud to the equipped creature. The keyword companion
+    /// (split out from the `CantBeBlocked` restriction) must actually reach the
+    /// equipped creature — not silently dropped.
+    #[test]
+    fn whispersilk_compound_grants_shroud_through_layers() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let defs = crate::parser::oracle_static::parse_static_line_multi(
+            "Equipped creature can't be blocked and has shroud.",
+        );
+        assert_eq!(defs.len(), 2, "parser must emit 2 defs, got {defs:?}");
+
+        let equipment = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Whispersilk Cloak".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+            for def in defs {
+                obj.static_definitions.push(def);
+            }
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(equipment);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let equipped = state.objects.get(&bear).unwrap();
+        assert!(
+            equipped.has_keyword(&Keyword::Shroud),
+            "equipped creature must gain Shroud from the keyword companion"
         );
     }
 
@@ -8142,6 +8209,135 @@ mod tests {
         assert!(
             !opc.has_keyword(&Keyword::Lifelink),
             "Opponent commander no lifelink"
+        );
+    }
+
+    /// Adds a creature subtype to an object and re-snapshots its base card types so
+    /// the layer reset preserves the printed subtype.
+    fn add_subtype(state: &mut GameState, id: ObjectId, subtype: &str) {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.subtypes.push(subtype.to_string());
+        obj.base_card_types = obj.card_types.clone();
+    }
+
+    fn recipient_filter_condition(text: &str) -> StaticCondition {
+        let (rest, condition) = crate::parser::oracle_nom::condition::parse_condition(text)
+            .expect("recipient condition should parse");
+        assert_eq!(rest, "", "condition should fully consume: {text:?}");
+        condition
+    }
+
+    /// CR 611.3a: SelfRef self-static "has defender as long as it's a Wall" — the
+    /// anaphoric "it" binds to the source itself. A Wall creature therefore keeps
+    /// Defender (Mistform Wall regression guard). Drives the real `evaluate_layers`.
+    #[test]
+    fn recipient_selfref_wall_keeps_defender() {
+        let mut state = setup();
+        let wall = make_creature(&mut state, "Mistform Wall", 0, 4, PlayerId(0));
+        add_subtype(&mut state, wall, "Wall");
+
+        let condition = recipient_filter_condition("as long as it's a Wall");
+        let def = StaticDefinition::continuous()
+            .condition(condition)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Defender,
+            }]);
+        {
+            let obj = state.objects.get_mut(&wall).unwrap();
+            Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+            obj.static_definitions.push(def);
+        }
+
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&wall].has_keyword(&Keyword::Defender),
+            "Wall recipient matches the gate — Defender must be granted"
+        );
+    }
+
+    /// CR 611.3a: SelfRef self-static gated "as long as it's a Wall" on a NON-Wall
+    /// creature — recipient is the source, which is not a Wall, so the gate fails
+    /// and the keyword is NOT granted. Complements the positive case above.
+    #[test]
+    fn recipient_selfref_nonwall_no_defender() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Grizzly Bears", 2, 2, PlayerId(0));
+
+        let condition = recipient_filter_condition("as long as it's a Wall");
+        let def = StaticDefinition::continuous()
+            .condition(condition)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Defender,
+            }]);
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+            obj.static_definitions.push(def);
+        }
+
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&bear].has_keyword(&Keyword::Defender),
+            "Non-Wall recipient fails the gate — Defender must NOT be granted"
+        );
+    }
+
+    /// CR 611.3a: per-recipient gating — an anthem-style static affecting all
+    /// creatures, gated "as long as it's a Zombie", buffs ONLY the Zombie recipient
+    /// and leaves the non-Zombie creature untouched. This is the Depala/Earth Surge
+    /// correctness case: the gate is re-evaluated per affected object, not once for
+    /// the source. Drives the real `evaluate_layers`.
+    #[test]
+    fn recipient_per_object_anthem_buffs_only_matching() {
+        let mut state = setup();
+
+        let anthem = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Zombie Lord".to_string(),
+            Zone::Battlefield,
+        );
+        let anthem_ts = state.next_timestamp();
+        let condition = recipient_filter_condition("as long as it's a Zombie");
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = anthem_ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .condition(condition)
+                    .affected(TargetFilter::Typed(TypedFilter::creature()))
+                    .modifications(vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ]),
+            );
+        }
+
+        let zombie = make_creature(&mut state, "Zombie", 2, 2, PlayerId(0));
+        add_subtype(&mut state, zombie, "Zombie");
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        let zombie_obj = &state.objects[&zombie];
+        assert_eq!(zombie_obj.power, Some(3), "Zombie recipient is buffed");
+        assert_eq!(zombie_obj.toughness, Some(3), "Zombie recipient is buffed");
+
+        let bear_obj = &state.objects[&bear];
+        assert_eq!(
+            bear_obj.power,
+            Some(2),
+            "Non-Zombie recipient must NOT be buffed (per-recipient gate)"
+        );
+        assert_eq!(
+            bear_obj.toughness,
+            Some(2),
+            "Non-Zombie recipient must NOT be buffed (per-recipient gate)"
         );
     }
 }

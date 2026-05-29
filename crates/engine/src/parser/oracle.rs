@@ -5995,6 +5995,96 @@ mod tests {
     }
 
     #[test]
+    fn owen_grady_shared_noun_counter_choice_activated() {
+        use crate::types::counter::CounterType;
+
+        // CR 122.1b shared-noun counter choice on an activate-as-a-sorcery
+        // ability: "{T}: Put your choice of a menace, trample, reach, or haste
+        // counter on target Dinosaur. Activate only as a sorcery."
+        let r = parse(
+            "{T}: Put your choice of a menace, trample, reach, or haste counter on target Dinosaur. Activate only as a sorcery.",
+            "Owen Grady, Raptor Trainer",
+            &[],
+            &["Creature"],
+            &["Human"],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+
+        // Tap cost + sorcery-speed activation restriction.
+        assert_eq!(ability.cost, Some(crate::types::ability::AbilityCost::Tap));
+        assert!(ability.sorcery_speed);
+        assert!(ability
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::AsSorcery));
+
+        // The shared "on target Dinosaur" target is lifted to the TargetOnly head.
+        assert!(
+            matches!(&*ability.effect, Effect::TargetOnly { .. }),
+            "expected TargetOnly head, got {:?}",
+            ability.effect
+        );
+        let head_target = ability
+            .effect
+            .target_filter()
+            .expect("TargetOnly head must surface its shared target");
+        assert!(
+            // allow-noncombinator: test assertion on Debug output, not parsing dispatch
+            format!("{head_target:?}").contains("Dinosaur"),
+            "expected shared target to be a Dinosaur filter, got {head_target:?}"
+        );
+
+        // Body is the ChooseOneOf with 4 keyword PutCounter branches on ParentTarget.
+        let choice = ability
+            .sub_ability
+            .as_deref()
+            .expect("counter choice must be chained as a sub-ability");
+        let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+            panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 4);
+
+        let expected = [
+            KeywordKind::Menace,
+            KeywordKind::Trample,
+            KeywordKind::Reach,
+            KeywordKind::Haste,
+        ];
+        for (i, kind) in expected.iter().enumerate() {
+            match &*branches[i].effect {
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target,
+                } => {
+                    assert_eq!(
+                        *counter_type,
+                        CounterType::Keyword(*kind),
+                        "branch {i} should be {kind:?}"
+                    );
+                    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                    assert_eq!(*target, TargetFilter::ParentTarget);
+                }
+                other => panic!("expected branch {i} PutCounter, got {other:?}"),
+            }
+        }
+
+        // No Unimplemented anywhere in the chain.
+        assert!(
+            !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+            "head must not be Unimplemented"
+        );
+        for branch in branches {
+            assert!(
+                !matches!(&*branch.effect, Effect::Unimplemented { .. }),
+                "branch must not be Unimplemented"
+            );
+        }
+    }
+
+    #[test]
     fn spell_cast_restrictions_parse_into_top_level_metadata() {
         let r = parse(
             "Cast this spell only during combat on an opponent's turn.\nReturn X target creature cards from your graveyard to the battlefield. Sacrifice those creatures at the beginning of the next end step.",

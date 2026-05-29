@@ -62,6 +62,7 @@
   },
   "permanent": {
     "expandGroup": "Développer le groupe {{name}}",
+    "collapseGroup": "Réduire le groupe {{name}}",
     "chooseToken": "Choisir le jeton {{name}}",
     "pick": "Choisir",
     "close": "fermer",
