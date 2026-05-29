@@ -76,7 +76,7 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::{
     ContinuousModification, ObjectScope, QuantityExpr, QuantityRef, RoundingMode,
 };
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
 
 /// CR 707.9a: "[,] except {except_body} [and {except_body}]*[.]"
 ///
@@ -340,14 +340,14 @@ fn parse_rounding_sentence(input: &str) -> Option<(&str, RoundingMode)> {
     rounding.map(|(_, rounding, _)| (rest, rounding))
 }
 
-/// CR 707.9b: "<subject> N/M {type list} in addition to its other types" where
+/// CR 707.9b: "<subject> N/M {type list} [in addition to its other types]" where
 /// the subject is a pronoun-contraction ("he's" / "she's" / "it's" with either
 /// straight or curly apostrophes). Produces `SetPower` + `SetToughness`
 /// (overriding the copied P/T per CR 707.9b) and one `AddType`/`AddSubtype`
-/// per word in the type list. Layer placement is automatic from the variants'
-/// own `layer()` methods: SetPT at layer 7b, type additions at layer 4
-/// (CR 613.1d) — the layer system applies type additions after the copy's
-/// own types via timestamp order.
+/// per word in the type list. Color words produce `SetColor` so clauses like
+/// "it's a 4/4 black Zombie" stamp color alongside the P/T and subtype.
+/// Layer placement is automatic from the variants' own `layer()` methods:
+/// SetPT at layer 7b, color at layer 5, type additions at layer 4 (CR 613.1d).
 fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("he's a "),
@@ -364,37 +364,79 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    // Grab the type list up to " in addition to its/his/her other types".
-    let (type_text, rest) = split_on_first_of(
+    // Grab the characteristic words. The older Spark Double / Superior
+    // Spider-Man shape has an explicit "in addition to its other types" tail;
+    // The Scarab God shape terminates at the body/sentence boundary instead.
+    let (type_text, rest, in_addition) = if let Some((type_text, rest)) = split_on_first_of(
         rest,
         &[
             " in addition to its other types",
             " in addition to his other types",
             " in addition to her other types",
         ],
-    )?;
+    ) {
+        (type_text, rest, true)
+    } else {
+        let (type_text, rest) = split_at_body_boundary(rest);
+        (type_text, rest, false)
+    };
 
     let mut mods = vec![
         ContinuousModification::SetPower { value: power },
         ContinuousModification::SetToughness { value: toughness },
     ];
 
-    // Type list is space-separated in the copy class ("Spider Human Hero").
-    // Reuse the shared core-type vs subtype dispatch from parse_its_a_type_in_addition.
+    append_color_and_type_modifications(type_text, !in_addition, &mut mods);
+
+    Some((rest, mods))
+}
+
+fn append_color_and_type_modifications(
+    type_text: &str,
+    replace_creature_subtypes: bool,
+    mods: &mut Vec<ContinuousModification>,
+) {
+    let mut colors = Vec::new();
+    let mut type_mods = Vec::new();
+    let mut has_exact_creature_subtype = false;
     for word in type_text.split_whitespace() {
-        if word.is_empty() {
+        if word.is_empty() || word == "and" {
             continue;
+        }
+        if let Ok((rest, color)) = nom_primitives::parse_color(word) {
+            if rest.is_empty() {
+                if !colors.contains(&color) {
+                    colors.push(color);
+                }
+                continue;
+            }
         }
         let canonical = canonicalize_subtype_name(word);
         let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
             ContinuousModification::AddType { core_type }
         } else {
+            if noncreature_subtype_set(&canonical).is_none() {
+                has_exact_creature_subtype = true;
+            }
             ContinuousModification::AddSubtype { subtype: canonical }
         };
-        mods.push(modification);
+        type_mods.push(modification);
     }
-
-    Some((rest, mods))
+    if !colors.is_empty() {
+        mods.push(ContinuousModification::SetColor { colors });
+    }
+    if replace_creature_subtypes && has_exact_creature_subtype {
+        type_mods.insert(
+            0,
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        );
+        mods.push(ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        });
+    }
+    mods.extend(type_mods);
 }
 
 /// CR 707.9a: "<subject pronoun> has this ability" — emit a
@@ -821,6 +863,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{ObjectScope, QuantityRef, RoundingMode};
     use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
 
     #[test]
     fn name_override_emits_set_name() {
@@ -1308,6 +1351,62 @@ mod tests {
                 ContinuousModification::AddSubtype { subtype } if subtype == "Hero"
             )),
             "missing AddSubtype(Hero); got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b: The Scarab God class uses a compact exception with P/T,
+    /// color, and subtype but no "in addition to its other types" suffix.
+    /// Each characteristic still becomes part of the copy token's copiable
+    /// values.
+    #[test]
+    fn compact_pt_color_subtype_exception_sets_all_characteristics() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a 4/4 black zombie",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "missing SetPower(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+            "missing SetToughness(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetColor { colors } if colors == &vec![ManaColor::Black]
+            )),
+            "missing SetColor(Black); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveAllSubtypes {
+                    set: SubtypeSet::Creature
+                }
+            )),
+            "missing RemoveAllSubtypes(Creature); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )),
+            "missing AddType(Creature); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Zombie"
+            )),
+            "missing AddSubtype(Zombie); got {mods:?}"
         );
     }
 

@@ -1075,6 +1075,52 @@ mod tests {
     }
 
     #[test]
+    fn copy_token_exception_compact_pt_color_subtype() {
+        let effect = try_parse_token(
+            "create a token that's a copy of it, except it's a 4/4 black zombie",
+            "Create a token that's a copy of it, except it's a 4/4 black Zombie",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::ParentTarget);
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })));
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetColor { colors }
+                if colors == &vec![ManaColor::Black]
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature
+            }
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Zombie"
+        )));
+    }
+
+    #[test]
     fn copy_token_half_pt_exception_emits_dynamic_modifications() {
         let effect = try_parse_token(
             "create two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. round up each time",

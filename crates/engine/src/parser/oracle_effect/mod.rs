@@ -17698,6 +17698,7 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::LoseLife { amount, .. }
         | Effect::ChangeSpeed { amount, .. }
         | Effect::Draw { count: amount, .. }
+        | Effect::Scry { count: amount, .. }
         | Effect::Mill { count: amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
@@ -19925,6 +19926,33 @@ mod tests {
                 other => panic!("expected GainLife Aggregate, got {other:?}"),
             },
             other => panic!("expected GainLife, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_x_binds_scry_sub_ability_count() {
+        let def = parse_effect_chain(
+            "Each opponent loses X life and you scry X, where X is the number of Zombies you control.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::LoseLife { amount, .. } => match amount {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                } => assert!(matches!(filter, TargetFilter::Typed(_))),
+                other => panic!("expected LoseLife ObjectCount, got {other:?}"),
+            },
+            other => panic!("expected LoseLife, got {other:?}"),
+        }
+        let sub = def.sub_ability.as_ref().expect("scry sub-ability");
+        match &*sub.effect {
+            Effect::Scry { count, .. } => match count {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                } => assert!(matches!(filter, TargetFilter::Typed(_))),
+                other => panic!("expected Scry ObjectCount, got {other:?}"),
+            },
+            other => panic!("expected Scry, got {other:?}"),
         }
     }
 
