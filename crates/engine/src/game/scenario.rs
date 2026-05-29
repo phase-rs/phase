@@ -82,13 +82,13 @@ fn build_face_from_oracle(
         keyword_names
     };
 
-    let parsed = parse_oracle_text(
-        oracle_text,
-        &obj.name,
-        effective_kw_names,
-        &type_strings,
-        &subtype_strings,
-    );
+        let parsed = parse_oracle_text(
+            oracle_text,
+            &obj.name,
+            effective_kw_names,
+            &type_strings,
+            &subtype_strings,
+        );
 
     // Merge keywords: parse keyword names into Keyword values (mirroring how
     // build_oracle_face merges MTGJSON keywords with extracted_keywords).
@@ -966,10 +966,28 @@ impl<'a> CardBuilder<'a> {
         oracle_text: &str,
     ) -> &mut Self {
         let kw_strings: Vec<String> = keyword_names.iter().map(|s| s.to_string()).collect();
+        let zone = self.state.objects.get(&self.id).unwrap().zone;
         let obj = self.state.objects.get(&self.id).unwrap();
         let face = build_face_from_oracle(obj, &kw_strings, oracle_text);
         let obj = self.state.objects.get_mut(&self.id).unwrap();
         apply_card_face_to_object(obj, &face);
+        // CR 603.6a: `create_object` registers the trigger index before Oracle
+        // text is applied. Re-index after `from_oracle_text` so scenario-seeded
+        // triggers (e.g. upkeep lines added via `add_creature_from_oracle`) fire.
+        if zone == Zone::Battlefield {
+            let object_id = self.id;
+            let registration = self.state.objects.get(&object_id).map(|obj| {
+                let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
+                    obj.trigger_definitions.as_slice().iter().cloned().collect();
+                let synthetic =
+                    crate::game::trigger_index::has_synthetic_keyword_trigger_for(obj);
+                (defs, synthetic)
+            });
+            if let Some((defs, synthetic)) = registration {
+                self.state.trigger_index.remove(object_id);
+                self.state.trigger_index.add(object_id, &defs, synthetic);
+            }
+        }
         self
     }
 }

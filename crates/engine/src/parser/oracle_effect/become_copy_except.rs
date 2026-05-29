@@ -364,7 +364,8 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    // Grab the type list up to " in addition to its/his/her other types".
+    // Type list either ends at "in addition to its/his/her other types" or at the
+    // end of the except body (The Scarab God: "it's a 4/4 black Zombie").
     let (type_text, rest) = split_on_first_of(
         rest,
         &[
@@ -372,17 +373,27 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
             " in addition to his other types",
             " in addition to her other types",
         ],
-    )?;
+    )
+    .map(|(types, after)| (types.trim(), after))
+    .unwrap_or_else(|| {
+        let trimmed = rest.trim().trim_end_matches('.').trim();
+        (trimmed, "")
+    });
 
     let mut mods = vec![
         ContinuousModification::SetPower { value: power },
         ContinuousModification::SetToughness { value: toughness },
     ];
 
-    // Type list is space-separated in the copy class ("Spider Human Hero").
-    // Reuse the shared core-type vs subtype dispatch from parse_its_a_type_in_addition.
+    // Type list is space-separated in the copy class ("Spider Human Hero", or
+    // "black Zombie"). Color words map to AddColor; core types and subtypes
+    // reuse parse_its_a_type_in_addition dispatch.
     for word in type_text.split_whitespace() {
         if word.is_empty() {
+            continue;
+        }
+        if let Ok((_, color)) = nom_primitives::parse_color(word) {
+            mods.push(ContinuousModification::AddColor { color });
             continue;
         }
         let canonical = canonicalize_subtype_name(word);
@@ -1275,6 +1286,45 @@ mod tests {
     /// SetToughness + AddSubtype), so 707.9b covers the full clause. Confirms
     /// the contracted negated-copula does not block the
     /// `parse_subject_pt_and_types` arm that follows the " and " conjunction.
+    #[test]
+    /// CR 707.9b: The Scarab God — "except it's a 4/4 black Zombie" (no
+    /// "in addition to its other types" suffix).
+    #[test]
+    fn scarab_god_copy_token_except_sets_pt_color_and_zombie() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a 4/4 black Zombie",
+            "The Scarab God",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "missing SetPower(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+            "missing SetToughness(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddColor {
+                    color: crate::types::mana::ManaColor::Black
+                }
+            )),
+            "missing AddColor(Black); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Zombie"
+            )),
+            "missing AddSubtype(Zombie); got {mods:?}"
+        );
+    }
+
     #[test]
     fn token_compound_clause_strips_legendary_and_sets_pt_subtype() {
         let (_, mods) = parse_except_clause(

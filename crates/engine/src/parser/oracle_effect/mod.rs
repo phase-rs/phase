@@ -17712,6 +17712,9 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
         }
+        Effect::Scry { count, .. } => {
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
+        }
         Effect::Pump {
             power, toughness, ..
         }
@@ -19892,6 +19895,60 @@ mod tests {
                 "sub_ability must not be a counter-spell effect, got {:?}",
                 sub.effect
             );
+        }
+    }
+
+    /// Issue #1424 — The Scarab God upkeep: opponent life loss and scry share
+    /// the zombie-count binding from the trailing where-X clause.
+    #[test]
+    fn scarab_god_upkeep_where_x_binds_zombie_count_to_life_loss_and_scry() {
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, each opponent loses X life and you scry X, where X is the number of Zombies you control.",
+            "The Scarab God",
+        );
+        let execute = def.execute.expect("upkeep execute");
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::Opponent),
+            "each opponent loses … must set player_scope=Opponent"
+        );
+        match &*execute.effect {
+            Effect::LoseLife { amount, .. } => match amount {
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                } => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(
+                        tf.type_filters
+                            .contains(&TypeFilter::Subtype("Zombie".to_string()))
+                    );
+                }
+                other => panic!("expected ObjectCount Zombies, got {other:?}"),
+            },
+            other => panic!("expected LoseLife, got {other:?}"),
+        }
+        let scry = execute.sub_ability.expect("scry sibling");
+        match &*scry.effect {
+            Effect::Scry { count, .. } => match count {
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                } => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(
+                        tf.type_filters
+                            .contains(&TypeFilter::Subtype("Zombie".to_string()))
+                    );
+                }
+                other => panic!("expected ObjectCount Zombies on Scry, got {other:?}"),
+            },
+            other => panic!("expected Scry, got {other:?}"),
         }
     }
 

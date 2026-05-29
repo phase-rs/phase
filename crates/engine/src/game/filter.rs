@@ -160,7 +160,11 @@ impl<'a> FilterContext<'a> {
     pub fn from_ability(ability: &'a ResolvedAbility) -> Self {
         Self {
             source_id: ability.source_id,
-            source_controller: Some(ability.controller),
+            // CR 109.5 + CR 608.2c: `player_scope` iteration rebinds
+            // `ability.controller` to each affected player, but quantity and
+            // filter phrases like "Zombies you control" still refer to the
+            // printed ability controller (The Scarab God upkeep X).
+            source_controller: Some(ability.original_controller.unwrap_or(ability.controller)),
             ability: Some(ability),
             recipient_id: None,
         }
