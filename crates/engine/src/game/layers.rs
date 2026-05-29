@@ -8520,6 +8520,7 @@ mod tests {
     ///      `b_changes_types` set (it is a bulk wipe, not an Add/Remove of a
     ///      named type).
     ///   1. `AddSubtype{Frog}`            — IS in `b_changes_types`.
+    ///
     /// With the guard suppressed, `depends_on` yields exactly ONE directed
     /// edge: `depends_on(RemoveAllSubtypes, AddSubtype) == true` (b adds a
     /// type, a's filter references a type) while the reverse is `false`
