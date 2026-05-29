@@ -257,9 +257,14 @@ pub(crate) fn payable_spell_alternative_cost(
         return None;
     }
 
-    // CR 118.9a: the spell's own self-referential casting-option (printed
-    // alternative cost / cast-without-mana-cost) takes precedence — only one
-    // alternative cost can apply, so a self-cost wins over a permanent grant.
+    // CR 118.9a: only one alternative cost is applied to a spell and the
+    // controller chooses which. The pipeline currently exposes a single
+    // alternative-vs-printed choice, so when a spell carries BOTH a
+    // self-referential casting option and a permanent grant it cannot offer
+    // both — it deterministically prefers the spell's own printed option. This
+    // is not a CR-mandated precedence; honoring full controller choice across a
+    // self-option and one or more grants needs a multi-alternative choice
+    // surface and is a known limitation tracked for follow-up.
     let self_option = obj.casting_options.iter().find_map(|option| {
         if option.condition.as_ref().is_some_and(|condition| {
             !restrictions::evaluate_condition(state, player, object_id, condition)

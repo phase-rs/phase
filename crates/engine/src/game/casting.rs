@@ -699,11 +699,18 @@ fn granted_spell_keywords(
     keywords
 }
 
-/// CR 118.9 + CR 604.1: Collect the alternative MANA cost (if any) granted to
-/// `object_id` by a `CastWithAlternativeCost` static on the battlefield whose
-/// `affected` filter matches this spell. CR 118.9a: at most one alternative
-/// cost can be applied to a spell — return the FIRST matching grant in the
-/// deterministic battlefield scan order.
+/// CR 118.9 + CR 604.1: Collect an alternative MANA cost granted to `object_id`
+/// by a `CastWithAlternativeCost` static on the battlefield whose `affected`
+/// filter matches this spell.
+///
+/// CR 118.9a: only one alternative cost is ultimately applied to a spell, and
+/// the spell's controller chooses which. The casting pipeline currently surfaces
+/// a single alternative-vs-printed choice (`AdditionalCost::Choice`), so when
+/// multiple grants match (e.g. Rooftop Storm and Fist of Suns both active) this
+/// returns the first in deterministic battlefield-scan order rather than
+/// prompting the controller to choose among them. Offering a choice across
+/// multiple simultaneous grants needs a multi-alternative choice surface and is
+/// a known limitation tracked for follow-up, not implemented here.
 pub(super) fn granted_spell_alternative_cost(
     state: &GameState,
     caster: PlayerId,

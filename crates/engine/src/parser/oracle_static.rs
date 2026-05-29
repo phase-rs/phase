@@ -5348,24 +5348,26 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
     let consumed = after_cost.lower.len() - subject_lower.len();
     let subject = TextPair::new(&after_cost.original[consumed..], subject_lower);
 
-    // Remainder: "<filter> spells you cast[.]" — reuse the subject-extraction
-    // convention from parse_spells_have_keyword.
+    // Remainder: "<filter> spell[s] you cast[.]". Locate the marker with nom
+    // combinators (take_until + tag), not manual string scanning: `terminated`
+    // yields the type-prefix slice preceding the marker while consuming the
+    // marker itself, leaving the optional mana-value tail as the remainder.
     let subject = subject.trim_end_matches('.').trim_end();
-    let (marker_pos, marker_len) = subject
-        .lower
-        .match_indices("spells you cast")
-        .next()
-        .map(|(pos, m)| (pos, m.len()))
-        .or_else(|| {
-            subject
-                .lower
-                .match_indices("spell you cast")
-                .next()
-                .map(|(pos, m)| (pos, m.len()))
-        })?;
+    let (after_spells_lower, type_prefix_lower) = alt((
+        terminated(
+            take_until::<_, _, VE<'_>>("spells you cast"),
+            tag("spells you cast"),
+        ),
+        terminated(
+            take_until::<_, _, VE<'_>>("spell you cast"),
+            tag("spell you cast"),
+        ),
+    ))
+    .parse(subject.lower)
+    .ok()?;
 
-    let type_prefix_original = subject.original[..marker_pos].trim();
-    let after_spells = subject.lower[marker_pos + marker_len..].trim();
+    let type_prefix_original = subject.original[..type_prefix_lower.len()].trim();
+    let after_spells = after_spells_lower.trim();
 
     // Optional "with mana value N or greater" qualifier (Jodah MV-5+ class). If
     // an MV qualifier is present but does not parse cleanly into FilterProp::Cmc,
