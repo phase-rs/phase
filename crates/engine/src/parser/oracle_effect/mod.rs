@@ -2126,6 +2126,56 @@ fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
     Some(items)
 }
 
+/// Shape of a disjunctive counter-choice list. Determines how each list item
+/// is synthesized back into a `put ... on ...` branch clause.
+///
+/// - `Distributed`: each item is a complete counter noun phrase that already
+///   ends in "counter" ("a +1/+1 counter", "two charge counters"). The item is
+///   used verbatim as the choice phrase.
+/// - `FromAmong`: "a counter from among X, Y, ..., and Z" — each item is a bare
+///   keyword name; synthesized as "a <item> counter".
+/// - `SharedNoun`: "a X, Y, ..., or Z counter" — one leading article and one
+///   trailing "counter" shared across a list of bare keyword adjectives;
+///   synthesized as "a <item> counter".
+enum ChoiceListShape {
+    Distributed,
+    FromAmong,
+    SharedNoun,
+}
+
+/// CR 122.1b: keyword counters distribute over a single shared noun. Recognize
+/// the "shared-noun" disjunctive list shape: ONE leading article, a list of
+/// bare keyword adjectives, and ONE trailing "counter" — e.g. "a menace,
+/// trample, reach, or haste counter" yields `["menace", "trample", "reach",
+/// "haste"]`.
+///
+/// The item combinator must stop at BOTH a list separator AND the trailing
+/// " counter" sentinel; otherwise the final item greedily consumes
+/// "haste counter" and the trailing `tag(" counter")` has nothing left to
+/// match, causing `all_consuming` to fail. Excluding the sentinel from the
+/// item leaves " counter" for the terminating tag.
+///
+/// Returns `None` unless the entire input is consumed as `a <list> counter`.
+/// Per-item strict-counter-type validation is the caller's responsibility — a
+/// raw match here does not yet guarantee every item names a real counter type.
+fn recognize_shared_noun_counter_list(input: &str) -> Option<Vec<&str>> {
+    let trailing_counter = || value((), (tag::<_, _, OracleError<'_>>(" counter"), eof));
+    let item = recognize(many1(preceded(
+        not(alt((parse_choice_list_separator, trailing_counter()))),
+        anychar,
+    )));
+    let (_, items) = preceded(
+        tag::<_, _, OracleError<'_>>("a "),
+        all_consuming(terminated(
+            separated_list1(parse_choice_list_separator, item),
+            tag(" counter"),
+        )),
+    )
+    .parse(input)
+    .ok()?;
+    Some(items)
+}
+
 /// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
 /// "put your choice of A counter-pattern, B counter-pattern, or C
 /// counter-pattern on TARGET" (N-ary branches).
@@ -2161,20 +2211,42 @@ fn try_parse_put_counter_choice(
     let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
 
     // Split the post-"on" choices into individual items via nom combinators.
-    // Two list shapes (CR 122.1 + CR 608.2d), both handled by one separator
-    // grammar (`parse_choice_list_separator`):
-    //   1. "from among" bare keywords: "a counter from among X, Y, ..., and Z"
-    //   2. distributed / binary nouns: "a A counter, a B counter, or a C
-    //      counter" or "a A counter or a B counter"
-    // CR 122.1b: the "from among" form names bare keywords; strip its prefix so
-    // each branch is later synthesized as "a <keyword> counter".
+    // Three list shapes (CR 122.1 + CR 608.2d), classified in priority order:
+    //   1. FromAmong  — "a counter from among X, Y, ..., and Z" (bare keywords)
+    //   2. SharedNoun — "a X, Y, ..., or Z counter" (one leading article + bare
+    //      keyword adjectives + one trailing "counter")
+    //   3. Distributed — "a A counter, a B counter, or a C counter" / binary
+    //      ("a A counter or a B counter"), each item a full counter noun phrase.
+    // CR 122.1b: both FromAmong and SharedNoun name bare keywords; each branch
+    // is later synthesized as "a <keyword> counter".
     let choices_text = choices_tp.original;
-    let (list_text, from_among) =
-        match tag::<_, _, nom::error::Error<&str>>("a counter from among ")(choices_text) {
-            Ok((rest, _)) => (rest, true),
-            Err(_) => (choices_text, false),
+    let (shape, choice_items) =
+        match tag::<_, _, OracleError<'_>>("a counter from among ")(choices_text) {
+            Ok((rest, _)) => (ChoiceListShape::FromAmong, split_choice_list_items(rest)?),
+            // CR 122.1b: keyword counters distribute over a single noun; CR
+            // 608.2d: choice made at resolution; CR 601.2c: shared target at
+            // cast. Only classify as SharedNoun when the shape matches AND every
+            // item is a recognized counter type — otherwise distributed lists
+            // ("a +1/+1 counter, ...") and non-counter lists ("a red or blue
+            // creature") would leak through. Fall through to Distributed when
+            // the strict guard fails.
+            Err(_) => match recognize_shared_noun_counter_list(choices_text) {
+                Some(items)
+                    if items.len() >= 2
+                        && items.iter().all(|item| {
+                            all_consuming(nom_primitives::parse_strict_counter_type)
+                                .parse(item.trim())
+                                .is_ok()
+                        }) =>
+                {
+                    (ChoiceListShape::SharedNoun, items)
+                }
+                _ => (
+                    ChoiceListShape::Distributed,
+                    split_choice_list_items(choices_text)?,
+                ),
+            },
         };
-    let choice_items = split_choice_list_items(list_text)?;
 
     // Require at least 2 branches.
     if choice_items.len() < 2 {
@@ -2200,12 +2272,13 @@ fn try_parse_put_counter_choice(
     let mut branch_clauses: Vec<(ParsedEffectClause, String)> =
         Vec::with_capacity(choice_items.len());
     for item in &choice_items {
-        // CR 122.1b: the "from among" form names bare keywords, so synthesize
-        // "a <keyword> counter"; distributed/binary items are full noun phrases.
-        let choice_phrase = if from_among {
-            format!("a {} counter", item.trim())
-        } else {
-            item.trim().to_string()
+        // CR 122.1b: FromAmong and SharedNoun name bare keywords, so synthesize
+        // "a <keyword> counter"; Distributed items are already full noun phrases.
+        let choice_phrase = match shape {
+            ChoiceListShape::Distributed => item.trim().to_string(),
+            ChoiceListShape::FromAmong | ChoiceListShape::SharedNoun => {
+                format!("a {} counter", item.trim())
+            }
         };
         let branch_text = format!("put {choice_phrase} on {target_text}");
         let clause = parse_effect_clause(&branch_text, ctx);
@@ -36595,6 +36668,88 @@ mod tests {
                 other => panic!("expected branch {i} PutCounter, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn choose_one_of_detects_shared_noun_counter_choice() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+
+        // CR 122.1b shared-noun shape: one leading article + bare keyword
+        // adjectives + one trailing "counter" ("a flying, lifelink, or
+        // deathtouch counter" == choice of {flying, lifelink, deathtouch}).
+        let ability = parse_effect_chain(
+            "Put your choice of a flying, lifelink, or deathtouch counter on target creature.",
+            AbilityKind::Spell,
+        );
+
+        // The shared "on target creature" is a single cast-time target lifted to
+        // a `TargetOnly` head; the counter choice is the chained sub-ability
+        // whose branches act on `ParentTarget`.
+        assert!(
+            matches!(&*ability.effect, Effect::TargetOnly { .. }),
+            "expected TargetOnly head, got {:?}",
+            ability.effect
+        );
+
+        let choice = ability
+            .sub_ability
+            .as_deref()
+            .expect("counter choice must be chained as a sub-ability");
+        let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+            panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 3);
+
+        let expected = [
+            KeywordKind::Flying,
+            KeywordKind::Lifelink,
+            KeywordKind::Deathtouch,
+        ];
+        for (i, kind) in expected.iter().enumerate() {
+            match &*branches[i].effect {
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target,
+                } => {
+                    assert_eq!(
+                        *counter_type,
+                        CounterType::Keyword(*kind),
+                        "branch {i} should be {:?}",
+                        kind
+                    );
+                    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                    assert_eq!(*target, TargetFilter::ParentTarget);
+                }
+                other => panic!("expected branch {i} PutCounter, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn shared_noun_counter_choice_rejects_non_counter_list() {
+        // "a red or blue creature" is a noun-phrase disjunction, not a counter
+        // choice — the per-item strict-counter-type guard must reject it so the
+        // shared-noun arm does not produce a ChooseOneOf-of-PutCounter shape.
+        let ability = parse_effect_chain(
+            "Put your choice of a red or blue creature on target creature.",
+            AbilityKind::Spell,
+        );
+
+        let is_counter_choice = match &*ability.effect {
+            Effect::TargetOnly { .. } => ability.sub_ability.as_deref().is_some_and(|sub| {
+                matches!(&*sub.effect, Effect::ChooseOneOf { branches, .. }
+                    if branches.iter().all(|b| matches!(&*b.effect, Effect::PutCounter { .. })))
+            }),
+            _ => false,
+        };
+        assert!(
+            !is_counter_choice,
+            "non-counter list must not be parsed as a shared-noun counter choice, got {:?}",
+            ability.effect
+        );
     }
 
     #[test]

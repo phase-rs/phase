@@ -298,6 +298,33 @@ pub fn parse_counter_type_typed(input: &str) -> OracleResult<'_, CounterType> {
     .parse(input)
 }
 
+/// Parse a *recognized* counter type, rejecting unknown tokens.
+///
+/// This is `parse_counter_type_typed` MINUS the open-ended `take_till1 →
+/// Generic` fallback arm. Only the three enumerated arms (P/T modifier,
+/// keyword counter, named counter) are tried, so an unrecognized token such as
+/// "red" or "blue creature" fails the parse instead of mapping to
+/// `CounterType::Generic`. Callers use this to validate that a list item names
+/// a real counter type before classifying a disjunctive list as a counter
+/// choice.
+///
+/// CR 122.1b: keyword counters (docs/MagicCompRules.txt:1180).
+/// CR 122.1: named counters (docs/MagicCompRules.txt:1176).
+pub(crate) fn parse_strict_counter_type(input: &str) -> OracleResult<'_, CounterType> {
+    alt((
+        map(parse_pt_modifier, |(power, toughness)| {
+            crate::types::counter::parse_counter_type(&format!("{power:+}/{toughness:+}"))
+        }),
+        map(parse_keyword_counter_name, |raw| {
+            crate::types::counter::parse_counter_type(raw)
+        }),
+        map(parse_named_counter_type, |raw| {
+            crate::types::counter::parse_counter_type(raw)
+        }),
+    ))
+    .parse(input)
+}
+
 /// Parse a keyword counter name: "flying", "first strike", "double strike", etc.
 ///
 /// CR 122.1b: A keyword counter on a permanent causes that object to gain the
@@ -901,6 +928,15 @@ mod tests {
         assert_eq!(parse_number("eighty").unwrap().1, 80);
         assert_eq!(parse_number("ninety").unwrap().1, 90);
         assert_eq!(parse_number("one hundred").unwrap().1, 100);
+    }
+
+    /// `parse_strict_counter_type` accepts recognized counter tokens (keyword
+    /// counters, named counters) and rejects unknown tokens — unlike
+    /// `parse_counter_type_typed`, which maps anything to `CounterType::Generic`.
+    #[test]
+    fn test_parse_strict_counter_type_rejects_unrecognized() {
+        assert!(parse_strict_counter_type("menace").is_ok());
+        assert!(parse_strict_counter_type("red").is_err());
     }
 
     /// "one hundred" must be tried BEFORE "one" so "one hundred cards"
