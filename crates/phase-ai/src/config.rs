@@ -54,7 +54,9 @@ impl AiDifficulty {
     /// difficulty string routes through here precisely so a missing arm can't
     /// silently downgrade a preset (cEDH previously fell through to `Medium`).
     pub fn from_label(label: &str) -> AiDifficulty {
-        match label.to_lowercase().as_str() {
+        // Trim first: transport boundaries (config files, CLI args via ai_duel)
+        // may carry surrounding whitespace.
+        match label.trim().to_lowercase().as_str() {
             "veryeasy" => AiDifficulty::VeryEasy,
             "easy" => AiDifficulty::Easy,
             "medium" => AiDifficulty::Medium,
@@ -821,6 +823,8 @@ mod tests {
         // Case-insensitive (matches the lobby's case-insensitive "cedh" checks).
         assert_eq!(AiDifficulty::from_label("cedh"), AiDifficulty::CEDH);
         assert_eq!(AiDifficulty::from_label("cEDH"), AiDifficulty::CEDH);
+        // Surrounding whitespace from transport/config boundaries is trimmed.
+        assert_eq!(AiDifficulty::from_label("  CEDH  "), AiDifficulty::CEDH);
         // The CEDH preset actually engages, not the Medium fallback.
         assert_eq!(
             create_config(AiDifficulty::from_label("CEDH"), Platform::Native)
