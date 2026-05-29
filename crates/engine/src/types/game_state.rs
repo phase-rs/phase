@@ -3357,6 +3357,22 @@ pub enum CastingVariant {
         /// `hand_cast_free_permissions_used`.
         frequency: super::statics::CastFrequency,
     },
+    /// CR 601.2a + CR 113.6b + CR 118.9a: Cast from exile via a
+    /// `StaticMode::ExileCastPermission` source (Maralen, Fae Ascendant).
+    /// Stores the granting permanent's ObjectId for per-turn tracking; the
+    /// finalize-cast step zeroes the spell's mana cost when the static carries
+    /// `without_paying_mana_cost: true` (the only published shape today). The
+    /// resolution-time routing matches a normal cast — no on-resolve exile
+    /// behavior — so this is treated as a casting-context tag, not as an
+    /// alternative cost.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting the per-turn slot when the source leaves and re-enters play.
+    ExilePermission {
+        source: ObjectId,
+        /// CR 601.2a: When `OncePerTurn`, casting consumes this source's slot
+        /// in `exile_cast_permissions_used`. `Unlimited` skips tracking.
+        frequency: super::statics::CastFrequency,
+    },
     /// CR 702.190a: Cast from HAND via the Sneak alternative cost. Legal only
     /// during the declare-blockers step. The returned unblocked attacker you
     /// control is part of the cost, bounced to its owner's hand at
@@ -4101,6 +4117,32 @@ pub struct GameState {
     /// consumed this turn. Keyed by the granting source's ObjectId.
     #[serde(default)]
     pub exile_play_permissions_used: HashSet<ObjectId>,
+    /// CR 601.2a + CR 113.6b: Tracks `OncePerTurn` `StaticMode::ExileCastPermission`
+    /// sources that have already had a spell cast through them this turn
+    /// (Maralen, Fae Ascendant — "Once each turn, you may cast …"). Keyed by
+    /// the granting permanent's ObjectId. `Unlimited` frequency permissions
+    /// never populate this set. Cleared at the start of each turn alongside
+    /// the other per-turn cast-permission slots.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting the slot when the source leaves and re-enters play.
+    #[serde(default)]
+    pub exile_cast_permissions_used: HashSet<ObjectId>,
+    /// CR 113.6b + CR 601.2a: Per-turn rolling list of cards that have been
+    /// exiled "with" each linked-exile source during the current turn. Keyed
+    /// by the source's `ObjectId`; the `Vec` is the list of card `ObjectId`s
+    /// exiled this turn by that source, in exile order. Populated by
+    /// `exile_links::push_exiled_with_source_this_turn` whenever a tracked
+    /// exile happens; cleared at the start of each turn so "cards exiled with
+    /// ~ this turn" cast permissions (Maralen, Fae Ascendant) only see the
+    /// current turn's pool.
+    ///
+    /// Distinct from `exile_links`: those persist for the lifetime of the
+    /// source-link contract (CR 610.3) and back the open-ended "cards exiled
+    /// with ~" filter. This map is the turn-scoped slice and is consulted
+    /// only by `StaticMode::ExileCastPermission` and similar per-turn
+    /// permissions.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub cards_exiled_with_source_this_turn: HashMap<ObjectId, Vec<ObjectId>>,
     /// CR 702.94a + CR 603.11: Per-player first-card-drawn-this-turn tracking for
     /// miracle's linked triggered ability. Populated by the draw pipeline on the
     /// first `CardDrawn` event each turn per player; reset at turn start. The
@@ -4811,6 +4853,8 @@ impl GameState {
             pending_permanent_type_slot: None,
             hand_cast_free_permissions_used: HashSet::new(),
             exile_play_permissions_used: HashSet::new(),
+            exile_cast_permissions_used: HashSet::new(),
+            cards_exiled_with_source_this_turn: HashMap::new(),
             first_card_drawn_this_turn: HashMap::new(),
             cards_drawn_this_turn: HashMap::new(),
             pending_miracle_offers: Vec::new(),
@@ -5091,6 +5135,8 @@ impl PartialEq for GameState {
             && self.pending_permanent_type_slot == other.pending_permanent_type_slot
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.exile_play_permissions_used == other.exile_play_permissions_used
+            && self.exile_cast_permissions_used == other.exile_cast_permissions_used
+            && self.cards_exiled_with_source_this_turn == other.cards_exiled_with_source_this_turn
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn
             && self.cards_drawn_this_turn == other.cards_drawn_this_turn
             && self.pending_miracle_offers == other.pending_miracle_offers

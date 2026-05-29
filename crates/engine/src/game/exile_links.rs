@@ -9,6 +9,14 @@ const LINKED_EXILE_CONSUMER_TAGS: &[&str] = &[
     "CardsExiledBySource",
     "OwnersOfCardsExiledBySource",
     "ChoiceAmongExiledColors",
+    // CR 601.2a + CR 113.6b: A source carrying `StaticMode::ExileCastPermission`
+    // (Maralen, Fae Ascendant) consumes its own linked-exile pool to grant
+    // casting permission. Detection by externally-tagged serde key ensures the
+    // source-level scan (`source_contains_linked_exile_consumer`) marks the
+    // permanent as a tracked-exile consumer even when the consuming reference
+    // is on a static rather than on a target filter — no special-casing of the
+    // static-definition shape required.
+    "ExileCastPermission",
 ];
 
 /// CR 607.1 / CR 607.2a + CR 406.6: A source only needs ordinary
@@ -49,6 +57,32 @@ pub(crate) fn push_tracked_by_source(
         source_id,
         kind: ExileLinkKind::TrackedBySource,
     });
+    push_exiled_with_source_this_turn(state, exiled_id, source_id);
+}
+
+/// CR 601.2a + CR 113.6b: Record an `exiled_id` as exiled "with" `source_id`
+/// during the current turn so the per-turn rolling list
+/// (`GameState::cards_exiled_with_source_this_turn`) stays in lockstep with the
+/// persistent `exile_links` pool. Callers that already populate `exile_links`
+/// via `push_tracked_by_source` get this for free; callers that build typed
+/// exile-link kinds directly (e.g. `UntilSourceLeaves`) and still need their
+/// exiled cards to feed `StaticMode::ExileCastPermission` should call this
+/// helper alongside the link push.
+///
+/// Idempotent: a duplicate `(source_id, exiled_id)` pair is dropped, mirroring
+/// `push_tracked_by_source`.
+pub(crate) fn push_exiled_with_source_this_turn(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+) {
+    let entry = state
+        .cards_exiled_with_source_this_turn
+        .entry(source_id)
+        .or_default();
+    if !entry.contains(&exiled_id) {
+        entry.push(exiled_id);
+    }
 }
 
 pub(crate) fn ability_contains_linked_exile_consumer(ability: &ResolvedAbility) -> bool {

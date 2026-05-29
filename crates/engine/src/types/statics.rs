@@ -624,6 +624,46 @@ pub enum StaticMode {
         /// CR 601.2b: Per-turn cast frequency.
         frequency: CastFrequency,
     },
+    /// CR 601.2a + CR 113.6b + CR 118.9: Static ability granting permission to
+    /// cast cards exiled with this source — restricted to cards exiled *this
+    /// turn* — typically without paying the mana cost. Maralen, Fae Ascendant
+    /// is the type specimen ("Once each turn, you may cast a spell with mana
+    /// value less than or equal to the number of Elves and Faeries you control
+    /// from among cards exiled with Maralen this turn without paying its mana
+    /// cost.").
+    ///
+    /// The source pool is the per-turn list
+    /// `GameState::cards_exiled_with_source_this_turn[source_id]`. The static's
+    /// `affected: TargetFilter` constrains the eligible cards (type, mana
+    /// value, etc.). Per-turn frequency tracking is keyed on `source_id` in
+    /// `GameState::exile_cast_permissions_used` for `OncePerTurn`; `Unlimited`
+    /// skips tracking.
+    ///
+    /// Distinct from `GraveyardCastPermission`: the source pool is exile
+    /// (per-turn-scoped), not the controller's graveyard. Distinct from
+    /// `TopOfLibraryCastPermission`: the eligible cards are a tracked exile
+    /// set carved out by a prior exile-with-source effect, not the live top
+    /// of library. Distinct from `Effect::CastFromZone` (Court of Locthwain,
+    /// Mizzix's Mastery): that is a one-shot effect that grants per-card
+    /// permissions; this is a continuous static that grants the controller a
+    /// recurring per-turn cast slot.
+    ExileCastPermission {
+        /// CR 601.2a: Per-turn cast frequency. `OncePerTurn` consumes a slot
+        /// in `exile_cast_permissions_used`; `Unlimited` does not.
+        frequency: CastFrequency,
+        /// CR 305.1: Play (lands + spells) vs Cast (spells only). All current
+        /// printings of this class are `Cast` (Maralen, Fae Ascendant); the
+        /// axis is retained for symmetry with the graveyard / top-of-library
+        /// permission classes.
+        play_mode: CardPlayMode,
+        /// CR 118.9a: When `true`, the spell is cast without paying its mana
+        /// cost — `casting_costs` zeroes the printed mana cost (mirrors the
+        /// Omniscience / `CastFromHandFree` flow). When `false`, the spell is
+        /// cast at its normal cost (no published printings in this class today,
+        /// but the field keeps the static composable with future patterns).
+        #[serde(default)]
+        without_paying_mana_cost: bool,
+    },
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
     /// CR 101.2 + CR 707.10: This spell can't be copied by spells or abilities.
@@ -959,6 +999,15 @@ impl Hash for StaticMode {
             StaticMode::CastFromHandFree { frequency } => {
                 frequency.hash(state);
             }
+            StaticMode::ExileCastPermission {
+                frequency,
+                play_mode,
+                without_paying_mana_cost,
+            } => {
+                frequency.hash(state);
+                play_mode.hash(state);
+                without_paying_mana_cost.hash(state);
+            }
             StaticMode::SkipStep { step } => step.hash(state),
             StaticMode::DoubleTriggers { cause } => cause.hash(state),
             // CR 107.4f: Parameterized by ManaColor — hash the color so distinct
@@ -1070,6 +1119,17 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CastFromHandFree { frequency } => {
                 write!(f, "CastFromHandFree({frequency})")
+            }
+            StaticMode::ExileCastPermission {
+                frequency,
+                play_mode,
+                without_paying_mana_cost,
+            } => {
+                if *without_paying_mana_cost {
+                    write!(f, "ExileCastPermission({play_mode},{frequency},free)")
+                } else {
+                    write!(f, "ExileCastPermission({play_mode},{frequency})")
+                }
             }
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantBeCopied => write!(f, "CantBeCopied"),
@@ -1365,6 +1425,36 @@ impl FromStr for StaticMode {
                     .unwrap_or("unlimited");
                 StaticMode::CastFromHandFree {
                     frequency: freq.parse().unwrap_or(CastFrequency::Unlimited),
+                }
+            }
+            "ExileCastPermission" => StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                without_paying_mana_cost: false,
+            },
+            s if s.starts_with("ExileCastPermission(") => {
+                // Display form: "ExileCastPermission(<play_mode>,<frequency>)" or
+                // "ExileCastPermission(<play_mode>,<frequency>,free)" for the
+                // without-paying-mana-cost variant. Parse positionally so a
+                // later 3-segment form survives lossless round-trip.
+                let inner = s
+                    .strip_prefix("ExileCastPermission(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or("");
+                let mut parts = inner.split(',');
+                let play_mode = parts
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(CardPlayMode::Cast);
+                let frequency = parts
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(CastFrequency::Unlimited);
+                let without_paying_mana_cost = matches!(parts.next(), Some("free"));
+                StaticMode::ExileCastPermission {
+                    frequency,
+                    play_mode,
+                    without_paying_mana_cost,
                 }
             }
             "CantBeCountered" => StaticMode::CantBeCountered,
@@ -1763,6 +1853,17 @@ mod tests {
             },
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
+            },
+            // Exile-cast permission (Maralen, Fae Ascendant).
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                without_paying_mana_cost: true,
+            },
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                without_paying_mana_cost: false,
             },
             // Casting prohibitions
             StaticMode::CantBeCast {

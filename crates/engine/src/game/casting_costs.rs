@@ -3190,6 +3190,19 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         } => {
             state.hand_cast_free_permissions_used.insert(source);
         }
+        // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. Stamp
+        // the per-source slot when the static is `OncePerTurn`; `Unlimited`
+        // (no shipping printing yet) skips tracking so the slot never blocks.
+        CastingVariant::ExilePermission {
+            source,
+            frequency: crate::types::statics::CastFrequency::OncePerTurn,
+        }
+        | CastingVariant::ExilePermission {
+            source,
+            frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
+        } => {
+            state.exile_cast_permissions_used.insert(source);
+        }
         _ => {}
     }
     if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =

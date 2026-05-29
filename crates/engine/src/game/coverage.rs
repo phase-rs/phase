@@ -53,6 +53,11 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
+            // CR 601.2a + CR 113.6b: ExileCastPermission carries frequency,
+            // play_mode, and the `without_paying_mana_cost` flag. Runtime
+            // enforcement is in casting.rs::exile_objects_castable_by_permission
+            // and casting_costs.rs.
+            | StaticMode::ExileCastPermission { .. }
             | StaticMode::CastWithKeyword { .. }
             // CR 702.16: PlayerProtection carries a `ProtectionTarget` (Strings) —
             // open value space, consumed by direct match in `player_protection_from`.
@@ -6429,6 +6434,13 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             // already enforced by the parser; coverage just needs a phrase
             // that the static description will contain.
             StaticMode::TopOfLibraryCastPermission { .. } => {
+                effective_lower.contains("you may cast") || effective_lower.contains("you may play")
+            }
+            // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. The
+            // discriminator phrase ("from among cards exiled with") is
+            // already enforced by the parser; coverage just needs a phrase
+            // the static description will contain.
+            StaticMode::ExileCastPermission { .. } => {
                 effective_lower.contains("you may cast") || effective_lower.contains("you may play")
             }
             StaticMode::CantCastDuring { .. } => {

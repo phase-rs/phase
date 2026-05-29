@@ -468,6 +468,14 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.hand_cast_free_permissions_used.clear();
     // CR 601.2a: Reset per-turn PlayFromExile source usage (Evelyn-style permissions).
     state.exile_play_permissions_used.clear();
+    // CR 601.2a + CR 113.6b: Reset per-turn ExileCastPermission once-per-turn
+    // tracking (Maralen, Fae Ascendant) and the rolling list of cards exiled
+    // with each tracked source this turn. Both are turn-scoped slices; the
+    // persistent `exile_links` pool is untouched and continues to back the
+    // open-ended "cards exiled with ~" filter for sources without a per-turn
+    // cap.
+    state.exile_cast_permissions_used.clear();
+    state.cards_exiled_with_source_this_turn.clear();
     // CR 702.94a: Reset per-player first-card-drawn-this-turn tracking for miracle.
     state.first_card_drawn_this_turn.clear();
     state.cards_drawn_this_turn.clear();

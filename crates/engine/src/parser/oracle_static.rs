@@ -1020,6 +1020,15 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(result);
     }
 
+    // CR 601.2a + CR 113.6b + CR 118.9: "Once each turn, you may cast [filter]
+    // from among cards exiled with ~ this turn [without paying its mana cost]."
+    // Maralen, Fae Ascendant is the type specimen; the handler accepts the
+    // wider class (any frequency, any mana-value comparator) so future
+    // printings slot in without parser changes.
+    if let Some(result) = try_parse_exile_cast_permission(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 601.2b + CR 118.9a + CR 601.2: Omniscience-class restricted free-cast
     // static. Optional " from your hand" zone qualifier — Dracogenesis's
     // "you may cast Dragon spells without paying their mana costs" relies on
@@ -10263,6 +10272,106 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
     Some(def)
 }
 
+/// CR 601.2a + CR 113.6b + CR 118.9: Parse the Maralen-class exile cast
+/// permission line: "Once each turn, you may cast [filter] from among cards
+/// exiled with ~ this turn [without paying its mana cost]." Mirrors
+/// `try_parse_graveyard_cast_permission` for the exile-pool sibling.
+///
+/// Accepted shapes:
+/// - "once each turn, you may cast a spell with mana value less than or equal
+///   to <quantity_ref> from among cards exiled with ~ this turn without paying
+///   its mana cost." (Maralen, Fae Ascendant)
+/// - The longer "once during each of your turns, you may cast …" synonym.
+/// - Unlimited shape ("you may cast …") is left for a future printing — Maralen
+///   is the only shipping card today so the `Unlimited` branch is not gated on
+///   any anchor; adding it requires an Oracle-confirmed sibling printing first.
+///
+/// Returns `None` for shapes outside this class (graveyard/top-of-library/hand
+/// permissions all anchor on different phrases earlier in the dispatch chain).
+fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+    // CR 601.2a: Frequency prefix. Both "once each turn" (Maralen) and the
+    // longer "once during each of your turns" synonym map to `OncePerTurn`.
+    // Both prefixes are tried via the file-wide `or_else` chain — adding an
+    // `Unlimited` ("you may cast …") sibling needs an Oracle-confirmed
+    // printing to disambiguate from the existing graveyard / hand handlers.
+    let rest = nom_tag_lower(lower, lower, "once each turn, you may cast ").or_else(|| {
+        nom_tag_lower(
+            lower,
+            lower,
+            "once during each of your turns, you may cast ",
+        )
+    })?;
+    let frequency = CastFrequency::OncePerTurn;
+
+    // Strip the leading article — `parse_type_phrase` expects the bare noun.
+    let rest = nom_tag_lower(rest, rest, "a ")
+        .or_else(|| nom_tag_lower(rest, rest, "an "))
+        .unwrap_or(rest);
+
+    // CR 113.6b: Anchor on " from among cards exiled with " — the
+    // class-defining phrase. Anything before is the affected filter; anything
+    // after is the source self-reference plus optional alt-cost / "this turn"
+    // markers.
+    let (filter_text, trailing) =
+        nom_primitives::split_once_on(rest, " from among cards exiled with ")
+            .ok()
+            .map(|(_, pair)| pair)?;
+
+    // Drop trailing " spell"/" spells" so `parse_type_phrase` sees the bare
+    // type. Mirrors the graveyard / top-of-library / hand sibling parsers.
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
+        Cow::Owned(filter_text.replacen(" spells", "", 1))
+    } else if nom_primitives::scan_contains(filter_text, "spell") {
+        Cow::Owned(filter_text.replacen(" spell", "", 1))
+    } else {
+        Cow::Borrowed(filter_text)
+    };
+
+    // `parse_type_phrase` already composes the dynamic "with mana value …"
+    // suffix through `parse_mana_value_suffix`, so Maralen's filter
+    // ("spell with mana value less than or equal to the number of Elves and
+    // Faeries you control") resolves through one call — no bespoke combinator
+    // chain needed here.
+    let (filter, remainder) = parse_type_phrase(&cleaned);
+    if !remainder.trim().is_empty() {
+        // Strict: any unconsumed remainder is a filter shape we don't yet
+        // model. Decline so the line either dispatches to the next handler or
+        // surfaces as Unimplemented (which the swallow detector picks up as a
+        // coverage gap rather than a misparse).
+        return None;
+    }
+
+    // CR 113.6b + CR 201.5: The source reference is normalized to `~` for
+    // `SELF_REF_TYPE_PHRASES` (this creature, this permanent, …) but left
+    // verbatim for `SELF_REF_PARSE_ONLY_PHRASES` ("this card"). Accept either
+    // form so the static covers future cards that lean on the parse-only set.
+    let after_source = std::iter::once("~")
+        .chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied())
+        .find_map(|phrase| nom_tag_lower(trailing, trailing, phrase))?;
+
+    // CR 113.6b: The "this turn" suffix is structural — without it the
+    // permission would not be per-turn-scoped and would belong to the
+    // open-ended `ExiledBySource` class instead.
+    let after_this_turn = nom_tag_lower(after_source, after_source, " this turn")?;
+
+    // CR 118.9a: Optional " without paying its mana cost" / "their mana costs"
+    // alt-cost rider. The `scan_contains` is the same idiom the sibling
+    // graveyard parser uses for its trailing alt-cost detection.
+    let without_paying_mana_cost =
+        nom_primitives::scan_contains(after_this_turn, "without paying its mana cost")
+            || nom_primitives::scan_contains(after_this_turn, "without paying their mana cost");
+
+    Some(
+        StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency,
+            play_mode: CardPlayMode::Cast,
+            without_paying_mana_cost,
+        })
+        .affected(filter)
+        .description(text.to_string()),
+    )
+}
+
 /// CR 601.3 + CR 113.6b: Parse the affected-card filter of a graveyard
 /// cast-permission ability. When the filter text is a self-reference phrase
 /// ("this card", "this creature", "this permanent", ...), the permission
@@ -16212,6 +16321,107 @@ mod tests {
                 "missing HasKeywordKind{{{expected_kind:?}}} for {name}"
             );
         }
+    }
+
+    /// Issue #594 (Maralen, Fae Ascendant) — parser test for the new exile
+    /// cast permission class. The full static line must lower to
+    /// `StaticMode::ExileCastPermission { OncePerTurn, Cast, without_paying }`
+    /// with the affected filter carrying the dynamic CMC cap. Anchored on
+    /// `parse_static_line` so the dispatch routing through `is_static_pattern`
+    /// → `parse_static_line_multi` → `parse_static_line_inner` is exercised
+    /// end-to-end.
+    #[test]
+    fn exile_cast_permission_maralen_fae_ascendant() {
+        let text = "Once each turn, you may cast a spell with mana value \
+                    less than or equal to the number of Elves and Faeries \
+                    you control from among cards exiled with ~ this turn \
+                    without paying its mana cost.";
+        let def = parse_static_line(text).expect("Maralen static must parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                without_paying_mana_cost: true,
+            },
+            "expected ExileCastPermission, got {:?}",
+            def.mode
+        );
+        let affected = def.affected.as_ref().expect("affected filter present");
+        let TargetFilter::Typed(tf) = affected else {
+            panic!("expected typed filter, got {affected:?}");
+        };
+        let has_cmc_le = tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                }
+            )
+        });
+        assert!(
+            has_cmc_le,
+            "Maralen filter must carry a Cmc(LE, ObjectCount) predicate: {:?}",
+            tf.properties
+        );
+    }
+
+    /// Issue #594 sibling — the parser must accept the longer "once during
+    /// each of your turns" synonym, leaving the rest of the lowering
+    /// unchanged. No card prints this shape today, but `add-engine-variant`
+    /// requires the class be built for the pattern, not the single card.
+    #[test]
+    fn exile_cast_permission_during_each_of_your_turns_synonym() {
+        let text = "Once during each of your turns, you may cast a spell \
+                    with mana value 3 or less from among cards exiled with \
+                    ~ this turn without paying its mana cost.";
+        let def = parse_static_line(text).expect("synonym shape must parse");
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ExileCastPermission {
+                    frequency: CastFrequency::OncePerTurn,
+                    play_mode: CardPlayMode::Cast,
+                    without_paying_mana_cost: true,
+                }
+            ),
+            "expected ExileCastPermission(OncePerTurn, Cast, free), got {:?}",
+            def.mode
+        );
+    }
+
+    /// CR 113.6b: The "this turn" suffix is structural. A line that names
+    /// "cards exiled with ~" but omits "this turn" must NOT match this
+    /// permission class — that would belong to the open-ended
+    /// `ExiledBySource` family (Court of Locthwain, Bag of Holding, etc.)
+    /// and is parsed elsewhere.
+    #[test]
+    fn exile_cast_permission_rejects_missing_this_turn_suffix() {
+        let text = "Once each turn, you may cast a spell with mana value 3 \
+                    or less from among cards exiled with ~ without paying \
+                    its mana cost.";
+        let lower = text.to_lowercase();
+        assert!(
+            try_parse_exile_cast_permission(text, &lower).is_none(),
+            "Open-ended exile filter must not match the per-turn class"
+        );
+    }
+
+    /// CR 601.2a: The graveyard sibling handler must NOT intercept the
+    /// exile-cast permission line. Regression guard against accidentally
+    /// over-anchoring the graveyard branch on "you may cast" alone.
+    #[test]
+    fn exile_cast_permission_not_intercepted_by_graveyard_branch() {
+        let text = "Once each turn, you may cast a spell with mana value \
+                    less than or equal to the number of Elves and Faeries \
+                    you control from among cards exiled with ~ this turn \
+                    without paying its mana cost.";
+        let lower = text.to_lowercase();
+        assert!(try_parse_graveyard_cast_permission(text, &lower).is_none());
+        assert!(try_parse_exile_cast_permission(text, &lower).is_some());
     }
 
     #[test]
