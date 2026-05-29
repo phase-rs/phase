@@ -10802,7 +10802,7 @@ fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
     // CR 202.3: Delegate full card restrictions (type + mana value bounds, etc.) to the
     // shared search-filter parser — cleave bracket suffixes after "from it" are merged above.
     let search_filter = parse_search_filter(&combined, ctx);
-    if !matches!(search_filter, TargetFilter::Any) {
+    if !is_unrestricted_card_filter(&search_filter) {
         return search_filter;
     }
 
@@ -10966,6 +10966,36 @@ fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
     None
 }
 
+/// True when a filter imposes no restriction beyond "any card" (including empty `Typed`).
+fn is_unrestricted_card_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(tf) => {
+            tf.type_filters.is_empty() && tf.properties.is_empty() && tf.controller.is_none()
+        }
+        _ => false,
+    }
+}
+
+/// Type phrase after the last article in text that precedes `"card from"` (e.g. `"nonland"`,
+/// `"creature with mana value 3 or less"`, or empty for bare `"a card from it"`).
+fn type_phrase_before_card_from(before_card: &str) -> &str {
+    let trimmed = before_card.trim();
+    if let Some(idx) = trimmed.rfind(" an ") {
+        return trimmed[idx + 4..].trim();
+    }
+    if let Some(idx) = trimmed.rfind(" a ") {
+        return trimmed[idx + 3..].trim();
+    }
+    if trimmed.ends_with(" an") {
+        return "";
+    }
+    if trimmed.ends_with(" a") {
+        return "";
+    }
+    trimmed
+}
+
 /// Extract card type filter from a sub-ability sentence containing "card from it/among".
 /// Handles forms like "exile a nonland card from it", "discard a creature card from it".
 fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
@@ -10985,15 +11015,7 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
     };
     // Use the full type phrase before "card from" (e.g. "nonland", "creature with mana
     // value 3 or less"), not only the last word.
-    let trimmed = before_card.trim();
-    let phrase = if let Some(idx) = trimmed.rfind(" an ") {
-        &trimmed[idx + 4..]
-    } else if let Some(idx) = trimmed.rfind(" a ") {
-        &trimmed[idx + 3..]
-    } else {
-        trimmed
-    }
-    .trim();
+    let phrase = type_phrase_before_card_from(before_card);
     if phrase.is_empty() || phrase == "a" {
         return TargetFilter::Any;
     }
@@ -11003,7 +11025,7 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
         format!("{phrase} card")
     };
     let filter = parse_search_filter(&search_text, ctx);
-    if !matches!(filter, TargetFilter::Any) {
+    if !is_unrestricted_card_filter(&filter) {
         return filter;
     }
     // Legacy single-word fallback for short descriptors ("nonland", "creature").
