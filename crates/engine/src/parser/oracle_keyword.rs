@@ -1326,6 +1326,7 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
         "blitz",
         "overload",
         "spectacle",
+        "freerunning",
         "surge",
         "encore",
         "buyback",

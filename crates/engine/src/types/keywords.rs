@@ -1511,6 +1511,7 @@ impl FromStr for Keyword {
                 "blitz" => return Ok(Keyword::Blitz(parse_keyword_mana_cost(p))),
                 "overload" => return Ok(Keyword::Overload(parse_keyword_mana_cost(p))),
                 "spectacle" => return Ok(Keyword::Spectacle(parse_keyword_mana_cost(p))),
+                "freerunning" => return Ok(Keyword::Freerunning(parse_keyword_mana_cost(p))),
                 "surge" => return Ok(Keyword::Surge(parse_keyword_mana_cost(p))),
                 "encore" => return Ok(Keyword::Encore(parse_keyword_mana_cost(p))),
                 "buyback" => {
@@ -2116,6 +2117,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Blitz" => Ok(Keyword::Blitz(mana(data)?)),
         "Overload" => Ok(Keyword::Overload(mana(data)?)),
         "Spectacle" => Ok(Keyword::Spectacle(mana(data)?)),
+        "Freerunning" => Ok(Keyword::Freerunning(mana(data)?)),
         "Surge" => Ok(Keyword::Surge(mana(data)?)),
         "Encore" => Ok(Keyword::Encore(mana(data)?)),
         "Buyback" => {
