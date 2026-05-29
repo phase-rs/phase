@@ -36,8 +36,8 @@ use super::oracle_target::{
     parse_that_clause_suffix, parse_type_phrase, TargetSyntax,
 };
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
-    split_around, starts_with_possessive, strip_after, TextPair,
+    contains_possessive, has_unconsumed_conditional, parse_count_expr, parse_mana_symbols,
+    parse_number, split_around, starts_with_possessive, strip_after, TextPair,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
@@ -2174,6 +2174,94 @@ fn recognize_shared_noun_counter_list(input: &str) -> Option<Vec<&str>> {
     .parse(input)
     .ok()?;
     Some(items)
+}
+
+/// CR 122.1 + CR 608.2d: Context-free classifier for a disjunctive
+/// counter-choice list. Given the choices payload (the text BETWEEN
+/// "your choice of " and " on TARGET"), recognize which of the three list
+/// shapes it is and parse each item into a typed `(CounterType, QuantityExpr)`
+/// pair.
+///
+/// Three list shapes (classified in priority order, mirroring
+/// `try_parse_put_counter_choice`):
+///   1. FromAmong  — "a counter from among X, Y, ..., and Z" (bare keywords)
+///   2. SharedNoun — "a X, Y, ..., or Z counter" (one leading article + bare
+///      keyword adjectives + one trailing "counter")
+///   3. Distributed — "a A counter, a B counter, or a C counter" / binary,
+///      each item a full counter noun phrase.
+///
+/// Item parsing:
+///   - Distributed item ("a +1/+1 counter", "two charge counters"):
+///     `parse_count_expr` then `parse_counter_type_typed` on the remainder
+///     (mirrors `counter.rs::try_parse_put_counter`).
+///   - FromAmong / SharedNoun bare-keyword item ("first strike"):
+///     `all_consuming(parse_strict_counter_type)`, count = `Fixed { 1 }`.
+///
+/// Requires at least 2 items and that every item names a real counter type;
+/// a non-counter list returns `None`. Nom-only — no string dispatch.
+///
+/// CR 122.1b: keyword counters (docs/MagicCompRules.txt:1180).
+/// CR 122.1: named counters (docs/MagicCompRules.txt:1176).
+pub(crate) fn classify_and_parse_counter_choice_list(
+    choices_text: &str,
+) -> Option<Vec<(CounterType, QuantityExpr)>> {
+    let (shape, choice_items) =
+        match tag::<_, _, OracleError<'_>>("a counter from among ")(choices_text) {
+            Ok((rest, _)) => (ChoiceListShape::FromAmong, split_choice_list_items(rest)?),
+            // CR 122.1b: keyword counters distribute over a single noun; only
+            // classify as SharedNoun when the shape matches AND every item is a
+            // recognized counter type — otherwise distributed lists and
+            // non-counter lists leak through. Fall through to Distributed when
+            // the strict guard fails.
+            Err(_) => match recognize_shared_noun_counter_list(choices_text) {
+                Some(items)
+                    if items.len() >= 2
+                        && items.iter().all(|item| {
+                            all_consuming(nom_primitives::parse_strict_counter_type)
+                                .parse(item.trim())
+                                .is_ok()
+                        }) =>
+                {
+                    (ChoiceListShape::SharedNoun, items)
+                }
+                _ => (
+                    ChoiceListShape::Distributed,
+                    split_choice_list_items(choices_text)?,
+                ),
+            },
+        };
+
+    if choice_items.len() < 2 {
+        return None;
+    }
+
+    let mut entries: Vec<(CounterType, QuantityExpr)> = Vec::with_capacity(choice_items.len());
+    for item in &choice_items {
+        let item = item.trim();
+        if item.is_empty() {
+            return None;
+        }
+        let entry = match shape {
+            // CR 122.1: full counter noun phrase ("a +1/+1 counter", "two charge
+            // counters"). Parse count then counter type from the remainder.
+            ChoiceListShape::Distributed => {
+                let (count, rest) = parse_count_expr(item)?;
+                let (_after, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+                (counter_type, count)
+            }
+            // CR 122.1b: bare keyword name ("first strike"); count is one.
+            ChoiceListShape::FromAmong | ChoiceListShape::SharedNoun => {
+                let (_rest, counter_type) =
+                    all_consuming(nom_primitives::parse_strict_counter_type)
+                        .parse(item)
+                        .ok()?;
+                (counter_type, QuantityExpr::Fixed { value: 1 })
+            }
+        };
+        entries.push(entry);
+    }
+
+    Some(entries)
 }
 
 /// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
@@ -36726,6 +36814,103 @@ mod tests {
                 other => panic!("expected branch {i} PutCounter, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn classify_counter_choice_list_all_three_shapes() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+
+        // SharedNoun: one article + bare keyword adjectives + trailing "counter".
+        let shared =
+            classify_and_parse_counter_choice_list("a +1/+1, first strike, or vigilance counter")
+                .expect("shared-noun counter list should classify");
+        assert_eq!(
+            shared,
+            vec![
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+                (
+                    CounterType::Keyword(KeywordKind::FirstStrike),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+                (
+                    CounterType::Keyword(KeywordKind::Vigilance),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+            ]
+        );
+
+        // Distributed: each item a full counter noun phrase.
+        let distributed = classify_and_parse_counter_choice_list(
+            "a +1/+1 counter, a first strike counter, or a vigilance counter",
+        )
+        .expect("distributed counter list should classify");
+        assert_eq!(
+            distributed,
+            vec![
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+                (
+                    CounterType::Keyword(KeywordKind::FirstStrike),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+                (
+                    CounterType::Keyword(KeywordKind::Vigilance),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+            ]
+        );
+
+        // FromAmong: "a counter from among X, Y, and Z" (bare keywords).
+        let from_among = classify_and_parse_counter_choice_list(
+            "a counter from among first strike, vigilance, and lifelink",
+        )
+        .expect("from-among counter list should classify");
+        assert_eq!(
+            from_among,
+            vec![
+                (
+                    CounterType::Keyword(KeywordKind::FirstStrike),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+                (
+                    CounterType::Keyword(KeywordKind::Vigilance),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+                (
+                    CounterType::Keyword(KeywordKind::Lifelink),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+            ]
+        );
+
+        // Distributed with a non-unit count ("two charge counters").
+        let with_count =
+            classify_and_parse_counter_choice_list("a +1/+1 counter or two charge counters")
+                .expect("distributed counter list with count should classify");
+        assert_eq!(
+            with_count,
+            vec![
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+                (
+                    CounterType::Generic("charge".to_string()),
+                    QuantityExpr::Fixed { value: 2 }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_counter_choice_list_rejects_non_counter_and_singletons() {
+        // Non-counter disjunction must not classify as a counter choice.
+        assert!(
+            classify_and_parse_counter_choice_list("a red or blue creature").is_none(),
+            "non-counter list must return None"
+        );
+        // A single item is not a choice (requires >= 2).
+        assert!(
+            classify_and_parse_counter_choice_list("a +1/+1 counter").is_none(),
+            "single-item list must return None"
+        );
     }
 
     #[test]
