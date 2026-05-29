@@ -361,36 +361,7 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     let lower = text.to_lowercase();
 
     if let Some((condition, rest)) = nom_on_lower(text, &lower, |input| {
-        alt((
-            value(AbilityCondition::WhenYouDo, tag("when you do, ")),
-            value(
-                AbilityCondition::effect_performed(),
-                tag("if a player does, "),
-            ),
-            value(AbilityCondition::effect_performed(), tag("if they do, ")),
-            value(
-                AbilityCondition::effect_performed(),
-                tag("if that player does, "),
-            ),
-            value(
-                AbilityCondition::effect_performed(),
-                tag("if the player does, "),
-            ),
-            value(
-                AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::effect_performed()),
-                },
-                tag("if that player doesn't, "),
-            ),
-            value(
-                AbilityCondition::Not {
-                    condition: Box::new(AbilityCondition::effect_performed()),
-                },
-                tag("if the player doesn't, "),
-            ),
-            value(AbilityCondition::effect_performed(), tag("if you do, ")),
-        ))
-        .parse(input)
+        crate::parser::oracle_nom::condition::parse_reflexive_conditional_connector(input)
     }) {
         return (Some(condition), rest.to_string());
     }
@@ -3096,6 +3067,41 @@ mod tests {
     use super::*;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::counter::{CounterMatch, CounterType};
+
+    /// CR 603.12: After refactoring `strip_if_you_do_conditional` to delegate to
+    /// the shared `parse_reflexive_conditional_connector` combinator, all eight
+    /// reflexive connectors must still strip to the same `(condition, rest)`.
+    #[test]
+    fn strip_if_you_do_conditional_reflexive_connectors_unchanged() {
+        let effect = AbilityCondition::effect_performed();
+        let not_effect = AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        };
+        let cases: &[(&str, Option<AbilityCondition>)] = &[
+            (
+                "when you do, draw a card",
+                Some(AbilityCondition::WhenYouDo),
+            ),
+            ("if a player does, draw a card", Some(effect.clone())),
+            ("if they do, draw a card", Some(effect.clone())),
+            ("if that player does, draw a card", Some(effect.clone())),
+            ("if the player does, draw a card", Some(effect.clone())),
+            (
+                "if that player doesn't, draw a card",
+                Some(not_effect.clone()),
+            ),
+            (
+                "if the player doesn't, draw a card",
+                Some(not_effect.clone()),
+            ),
+            ("if you do, draw a card", Some(effect.clone())),
+        ];
+        for (input, expected) in cases {
+            let (condition, rest) = strip_if_you_do_conditional(input);
+            assert_eq!(&condition, expected, "condition mismatch for {input:?}");
+            assert_eq!(rest, "draw a card", "rest mismatch for {input:?}");
+        }
+    }
 
     #[test]
     fn difference_expr_composes_unsigned_gap_from_quantity_check() {

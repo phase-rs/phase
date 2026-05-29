@@ -22,10 +22,10 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AggregateFunction, CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator,
-    ControllerRef, CountScope, DamageGroupKey, FilterProp, ObjectProperty, ObjectScope,
-    PlayerScope, QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter, ZoneRef,
+    AbilityCondition, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
+    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageGroupKey, FilterProp,
+    ObjectProperty, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, SharedQuality,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -4819,6 +4819,46 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     Ok((rest, (filter, negated)))
 }
 
+/// CR 603.12 + CR 608.2c: Recognize a leading reflexive-conditional connector
+/// and return the corresponding AbilityCondition with the connector consumed.
+/// Single authority for this set; consumed by both
+/// `oracle_effect::conditions::strip_if_you_do_conditional` and the
+/// `oracle_effect::sequence` chunk-splitter sticky-detection so they never drift.
+pub(crate) fn parse_reflexive_conditional_connector(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    alt((
+        value(AbilityCondition::WhenYouDo, tag("when you do, ")),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if a player does, "),
+        ),
+        value(AbilityCondition::effect_performed(), tag("if they do, ")),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if that player does, "),
+        ),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if the player does, "),
+        ),
+        value(
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+            tag("if that player doesn't, "),
+        ),
+        value(
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+            tag("if the player doesn't, "),
+        ),
+        value(AbilityCondition::effect_performed(), tag("if you do, ")),
+    ))
+    .parse(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4856,6 +4896,37 @@ mod tests {
                 },
             },
         );
+    }
+
+    // --- parse_reflexive_conditional_connector (CR 603.12 / 608.2c) ---
+
+    #[test]
+    fn reflexive_connector_all_eight_variants() {
+        let effect = AbilityCondition::effect_performed();
+        let not_effect = AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        };
+        let cases: &[(&str, AbilityCondition)] = &[
+            ("when you do, rest", AbilityCondition::WhenYouDo),
+            ("if a player does, rest", effect.clone()),
+            ("if they do, rest", effect.clone()),
+            ("if that player does, rest", effect.clone()),
+            ("if the player does, rest", effect.clone()),
+            ("if that player doesn't, rest", not_effect.clone()),
+            ("if the player doesn't, rest", not_effect.clone()),
+            ("if you do, rest", effect.clone()),
+        ];
+        for (input, expected) in cases {
+            let (rest, cond) = parse_reflexive_conditional_connector(input)
+                .unwrap_or_else(|_| panic!("connector must parse: {input:?}"));
+            assert_eq!(&cond, expected, "condition mismatch for {input:?}");
+            assert_eq!(rest, "rest", "remainder mismatch for {input:?}");
+        }
+    }
+
+    #[test]
+    fn reflexive_connector_rejects_non_reflexive_conditional() {
+        assert!(parse_reflexive_conditional_connector("if you control a creature, ").is_err());
     }
 
     #[test]

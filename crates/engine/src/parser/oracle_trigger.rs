@@ -20752,6 +20752,117 @@ mod tests {
         }
     }
 
+    /// CR 109.5 + CR 115.1 + CR 608.2c + CR 611.2c: Gogo, Mysterious Mime —
+    /// end-to-end trigger parse. The "you may have ~ become a copy ..." frame
+    /// produces a BecomeCopy execute with a SetName(Gogo) modification, and the
+    /// "If you do, Gogo and that creature each get +2/+0 and gain haste ... and
+    /// attack this turn if able" follow-up chains as a 4-link distribution
+    /// (SelfRef links then ParentTarget links) with NO Unimplemented anywhere.
+    ///
+    /// This test asserts the FULL desired spec, including that the pump links
+    /// carry the Haste keyword. The subjectless pump+keyword coalescing path
+    /// (`coalesce_pump_with_modifications` in `oracle_effect::imperative`) now
+    /// folds "get +2/+0 and gain haste until end of turn" into a single
+    /// `GenericEffect { AddPower, AddToughness, AddKeyword(Haste) }`, matching the
+    /// subject-bound form, so the Haste keyword survives distribution. The
+    /// "If you do," reflexive frame no longer hides the compound subject from the
+    /// chunk splitter (sticky-detection strips the leading reflexive connector
+    /// via the shared `parse_reflexive_conditional_connector` combinator).
+    #[test]
+    fn trigger_gogo_distributes_pump_haste_must_attack_to_both() {
+        let def = parse_trigger_line_with_index(
+            "At the beginning of combat on your turn, you may have ~ become a copy of another target creature you control until end of turn, except its name is ~. If you do, ~ and that creature each get +2/+0 and gain haste until end of turn and attack this turn if able.",
+            "Gogo, Mysterious Mime",
+            Some(0),
+            &mut ParseContext::default(),
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+
+        let execute = def.execute.as_deref().expect("execute body must parse");
+
+        // Walk the entire ability tree and assert NO link is Unimplemented.
+        fn assert_no_unimplemented(node: &AbilityDefinition) {
+            assert!(
+                !matches!(*node.effect, Effect::Unimplemented { .. }),
+                "found Unimplemented link in Gogo chain: {:?}",
+                node.effect
+            );
+            if let Some(sub) = node.sub_ability.as_deref() {
+                assert_no_unimplemented(sub);
+            }
+        }
+        assert_no_unimplemented(execute);
+
+        // Primary effect: BecomeCopy with SetName(Gogo, Mysterious Mime).
+        match execute.effect.as_ref() {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::SetName { name }
+                            if name == "Gogo, Mysterious Mime"
+                    )),
+                    "expected SetName(Gogo, Mysterious Mime), got {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected BecomeCopy primary effect, got {other:?}"),
+        }
+
+        // Collect every distribution-link recipient hanging off the BecomeCopy,
+        // and detect whether the Haste keyword survived on any link.
+        let mut recipients: Vec<TargetFilter> = Vec::new();
+        let mut haste_present = false;
+        let mut cursor = execute.sub_ability.as_deref();
+        while let Some(link) = cursor {
+            match link.effect.as_ref() {
+                Effect::Pump { target, .. } => recipients.push(target.clone()),
+                Effect::GenericEffect {
+                    target,
+                    static_abilities,
+                    ..
+                } => {
+                    recipients.push(target.clone().expect("GenericEffect needs a recipient"));
+                    for s in static_abilities {
+                        if s.modifications.iter().any(|m| {
+                            matches!(
+                                m,
+                                crate::types::ability::ContinuousModification::AddKeyword {
+                                    keyword: crate::types::keywords::Keyword::Haste
+                                }
+                            )
+                        }) {
+                            haste_present = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            cursor = link.sub_ability.as_deref();
+        }
+        // 4-link distribution: first half SelfRef, second half ParentTarget.
+        assert_eq!(
+            recipients,
+            vec![
+                TargetFilter::SelfRef,
+                TargetFilter::SelfRef,
+                TargetFilter::ParentTarget,
+                TargetFilter::ParentTarget,
+            ],
+            "expected SelfRef,SelfRef,ParentTarget,ParentTarget recipient order"
+        );
+        // The currently-blocking assertion: Haste must be retained on the pump.
+        assert!(
+            haste_present,
+            "Haste keyword must survive distribution across the coalesced \
+             pump+keyword GenericEffect links"
+        );
+    }
+
     #[test]
     fn trigger_become_copy_without_this_ability_clause_emits_no_retain() {
         // The retain modification must only be emitted when the body contains
