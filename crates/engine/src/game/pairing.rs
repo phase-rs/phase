@@ -33,7 +33,7 @@ pub fn pair_objects(
         obj.paired_with = Some(first);
         obj.pair_controller = Some(controller);
     }
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
 }
 
 pub fn break_pair(state: &mut GameState, object_id: ObjectId) {
@@ -48,7 +48,7 @@ pub fn break_pair(state: &mut GameState, object_id: ObjectId) {
                 partner_obj.pair_controller = None;
             }
         }
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
     }
 }
 

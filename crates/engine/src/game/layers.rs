@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
@@ -18,7 +19,7 @@ use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::game_state::{DayNight, GameState};
+use crate::types::game_state::{DayNight, GameState, LayersDirty};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
@@ -71,7 +72,7 @@ pub fn prune_end_of_turn_effects(state: &mut GameState) {
         .transient_continuous_effects
         .retain(|e| e.duration != Duration::UntilEndOfTurn);
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -83,7 +84,7 @@ pub fn prune_end_of_combat_effects(state: &mut GameState) {
         .transient_continuous_effects
         .retain(|e| e.duration != Duration::UntilEndOfCombat);
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -106,7 +107,7 @@ pub fn prune_until_next_end_step_effects(state: &mut GameState, active_player: P
         ) && e.controller == active_player)
     });
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -258,7 +259,7 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
         ) && e.controller == active_player)
     });
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 
     // CR 701.15a: Goad expires at the goading player's next turn. Clear goaded_by entries
@@ -303,7 +304,7 @@ pub fn prune_controller_untap_step_effects(state: &mut GameState, active_player:
         }
     });
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -315,7 +316,7 @@ pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
         .transient_continuous_effects
         .retain(|e| !(e.duration == Duration::UntilHostLeavesPlay && e.source_id == departed_id));
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -326,7 +327,7 @@ pub fn prune_affected_object_left_effects(state: &mut GameState, departed_id: Ob
         !matches!(effect.affected, TargetFilter::SpecificObject { id } if id == departed_id)
     });
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -376,6 +377,101 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::RecipientHasCounters { .. } => true,
         StaticCondition::RecipientMatchesFilter { .. } => true,
         _ => false,
+    }
+}
+
+/// True when a static ability's SOURCE-LEVEL enabling condition can be flipped
+/// by an object entering or leaving the battlefield — i.e. its truth value
+/// depends on battlefield population/composition. Such conditions gate the
+/// effect for the WHOLE recipient set (they are NOT recipient-local; see
+/// `condition_uses_recipient_context`), so when an entry flips the gate every
+/// pre-existing recipient changes. The incremental layer-flush fast path only
+/// re-derives the entered objects, leaving pre-existing recipients with stale
+/// derived state, so it must escalate to a full re-evaluation in that case.
+///
+/// CR 611.3a: a static ability's continuous effect isn't locked in — when its
+/// source-level enabling condition depends on board population, an object
+/// entering can flip the condition for the whole recipient set, changing
+/// PRE-EXISTING recipients. Escalate to a full rebuild.
+///
+/// EXHAUSTIVE, wildcard-free over `StaticCondition` so a future variant forces a
+/// compile-time classification. Threshold/comparison variants recurse their
+/// operand `QuantityExpr`s through the existing `quantity_expr_uses_object_count`
+/// (DRY — no hand-rolled population detection). When in doubt, conservatively
+/// `true`: over-escalation is merely a perf cost, under-escalation is a
+/// rules-correctness bug.
+fn static_condition_uses_object_population(condition: &StaticCondition) -> bool {
+    match condition {
+        // Threshold/comparison gates: board-population-dependent iff an operand
+        // reads object count. Reuses the shared QuantityExpr classifier.
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            crate::game::quantity::quantity_expr_uses_object_count(lhs)
+                || crate::game::quantity::quantity_expr_uses_object_count(rhs)
+        }
+        // Devotion is a sum of mana symbols across permanents you control — pure
+        // board composition.
+        StaticCondition::DevotionGE { .. } => true,
+        // "you control [filter]" / "a [filter] is on the battlefield" — membership
+        // is battlefield population. `IsPresent` has no zone field (always a
+        // battlefield-presence check), so it is unconditionally population
+        // dependent regardless of whether `filter` is `Some`/`None`.
+        StaticCondition::IsPresent { .. } => true,
+        // Per-player board-count gate (defending player controls a [filter]).
+        StaticCondition::DefendingPlayerControls { .. } => true,
+        // "you control a/your commander" — membership of a commander on the
+        // battlefield, board-population dependent.
+        StaticCondition::ControlsCommander { .. } => true,
+        // Recurse combinators.
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(static_condition_uses_object_population),
+        StaticCondition::Not { condition } => static_condition_uses_object_population(condition),
+        // Parse fallback — evaluated permissively (always true today), but its
+        // text is unknown; conservatively escalate so an unrecognized
+        // population-gated condition can never silently under-escalate.
+        StaticCondition::Unrecognized { .. } => true,
+        // Genuinely board-population-independent: source-local state, the
+        // source's chosen attributes, combat status, player-scoped flags/totals,
+        // turn/phase, recipient-context gates (handled by
+        // `condition_uses_recipient_context`), zone presence of the source, and
+        // cast-history. Enumerated explicitly (no wildcard) so a future variant
+        // is forced through this classification.
+        StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::None => false,
     }
 }
 
@@ -739,7 +835,17 @@ pub fn evaluate_condition_for_test(
 /// 5. Clear the layers_dirty flag.
 ///
 /// CR 613.1: Evaluate all continuous effects in layer order (1–7e).
+/// Test-only counter incremented at the TOP of every FULL `evaluate_layers`
+/// pass (NOT incremented by `apply_layers_incremental`). The discriminating
+/// performance test reads this to prove the incremental fast path engaged: full
+/// evaluations must be near-constant, not proportional to the resolved stack.
+#[cfg(test)]
+pub(crate) static FULL_EVALUATE_LAYERS_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub fn evaluate_layers(state: &mut GameState) {
+    #[cfg(test)]
+    FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // CR 302.6 + CR 613.1b + CR 702.26c: Snapshot effective controllers for
     // phased-in permanents BEFORE the Step 1 reset below wipes them. The
     // post-pass diff at the end of this function compares against this
@@ -980,8 +1086,330 @@ pub fn evaluate_layers(state: &mut GameState) {
     // rebuild replaces both `by_key` and `unclassified` from scratch.
     crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
 
-    // Step 5: Clear dirty flag
-    state.layers_dirty = false;
+    // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
+    // (Clean / EnteredObjects / Full).
+    state.layers_dirty = LayersDirty::Clean;
+}
+
+/// Mark the layer system as requiring a FULL battlefield re-evaluation. The
+/// conservative escalation used by every mutation other than a battlefield entry.
+pub fn mark_layers_full(state: &mut GameState) {
+    state.layers_dirty.mark_full();
+}
+
+/// Record that `id` entered the battlefield and is a candidate for incremental
+/// layer re-derivation. If the dirty lattice is already `Full`, this is a no-op
+/// (the full pass subsumes the entry).
+pub fn mark_layers_entered(state: &mut GameState, id: ObjectId) {
+    state.layers_dirty.mark_entered(id);
+}
+
+/// Single authority that flushes any pending layer re-evaluation and keeps the
+/// public-state dirty marks consistent with what was recomputed.
+///
+/// CR 613.1: continuous effects are evaluated in layer order over the whole
+/// board. The `Full` path always produces a correct board; the `EnteredObjects`
+/// path is an O(entered + active-effects) fast path taken only when a
+/// per-entered precondition scan AND a board-wide escalation scan prove that
+/// re-deriving just the entered objects yields a board identical to a full pass.
+pub fn flush_layers(state: &mut GameState) {
+    match std::mem::replace(&mut state.layers_dirty, LayersDirty::Clean) {
+        LayersDirty::Clean => {}
+        LayersDirty::Full => {
+            evaluate_layers(state);
+            super::public_state::mark_public_state_all_dirty(state);
+        }
+        LayersDirty::EnteredObjects(ids) => {
+            if ids.is_empty() {
+                return;
+            }
+            if incremental_flush_must_escalate(state, &ids) {
+                evaluate_layers(state);
+                super::public_state::mark_public_state_all_dirty(state);
+            } else {
+                apply_layers_incremental(state, &ids);
+                for id in &ids {
+                    super::public_state::mark_public_state_object_dirty(state, *id);
+                }
+                super::public_state::mark_battlefield_display_dirty(state);
+            }
+        }
+    }
+}
+
+/// Decide whether an `EnteredObjects` flush must conservatively escalate to a
+/// full re-evaluation.
+///
+/// Two axes, both required-clean for the fast path:
+///
+/// 1. Per-entered preconditions: the entered object must not itself be the
+///    source of a continuous effect, carry a CDA static, or carry a
+///    control-override / type-change / text-change / counter / attachment /
+///    transient effect (the entry enqueued none for a plain token).
+///
+/// 2. Board-wide escalation: no ACTIVE continuous effect may have a magnitude,
+///    affected set, or source-level enabling CONDITION that reads battlefield
+///    object population.
+///    CR 611.3a: a static-ability continuous effect isn't locked in; it applies
+///    at any moment to whatever its text indicates — so a board-population-
+///    dependent magnitude, affected set, or enabling condition re-evaluates when
+///    an object enters, changing PRE-EXISTING recipients. CR 613.7d: the entering
+///    object receives its timestamp on zone entry. CR 613.8a: dependency/timestamp
+///    ordering operates on the live set. This scan is O(active-effect-count), NOT
+///    O(battlefield).
+fn incremental_flush_must_escalate(state: &GameState, entered_ids: &HashSet<ObjectId>) -> bool {
+    // Axis 1 — per-entered preconditions.
+    for &id in entered_ids {
+        let Some(obj) = state.objects.get(&id) else {
+            // The entered object already left (e.g. it was a token that died to
+            // an SBA before flush). A full pass is the safe handling.
+            return true;
+        };
+        if entered_object_blocks_incremental(state, obj) {
+            return true;
+        }
+    }
+
+    // Axis 2a — magnitude + affected-set over the EXISTING active effect set.
+    if collect_shared_active_continuous_effects(state)
+        .iter()
+        .any(|e| {
+            modification_dynamic_quantity(&e.modification)
+                .is_some_and(crate::game::quantity::quantity_expr_uses_object_count)
+                || crate::game::filter::affected_filter_uses_object_population(&e.affected_filter)
+        })
+    {
+        return true;
+    }
+
+    // Axis 2b — source-level enabling CONDITION over the EXISTING static-ability
+    // sources. The condition axis CANNOT be read off the collected
+    // `ActiveContinuousEffect`s: `active_continuous_effects_from_static_definitions`
+    // evaluates a non-recipient-context (source-level) condition as a gate at
+    // COLLECTION time and stores `condition: None` on the resulting effect (only
+    // recipient-context conditions are retained for per-recipient re-evaluation).
+    // So a board-population gate like "as long as you control N creatures" is
+    // already consumed and invisible on the active-effect set. We must inspect the
+    // intact `StaticDefinition.condition` on each live source instead.
+    //
+    // CR 611.3a: when such a source-level enabling condition depends on board
+    // population, an object entering can flip the condition for the WHOLE recipient
+    // set, changing PRE-EXISTING recipients — so escalate to a full rebuild.
+    any_active_static_condition_uses_object_population(state)
+}
+
+/// Scan every live static-ability source for a CONTINUOUS `StaticDefinition`
+/// whose enabling `condition` is board-population-dependent. Walks the same
+/// source set as `collect_shared_active_continuous_effects`
+/// (`for_each_static_effect_source`) but reads the intact pre-collection
+/// `condition` field. O(active-source-count); short-circuits on the first match.
+fn any_active_static_condition_uses_object_population(state: &GameState) -> bool {
+    let mut found = false;
+    for_each_static_effect_source(state, |_state, obj| {
+        if found {
+            return;
+        }
+        if obj.static_definitions.iter_all().any(|def| {
+            def.mode == StaticMode::Continuous
+                && def
+                    .condition
+                    .as_ref()
+                    .is_some_and(static_condition_uses_object_population)
+        }) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// True when the entered object cannot be handled by the incremental fast path
+/// and the flush must escalate to a full re-evaluation. Conservative: any entry
+/// kind whose layer contribution cannot be cheaply proven empty fails closed.
+fn entered_object_blocks_incremental(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    // (1) The entered object sources at least one continuous effect (anthem,
+    //     lord, type-changer, etc.): a full pass is required so its effect
+    //     reaches every pre-existing recipient.
+    if !active_continuous_effects_from_static_source(state, obj).is_empty() {
+        return true;
+    }
+    // (2) CDA static: a characteristic-defining static defines the object's own
+    //     P/T/color/type from game state and is not a plain entry.
+    if obj
+        .static_definitions
+        .iter_all()
+        .any(|s| s.characteristic_defining)
+    {
+        return true;
+    }
+    // (3) The entry carries no control-override / type-change / text-change /
+    //     counter / attachment / transient effect. Counters and attachments are
+    //     cheaply observable on the object; type/text/control overrides for a
+    //     genuine new entry are sourced by statics already covered by (1)/(2).
+    //     A controller differing from the base controller indicates a Layer-2
+    //     override the incremental path does not reset for the rest of the board.
+    if !obj.counters.is_empty() {
+        return true;
+    }
+    if obj.attached_to.is_some() || !obj.attachments.is_empty() {
+        return true;
+    }
+    if obj
+        .base_controller
+        .is_some_and(|base| base != obj.controller)
+    {
+        return true;
+    }
+    false
+}
+
+/// Incremental layer re-derivation for a set of freshly-entered objects.
+///
+/// Mirrors the PER-OBJECT subset of `evaluate_layers` for `entered_ids` only:
+/// resets each entered object to its base characteristics, re-applies the
+/// EXISTING global continuous-effect set (restricted to the entered objects via
+/// `apply_continuous_effect_to`), runs the per-object counter / keyword-counter /
+/// P-T-counter / loyalty fixups and the combat-assignment-rule application, then
+/// rebuilds the TriggerIndex (CR 603.6a + CR 611.2e — granted-trigger
+/// visibility). It does NOT clear attribution globally or touch the rest of the
+/// battlefield: pre-existing objects keep their already-derived characteristics.
+///
+/// Caller (`flush_layers`) only reaches this path after
+/// `incremental_flush_must_escalate` returned false, which guarantees no active
+/// effect's magnitude or affected set reads board population — so re-deriving
+/// just the entered objects yields a board identical to a full pass (CR 613.1).
+fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectId>) {
+    // Step 1 (per-entered subset): reset computed characteristics to base.
+    for &id in entered_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.sync_missing_base_characteristics();
+            obj.name = obj.base_name.clone();
+            obj.power = obj.base_power;
+            obj.toughness = obj.base_toughness;
+            obj.loyalty = obj.base_loyalty;
+            obj.card_types = obj.base_card_types.clone();
+            obj.mana_cost = obj.base_mana_cost.clone();
+            obj.keywords = obj.base_keywords.clone();
+            obj.abilities = Arc::clone(&obj.base_abilities);
+            obj.trigger_definitions = Arc::clone(&obj.base_trigger_definitions).into();
+            obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
+            obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
+            obj.color = obj.base_color.clone();
+            obj.printed_ref = obj.base_printed_ref.clone();
+            obj.controller = obj.base_controller.unwrap_or(obj.owner);
+            obj.assigns_damage_from_toughness = false;
+            obj.assigns_damage_as_though_unblocked = false;
+            obj.assigns_no_combat_damage = false;
+        }
+    }
+
+    // Step 2: Copy effects first (Layer 1), restricted to entered objects.
+    let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
+    let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
+    for effect in &ordered_copy {
+        apply_continuous_effect_to(state, effect, entered_ids);
+    }
+
+    // Step 3-4: Remaining layers in order, restricted to entered objects.
+    let effects_by_layer = gather_active_continuous_effects(state);
+    for (layer, layer_bucket) in &effects_by_layer {
+        if matches!(*layer, Layer::Copy | Layer::CounterPT) {
+            continue;
+        }
+        if !layer_bucket.is_empty() {
+            let layer_effects: Vec<&ActiveContinuousEffect> = layer_bucket.iter().collect();
+            let ordered = if layer.has_dependency_ordering() {
+                order_with_dependencies(&layer_effects, state)
+            } else {
+                order_by_timestamp(&layer_effects)
+            };
+            for effect in &ordered {
+                apply_continuous_effect_to(state, effect, entered_ids);
+            }
+        }
+        if *layer == Layer::Type {
+            let entered_vec: Vec<ObjectId> = entered_ids.iter().copied().collect();
+            apply_intrinsic_basic_land_mana_abilities(state, &entered_vec);
+        }
+    }
+
+    // CR 702.73a: Changeling — entered object gains all creature types if it now
+    // has Changeling but no CDA covered it.
+    if !state.all_creature_types.is_empty() {
+        for &id in entered_ids {
+            let has_changeling = state
+                .objects
+                .get(&id)
+                .is_some_and(|o| o.has_keyword(&Keyword::Changeling));
+            if has_changeling {
+                let all_types = state.all_creature_types.clone();
+                if let Some(obj) = state.objects.get_mut(&id) {
+                    for subtype in &all_types {
+                        if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
+                            obj.card_types.subtypes.push(subtype.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // CR 122.1b + CR 613.1f: Keyword counters grant their keyword (Layer 6).
+    // CR 613.4c: Power/toughness counters modify P/T (Layer 7c). CR 306.5c:
+    // loyalty re-derives from loyalty counters. Per-entered fixups only.
+    for &id in entered_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            let granted: Vec<Keyword> = obj
+                .counters
+                .keys()
+                .filter_map(|ct| match ct {
+                    CounterType::Keyword(kind) => Keyword::promote_keyword_kind(*kind),
+                    _ => None,
+                })
+                .collect();
+            for keyword in granted {
+                if !obj.has_keyword(&keyword) {
+                    obj.keywords.push(keyword);
+                }
+            }
+
+            let (power_delta, toughness_delta) = obj.counters.iter().fold(
+                (0i32, 0i32),
+                |(power_total, toughness_total), (counter_type, count)| {
+                    let Some((power, toughness)) = counter_type.power_toughness_delta() else {
+                        return (power_total, toughness_total);
+                    };
+                    let count = crate::game::arithmetic::u32_to_i32_saturating(*count);
+                    (
+                        power_total.saturating_add(power.saturating_mul(count)),
+                        toughness_total.saturating_add(toughness.saturating_mul(count)),
+                    )
+                },
+            );
+            if power_delta != 0 {
+                if let Some(ref mut p) = obj.power {
+                    *p = saturating_pt_add(*p, power_delta);
+                }
+            }
+            if toughness_delta != 0 {
+                if let Some(ref mut t) = obj.toughness {
+                    *t = saturating_pt_add(*t, toughness_delta);
+                }
+            }
+            if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
+                obj.loyalty = Some(loyalty_counters);
+            }
+        }
+    }
+
+    // CR 613.11: Combat-assignment rule effects, restricted to entered objects.
+    apply_combat_assignment_rule_effects_filtered(state, Some(entered_ids));
+
+    // CR 603.6a + CR 611.2e: Rebuild the TriggerIndex so the next event scan
+    // sees the entered objects' (and any granted) trigger sets.
+    crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
 }
 
 fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<ActiveContinuousEffect> {
@@ -1404,6 +1832,13 @@ fn is_combat_assignment_rule_modification(modification: &ContinuousModification)
 }
 
 fn apply_combat_assignment_rule_effects(state: &mut GameState) {
+    apply_combat_assignment_rule_effects_filtered(state, None);
+}
+
+fn apply_combat_assignment_rule_effects_filtered(
+    state: &mut GameState,
+    restrict_to: Option<&HashSet<ObjectId>>,
+) {
     let mut effects = collect_active_combat_assignment_rule_effects(state);
     effects.sort_by_key(|effect| (effect.timestamp, effect.controller.0, effect.source_id.0));
 
@@ -1416,6 +1851,7 @@ fn apply_combat_assignment_rule_effects(state: &mut GameState) {
         let ctx = FilterContext::from_source(state, effect.source_id);
         let affected_ids: Vec<ObjectId> = scan_ids
             .iter()
+            .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
             .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
             .filter(|&&id| {
                 effect.condition.as_ref().is_none_or(|condition| {
@@ -1888,7 +2324,93 @@ fn record_attribution(
     }
 }
 
+/// Single authority extracting the dynamic `QuantityExpr` magnitude carried by a
+/// `ContinuousModification`, if any. Both the dynamic-P/T apply site
+/// (`apply_continuous_effect`) and the incremental-flush escalation scan
+/// (`flush_layers`) call this so there is one place that decides which
+/// modifications carry a runtime-resolved magnitude.
+///
+/// EXHAUSTIVE and wildcard-free over `ContinuousModification` so a future
+/// variant that carries a `QuantityExpr` must be classified here at compile
+/// time rather than silently slipping past the escalation scan. `AddCounterOnEnter`
+/// also carries a `QuantityExpr` but is resolution-time-consumed by the
+/// BecomeCopy / CopyTokenOf resolvers and never reaches `apply_continuous_effect`
+/// (see its doc comment), so it is excluded.
+fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&QuantityExpr> {
+    match m {
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
+        | ContinuousModification::AddDynamicPower { value }
+        | ContinuousModification::AddDynamicToughness { value }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
+        // Resolution-time-consumed; never an active continuous effect.
+        ContinuousModification::AddCounterOnEnter { .. } => None,
+        // Non-dynamic modifications carry plain i32 / enum payloads, no dynamic
+        // magnitude. Enumerated explicitly (no wildcard) so a future
+        // QuantityExpr-carrying variant forces a decision here.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. } => None,
+    }
+}
+
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
+    apply_continuous_effect_filtered(state, effect, None);
+}
+
+/// Apply a continuous effect's modification only to the subset of its affected
+/// objects that are in `restrict_to`. Used by the incremental layer-flush fast
+/// path so a pre-existing anthem/static re-applies to a freshly-entered object
+/// without re-applying to (and thus without needing to reset) the rest of the
+/// battlefield. Shares the entire apply body with `apply_continuous_effect` —
+/// no duplicated per-recipient logic.
+fn apply_continuous_effect_to(
+    state: &mut GameState,
+    effect: &ActiveContinuousEffect,
+    restrict_to: &HashSet<ObjectId>,
+) {
+    apply_continuous_effect_filtered(state, effect, Some(restrict_to));
+}
+
+fn apply_continuous_effect_filtered(
+    state: &mut GameState,
+    effect: &ActiveContinuousEffect,
+    restrict_to: Option<&HashSet<ObjectId>>,
+) {
     let scan_zone = effect
         .affected_filter
         .extract_in_zone()
@@ -1897,6 +2419,10 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     let ctx = FilterContext::from_source(state, effect.source_id);
     let affected_ids: Vec<ObjectId> = scan_ids
         .iter()
+        // Incremental fast path: re-apply only to the freshly-entered objects.
+        // The rest of the battlefield was not reset and keeps its prior derived
+        // values, so re-applying to it would double-apply.
+        .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
         .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
         .filter(|&&id| {
             effect.condition.as_ref().is_none_or(|condition| {
@@ -2025,16 +2551,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     // referent. Recipient-relative quantities ("attached to it", "other",
     // "shares a type with it") need the affected object bound before
     // resolution, so those defer into the per-recipient loop below.
-    let dynamic_pt_expr = match &effect.modification {
-        ContinuousModification::SetDynamicPower { value }
-        | ContinuousModification::SetDynamicToughness { value }
-        | ContinuousModification::SetPowerDynamic { value }
-        | ContinuousModification::SetToughnessDynamic { value }
-        | ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value }
-        | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
-        _ => None,
-    };
+    let dynamic_pt_expr = modification_dynamic_quantity(&effect.modification);
     let effect_controller = state
         .objects
         .get(&effect.source_id)
@@ -3077,7 +3594,7 @@ mod tests {
         assert_eq!(state.objects[&bear].toughness, Some(2));
 
         state.players[0].life = 27;
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&bear].power, Some(4));
         assert_eq!(state.objects[&bear].toughness, Some(4));
@@ -3275,11 +3792,11 @@ mod tests {
     #[test]
     fn test_layers_dirty_flag_cleared() {
         let mut state = setup();
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
 
         evaluate_layers(&mut state);
 
-        assert!(!state.layers_dirty);
+        assert!(!state.layers_dirty.is_dirty());
     }
 
     #[test]
@@ -3386,7 +3903,7 @@ mod tests {
             .attachments
             .push(equipment);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let equipped = state.objects.get(&bear).unwrap();
@@ -4243,7 +4760,7 @@ mod tests {
         state.battlefield.retain(|&id| id != lord);
 
         // Re-evaluate
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let bear_obj = state.objects.get(&bear).unwrap();
@@ -4343,7 +4860,7 @@ mod tests {
         // Real attach pipeline: sets `attached_to` + host `attachments`.
         attach_to(&mut state, mutation, bear);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&bear).unwrap();
@@ -4416,7 +4933,7 @@ mod tests {
 
         evaluate_layers(&mut state);
         state.battlefield.retain(|&id| id != suppressor);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&target).unwrap();
@@ -4470,7 +4987,7 @@ mod tests {
             .contains(&CoreType::Creature));
 
         state.battlefield.retain(|&id| id != animator);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&artifact).unwrap();
@@ -4501,7 +5018,7 @@ mod tests {
         assert_eq!(state.objects[&bear].color, vec![ManaColor::Blue]);
 
         state.battlefield.retain(|&id| id != painter);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         assert!(
@@ -4547,7 +5064,7 @@ mod tests {
             .static_definitions
             .push(cda);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&shapeshifter).unwrap();
@@ -4578,7 +5095,7 @@ mod tests {
             .static_definitions
             .push(def);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         // The bear should have all creature types via the post-fixup
@@ -4630,7 +5147,7 @@ mod tests {
         obj.static_definitions.push(cda);
         obj.static_definitions.push(non_cda);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&shapeshifter).unwrap();
@@ -4677,7 +5194,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&land).unwrap();
@@ -4715,7 +5232,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&land).unwrap();
@@ -4757,7 +5274,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&mimic).unwrap();
@@ -4814,7 +5331,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&target).unwrap();
@@ -4870,7 +5387,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&target).unwrap();
@@ -4920,7 +5437,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&target).unwrap();
@@ -4971,7 +5488,7 @@ mod tests {
         }
 
         // Empty graveyards: 0 card types → P/T = 0/1
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         let obj = state.objects.get(&goyf).unwrap();
         assert_eq!(obj.power, Some(0), "No card types in graveyards → power 0");
@@ -4994,7 +5511,7 @@ mod tests {
             .push(CoreType::Creature);
         state.players[0].graveyard.push_back(gy_creature);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         let obj = state.objects.get(&goyf).unwrap();
         assert_eq!(obj.power, Some(1), "Creature in graveyard → power 1");
@@ -5021,7 +5538,7 @@ mod tests {
             .push(CoreType::Instant);
         state.players[1].graveyard.push_back(gy_instant);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         let obj = state.objects.get(&goyf).unwrap();
         assert_eq!(obj.power, Some(2), "Creature + Instant → power 2");
@@ -5042,7 +5559,7 @@ mod tests {
         }
         state.players[0].graveyard.push_back(gy_artcreature);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         let obj = state.objects.get(&goyf).unwrap();
         assert_eq!(
@@ -5324,7 +5841,7 @@ mod tests {
             .static_definitions
             .push(def);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&id).unwrap();
@@ -5399,7 +5916,7 @@ mod tests {
             .static_definitions
             .push(def);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&id).unwrap();
@@ -5473,7 +5990,7 @@ mod tests {
         .into();
 
         // Mark layers dirty and evaluate
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         // Player 0's Ninja should get +1/+1
@@ -6776,7 +7293,7 @@ mod tests {
         let urborg = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
         add_global_land_subtype_static(&mut state, urborg, "Swamp");
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let mountain_obj = state.objects.get(&mountain).unwrap();
@@ -6799,7 +7316,7 @@ mod tests {
         let yavimaya = make_land_with_mana(&mut state, "Yavimaya", PlayerId(0), ManaColor::Green);
         add_global_land_subtype_static(&mut state, yavimaya, "Forest");
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let plains_obj = state.objects.get(&plains).unwrap();
@@ -6818,7 +7335,7 @@ mod tests {
         let urborg2 = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
         add_global_land_subtype_static(&mut state, urborg2, "Swamp");
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let mountain_obj = state.objects.get(&mountain).unwrap();
@@ -6853,7 +7370,7 @@ mod tests {
         let urborg = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
         add_global_land_subtype_static(&mut state, urborg, "Swamp");
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let swamp_obj = state.objects.get(&basic_swamp).unwrap();
@@ -6885,7 +7402,7 @@ mod tests {
         // Silence host warning.
         let _ = host;
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let bear_obj = state.objects.get(&bear).unwrap();
@@ -6979,7 +7496,7 @@ mod tests {
             .static_definitions
             .push(static_def);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         for id in [artifact1, artifact2, artifact3] {
@@ -6992,7 +7509,7 @@ mod tests {
         }
 
         // Idempotency across layer passes: running layers twice must not stack.
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         for id in [artifact1, artifact2, artifact3] {
             assert_eq!(count_food_abilities(&state.objects[&id]), 1);
@@ -7016,7 +7533,7 @@ mod tests {
                 .push(static_def);
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         assert_eq!(
@@ -7114,7 +7631,7 @@ mod tests {
 
         // Effect expires — drop it from the transient list.
         state.transient_continuous_effects.retain(|e| e.id != eid);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         assert_eq!(
@@ -7175,7 +7692,7 @@ mod tests {
         // remove doesn't crash on a separate eval cycle.
         evaluate_layers(&mut state);
         state.objects.remove(&bear);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         // No panic; the diff loop's `get_mut(...).if let Some` swallows it.
         evaluate_layers(&mut state);
     }
@@ -7322,7 +7839,7 @@ mod tests {
         ));
 
         state.battlefield.retain(|&id| id != source);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&bear).unwrap();
@@ -8219,7 +8736,7 @@ mod tests {
             .attachments
             .push(equipment);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         // (a) The recipient holds the inner static after layer evaluation.
@@ -8481,7 +8998,7 @@ mod tests {
             .attachments
             .push(aura);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let c = state.objects.get(&creature).unwrap();
@@ -8595,7 +9112,7 @@ mod tests {
             .attachments
             .push(aura);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let c = state.objects.get(&creature).unwrap();

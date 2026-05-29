@@ -53,7 +53,7 @@ pub fn transform_permanent(
         obj.transformed = true;
     }
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
 
     events.push(GameEvent::Transformed { object_id });
 
@@ -160,7 +160,7 @@ mod tests {
             "BackAbility"
         );
         assert_eq!(obj.color, vec![ManaColor::Green, ManaColor::Red]);
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], GameEvent::Transformed { object_id: id });
     }

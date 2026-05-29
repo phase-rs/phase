@@ -457,7 +457,7 @@ pub fn activate_ninjutsu(
         source_id: ninjutsu_obj_id,
     });
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
 
     Ok(())
 }

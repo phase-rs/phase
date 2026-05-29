@@ -674,7 +674,11 @@ pub fn apply_create_token_after_replacement(
 
         // CR 111.10a–v: Inject predefined abilities for known token subtypes.
         inject_predefined_token_abilities(state, obj_id);
-        state.layers_dirty = true;
+        // Battlefield entry: request an incremental layer re-derive for just this
+        // token. `flush_layers` escalates to a full pass if the token sources a
+        // continuous effect / carries counters / etc., or if any active effect
+        // reads board population.
+        crate::game::layers::mark_layers_entered(state, obj_id);
         crate::game::restrictions::record_battlefield_entry(state, obj_id);
         crate::game::restrictions::record_token_created(state, obj_id);
 

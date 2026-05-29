@@ -43,7 +43,7 @@ pub fn apply_destroy_after_replacement(
                     } = zone_event
                     {
                         zones::move_to_zone(state, oid, to, events);
-                        state.layers_dirty = true;
+                        crate::game::layers::mark_layers_full(state);
                     }
                 }
                 ReplacementResult::Prevented => {}
@@ -58,7 +58,7 @@ pub fn apply_destroy_after_replacement(
         ProposedEvent::ZoneChange { object_id, to, .. } => {
             // Destroy replacement redirected directly to a zone change.
             zones::move_to_zone(state, object_id, to, events);
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
             true
         }
         _ => true,

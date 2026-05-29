@@ -61,7 +61,7 @@ pub fn resolve(
     if candidates.len() == 1 {
         // Only one creature — auto-select as ring-bearer.
         state.ring_bearer.insert(controller, Some(candidates[0]));
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
         return Ok(());
     }
 
@@ -110,7 +110,7 @@ pub(crate) fn clear_ring_bearer_if_object(state: &mut GameState, object_id: Obje
         }
     });
     if changed {
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
     }
 }
 
@@ -131,7 +131,7 @@ pub(crate) fn normalize_ring_bearers(state: &mut GameState) -> bool {
     for player in stale {
         state.ring_bearer.remove(&player);
     }
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     true
 }
 
@@ -246,7 +246,7 @@ mod tests {
         let creature_id = make_creature(&mut state, 1, PlayerId(0));
         state.ring_level.insert(PlayerId(0), 1);
         state.ring_bearer.insert(PlayerId(0), Some(creature_id));
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         layers::evaluate_layers(&mut state);
 

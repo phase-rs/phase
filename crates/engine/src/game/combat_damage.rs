@@ -1901,7 +1901,7 @@ mod tests {
             vec![attacker_a, attacker_b],
             vec![(attacker_a, vec![blocker])],
         );
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         let mut events = Vec::new();
         resolve_combat_damage(&mut state, &mut events);

@@ -1189,6 +1189,56 @@ pub struct TargetSelectionProgress {
     pub current_legal_targets: Vec<TargetRef>,
 }
 
+/// Lattice tracking which battlefield objects need layer (continuous-effect)
+/// re-evaluation. Replaces the old `bool` flag so that a token / conjure / copy
+/// entry can request an INCREMENTAL re-derive of only the entering object(s)
+/// instead of a full battlefield reset+reapply.
+///
+/// CR 613.1: continuous effects are evaluated in layer order over the whole
+/// board. A full evaluation is always correct; the incremental path is a
+/// performance optimization that `flush_layers` only takes when it can prove
+/// (per-entered preconditions + a board-wide escalation scan) that re-deriving
+/// just the entered objects produces a board state identical to a full pass.
+/// `mark_full()` is the conservative escalation any non-entry mutation uses.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LayersDirty {
+    /// Layers are up to date; nothing to flush.
+    #[default]
+    Clean,
+    /// Only these objects entered the battlefield since the last flush and no
+    /// other layer-affecting mutation occurred. Candidate for the incremental
+    /// fast path.
+    EnteredObjects(HashSet<ObjectId>),
+    /// A full battlefield re-evaluation is required.
+    Full,
+}
+
+impl LayersDirty {
+    /// Constructor used as the `#[serde(default)]` for the field: deserialized
+    /// snapshots conservatively rebuild fully on first flush.
+    pub fn full() -> Self {
+        Self::Full
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        !matches!(self, Self::Clean)
+    }
+
+    pub fn mark_full(&mut self) {
+        *self = Self::Full;
+    }
+
+    pub fn mark_entered(&mut self, id: ObjectId) {
+        match self {
+            Self::Full => {}
+            Self::Clean => *self = Self::EnteredObjects(HashSet::from([id])),
+            Self::EnteredObjects(s) => {
+                s.insert(id);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublicStateDirty {
     pub all_objects_dirty: bool,
@@ -3922,7 +3972,12 @@ pub struct GameState {
     pub deferred_entry_events: Vec<GameEvent>,
 
     // Layer system
-    pub layers_dirty: bool,
+    // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
+    // fully on first flush. The previous `bool` field serialized as `true`
+    // initially; skipping + defaulting to `Full` preserves that intent without
+    // serializing the (derived) entered-object set.
+    #[serde(skip, default = "LayersDirty::full")]
+    pub layers_dirty: LayersDirty,
     /// CR 603.2: Candidate pre-filter for `collect_pending_triggers`. Rebuilt
     /// lazily after deserialize via a sentinel check at the top of the consult
     /// site; rebuilt eagerly at the end of `evaluate_layers` (CR 611.2e) so the
@@ -4975,7 +5030,7 @@ impl GameState {
             post_replacement_event_target: None,
             pending_spell_resolution: None,
             deferred_entry_events: Vec::new(),
-            layers_dirty: true,
+            layers_dirty: LayersDirty::full(),
             trigger_index: TriggerIndex::default(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
@@ -5202,7 +5257,7 @@ impl GameState {
                 condition,
                 source_name,
             });
-        self.layers_dirty = true;
+        self.layers_dirty.mark_full();
         id
     }
 

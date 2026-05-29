@@ -27,6 +27,174 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
 use crate::types::zones::Zone;
 
+/// True when the filter's matched SET depends on the population of objects on
+/// the battlefield — i.e. another object entering or leaving the battlefield can
+/// change whether a PRE-EXISTING object satisfies this filter.
+///
+/// CR 611.3a: a static-ability continuous effect applies at any moment to
+/// whatever its text indicates; if its affected set is defined by board
+/// population ("creatures that share a name with another permanent", "with the
+/// most counters", etc.) then an entry/exit changes which pre-existing objects
+/// it affects. The incremental layer-flush fast path must escalate to a full
+/// re-evaluation in that case. CR 613.7d: the entering object receives its
+/// timestamp on zone entry, so even a fixed affected-set can reorder.
+///
+/// Sibling of the fail-closed exhaustive FilterProp match in this module — it
+/// answers a DIFFERENT question (population dependence, not membership), so it is
+/// built as a distinct recursion rather than overloading that match.
+pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Not { filter: inner } => affected_filter_uses_object_population(inner),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(affected_filter_uses_object_population)
+        }
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            properties.iter().any(filter_prop_uses_object_population)
+        }
+        // No other TargetFilter arm defines its set by whole-board population.
+        // Self/source/target/parent/triggering/specific references resolve to a
+        // fixed object or player; zone/exile/tracked-set references read a
+        // specific zone or ledger, not battlefield membership.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::OriginalController
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// EXHAUSTIVE, wildcard-free leaf classifier for
+/// `affected_filter_uses_object_population`. Adding a `FilterProp` variant forces
+/// a decision here. `true` only for props whose membership reads whole-board
+/// object population; recurses into embedded `QuantityExpr` thresholds and inner
+/// filters.
+fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
+    match prop {
+        // Structurally board-population dependent.
+        FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::NameMatchesAnyPermanent { .. } => true,
+        // Membership depends on the names of every battlefield permanent matched
+        // by the inner filter ("with a different name than each X you control"),
+        // so any entry/exit of a matching permanent can flip membership for a
+        // pre-existing object. Unconditionally population dependent.
+        FilterProp::DifferentNameFrom { .. } => true,
+        // CR 603.4: "shares a quality with" a reference set is population
+        // dependent ONLY when a reference filter is present — the reference set
+        // is battlefield-derived. The multi-target group-share form
+        // (`reference = None`) is candidate-local, validated at resolution time,
+        // not whole-board membership.
+        FilterProp::SharesQuality { reference, .. } => reference.is_some(),
+        // Embedded-threshold props: population dependent iff the threshold
+        // expression reads object count.
+        FilterProp::Counters { count, .. } => {
+            crate::game::quantity::quantity_expr_uses_object_count(count)
+        }
+        FilterProp::Cmc { value, .. } => {
+            crate::game::quantity::quantity_expr_uses_object_count(value)
+        }
+        FilterProp::PtComparison { value, .. } => {
+            crate::game::quantity::quantity_expr_uses_object_count(value)
+        }
+        // Disjunctive composite: recurse.
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_uses_object_population),
+        // Intentional leaf-false. These are candidate-local, stack-relative,
+        // single-object, or carry no QuantityExpr threshold, so a board entry/exit
+        // cannot change whether a pre-existing object satisfies them.
+        // `ColorCount` carries a `u8` constant, not a QuantityExpr.
+        FilterProp::CanEnchant { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::ColorCount { .. }
+        | FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::Attacking
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::Unblocked
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::HasSingleTarget
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::ToughnessGTPower
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::FaceDown
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::AttackingController
+        | FilterProp::IsCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
 /// CR 608.2c: Resolve contextual parent-target exclusions before a mass-effect scan.
 ///
 /// This intentionally supports only `Not(ParentTarget)` inside composite filters.

@@ -195,6 +195,123 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
     }
 }
 
+/// True when the QuantityExpr's magnitude depends on the population of objects
+/// on the battlefield (a count/aggregate over a board-wide object set).
+///
+/// CR 611.3a: a static-ability continuous effect isn't locked in — it applies at
+/// any moment to whatever its text indicates. A magnitude that reads board
+/// population ("+1/+1 for each creature you control", Devotion, distinct colors
+/// among permanents, etc.) re-evaluates when ANY object enters or leaves, which
+/// changes the value applied to PRE-EXISTING recipients. The incremental
+/// layer-flush fast path must escalate to a full re-evaluation when an active
+/// effect carries such a magnitude. CR 613.7d / CR 613.8a: timestamp/dependency
+/// ordering operates on the live set, so a population change can also reorder.
+///
+/// Mirrors the structural recursion of `quantity_expr_uses_recipient`: composite
+/// arms recurse, the `QuantityRef` leaf classifies each variant exhaustively
+/// (NO wildcard tail) so a future population-reading variant forces a decision
+/// here at compile time.
+pub(crate) fn quantity_expr_uses_object_count(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_uses_object_count(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_object_count(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_object_count),
+        QuantityExpr::UpTo { max } => quantity_expr_uses_object_count(max),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_uses_object_count(exponent),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_uses_object_count(left) || quantity_expr_uses_object_count(right)
+        }
+    }
+}
+
+/// CR 611.3a + CR 613.7d: Leaf classification for `quantity_expr_uses_object_count`.
+/// EXHAUSTIVE and wildcard-free — adding a `QuantityRef` variant forces a
+/// decision here. `true` for any reference that reads battlefield object
+/// population; `false` for single-object, player-level, history-record, and
+/// payment/choice references whose value is unaffected by another object
+/// entering or leaving the battlefield.
+fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
+    match qty {
+        // Read battlefield object population directly.
+        QuantityRef::ObjectCount { .. }
+        | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::Aggregate { .. }
+        | QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::DistinctColorsAmongPermanents { .. }
+        | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::EnteredThisTurn { .. } => true,
+        // Distinct card types reads battlefield population ONLY when its source
+        // is the object-filter variant; zone / linked-exile sources do not.
+        QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Objects { .. } => true,
+            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+        },
+        // Player-level, single-object, history-record, payment, and choice
+        // references: unaffected by another object's battlefield entry/exit.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::ChosenNumber
+        | QuantityRef::AttackedThisTurn
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount => false,
+    }
+}
+
 pub(crate) fn filter_uses_recipient(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => tf.properties.iter().any(filter_prop_uses_recipient),

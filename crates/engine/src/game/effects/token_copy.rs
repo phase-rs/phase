@@ -303,7 +303,10 @@ pub fn resolve(
             // Step 6b: Inject predefined abilities, record entry, and mark layers dirty.
             // CR 111.10a-v: Predefined token abilities for known subtypes (Treasure, Food, etc.).
             super::token::inject_predefined_token_abilities(state, token_id);
-            state.layers_dirty = true;
+            // Battlefield entry of a copy token: request an incremental re-derive
+            // for just this token. `flush_layers` escalates to a full pass when
+            // the copied object sources a continuous effect, carries a CDA, etc.
+            crate::game::layers::mark_layers_entered(state, token_id);
             crate::game::restrictions::record_battlefield_entry(state, token_id);
             crate::game::restrictions::record_token_created(state, token_id);
 
@@ -820,7 +823,7 @@ mod tests {
         assert!(token.card_types.subtypes.contains(&"Snake".to_string()));
         assert!(token.is_token);
         assert!(token.zone == Zone::Battlefield);
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::TokenCreated { name, .. } if name == "Mist-Syndicate Naga")
         ));

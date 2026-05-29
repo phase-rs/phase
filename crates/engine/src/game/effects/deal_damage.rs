@@ -315,7 +315,7 @@ pub(crate) fn apply_damage_after_replacement(
                         target_obj.dealt_deathtouch_damage = true;
                     }
                 }
-                state.layers_dirty = true;
+                crate::game::layers::mark_layers_full(state);
             } else {
                 // Classify the target before mutating so the post-classification
                 // helper can take a fresh `&mut GameState` borrow.

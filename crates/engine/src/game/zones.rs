@@ -175,7 +175,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         };
         if !preserve_bestow_form && obj_mut.bestow_form.is_some() {
             super::casting::revert_bestow_aura_form(obj_mut);
-            state.layers_dirty = true;
+            state.layers_dirty.mark_full();
         }
 
         // CR 702.148a + CR 612: A cleave spell's text-changing effect functions
@@ -215,7 +215,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {
         super::pairing::break_pair(state, object_id);
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
         super::layers::prune_host_left_effects(state, object_id);
         super::layers::prune_affected_object_left_effects(state, object_id);
         for tapped in state.lands_tapped_for_mana.values_mut() {
@@ -379,7 +379,7 @@ pub fn move_to_zone(
     // CR 702.94a + CR 400.3: hand-zone continuous effects require re-evaluation
     // when a hand object appears or departs.
     if to == Zone::Battlefield || to == Zone::Hand || from == Zone::Hand {
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
     }
 
     // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under

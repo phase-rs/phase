@@ -1013,10 +1013,10 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
     }
 
     if changed_battlefield {
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
     }
 
-    if changed_any || state.layers_dirty {
+    if changed_any || state.layers_dirty.is_dirty() {
         bump_state_revision(state);
         mark_public_state_all_dirty(state);
         finalize_public_state(state);

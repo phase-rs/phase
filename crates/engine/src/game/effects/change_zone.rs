@@ -112,7 +112,7 @@ pub(crate) fn deliver_replaced_zone_change(
     {
         zones::move_to_zone(state, object_id, to, events);
         if to == Zone::Battlefield || from == Zone::Battlefield {
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
         // CR 712.14a: Apply transformation if entering the battlefield transformed.
         if should_transform && to == Zone::Battlefield {

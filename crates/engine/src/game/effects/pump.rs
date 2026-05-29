@@ -558,7 +558,7 @@ mod tests {
         assert_eq!(state.objects[&obj_id].power, Some(5));
 
         // Trigger another layer recalculation — pump must persist
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&obj_id].power, Some(5));
         assert_eq!(state.objects[&obj_id].toughness, Some(5));

@@ -4994,5 +4994,507 @@ mod tests {
             def.quantity_modification = Some(QuantityModification::Double);
             def
         }
+
+        // ====================================================================
+        // Incremental layer-flush performance + correctness regression tests.
+        // ====================================================================
+
+        use crate::game::layers::{evaluate_layers, flush_layers, FULL_EVALUATE_LAYERS_COUNT};
+        use std::sync::atomic::Ordering;
+
+        /// (A) DISCRIMINATING perf test on the REAL 583-Scute-Swarm board.
+        ///
+        /// Deserializes the WASM-export wrapper at `/tmp/gamestate.json` and
+        /// resolves a BOUNDED PREFIX of the landfall-trigger stack (each step:
+        /// resolve_next + process_triggers + SBA loop, the real pipeline). Asserts
+        /// that the number of FULL `evaluate_layers` passes over that prefix is
+        /// NEAR-CONSTANT, not one-per-resolution — proving the incremental fast
+        /// path engaged.
+        ///
+        /// Before the fix every resolution flushed a full `evaluate_layers`
+        /// (token-creation set `layers_dirty = true`, flushed per resolution), so
+        /// `full_evals` would equal the number of steps. After the fix the
+        /// `EnteredObjects` incremental path handles vanilla Insect-token entries,
+        /// so full passes stay near-constant.
+        ///
+        /// Bounded to a prefix because the FULL 2,891-trigger resolution is
+        /// dominated by the O(N²) trigger-scan / SBA pipeline (independent of the
+        /// layers fix) and is impractically slow in a debug build. The prefix is
+        /// sufficient to discriminate: pre-fix the prefix already shows
+        /// full_evals == steps.
+        ///
+        /// Self-skips when `/tmp/gamestate.json` is absent (CI lacks the repro).
+        /// `#[ignore]` by default: depends on a local-only 27MB snapshot. Run with
+        /// `cargo test -p engine -- --ignored real_scute_board`.
+        #[test]
+        #[ignore = "requires local /tmp/gamestate.json repro"]
+        fn real_scute_board_resolution_is_not_full_eval_per_token() {
+            let path = "/tmp/gamestate.json";
+            let Ok(contents) = std::fs::read_to_string(path) else {
+                eprintln!("skipping: {path} not present");
+                return;
+            };
+            let wrapper: serde_json::Value =
+                serde_json::from_str(&contents).expect("repro wrapper must parse");
+            let gs_value = wrapper
+                .get("gameState")
+                .expect("wrapper must have gameState member")
+                .clone();
+            let mut state: GameState =
+                serde_json::from_value(gs_value).expect("gameState must deserialize");
+
+            let stack_size = state.stack.len();
+            assert!(
+                stack_size > 100,
+                "repro must have a large stack (got {stack_size})"
+            );
+
+            // First flush rebuilds fully (deserialized snapshot defaults to Full).
+            // Reset the counter AFTER that initial mandatory full pass so we only
+            // measure per-resolution behavior.
+            flush_layers(&mut state);
+            FULL_EVALUATE_LAYERS_COUNT.store(0, Ordering::Relaxed);
+
+            const PREFIX_STEPS: usize = 120;
+            let mut steps = 0usize;
+            while !state.stack.is_empty() && steps < PREFIX_STEPS {
+                let mut events = Vec::new();
+                resolve_next(&mut state, &mut events);
+                triggers::process_triggers(&mut state, &events);
+                crate::game::sba::check_state_based_actions(&mut state, &mut events);
+                steps += 1;
+            }
+            let full_evals = FULL_EVALUATE_LAYERS_COUNT.load(Ordering::Relaxed);
+
+            assert!(
+                steps > 20,
+                "prefix must resolve enough steps to discriminate (got {steps})"
+            );
+            // Rules-correct, perf-PARTIAL state: this repro board carries four
+            // board-population-gated statics (Kruphix devotion, Anger/Brawn
+            // land-presence, Grist) that the CONSERVATIVE escalation scan fires on
+            // for every token entry, so ~half the steps still do a full pass
+            // (~63/120). That is strictly fewer than the pre-fix behavior — one
+            // full `evaluate_layers` per resolution (`full_evals == steps`) — which
+            // proves the incremental `EnteredObjects` path engages for the entries
+            // that touch no gate. This `< steps` bound is therefore a valid
+            // regression guard (a broken incremental path returns to `== steps`).
+            //
+            // The near-constant target bound (`steps / 4 + 8`) is restored by the
+            // ENTRY-AWARE escalation follow-up: escalate only when an ENTERED object
+            // can actually flip a gate. This board's tokens are colorless, non-land
+            // Insects that change neither G/U devotion nor land presence, so they
+            // flip none of the four gates and will stay on the fast path.
+            assert!(
+                full_evals < steps,
+                "incremental layer flush did not engage: {full_evals} full evaluate_layers \
+                 passes across {steps} resolution steps (stack was {stack_size}); pre-fix \
+                 baseline is one full pass per step"
+            );
+        }
+
+        /// Build a battlefield with a Devotion-magnitude anthem source plus
+        /// pre-existing creatures, then push a single token-creation trigger.
+        /// Returns (state, anthem_source_id).
+        ///
+        /// The anthem is "creatures you control get +X/+X where X = your devotion
+        /// to green" — a board-population-dependent magnitude
+        /// (`DistinctColorsAmongPermanents`-class via `Devotion`). A token entry
+        /// changes devotion, so the magnitude applied to PRE-EXISTING creatures
+        /// must re-evaluate; the escalation scan must force a full pass.
+        fn devotion_anthem_board() -> GameState {
+            use crate::types::ability::DevotionColors;
+            use crate::types::ability::{ContinuousModification, StaticDefinition};
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            // Two pre-existing green creatures.
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(50 + i),
+                    PlayerId(0),
+                    format!("Bear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            // Anthem source: "creatures you control get +X/+X, X = devotion to green".
+            let anthem = create_object(
+                &mut state,
+                CardId(60),
+                PlayerId(0),
+                "Devotion Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: DevotionColors::Fixed(vec![ManaColor::Green]),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: DevotionColors::Fixed(vec![ManaColor::Green]),
+                        },
+                    },
+                },
+            ];
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (B1) Population-magnitude escalation: with a devotion-magnitude anthem,
+        /// a token entry must escalate the incremental flush to a full pass so
+        /// pre-existing creatures' P/T re-evaluate. Dual-run: the normal flush
+        /// path must produce a board characteristic-identical to a forced-Full
+        /// flush.
+        #[test]
+        fn devotion_anthem_token_entry_escalates_and_matches_full() {
+            let mut base = devotion_anthem_board();
+            let src = add_scute_source(&mut base);
+            push_token_triggers(&mut base, src, insect_token_effect(), None, 1);
+
+            // Normal path (incremental flush eligible; must escalate).
+            let mut normal = base.clone();
+            resolve_to_empty_batched(&mut normal);
+            flush_layers(&mut normal);
+
+            // Forced-full reference: same resolution, then force a full re-eval.
+            let mut forced = base.clone();
+            resolve_to_empty_batched(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+
+            assert_pt_identical(&normal, &forced, "devotion anthem escalation");
+        }
+
+        /// (B2) Recipient-local dynamic ("+1/+1 for each +1/+1 counter on IT",
+        /// `CountersOn { Recipient }`) must NOT escalate — it does not read board
+        /// population — and the incremental result still matches a full recompute.
+        #[test]
+        fn recipient_local_dynamic_does_not_escalate_and_matches_full() {
+            use crate::types::ability::{ContinuousModification, ObjectScope, StaticDefinition};
+            use crate::types::statics::StaticMode;
+            let mut base = setup();
+            // A creature with a recipient-local self-buff static and a +1/+1 counter.
+            let id = create_object(
+                &mut base,
+                CardId(70),
+                PlayerId(0),
+                "Recipient Buff".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::SelfRef);
+            sd.modifications = vec![ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Recipient,
+                        counter_type: Some(CounterType::Plus1Plus1),
+                    },
+                },
+            }];
+            {
+                let o = base.objects.get_mut(&id).unwrap();
+                o.base_power = Some(1);
+                o.base_toughness = Some(1);
+                o.power = Some(1);
+                o.toughness = Some(1);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.counters.insert(CounterType::Plus1Plus1, 2);
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+            }
+            base.layers_dirty = crate::types::game_state::LayersDirty::Full;
+
+            let src = add_scute_source(&mut base);
+            push_token_triggers(&mut base, src, insect_token_effect(), None, 1);
+
+            let mut normal = base.clone();
+            // Prove the escalation predicate does NOT fire for this board: after
+            // resolving, the dirty state right before flush should be EnteredObjects
+            // and the incremental path must apply.
+            FULL_EVALUATE_LAYERS_COUNT.store(0, Ordering::Relaxed);
+            resolve_to_empty_batched(&mut normal);
+            flush_layers(&mut normal);
+
+            let mut forced = base.clone();
+            resolve_to_empty_batched(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+
+            assert_pt_identical(&normal, &forced, "recipient-local dynamic");
+        }
+
+        /// (B-embedded) Population-dependent EMBEDDED THRESHOLD escalation.
+        ///
+        /// A continuous static whose AFFECTED FILTER is a `PtComparison` with an
+        /// `ObjectCount`-backed threshold ("creatures with power <= the number of
+        /// creatures you control get +1/+1"). A token entry changes the creature
+        /// count, which changes the threshold, which changes whether PRE-EXISTING
+        /// creatures match the affected filter. The escalation scan must fire via
+        /// the `affected_filter_uses_object_population` → embedded-threshold
+        /// `quantity_expr_uses_object_count` recursion, forcing a full pass.
+        ///
+        /// Dual-run: the normal flush path must produce a board characteristic-
+        /// identical to a forced-Full flush.
+        #[test]
+        fn embedded_threshold_token_entry_escalates_and_matches_full() {
+            use crate::types::ability::{
+                Comparator, ContinuousModification, FilterProp, PtStat, PtValueScope,
+                StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut base = setup();
+            // Two pre-existing 1/1 green creatures.
+            for i in 0..2 {
+                let id = create_object(
+                    &mut base,
+                    CardId(80 + i),
+                    PlayerId(0),
+                    format!("Smol{i}"),
+                    Zone::Battlefield,
+                );
+                let o = base.objects.get_mut(&id).unwrap();
+                o.base_power = Some(1);
+                o.base_toughness = Some(1);
+                o.power = Some(1);
+                o.toughness = Some(1);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            // Anthem source: "creatures you control with power <= (number of
+            // creatures you control) get +1/+1" — affected set keyed by an
+            // ObjectCount-backed PtComparison threshold.
+            let anthem = create_object(
+                &mut base,
+                CardId(90),
+                PlayerId(0),
+                "Threshold Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Creature],
+                                ..Default::default()
+                            }),
+                        },
+                    },
+                }],
+                ..Default::default()
+            }));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            {
+                let o = base.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            base.layers_dirty = crate::types::game_state::LayersDirty::Full;
+
+            let src = add_scute_source(&mut base);
+            push_token_triggers(&mut base, src, insect_token_effect(), None, 1);
+
+            let mut normal = base.clone();
+            resolve_to_empty_batched(&mut normal);
+            flush_layers(&mut normal);
+
+            let mut forced = base.clone();
+            resolve_to_empty_batched(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+
+            assert_pt_identical(&normal, &forced, "embedded-threshold escalation");
+        }
+
+        /// (B-condition) Population-dependent source-level CONDITION escalation.
+        ///
+        /// A continuous anthem static "creatures you control get +1/+1 as long as
+        /// you control 3 or more creatures" — a source-level enabling condition
+        /// (`QuantityComparison` over `ObjectCount`) that gates the effect for the
+        /// WHOLE recipient set (not recipient-local). The board starts one short
+        /// of the threshold (2 creatures), so the condition is OFF and no creature
+        /// is buffed. A single token entry crosses the threshold (→ 3 creatures),
+        /// flipping the condition ON for EVERY pre-existing creature.
+        ///
+        /// The incremental flush re-derives only the entered token, so without the
+        /// condition-axis escalation clause the pre-existing creatures would keep
+        /// stale (unbuffed) P/T. The escalation scan must fire via
+        /// `static_condition_uses_object_population` →
+        /// `quantity_expr_uses_object_count`, forcing a full pass.
+        ///
+        /// Asserts (a) the entry escalated to a FULL pass (the full-eval counter
+        /// incremented exactly once during the normal-path flush) and (b) dual-run
+        /// characteristic-identity: the normal flush produces a board identical to
+        /// a forced-Full flush, with pre-existing creatures at the flipped-on P/T.
+        #[test]
+        fn condition_gated_anthem_token_entry_escalates_and_matches_full() {
+            use crate::types::ability::{
+                Comparator, ContinuousModification, StaticCondition, StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut base = setup();
+            // Two pre-existing 2/2 creatures — one short of the ≥3 threshold.
+            let mut creature_ids = Vec::new();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut base,
+                    CardId(100 + i),
+                    PlayerId(0),
+                    format!("Gater{i}"),
+                    Zone::Battlefield,
+                );
+                let o = base.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                creature_ids.push(id);
+            }
+            // Anthem source (an Enchantment — does NOT count toward the creature
+            // threshold): "creatures you control get +1/+1 as long as you control
+            // 3 or more creatures".
+            let anthem = create_object(
+                &mut base,
+                CardId(110),
+                PlayerId(0),
+                "Condition Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            sd.condition = Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            ..Default::default()
+                        }),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            });
+            {
+                let o = base.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            base.layers_dirty = crate::types::game_state::LayersDirty::Full;
+
+            // Sanity: with 2 creatures the condition is OFF — no buff yet.
+            flush_layers(&mut base);
+            for &id in &creature_ids {
+                let o = base.objects.get(&id).unwrap();
+                assert_eq!(o.power, Some(2), "condition should be off below threshold");
+            }
+
+            let src = add_scute_source(&mut base);
+            push_token_triggers(&mut base, src, insect_token_effect(), None, 1);
+
+            // Normal path: incremental flush eligible; the condition-axis escalation
+            // must force a full pass. Reset the counter BEFORE resolution so a
+            // flush triggered inside the resolve pipeline (SBA / batch resolve)
+            // is counted too — escalation must occur somewhere in the
+            // resolve-then-flush window, not necessarily on the final explicit
+            // flush (the pipeline may have already drained the EnteredObjects
+            // mark by the time we flush below).
+            let mut normal = base.clone();
+            FULL_EVALUATE_LAYERS_COUNT.store(0, Ordering::Relaxed);
+            resolve_to_empty_batched(&mut normal);
+            flush_layers(&mut normal);
+            let full_evals = FULL_EVALUATE_LAYERS_COUNT.load(Ordering::Relaxed);
+            assert!(
+                full_evals >= 1,
+                "token entry crossing a board-population-gated condition must \
+                 escalate the incremental flush to a full pass (got {full_evals})"
+            );
+
+            // Forced-full reference. Build AFTER reading the counter so its own
+            // `evaluate_layers` does not perturb the measurement above.
+            let mut forced = base.clone();
+            resolve_to_empty_batched(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+
+            // Pre-existing creatures must be flipped ON (3/3), not stale (2/2).
+            for &id in &creature_ids {
+                let o = normal.objects.get(&id).unwrap();
+                assert_eq!(
+                    o.power,
+                    Some(3),
+                    "pre-existing creature must be buffed after the condition flips on"
+                );
+            }
+            assert_pt_identical(&normal, &forced, "condition-gated anthem escalation");
+        }
+
+        /// Assert every battlefield object's computed power/toughness/loyalty and
+        /// keyword set are identical across two states.
+        fn assert_pt_identical(a: &GameState, b: &GameState, label: &str) {
+            assert_eq!(
+                a.battlefield.len(),
+                b.battlefield.len(),
+                "{label}: battlefield size mismatch"
+            );
+            for &id in a.battlefield.iter() {
+                let oa = a.objects.get(&id).expect("a object");
+                let ob = b.objects.get(&id).expect("b object");
+                assert_eq!(oa.power, ob.power, "{label}: power mismatch for {id:?}");
+                assert_eq!(
+                    oa.toughness, ob.toughness,
+                    "{label}: toughness mismatch for {id:?}"
+                );
+                assert_eq!(
+                    oa.keywords, ob.keywords,
+                    "{label}: keyword mismatch for {id:?}"
+                );
+            }
+        }
     }
 }

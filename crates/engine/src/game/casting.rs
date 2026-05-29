@@ -3976,7 +3976,7 @@ pub fn revert_bestow_form(state: &mut GameState, object_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
         if obj.bestow_form.is_some() {
             revert_bestow_aura_form(obj);
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
     }
 }
@@ -5597,9 +5597,7 @@ fn continue_with_prepared(
     };
 
     // 5. Handle targeting -- ensure layers evaluated before target legality
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
+    super::layers::flush_layers(state);
 
     // Check if this is an Aura spell -- Auras target via Enchant keyword, not via effect targets
     // Re-read obj after evaluate_layers (which needs &mut state)
@@ -5898,9 +5896,7 @@ pub fn spell_has_legal_targets(
     player: PlayerId,
 ) -> bool {
     let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
+    super::layers::flush_layers(&mut simulated);
     let Some(obj) = simulated.objects.get(&obj.id) else {
         return false;
     };
@@ -6447,9 +6443,7 @@ pub fn can_pay_cost_after_auto_tap(
     cost: &crate::types::mana::ManaCost,
 ) -> bool {
     let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
+    super::layers::flush_layers(&mut simulated);
     let spell_meta = build_spell_meta(&simulated, player, source_id);
 
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
@@ -6596,9 +6590,7 @@ pub(super) fn can_pay_ability_mana_cost_after_auto_tap_excluding(
     excluded_sources: &HashSet<ObjectId>,
 ) -> bool {
     let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
+    super::layers::flush_layers(&mut simulated);
 
     let (source_types, source_subtypes) = activation_source_types(&simulated, source_id);
     let activation_ctx = PaymentContext::Activation {
@@ -6628,9 +6620,7 @@ pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
     cost: &crate::types::mana::ManaCost,
 ) -> bool {
     let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
+    super::layers::flush_layers(&mut simulated);
 
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     let effect_ctx = PaymentContext::Effect;
@@ -6721,9 +6711,7 @@ pub(super) fn pay_mana_cost_with_choices(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
+    super::layers::flush_layers(state);
 
     let spell_meta = build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
@@ -6901,9 +6889,7 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding(
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> Result<(), EngineError> {
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
+    super::layers::flush_layers(state);
 
     let (source_types, source_subtypes) = activation_source_types(state, source_id);
     let activation_ctx = PaymentContext::Activation {
@@ -6935,9 +6921,7 @@ pub(super) fn pay_effect_mana_cost(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
+    super::layers::flush_layers(state);
 
     let effect_ctx = PaymentContext::Effect;
     let events_before = events.len();
@@ -8165,9 +8149,7 @@ pub fn can_activate_ability_now(
     let resolved = build_resolved_from_def(&ability_def, source_id, player);
 
     let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
+    super::layers::flush_layers(&mut simulated);
 
     match build_target_slots(&simulated, &resolved) {
         Ok(target_slots) => {
@@ -16559,7 +16541,7 @@ mod tests {
         }
 
         let forest = add_basic_land(&mut state, CardId(27), "Forest", "Forest");
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         let mut events = Vec::new();
         let result = handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(25), &mut events);
@@ -21560,7 +21542,7 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(1),
         };
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         // The engine derives `CastingVariant::Escape` with no override.
         let prepared = prepare_spell_cast(&state, PlayerId(1), phlage).unwrap();

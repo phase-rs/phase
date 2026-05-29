@@ -1329,9 +1329,7 @@ pub(crate) fn target_dependent_flash_permission_feasible(
     // granted types/keywords are visible — mirror `spell_has_legal_targets`
     // (casting.rs). `find_legal_targets` does not evaluate layers itself.
     let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
+    super::layers::flush_layers(&mut simulated);
     let Some(obj) = simulated.objects.get(&object_id) else {
         return true;
     };

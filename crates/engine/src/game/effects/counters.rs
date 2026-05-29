@@ -158,7 +158,7 @@ pub(crate) fn apply_counter_addition(
     sync_derived_from_counters(obj, &counter_type);
 
     if counter_type_affects_layers(&counter_type) {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 
     state.counter_added_this_turn.push(CounterAddedRecord {
@@ -213,7 +213,7 @@ pub(crate) fn apply_counter_removal(
     sync_derived_from_counters(obj, &counter_type);
 
     if counter_type_affects_layers(&counter_type) {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 
     // CR 122.1: Only emit when counters were actually removed,
@@ -1387,7 +1387,7 @@ mod tests {
         };
         let mut events = Vec::new();
 
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
         apply_counter_addition(
             &mut state,
             PlayerId(0),
@@ -1396,11 +1396,11 @@ mod tests {
             1,
             &mut events,
         );
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
 
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
         apply_counter_removal(&mut state, obj_id, counter_type, 1, &mut events);
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
     }
 
     #[test]
@@ -1641,7 +1641,10 @@ mod tests {
             1,
             "SelfRef counter must land on the source object"
         );
-        assert!(state.layers_dirty, "layers must be dirtied for P/T counter");
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "layers must be dirtied for P/T counter"
+        );
     }
 
     #[test]

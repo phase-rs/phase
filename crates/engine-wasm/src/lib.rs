@@ -799,7 +799,7 @@ fn handle_debug_create_card(
         );
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         // Hydrate `back_face` for dual-faced spawns (MDFC, Transform, Adventure,
         // Omen, Meld, Prepare). `apply_card_face_to_object` only writes the named

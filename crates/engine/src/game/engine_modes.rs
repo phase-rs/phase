@@ -92,9 +92,7 @@ fn handle_activated_mode_choice(
         modal,
     } = choice;
 
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
+    super::layers::flush_layers(state);
 
     let target_slots = build_target_slots(state, &resolved)?;
     let target_constraints = target_constraints_from_modal(&modal);
