@@ -364,7 +364,7 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    // Type list either ends at "in addition to its/his/her other types" or at the
+    // CR 707.9b: Type list either ends at "in addition to its/his/her other types" or at the
     // end of the except body (The Scarab God: "it's a 4/4 black Zombie").
     let (type_text, rest) = split_on_first_of(
         rest,
