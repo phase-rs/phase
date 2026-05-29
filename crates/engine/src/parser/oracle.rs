@@ -11778,6 +11778,22 @@ mod tests {
     }
 
     #[test]
+    fn vrondiss_enrage_damage_received_watches_self_not_controller() {
+        let result = parse(
+            "Enrage — Whenever Vrondiss, Rage of Ancients is dealt damage, you may create a 5/4 red and green Dragon Spirit creature token with \"When this creature deals damage, sacrifice it.\"",
+            "Vrondiss, Rage of Ancients",
+            &[],
+            &["Creature"],
+            &["Dragon", "Barbarian"],
+        );
+        assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+        let trigger = &result.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::DamageReceived);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger.valid_target, None);
+    }
+
+    #[test]
     fn heroic_trigger_not_misrouted_to_replacement() {
         // Favored Hoplite: "Heroic — Whenever you cast a spell that targets this creature,
         // put a +1/+1 counter on this creature and prevent all damage that would be dealt

@@ -2436,7 +2436,8 @@ pub(super) fn match_becomes_blocked(
 /// Uses DamageDealt event but checks the *target* (not the damage source) against the trigger.
 ///
 /// Two target patterns are supported:
-/// - Object target: "Whenever ~ is dealt damage" — `target == source_id`.
+/// - Object target: "Whenever ~ is dealt damage" — `valid_card` scopes the object;
+///   runtime checks `target == source_id` for SelfRef triggers.
 /// - Player target: "Whenever you're dealt damage" — `valid_target` scopes the player.
 ///
 /// `valid_source` optionally scopes the damage source for either target shape.
@@ -2471,11 +2472,21 @@ pub(super) fn match_damage_received(
         }
         match target {
             TargetRef::Object(target_id) => {
+                // CR 120.3: Player-scoped triggers ("you're dealt damage") must not
+                // fire when the trigger source object takes damage.
+                if trigger.valid_card.is_none() && trigger.valid_target.is_some() {
+                    return false;
+                }
                 // Object target: trigger source is the damaged permanent.
                 *target_id == source_id
                     && valid_source_matches(trigger, state, *damage_source_id, source_id)
             }
             TargetRef::Player(pid) => {
+                // CR 120.3: Object-scoped triggers ("~ is dealt damage", Enrage) must
+                // not fire when the controller takes damage.
+                if trigger.valid_card.is_some() {
+                    return false;
+                }
                 // Player target: check the damaged player matches valid_target
                 // (e.g., "you" → Controller) and optionally that the damage
                 // source matches valid_source. CR 120.1 + CR 120.3.
@@ -7165,6 +7176,86 @@ mod tests {
         assert!(
             !match_damage_received(&event3, &trigger, source, &state),
             "must not fire when opponent is damaged, not controller"
+        );
+    }
+
+    /// CR 120.3: Enrage / "~ is dealt damage" — object-scoped triggers must not
+    /// fire when the controller takes damage (Vrondiss #1306).
+    #[test]
+    fn damage_received_object_scoped_rejects_player_damage() {
+        let mut state = setup();
+        let vrondiss = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vrondiss, Rage of Ancients".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let controller_damaged = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_received(&controller_damaged, &trigger, vrondiss, &state),
+            "Enrage-style triggers must not fire on controller damage"
+        );
+
+        let self_damage = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(vrondiss),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            match_damage_received(&self_damage, &trigger, vrondiss, &state),
+            "Enrage-style triggers must fire when the source object is dealt damage"
+        );
+    }
+
+    /// CR 120.1: "Whenever you're dealt damage" must not fire when the trigger
+    /// source object takes damage instead of the controller.
+    #[test]
+    fn damage_received_player_scoped_rejects_object_damage_to_source() {
+        let mut state = setup();
+        let stuffy_doll = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stuffy Doll".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageReceived);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let object_damage = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(stuffy_doll),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_received(&object_damage, &trigger, stuffy_doll, &state),
+            "player-scoped damage triggers must not fire on object damage"
+        );
+
+        let player_damage = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            excess: 0,
+        };
+        assert!(
+            match_damage_received(&player_damage, &trigger, stuffy_doll, &state),
+            "player-scoped damage triggers must fire on controller damage"
         );
     }
 
