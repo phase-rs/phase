@@ -2043,15 +2043,17 @@ fn try_parse_create_token_choice(
     }))
 }
 
-/// CR 115.1 + CR 608.2d + CR 701.26a-b: "tap or untap target <object>"
-/// declares a single target as the trigger/spell is put on the stack, then the
-/// controller chooses the tap or untap instruction while resolving.
+/// CR 115.1 + CR 608.2d + CR 701.26a-b: "tap or untap target <object>" (and the
+/// "untap or tap" ordering) declares a single target as the trigger/spell is put
+/// on the stack, then the controller chooses the tap or untap instruction while
+/// resolving. The choice is order-independent, so both verb orderings map to the
+/// same `ChooseOneOf`.
 fn try_parse_tap_or_untap_choice(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let ((), rest) = nom_on_lower(tp.original, tp.lower, |i| {
-        value((), tag("tap or untap ")).parse(i)
+        value((), alt((tag("tap or untap "), tag("untap or tap ")))).parse(i)
     })?;
     let (target_text, multi_target) = strip_optional_target_prefix(rest.trim_start());
     let (target, _rem) = parse_target_with_ctx(target_text, ctx);
@@ -2132,8 +2134,8 @@ fn try_parse_put_counter_choice(
     let right_text = format!("put {right_choice} on {target_text}");
 
     let diagnostics_snapshot = ctx.diagnostics.len();
-    let left_clause = parse_effect_clause(&left_text, ctx);
-    let right_clause = parse_effect_clause(&right_text, ctx);
+    let mut left_clause = parse_effect_clause(&left_text, ctx);
+    let mut right_clause = parse_effect_clause(&right_text, ctx);
 
     if !matches!(left_clause.effect, Effect::PutCounter { .. })
         || !matches!(right_clause.effect, Effect::PutCounter { .. })
@@ -2146,15 +2148,56 @@ fn try_parse_put_counter_choice(
         return None;
     }
 
-    let mut left_def = ability_definition_from_clause(AbilityKind::Spell, left_clause);
-    left_def.description = Some(left_text);
-    let mut right_def = ability_definition_from_clause(AbilityKind::Spell, right_clause);
-    right_def.description = Some(right_text);
+    // CR 601.2c: the trailing "on <target>" is a single shared cast-time target
+    // for the whole choice — the player chooses one artifact, then chooses which
+    // counter(s) to put on it. Both branches parsed it identically; lift it to a
+    // parent `TargetOnly` clause (mirrors `try_parse_tap_or_untap_choice`) and
+    // retarget each branch to `ParentTarget`. This surfaces one shared target
+    // slot at cast time, instead of two per-branch targets that
+    // `collect_target_slot_specs` never descends into from inside `ChooseOneOf`.
+    let Effect::PutCounter {
+        target: shared_target,
+        ..
+    } = &left_clause.effect
+    else {
+        ctx.diagnostics.truncate(diagnostics_snapshot);
+        return None;
+    };
+    let shared_target = shared_target.clone();
+    let shared_multi_target = left_clause.multi_target.take();
+    right_clause.multi_target = None;
+    retarget_put_counter_to_parent(&mut left_clause.effect);
+    retarget_put_counter_to_parent(&mut right_clause.effect);
 
-    Some(parsed_clause(Effect::ChooseOneOf {
-        chooser: PlayerFilter::Controller,
-        branches: vec![left_def, right_def],
-    }))
+    let mut left_def = ability_definition_from_clause(AbilityKind::Spell, left_clause);
+    left_def.description = Some(format!("put {left_choice}"));
+    let mut right_def = ability_definition_from_clause(AbilityKind::Spell, right_clause);
+    right_def.description = Some(format!("put {right_choice}"));
+
+    let mut choice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![left_def, right_def],
+        },
+    );
+    choice.description = Some("put your choice of counter".to_string());
+
+    let mut clause = parsed_clause(Effect::TargetOnly {
+        target: shared_target,
+    });
+    clause.multi_target = shared_multi_target;
+    clause.sub_ability = Some(Box::new(choice));
+    Some(clause)
+}
+
+/// Rewrite a `PutCounter` effect to act on the parent clause's target
+/// (`TargetFilter::ParentTarget`), preserving `counter_type` and `count`.
+/// Used when a shared cast-time target is lifted out of a `ChooseOneOf`.
+fn retarget_put_counter_to_parent(effect: &mut Effect) {
+    if let Effect::PutCounter { target, .. } = effect {
+        *target = TargetFilter::ParentTarget;
+    }
 }
 
 /// CR 700.2 + CR 608.2d: Detect inline binary-choice imperatives of the form
@@ -24264,6 +24307,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn shared_target_untap_or_tap_reversed_ordering_parses() {
+        // The reversed verb ordering maps to the same shared-target choice; the
+        // generic "A or B" splitter must not swallow the second instruction.
+        let def = parse_effect_chain("Untap or tap target permanent", AbilityKind::Spell);
+        assert!(
+            matches!(&*def.effect, Effect::TargetOnly { .. }),
+            "expected TargetOnly head, got {:?}",
+            def.effect
+        );
+        let choice = def
+            .sub_ability
+            .as_deref()
+            .expect("untap-or-tap must chain a resolution choice");
+        let Effect::ChooseOneOf { branches, .. } = &*choice.effect else {
+            panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
+        };
+        assert_eq!(branches.len(), 2);
+    }
+
     /// Issue #501 FOLLOW-UP — ROOT CAUSE A building-block test. A "gains
     /// suspend" continuous keyword grant carries `Duration::Permanent` (CR
     /// 702.62b + CR 611.2a): the suspend mechanic owns the card's lifetime, so
@@ -36355,8 +36418,26 @@ mod tests {
             AbilityKind::Spell,
         );
 
-        let Effect::ChooseOneOf { chooser, branches } = &*ability.effect else {
-            panic!("expected ChooseOneOf, got {:?}", ability.effect);
+        // The shared "on up to one other target artifact" is a single cast-time
+        // target lifted to a `TargetOnly` head; the up-to-one cap lives on the
+        // head, and the counter choice is the chained sub-ability whose branches
+        // act on `ParentTarget`.
+        assert!(
+            matches!(&*ability.effect, Effect::TargetOnly { .. }),
+            "expected TargetOnly head, got {:?}",
+            ability.effect
+        );
+        assert!(
+            ability.multi_target.is_some(),
+            "shared target should preserve the up-to-one cap on the head"
+        );
+
+        let choice = ability
+            .sub_ability
+            .as_deref()
+            .expect("counter choice must be chained as a sub-ability");
+        let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+            panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
         };
         assert_eq!(*chooser, PlayerFilter::Controller);
         assert_eq!(branches.len(), 2);
@@ -36365,33 +36446,27 @@ mod tests {
             Effect::PutCounter {
                 counter_type,
                 count,
-                ..
+                target,
             } => {
                 assert_eq!(*counter_type, CounterType::Plus1Plus1);
                 assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(*target, TargetFilter::ParentTarget);
             }
             other => panic!("expected first branch PutCounter, got {other:?}"),
         }
-        assert!(
-            branches[0].multi_target.is_some(),
-            "first branch should preserve up-to target cap"
-        );
 
         match &*branches[1].effect {
             Effect::PutCounter {
                 counter_type,
                 count,
-                ..
+                target,
             } => {
                 assert_eq!(*counter_type, CounterType::Generic("charge".to_string()));
                 assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+                assert_eq!(*target, TargetFilter::ParentTarget);
             }
             other => panic!("expected second branch PutCounter, got {other:?}"),
         }
-        assert!(
-            branches[1].multi_target.is_some(),
-            "second branch should preserve up-to target cap"
-        );
     }
 
     #[test]

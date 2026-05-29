@@ -1447,7 +1447,7 @@ pub(super) fn match_taps(
             if !valid_card_matches(trigger, state, *object_id, source_id) {
                 return false;
             }
-            // CR 701.21: "you tap an untapped creature an opponent controls" requires
+            // CR 701.26: "you tap an untapped creature an opponent controls" requires
             // an external cause. Only apply caused_by gating when the trigger explicitly
             // filters for opponent-controlled objects.
             let requires_opponent = matches!(
