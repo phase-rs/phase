@@ -10539,6 +10539,25 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
                 Ok((_, (before, _))) => (before, true),
                 Err(_) => (without_from, false),
             };
+        // CR 205.2a + CR 601.2f: Strip the "of the chosen type" / "of that type"
+        // qualifier (Cloud Key, Umori, Stenn, Herald's Horn: "Spells you cast of
+        // the chosen type cost {1} less"). A "you cast" infix sits between the
+        // type word and this qualifier, so the trim chain below can't reach the
+        // type word and `parse_type_phrase` never extracts the chosen-type
+        // discriminator. Strip it here and re-attach IsChosenCardType /
+        // IsChosenCreatureType after the base type is parsed — mirrors the
+        // "with the chosen name" handling above.
+        let (without_chosen, has_chosen_type) = if let Ok((_, (before, _))) =
+            nom_primitives::split_once_on(without_chosen, " of the chosen type")
+        {
+            (before, true)
+        } else if let Ok((_, (before, _))) =
+            nom_primitives::split_once_on(without_chosen, " of that type")
+        {
+            (before, true)
+        } else {
+            (without_chosen, false)
+        };
         let type_desc = without_chosen
             .trim_end_matches(" you cast")
             .trim_end_matches(" your opponents cast")
@@ -10571,6 +10590,32 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
                     })
                 }
             }
+        };
+        // CR 205.2a: Re-attach the chosen-type discriminator stripped above. A
+        // creature-typed base ("Creature spells ... of the chosen type",
+        // Herald's Horn) pairs with a chosen CREATURE type; a bare-spells base
+        // ("Spells ... of the chosen type", Cloud Key / Umori / Stenn) pairs
+        // with a chosen CARD type. Resolved at cast time against the source
+        // permanent's `ChosenAttribute` (CR 601.2f).
+        let typed_filter = if has_chosen_type {
+            match typed_filter {
+                Some(TargetFilter::Typed(mut tf))
+                    if tf.type_filters.contains(&TypeFilter::Creature) =>
+                {
+                    tf.properties.push(FilterProp::IsChosenCreatureType);
+                    Some(TargetFilter::Typed(tf))
+                }
+                Some(TargetFilter::Typed(mut tf)) => {
+                    tf.properties.push(FilterProp::IsChosenCardType);
+                    Some(TargetFilter::Typed(tf))
+                }
+                None => Some(TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::IsChosenCardType]),
+                )),
+                other => other,
+            }
+        } else {
+            typed_filter
         };
         // Compose chosen-name constraint with the typed prefix (if any). Bare
         // "Spells with the chosen name" → `HasChosenName` alone; typed
@@ -12493,6 +12538,68 @@ mod tests {
                 _ => panic!("Expected Typed filter"),
             }
         }
+    }
+
+    #[test]
+    fn static_spells_of_chosen_type_cost_less_carries_chosen_card_type() {
+        // Issue #930 — Cloud Key / Umori / Stenn:
+        // "Spells you cast of the chosen type cost {1} less to cast."
+        // CR 205.2a: the "of the chosen type" qualifier must narrow the
+        // reduction to the chosen card type, not every spell. The "you cast"
+        // infix previously prevented the discriminator from being extracted.
+        let def =
+            parse_static_line("Spells you cast of the chosen type cost {1} less to cast.").unwrap();
+        let StaticMode::ReduceCost {
+            spell_filter: Some(TargetFilter::Typed(ref tf)),
+            ..
+        } = def.mode
+        else {
+            panic!(
+                "expected ReduceCost with a Typed spell_filter, got {:?}",
+                def.mode
+            );
+        };
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenCardType)),
+            "chosen-type cost reduction must carry IsChosenCardType, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn static_creature_spells_of_chosen_type_cost_less_carries_chosen_creature_type() {
+        // Issue #930 — Herald's Horn:
+        // "Creature spells you cast of the chosen type cost {1} less to cast."
+        // CR 205.2a: a creature-typed base pairs with a chosen CREATURE type.
+        let def =
+            parse_static_line("Creature spells you cast of the chosen type cost {1} less to cast.")
+                .unwrap();
+        let StaticMode::ReduceCost {
+            spell_filter: Some(TargetFilter::Typed(ref tf)),
+            ..
+        } = def.mode
+        else {
+            panic!(
+                "expected ReduceCost with a Typed spell_filter, got {:?}",
+                def.mode
+            );
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)),
+            "expected Creature type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenCreatureType)),
+            "creature chosen-type reduction must carry IsChosenCreatureType, got {:?}",
+            tf.properties
+        );
     }
 
     #[test]

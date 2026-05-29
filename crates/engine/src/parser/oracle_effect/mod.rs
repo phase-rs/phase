@@ -2043,6 +2043,54 @@ fn try_parse_create_token_choice(
     }))
 }
 
+/// CR 115.1 + CR 608.2d + CR 701.26a-b: "tap or untap target <object>"
+/// declares a single target as the trigger/spell is put on the stack, then the
+/// controller chooses the tap or untap instruction while resolving.
+fn try_parse_tap_or_untap_choice(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let ((), rest) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("tap or untap ")).parse(i)
+    })?;
+    let (target_text, multi_target) = strip_optional_target_prefix(rest.trim_start());
+    let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+    if matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    #[cfg(debug_assertions)]
+    assert_no_compound_remainder(_rem, tp.original);
+
+    let mut tap_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Tap {
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    tap_branch.description = Some("tap".to_string());
+    let mut untap_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Untap {
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    untap_branch.description = Some("untap".to_string());
+
+    let mut choice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![tap_branch, untap_branch],
+        },
+    );
+    choice.description = Some("tap or untap".to_string());
+
+    let mut clause = parsed_clause(Effect::TargetOnly { target });
+    clause.multi_target = multi_target;
+    clause.sub_ability = Some(Box::new(choice));
+    Some(clause)
+}
+
 /// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
 /// "put your choice of A counter-pattern or B counter-pattern on TARGET".
 ///
@@ -3092,6 +3140,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // generic inline splitter and token dispatch so "create a Food token or a
     // Treasure token" does not collapse to the first token branch.
     if let Some(clause) = try_parse_create_token_choice(tp, ctx) {
+        return clause;
+    }
+
+    // CR 115.1 + CR 608.2d + CR 701.26a-b: Shared-target tap/untap choice
+    // must run before the generic "A or B" splitter and before simple `tap`
+    // verb dispatch, otherwise the second instruction can be swallowed.
+    if let Some(clause) = try_parse_tap_or_untap_choice(tp, ctx) {
         return clause;
     }
 
@@ -9957,6 +10012,40 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     false
 }
 
+/// CR 205.2: Recognize the enumerated form of a "choose a card type" choice.
+/// Older cards (e.g. Cloud Key) spell out the *complete* list of choosable card
+/// types ("artifact, creature, enchantment, instant, or sorcery") instead of
+/// the modern generic phrasing. A *partial* type list (e.g. "artifact, creature,
+/// or land" — Storage Matrix, Turnabout, A Killer Among Us) is a restricted
+/// modal selection, NOT a card-type chooser, and must remain `Labeled`. So this
+/// matches only when `rest` (after an optional trailing period) is exactly the
+/// canonical card-type set, in any order.
+fn is_card_type_enumeration(rest: &str) -> bool {
+    fn card_type_word(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((
+            tag("artifact"),
+            tag("creature"),
+            tag("enchantment"),
+            tag("instant"),
+            tag("sorcery"),
+        ))
+        .parse(input)
+    }
+    fn separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((tag(", or "), tag(", "), tag(" or "))).parse(input)
+    }
+    let rest = rest.trim_end_matches('.').trim_end();
+    match all_consuming(nom::multi::separated_list1(separator, card_type_word)).parse(rest) {
+        Ok((_, mut items)) => {
+            items.sort_unstable();
+            items.dedup();
+            // The complete canonical card-type set (alphabetical).
+            items == ["artifact", "creature", "enchantment", "instant", "sorcery"]
+        }
+        Err(_) => false,
+    }
+}
+
 /// Match "choose a creature type", "choose a color", "choose odd or even",
 /// "choose a basic land type", "choose a card type" from lowercased Oracle text.
 pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
@@ -9983,6 +10072,14 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     } else if tag::<_, _, E>("a basic land type").parse(rest).is_ok() {
         Some(ChoiceType::BasicLandType)
     } else if tag::<_, _, E>("a card type").parse(rest).is_ok() {
+        Some(ChoiceType::CardType)
+    } else if is_card_type_enumeration(rest) {
+        // CR 205.2: Older "choose a card type" cards (Cloud Key) spell out the
+        // options ("artifact, creature, enchantment, instant, or sorcery")
+        // rather than using the modern generic phrasing. Treat the enumeration
+        // as the same CardType choice so the chosen type persists for downstream
+        // `IsChosenCardType` reads (cost reduction, protection from the chosen
+        // type, etc.).
         Some(ChoiceType::CardType)
     } else if alt((
         tag::<_, _, E>("a card name"),
@@ -10954,6 +11051,29 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_player_scope_refs(else_branch);
+    }
+}
+
+/// CR 608.2 + CR 109.5: Apply `rewrite_player_scope_refs` rooted at every def in
+/// the chain that carries `player_scope` — not only the outermost one. A scoped
+/// clause routinely appears NESTED as a sub-ability: Betor, Kin to All chains
+/// "draw a card", "untap each creature you control", then "each opponent loses
+/// half their life, rounded up", so `player_scope: Opponent` sits on the third
+/// sub-ability while the outermost effect (Draw) has none. Gating the rewrite on
+/// the outermost def's scope left the nested clause's "their life" as
+/// `LifeTotal { Target }`, which resolves to 0 (no player target). Once a scoped
+/// root is found, `rewrite_player_scope_refs` already recurses through its own
+/// sub-chain, so we stop descending here to avoid rewriting it twice.
+fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
+    if def.player_scope.is_some() {
+        rewrite_player_scope_refs(def);
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        apply_player_scope_rewrites(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        apply_player_scope_rewrites(else_branch);
     }
 }
 
@@ -14016,12 +14136,12 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         })
     };
 
-    // CR 608.2 + CR 107.2: If the outermost ability carries `player_scope`,
-    // rewrite target-scoped refs ("their life", "their hand") to their
-    // controller-scoped equivalents so they resolve per-iterating-player.
-    if result.player_scope.is_some() {
-        rewrite_player_scope_refs(&mut result);
-    }
+    // CR 608.2 + CR 107.2: Wherever an ability in the chain carries
+    // `player_scope` (outermost OR a nested sub-ability), rewrite target-scoped
+    // refs ("their life", "their hand") to their per-iterating-player
+    // equivalents. Walks the whole tree so a scoped clause buried under earlier
+    // non-scoped clauses (Betor, Kin to All) is still rewritten.
+    apply_player_scope_rewrites(&mut result);
 
     // CR 107.1a: Apply the chain-level rounding annotation (captured above)
     // to every DivideRounded in the built tree. No-op when the sentence was
@@ -23982,6 +24102,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shared_target_tap_or_untap_uses_resolution_choice() {
+        let def = parse_effect_chain("Tap or untap target permanent", AbilityKind::Spell);
+
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(target),
+        } = &*def.effect
+        else {
+            panic!("expected TargetOnly head, got {:?}", def.effect);
+        };
+        assert!(target
+            .type_filters
+            .iter()
+            .any(|filter| matches!(filter, TypeFilter::Permanent)));
+
+        let choice = def
+            .sub_ability
+            .as_deref()
+            .expect("tap-or-untap must chain a resolution choice");
+        let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+            panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
+        };
+        assert_eq!(*chooser, PlayerFilter::Controller);
+        assert_eq!(branches.len(), 2);
+        assert!(matches!(
+            &*branches[0].effect,
+            Effect::Tap {
+                target: TargetFilter::ParentTarget
+            }
+        ));
+        assert!(matches!(
+            &*branches[1].effect,
+            Effect::Untap {
+                target: TargetFilter::ParentTarget
+            }
+        ));
+    }
+
+    #[test]
+    fn shared_target_tap_or_untap_preserves_up_to_target_count() {
+        let def = parse_effect_chain(
+            "Tap or untap up to one target permanent",
+            AbilityKind::Spell,
+        );
+
+        assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
+        assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+        assert!(matches!(
+            *def.sub_ability
+                .expect("tap-or-untap must chain a resolution choice")
+                .effect,
+            Effect::ChooseOneOf { .. }
+        ));
+    }
+
     /// Issue #501 FOLLOW-UP — ROOT CAUSE A building-block test. A "gains
     /// suspend" continuous keyword grant carries `Duration::Permanent` (CR
     /// 702.62b + CR 611.2a): the suspend mechanic owns the card's lifetime, so
@@ -28626,6 +28801,50 @@ mod tests {
             }
             other => panic!("Expected LoseLife, got {other:?}"),
         }
+    }
+
+    /// CR 107.1a + CR 109.5 regression (Betor, Kin to All): an "each opponent
+    /// loses half their life, rounded up" clause NESTED as a sub-ability (not
+    /// the outermost effect) must still pick up the player-scope rewrite, so
+    /// "their life" binds to each iterating opponent (`ScopedPlayer`). Before
+    /// the fix the rewrite only ran when the OUTERMOST def carried
+    /// `player_scope`, so the nested clause kept `LifeTotal { Target }` — which
+    /// resolves to 0 (no player target), making the life loss a no-op.
+    #[test]
+    fn nested_each_opponent_loses_half_life_uses_scoped_player() {
+        use crate::types::ability::{PlayerFilter, RoundingMode};
+        let def = parse_effect_chain(
+            "Draw a card. Then each opponent loses half their life, rounded up.",
+            AbilityKind::Spell,
+        );
+        // Walk the sub_ability chain to the LoseLife clause.
+        let mut node = &def;
+        let lose = loop {
+            if matches!(&*node.effect, Effect::LoseLife { .. }) {
+                break node;
+            }
+            node = node
+                .sub_ability
+                .as_deref()
+                .expect("LoseLife present in chain");
+        };
+        assert_eq!(lose.player_scope, Some(PlayerFilter::Opponent));
+        let Effect::LoseLife { amount, .. } = &*lose.effect else {
+            unreachable!()
+        };
+        assert_eq!(
+            *amount,
+            QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Up,
+            },
+            "nested each-opponent 'their life' must rebind to ScopedPlayer, got {amount:?}",
+        );
     }
 
     /// CR 107.1a: Cut Your Losses — "Target player mills half their library,
@@ -35837,6 +36056,40 @@ mod tests {
         assert!(matches!(&*effect.effect, Effect::Draw { .. }));
     }
 
+    /// CR 201.2: "Destroy target nonland permanent and all other permanents
+    /// with the same name as that permanent" (Maelstrom Pulse, and the Echoing
+    /// cycle, Bile Blight, Homing Lightning, Detention Sphere class). The
+    /// secondary mass effect must filter to permanents whose name matches the
+    /// targeted permanent (`SameNameAsParentTarget`) — without it the effect
+    /// degrades into an unconditional board wipe.
+    #[test]
+    fn maelstrom_pulse_destroys_only_same_named_permanents() {
+        let def = parse_effect_chain(
+            "Destroy target nonland permanent and all other permanents with the same name as that permanent.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(&*def.effect, Effect::Destroy { .. }));
+        let sub = def.sub_ability.as_ref().expect("DestroyAll continuation");
+        let Effect::DestroyAll { target, .. } = &*sub.effect else {
+            panic!("expected DestroyAll, got {:?}", sub.effect);
+        };
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected Typed filter, got {target:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .contains(&FilterProp::SameNameAsParentTarget),
+            "DestroyAll must restrict to the parent target's name, got {:?}",
+            typed.properties
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Another),
+            "DestroyAll must exclude the targeted permanent itself, got {:?}",
+            typed.properties
+        );
+    }
+
     /// CR 701.12a: Tree of Perdition / Tree of Redemption / Evra — "exchange
     /// <player>'s life total with ~'s power/toughness" parses to
     /// `ExchangeLifeWithStat` with the right player filter and stat, not the
@@ -39798,5 +40051,39 @@ mod snapshot_tests {
             .is_none(),
             "interceptor must reject inputs whose inner quantity is not the equalization shape"
         );
+    }
+
+    #[test]
+    fn named_choice_recognizes_enumerated_card_types() {
+        // Issue #930 — Cloud Key's older templating enumerates the card-type
+        // options ("choose artifact, creature, enchantment, instant, or
+        // sorcery") instead of the modern "choose a card type". Both must map
+        // to ChoiceType::CardType so the chosen type persists for downstream
+        // IsChosenCardType reads (CR 205.2).
+        assert!(matches!(
+            try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery"),
+            Some(ChoiceType::CardType)
+        ));
+        assert!(matches!(
+            try_parse_named_choice("choose a card type"),
+            Some(ChoiceType::CardType)
+        ));
+        // Trailing period, as it appears in oracle text.
+        assert!(matches!(
+            try_parse_named_choice("choose artifact, creature, enchantment, instant, or sorcery."),
+            Some(ChoiceType::CardType)
+        ));
+    }
+
+    #[test]
+    fn named_choice_enumeration_does_not_misfire() {
+        // Non-card-type lists and articled / creature-type choices must not be
+        // treated as a card-type enumeration.
+        assert!(!is_card_type_enumeration("one or more creatures"));
+        assert!(!is_card_type_enumeration("a creature"));
+        assert!(!matches!(
+            try_parse_named_choice("choose a creature type"),
+            Some(ChoiceType::CardType)
+        ));
     }
 }

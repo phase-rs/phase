@@ -1291,6 +1291,110 @@ fn effect_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     effect.target_filter()
 }
 
+// ── Batch resolution (Tier 3) ────────────────────────────────────────────
+//
+// Driver-level collapse of N contiguous, identical, observer-free
+// triggered-ability resolutions into a single execution pass. The eligibility
+// predicate is layered (Layer A run-identity in `game/stack.rs`, Layer B
+// handler purity here + in `token.rs`, Layer C observer-order-invariance in
+// `game/stack.rs`). All gates default to "not batchable" — only the Token
+// handler opts in, and only for provably-equivalent runs. See the planning
+// trace in `game/stack.rs::resolve_next`.
+
+/// Handler-specific execution data for a batch. Each variant carries exactly
+/// what the execute step needs to reproduce N one-by-one resolutions.
+pub(crate) enum BatchExecutionPlan {
+    /// Resolve `Effect::Token` `run_len` times by replaying the existing
+    /// per-resolution body. Carries the resolved per-resolution `TokenSpec`
+    /// so Layer C (`game/stack.rs::observers_are_batch_safe`) can build the
+    /// real ZoneChanged/TokenCreated probe events from its true
+    /// characteristics (HIGH-1).
+    Token {
+        spec: crate::types::proposed_event::TokenSpec,
+        run_len: u32,
+    },
+}
+
+/// A proven-safe batch plan returned by `try_resolve_batch`. The driver
+/// consumes `consumed` stack entries and applies the plan once.
+pub(crate) struct BatchPlan {
+    plan: BatchExecutionPlan,
+    /// Number of stack entries this batch consumes (drives the pop loop and
+    /// the auto-pass baseline decrement, §7.2).
+    consumed: u32,
+}
+
+impl BatchPlan {
+    /// Build a Token batch plan: resolve the base `Effect::Token` `run_len`
+    /// times, producing the single per-resolution `spec` each iteration.
+    pub(crate) fn token(spec: crate::types::proposed_event::TokenSpec, run_len: u32) -> Self {
+        BatchPlan {
+            plan: BatchExecutionPlan::Token { spec, run_len },
+            consumed: run_len,
+        }
+    }
+
+    pub(crate) fn consumed(&self) -> u32 {
+        self.consumed
+    }
+
+    /// CR 603.6a: the resolved token spec(s) this batch will produce, exposed
+    /// so Layer C can build the REAL ZoneChanged/TokenCreated probe events
+    /// from each spec's true `core_types` — never a hand-fixed key set.
+    pub(crate) fn produced_token_specs(&self) -> Vec<&crate::types::proposed_event::TokenSpec> {
+        match &self.plan {
+            BatchExecutionPlan::Token { spec, .. } => vec![spec],
+        }
+    }
+
+    /// CR 608.2: Apply the batch by replaying the per-resolution handler body
+    /// `run_len` times. The pipeline checkpoint (process_triggers + SBA) is
+    /// hoisted to once-after by the driver, but the per-token creation +
+    /// replacement + ETB bookkeeping stays at full N-fold multiplicity (§5.2).
+    pub(crate) fn execute(
+        &self,
+        state: &mut GameState,
+        ability: &ResolvedAbility,
+        events: &mut Vec<GameEvent>,
+    ) {
+        match &self.plan {
+            BatchExecutionPlan::Token { run_len, .. } => {
+                for _ in 0..*run_len {
+                    let _ = token::resolve(state, ability, events);
+                }
+            }
+        }
+    }
+}
+
+/// CR 608.2 + CR 608.2c: Returns a `BatchPlan` iff this effect instance is
+/// provably state-invariant across `run_len` identical resolutions for its
+/// OWN inputs — i.e. resolving it `run_len` times one-by-one would produce the
+/// same per-resolution decision and token spec as one batched application.
+/// Returns `None` (the default) for every effect not explicitly proven
+/// batch-safe.
+///
+/// This gate covers ONLY the effect's own inputs (Layer B), INCLUDING the
+/// §2.2a emits-exactly-{ZoneChanged,TokenCreated} gate (`spec_emits_only_etb_pair`)
+/// and the §2.3a produced-token-non-observer gate applied inside the Token arm
+/// so a returned plan's spec emits exactly the ETB pair. The driver must ALSO
+/// pass the battlefield-wide observer-order-invariance gate (Layer C,
+/// `game/stack.rs::observers_are_batch_safe`) before batching — that probe is
+/// complete by construction precisely because the spec emits only the ETB pair.
+pub(crate) fn try_resolve_batch(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    run_len: u32,
+) -> Option<BatchPlan> {
+    match &ability.effect {
+        Effect::Token { .. } => token::try_resolve_batch(state, ability, run_len),
+        // Exhaustive conservative default: every other effect is non-batchable
+        // in v1. The wildcard encodes "opt-in," not a forgotten arm — new
+        // batch-aware handlers add an explicit arm above.
+        _ => None,
+    }
+}
+
 /// Dispatch to the appropriate effect handler using typed pattern matching.
 pub fn resolve_effect(
     state: &mut GameState,

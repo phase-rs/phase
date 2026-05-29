@@ -313,6 +313,16 @@ pub fn move_to_zone(
     remove_from_zone(state, object_id, from, owner);
     add_to_zone(state, object_id, to, owner);
 
+    // CR 603.6c: Drop the leaving permanent from the TriggerIndex. The
+    // leaves-battlefield last-known-information scan in
+    // `collect_pending_triggers` reads `state.objects` directly (the object's
+    // zone is no longer Battlefield), unaffected by this removal. The
+    // authoritative correctness path is the `evaluate_layers` rebuild
+    // (CR 611.2e); this hook is incremental optimization between layer flushes.
+    if from == Zone::Battlefield {
+        state.trigger_index.remove(object_id);
+    }
+
     let obj_mut = state.objects.get_mut(&object_id).unwrap();
     obj_mut.zone = to;
 
@@ -373,6 +383,25 @@ pub fn move_to_zone(
             if needs_transform {
                 let _ = super::transform::transform_permanent(state, object_id, events);
             }
+        }
+    }
+
+    // CR 603.6a: Register the post-reset trigger definitions in the index so
+    // `state.clone()` consumers see a coherent battlefield → trigger candidate
+    // map. AUTHORITATIVE PATH: the end-of-`evaluate_layers` rebuild
+    // (CR 611.2e, `layers.rs`) is the safety net; this hook is incremental
+    // optimization between layer flushes. `state.layers_dirty = true` was set
+    // above, guaranteeing a post-layer rebuild on the next
+    // `collect_pending_triggers` consult.
+    if to == Zone::Battlefield {
+        let registration = state.objects.get(&object_id).map(|obj| {
+            let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
+                obj.trigger_definitions.as_slice().iter().cloned().collect();
+            let synthetic = super::trigger_index::has_synthetic_keyword_trigger_for(obj);
+            (defs, synthetic)
+        });
+        if let Some((defs, synthetic)) = registration {
+            state.trigger_index.add(object_id, &defs, synthetic);
         }
     }
 
@@ -483,6 +512,13 @@ pub fn move_to_library_at_index(
     apply_zone_exit_cleanup(state, object_id, from, Zone::Library);
 
     remove_from_zone(state, object_id, from, owner);
+
+    // CR 603.6c: Drop the leaving permanent from the TriggerIndex when this
+    // path is used to move a battlefield permanent into the library
+    // (Conduit-of-Worlds-style "shuffle a permanent into your library").
+    if from == Zone::Battlefield {
+        state.trigger_index.remove(object_id);
+    }
 
     // Place at specified index or push to end (bottom)
     let player = state

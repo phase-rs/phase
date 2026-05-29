@@ -1,8 +1,8 @@
 use crate::database::legality::LegalityFormat;
 use crate::database::CardDatabase;
 use crate::game::game_object::GameObject;
-use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
-use crate::game::triggers::build_trigger_registry;
+use crate::game::static_abilities::{build_static_registry, static_registry, StaticAbilityHandler};
+use crate::game::triggers::{build_trigger_registry, trigger_registry};
 use crate::parser::oracle::is_commander_permission_sentence;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
@@ -3238,7 +3238,9 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
 
     // 3. Check trigger modes against trigger registry
     // CR 603.8: StateCondition triggers use the priority pipeline, not the event registry.
-    let trigger_registry = build_trigger_registry();
+    // Cached accessor: this runs per battlefield object on every `apply()` via
+    // display derivation, so the registry must not be rebuilt per call.
+    let trigger_registry = trigger_registry();
     // Classification scan: iterate every printed trigger/static regardless
     // of functioning state — we're computing coverage, not game behavior.
     for trig in obj.trigger_definitions.iter_all() {
@@ -3251,7 +3253,8 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     }
 
     // 4. Check static ability modes against static registry
-    let static_registry = build_static_registry();
+    // Cached accessor (see trigger registry note above) — hot per-object path.
+    let static_registry = static_registry();
     for stat in obj.static_definitions.iter_all() {
         if !static_registry.contains_key(&stat.mode) && !is_data_carrying_static(&stat.mode) {
             missing.push(format!("Static: {}", stat.mode));

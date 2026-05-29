@@ -6351,7 +6351,7 @@ pub(super) fn parse_zone_counter_ast(
                 target,
             },
             _rem,
-        )) = super::counter::try_parse_move_counters(lower, text)
+        )) = super::counter::try_parse_move_counters(lower, text, ctx)
         {
             return Some(ZoneCounterImperativeAst::MoveCounters {
                 source,

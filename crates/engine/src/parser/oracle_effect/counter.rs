@@ -551,15 +551,25 @@ fn resolve_that_creature_in_trigger<'a>(text: &'a str, ctx: &mut ParseContext) -
 /// case where the source's counters are copied (not strictly moved) to a
 /// second object.
 ///
-/// `"its"` / `"this creature's"` are possessive pronouns referring to the
-/// ability source (live state). `"those"` is an anaphoric reference to the
-/// counters that were on the source — typically used in dies / leaves-
-/// battlefield triggers gated by an `if it had counters on it` condition
-/// (Scolding Administrator class). The runtime resolver in
-/// `effects::counters::resolve_move` already performs LKI fallback on the
-/// source object (CR 400.7), so dies-triggers correctly read counters from
-/// the dying creature's last-known state regardless of pronoun form.
-pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<(Effect, &'a str)> {
+/// `"its"` / `"this creature's"` / `"those"` all refer anaphorically to the
+/// object whose counters the trigger condition (`if it had counters on it`)
+/// established. Which object that is depends on the trigger's subject:
+///
+/// - A **self** dies/leaves trigger ("When ~ dies, put its counters on …" —
+///   Scolding Administrator) → the source object itself (`SelfRef`).
+/// - An **other-object** leaves trigger ("Whenever a creature you control
+///   leaves the battlefield, … put those counters on ~" — The Ozolith) → the
+///   triggering creature (`TriggeringSource`), NOT the ability source.
+///
+/// `resolve_it_pronoun` makes exactly this distinction from `ctx.subject`, so
+/// the counter source binds to the right object. The runtime resolver in
+/// `effects::counters::resolve_move` performs LKI fallback (CR 400.7), so the
+/// counters are read from the leaving object's last-known state either way.
+pub(super) fn try_parse_move_counters<'a>(
+    lower: &str,
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(Effect, &'a str)> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
     // Detect "its counters" / "this creature's counters" / "those counters"
@@ -590,7 +600,12 @@ pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<
 
     Some((
         Effect::MoveCounters {
-            source: TargetFilter::SelfRef,
+            // CR 122.8: when a leaves-the-battlefield trigger puts a departed
+            // object's counters onto another object, the same number/kinds the
+            // object had are placed on the destination — read from the leaving
+            // object's last-known information (CR 400.7), so the source must be
+            // the triggering object, not the ability source.
+            source: resolve_it_pronoun(ctx),
             counter_type: None,
             count: None,
             mode: CounterTransferMode::Put,
@@ -1473,7 +1488,7 @@ mod tests {
     #[test]
     fn move_counters_those_counters_anaphora() {
         let lower = "put those counters on up to one target creature";
-        let result = try_parse_move_counters(lower, lower);
+        let result = try_parse_move_counters(lower, lower, &mut default_ctx());
         let Some((
             Effect::MoveCounters {
                 source,
@@ -1501,6 +1516,34 @@ mod tests {
             }
             other => panic!("expected typed creature target, got {other:?}"),
         }
+    }
+
+    /// CR 122.8 + CR 400.7 (The Ozolith): "Whenever a creature you control
+    /// leaves the battlefield, ... put those counters on ~." Here the trigger
+    /// subject is a non-self creature filter, so "those counters" refers to the
+    /// triggering creature — the counter SOURCE must be `TriggeringSource`, not
+    /// `SelfRef` (the ability source, which never has the counters and would
+    /// make the move a no-op).
+    #[test]
+    fn move_counters_those_counters_from_other_object_trigger() {
+        use crate::types::ability::TypedFilter;
+        let mut ctx = default_ctx();
+        ctx.subject = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let lower = "put those counters on ~";
+        let result = try_parse_move_counters(lower, lower, &mut ctx);
+        let Some((Effect::MoveCounters { source, target, .. }, _)) = result else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert_eq!(
+            source,
+            TargetFilter::TriggeringSource,
+            "source must be the triggering (leaving) creature, not the ability source"
+        );
+        assert_eq!(
+            target,
+            TargetFilter::SelfRef,
+            "counters are put onto ~ (the ability source)"
+        );
     }
 
     /// CR 122.1b: Avenging Huntbonder (NCC) attack trigger places a `double
