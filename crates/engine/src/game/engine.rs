@@ -14040,11 +14040,11 @@ mod phase_trigger_regression_tests {
     /// may pay {1}. When you do, <effect>." parses into an end-step `Phase`
     /// trigger whose execute is an optional `PayCost` carrying a reflexive
     /// `WhenYouDo` sub-ability. CR 513.1a (beginning-of-end-step trigger) + CR
-    /// 603.1 (a triggered ability uses the stack) require the trigger to be put
-    /// on the stack and resolved; CR 603.12 makes "when you do" a reflexive
-    /// trigger that fires only if the optional payment is made. The shape is
-    /// shared by all four Boundless-era Go-Shintai and ~12 other "you may pay
-    /// {1}. When you do" cards, so this guards the whole class.
+    /// 603.3 (a triggered ability's controller puts it on the stack) require the
+    /// trigger to be put on the stack and resolved; CR 603.12 makes "when you
+    /// do" a reflexive trigger that fires only if the optional payment is made.
+    /// The shape is shared by all four Boundless-era Go-Shintai and ~12 other
+    /// "you may pay {1}. When you do" cards, so this guards the whole class.
     ///
     /// Accept path: the {1} is paid and the reflexive PutCounter resolves,
     /// placing one +1/+1 counter on the lone Shrine.
@@ -14070,7 +14070,7 @@ mod phase_trigger_regression_tests {
 
         let mut events = Vec::new();
         crate::game::turns::auto_advance(&mut state, &mut events);
-        // CR 603.1 + CR 513.1a: the trigger must reach the stack, not be skipped.
+        // CR 603.3 + CR 513.1a: the trigger must reach the stack, not be skipped.
         assert!(
             !state.stack.is_empty() || state.pending_trigger.is_some(),
             "end-step may-pay trigger must fire (waiting={:?})",
