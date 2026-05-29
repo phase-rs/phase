@@ -465,6 +465,10 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // "you may cast X as though it had flash if you pay Y" —
             // generalized cast-timing/keyword permission, always opt-in.
             | StaticMode::CastWithKeyword { .. }
+            // CR 118.9: "You may pay X rather than pay the mana cost for [filter]
+            // spells you cast" — opt-in alternative-mana-cost permission
+            // (Rooftop Storm, Fist of Suns, Jodah), structurally optional.
+            | StaticMode::CastWithAlternativeCost { .. }
             // CR 602.5e: "You may activate [abilities] any time you could
             // cast an instant" is an activation-timing permission, not an
             // optional effect to execute during resolution.
@@ -473,6 +477,10 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // (Crucible, Ramunap Excavator, etc.) — graveyard-as-zone
             // cast permission, structurally opt-in.
             | StaticMode::GraveyardCastPermission { .. }
+            // CR 601.2a + CR 113.6b: Maralen-class "Once each turn, you
+            // may cast …" exile-cast permission — structurally opt-in by
+            // the same "you may cast" surface as the graveyard sibling.
+            | StaticMode::ExileCastPermission { .. }
             // CR 601.2f: Defiler-style cost reductions encode the optional
             // life payment inside the static cost-modification primitive.
             | StaticMode::DefilerCostReduction { .. }
@@ -1145,6 +1153,11 @@ fn detect_dynamic_qty(
         // permanents you control, add one mana of that color" is captured as
         // a dynamic mana-production carrier, not a QuantityExpr count.
         "DistinctColorsAmongPermanents",
+        // CR 122.1: Bribe Taker class — "for each kind of counter on
+        // permanents you control" is captured as a `DistinctCounterKindsAmong`
+        // iteration-source QuantityRef driving `repeat_for`, not a swallowed
+        // count.
+        "DistinctCounterKindsAmong",
         // CR 702.122: Strive — "this spell costs {N} more for each target
         // beyond the first" is captured on the top-level `Card` as
         // `strive_cost: Some(ManaCost)`, not inside an ability tree.

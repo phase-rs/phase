@@ -2678,7 +2678,7 @@ mod tests {
         GainLifePlayer, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
         StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::TransientContinuousEffect;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -3539,6 +3539,50 @@ mod tests {
         let final_other = state.objects.get(&other).unwrap();
         assert_eq!(final_other.power, Some(2));
         assert_eq!(final_other.toughness, Some(2));
+    }
+
+    /// CR 205.4a + CR 613.4c: Jodah-style static anthem — "Legendary creatures
+    /// you control get +X/+X, where X is the number of legendary creatures you
+    /// control." The affected filter must test the legendary supertype, and
+    /// the dynamic amount must count the same supertype-qualified population.
+    #[test]
+    fn dynamic_legendary_anthem_counts_and_affects_legendary_creatures_you_control() {
+        let mut state = setup();
+        let jodah = make_creature(&mut state, "Jodah, the Unifier", 5, 5, PlayerId(0));
+        let ally = make_creature(&mut state, "Legendary Ally", 2, 2, PlayerId(0));
+        let ordinary = make_creature(&mut state, "Ordinary Bear", 2, 2, PlayerId(0));
+        let opponent_legend = make_creature(&mut state, "Opponent Legend", 2, 2, PlayerId(1));
+
+        for id in [jodah, ally, opponent_legend] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Drive Jodah's real Oracle line through the parser so this runtime test
+        // also fails if the supertype-descriptor parse regresses (closing the
+        // parser->layers seam, not hand-building the expected StaticDefinition).
+        let def = crate::parser::oracle_static::parse_static_line(
+            "Legendary creatures you control get +X/+X, where X is the number of legendary creatures you control.",
+        )
+        .expect("Jodah anthem static should parse");
+        state
+            .objects
+            .get_mut(&jodah)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&jodah].power, Some(7));
+        assert_eq!(state.objects[&jodah].toughness, Some(7));
+        assert_eq!(state.objects[&ally].power, Some(4));
+        assert_eq!(state.objects[&ally].toughness, Some(4));
+        assert_eq!(state.objects[&ordinary].power, Some(2));
+        assert_eq!(state.objects[&ordinary].toughness, Some(2));
+        assert_eq!(state.objects[&opponent_legend].power, Some(2));
+        assert_eq!(state.objects[&opponent_legend].toughness, Some(2));
     }
 
     #[test]

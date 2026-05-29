@@ -128,9 +128,14 @@ fn dalkovan_encampment_delayed_trigger_creates_warrior_tokens() {
         .as_ref()
         .expect("combat state present during DeclareAttackers");
     for &w in &warriors {
-        assert!(
-            combat.attackers.iter().any(|a| a.object_id == w),
-            "Warrior token {w:?} must be an attacking creature"
+        let info = combat
+            .attackers
+            .iter()
+            .find(|a| a.object_id == w)
+            .expect("Warrior token must be an attacking creature");
+        assert_eq!(
+            info.defending_player, P1,
+            "Warrior token must attack the opponent declared this combat, not its controller"
         );
     }
 }

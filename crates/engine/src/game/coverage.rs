@@ -53,7 +53,15 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
+            // CR 601.2a + CR 113.6b: ExileCastPermission carries frequency,
+            // play_mode, and the `without_paying_mana_cost` flag. Runtime
+            // enforcement is in casting.rs::exile_objects_castable_by_permission
+            // and casting_costs.rs.
+            | StaticMode::ExileCastPermission { .. }
             | StaticMode::CastWithKeyword { .. }
+            // CR 118.9: CastWithAlternativeCost carries a `ManaCost` — runtime
+            // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
+            | StaticMode::CastWithAlternativeCost { .. }
             // CR 702.16: PlayerProtection carries a `ProtectionTarget` (Strings) —
             // open value space, consumed by direct match in `player_protection_from`.
             | StaticMode::PlayerProtection { .. }
@@ -494,6 +502,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 let stat_str = match stat {
                     PtStat::Power => "power",
                     PtStat::Toughness => "toughness",
+                    PtStat::TotalPowerToughness => "total power and toughness",
                 };
                 let scope_str = match scope {
                     PtValueScope::Current => "",
@@ -1002,6 +1011,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::DistinctColorsAmongPermanents { filter } => {
             format!("# of colors among {}", fmt_target(filter))
+        }
+        QuantityRef::DistinctCounterKindsAmong { filter } => {
+            format!("# of counter kinds among {}", fmt_target(filter))
         }
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
@@ -1746,6 +1758,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 match stat {
                     PtStat::Power => "power".into(),
                     PtStat::Toughness => "toughness".into(),
+                    PtStat::TotalPowerToughness => "total power and toughness".into(),
                 },
             ));
         }
@@ -5180,6 +5193,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DistinctColorsAmongPermanents { .. } => {
             ("DistinctColorsAmongPermanents", Handled)
         }
+        QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
@@ -6425,6 +6439,13 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             // already enforced by the parser; coverage just needs a phrase
             // that the static description will contain.
             StaticMode::TopOfLibraryCastPermission { .. } => {
+                effective_lower.contains("you may cast") || effective_lower.contains("you may play")
+            }
+            // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. The
+            // discriminator phrase ("from among cards exiled with") is
+            // already enforced by the parser; coverage just needs a phrase
+            // the static description will contain.
+            StaticMode::ExileCastPermission { .. } => {
                 effective_lower.contains("you may cast") || effective_lower.contains("you may play")
             }
             StaticMode::CantCastDuring { .. } => {

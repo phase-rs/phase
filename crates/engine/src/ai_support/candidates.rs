@@ -651,6 +651,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 508.1g + CR 701.43d: exert-as-attack is optional — offer both
+        // paying the exert cost and declining so search can weigh the linked
+        // "when you do" payoff against losing the next untap.
+        WaitingFor::ExertChoice { player, .. } => vec![
+            candidate(
+                GameAction::ChooseExert { exert: true },
+                TacticalClass::Utility,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChooseExert { exert: false },
+                TacticalClass::Pass,
+                Some(*player),
+            ),
+        ],
         WaitingFor::EquipTarget {
             player,
             equipment_id,

@@ -58,6 +58,11 @@ pub fn resolve(
     let stat_value = match stat {
         PtStat::Power => source.power,
         PtStat::Toughness => source.toughness,
+        PtStat::TotalPowerToughness => {
+            return Err(EffectError::InvalidParam(
+                "total power and toughness is not exchangeable as a single stat".to_string(),
+            ));
+        }
     };
     let Some(stat_value) = stat_value else {
         // Source has no power/toughness (not a creature) — can't complete.
@@ -96,6 +101,11 @@ pub fn resolve(
     let modification = match stat {
         PtStat::Power => ContinuousModification::SetPower { value: old_life },
         PtStat::Toughness => ContinuousModification::SetToughness { value: old_life },
+        PtStat::TotalPowerToughness => {
+            return Err(EffectError::InvalidParam(
+                "total power and toughness is not exchangeable as a single stat".to_string(),
+            ));
+        }
     };
     state.add_transient_continuous_effect(
         ability.source_id,

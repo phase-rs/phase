@@ -4443,4 +4443,130 @@ mod tests {
         // Object must not have moved.
         assert_eq!(state.objects[&obj_id].zone, Zone::Graveyard);
     }
+
+    /// CR 701.17c + CR 608.2c: Issue #1298 — Terra, Magical Adept's
+    /// "Put up to one enchantment card milled this way into your hand" must
+    /// scope `EffectZoneChoice` to the milled cards, not battlefield
+    /// enchantments.
+    #[test]
+    fn tracked_set_filtered_milled_enchantment_offers_only_milled_cards() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::WaitingFor;
+
+        fn mark_enchantment(state: &mut GameState, id: ObjectId) {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Enchantment);
+        }
+
+        let mut state = GameState::new_two_player(42);
+
+        // Library top-first: one enchantment + four instants within the milled top-5.
+        let milled_enchantment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Milled Aura".to_string(),
+            Zone::Library,
+        );
+        mark_enchantment(&mut state, milled_enchantment);
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(i + 2),
+                PlayerId(0),
+                format!("Instant {i}"),
+                Zone::Library,
+            );
+        }
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 10),
+                PlayerId(0),
+                format!("Padding {i}"),
+                Zone::Library,
+            );
+        }
+
+        // Trap: a battlefield enchantment matches the inner type filter but
+        // is NOT among the milled cards.
+        let battlefield_enchantment = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Battlefield Aura".to_string(),
+            Zone::Battlefield,
+        );
+        mark_enchantment(&mut state, battlefield_enchantment);
+
+        let put_sub = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::new(
+                        TypeFilter::Enchantment,
+                    ))),
+                },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(put_sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let WaitingFor::EffectZoneChoice {
+            cards, destination, ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "expected EffectZoneChoice for the put-from-milled clause, got {:?}",
+                state.waiting_for
+            );
+        };
+
+        assert!(
+            cards.contains(&milled_enchantment),
+            "the milled enchantment must be offered; offered = {cards:?}"
+        );
+        assert!(
+            !cards.contains(&battlefield_enchantment),
+            "a battlefield enchantment must NEVER be offered — selection is \
+             scoped to the milled tracked set (issue #1298); offered = {cards:?}"
+        );
+        assert_eq!(
+            *destination,
+            Some(Zone::Hand),
+            "the chosen milled card moves to hand"
+        );
+    }
 }

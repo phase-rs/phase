@@ -2880,6 +2880,38 @@ fn apply_action(
                 turns::auto_advance(state, &mut events)
             }
         }
+        // CR 508.1g + CR 701.43d: the active player decides whether to pay the
+        // optional "exert as it attacks" cost for the prompted attacker, one
+        // attacker at a time. Triggers are deferred to `finish_declare_attackers`
+        // (the buffered declaration + exert events fire together), so suppress
+        // the epilogue's trigger pass for every step of the loop.
+        (
+            WaitingFor::ExertChoice {
+                player,
+                attacker,
+                remaining,
+            },
+            GameAction::ChooseExert { exert },
+        ) => {
+            triggers_processed_inline = true;
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if exert {
+                engine_combat::apply_attack_exert(state, *attacker, &mut events);
+            }
+            if let Some((next, rest)) = remaining.split_first() {
+                WaitingFor::ExertChoice {
+                    player: *player,
+                    attacker: *next,
+                    remaining: rest.to_vec(),
+                }
+            } else {
+                engine_combat::finish_declare_attackers(state, &mut events, false)?
+            }
+        }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             engine_replacement::handle_replacement_choice(state, index, &mut events)?
         }
@@ -5857,7 +5889,7 @@ mod tests {
         Arc::make_mut(&mut obj.base_abilities).extend(parsed.abilities);
     }
 
-    fn apply_oracle_to_object(
+    pub(super) fn apply_oracle_to_object(
         state: &mut GameState,
         object_id: ObjectId,
         name: &str,
@@ -13638,6 +13670,7 @@ mod exile_return_tests {
 mod phase_trigger_regression_tests {
     use std::sync::Arc;
 
+    use super::tests::apply_oracle_to_object;
     use super::*;
     use crate::game::combat::AttackTarget;
     use crate::game::zones::create_object;
@@ -13986,6 +14019,209 @@ mod phase_trigger_regression_tests {
             "Trigger with OnlyDuringYourTurn should not fire on opponent's turn"
         );
         assert!(state.pending_trigger.is_none());
+    }
+
+    /// Put a Go-Shintai of Boundless Vigor (the issue #1243 card) onto the
+    /// battlefield under P0, with its real parsed trigger set, and return its id.
+    /// The card is its own Shrine, so it is always a legal reflexive target.
+    fn put_boundless_go_shintai(state: &mut GameState) -> ObjectId {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Trample\nAt the beginning of your end step, you may pay {1}. When you do, put a +1/+1 counter on target Shrine for each Shrine you control.",
+            "Go-Shintai of Boundless Vigor",
+            &[],
+            &["Enchantment".to_string(), "Creature".to_string()],
+            &["Shrine".to_string(), "Spirit".to_string()],
+        );
+        assert!(
+            !parsed.triggers.is_empty(),
+            "parser must produce the end-step trigger, got {parsed:?}"
+        );
+
+        let id = create_object(
+            state,
+            CardId(200),
+            PlayerId(0),
+            "Go-Shintai of Boundless Vigor".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Shrine".to_string());
+        obj.power = Some(5);
+        obj.toughness = Some(5);
+        for t in parsed.triggers {
+            obj.trigger_definitions.push(t);
+        }
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    fn shintai_p1p1_counters(state: &GameState, id: ObjectId) -> u32 {
+        state
+            .objects
+            .get(&id)
+            .and_then(|o| {
+                o.counters
+                    .get(&crate::types::counter::CounterType::Plus1Plus1)
+                    .copied()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Issue #1243 — class regression. "At the beginning of your end step, you
+    /// may pay {1}. When you do, <effect>." parses into an end-step `Phase`
+    /// trigger whose execute is an optional `PayCost` carrying a reflexive
+    /// `WhenYouDo` sub-ability. CR 513.1a (beginning-of-end-step trigger) + CR
+    /// 603.1 (a triggered ability uses the stack) require the trigger to be put
+    /// on the stack and resolved; CR 603.12 makes "when you do" a reflexive
+    /// trigger that fires only if the optional payment is made. The shape is
+    /// shared by all four Boundless-era Go-Shintai and ~12 other "you may pay
+    /// {1}. When you do" cards, so this guards the whole class.
+    ///
+    /// Accept path: the {1} is paid and the reflexive PutCounter resolves,
+    /// placing one +1/+1 counter on the lone Shrine.
+    #[test]
+    fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::End;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let id = put_boundless_go_shintai(&mut state);
+        // One generic mana so the {1} is payable at resolution.
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(999),
+            false,
+            Vec::new(),
+        ));
+
+        let mut events = Vec::new();
+        crate::game::turns::auto_advance(&mut state, &mut events);
+        // CR 603.1 + CR 513.1a: the trigger must reach the stack, not be skipped.
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "end-step may-pay trigger must fire (waiting={:?})",
+            state.waiting_for
+        );
+
+        let mut saw_may_prompt = false;
+        for _ in 0..20 {
+            match state.waiting_for.clone() {
+                WaitingFor::Priority { player } => {
+                    if state.stack.is_empty() {
+                        break;
+                    }
+                    apply(&mut state, player, GameAction::PassPriority).unwrap();
+                }
+                // CR 603.12: the "you may pay {1}" choice on resolution.
+                WaitingFor::OptionalEffectChoice { player, .. } => {
+                    saw_may_prompt = true;
+                    apply(
+                        &mut state,
+                        player,
+                        GameAction::DecideOptionalEffect { accept: true },
+                    )
+                    .unwrap();
+                }
+                // Reflexive "when you do" target: the only Shrine is the source.
+                WaitingFor::TriggerTargetSelection { player, .. }
+                | WaitingFor::TargetSelection { player, .. } => {
+                    apply(
+                        &mut state,
+                        player,
+                        GameAction::SelectTargets {
+                            targets: vec![TargetRef::Object(id)],
+                        },
+                    )
+                    .unwrap();
+                }
+                _ => break,
+            }
+        }
+
+        assert!(
+            saw_may_prompt,
+            "the 'may pay {{1}}' prompt (CR 603.12) must be surfaced at the end step"
+        );
+        assert_eq!(
+            shintai_p1p1_counters(&state, id),
+            1,
+            "paying {{1}} must place one +1/+1 counter on the lone Shrine"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            0,
+            "the {{1}} must actually be paid on accept"
+        );
+    }
+
+    /// Issue #1243 — decline path. The trigger still goes on the stack and the
+    /// "may pay {1}" choice is still offered (CR 603.1), but declining means the
+    /// reflexive CR 603.12 "when you do" never triggers: no payment, no counter,
+    /// and the turn proceeds cleanly.
+    #[test]
+    fn issue_1243_end_step_may_pay_trigger_decline_places_no_counter() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::End;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let id = put_boundless_go_shintai(&mut state);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(999),
+            false,
+            Vec::new(),
+        ));
+
+        let mut events = Vec::new();
+        crate::game::turns::auto_advance(&mut state, &mut events);
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "end-step may-pay trigger must fire even when it will be declined"
+        );
+
+        let mut saw_may_prompt = false;
+        for _ in 0..20 {
+            match state.waiting_for.clone() {
+                WaitingFor::Priority { player } => {
+                    if state.stack.is_empty() {
+                        break;
+                    }
+                    apply(&mut state, player, GameAction::PassPriority).unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { player, .. } => {
+                    saw_may_prompt = true;
+                    apply(
+                        &mut state,
+                        player,
+                        GameAction::DecideOptionalEffect { accept: false },
+                    )
+                    .unwrap();
+                }
+                _ => break,
+            }
+        }
+
+        assert!(
+            saw_may_prompt,
+            "the 'may pay {{1}}' prompt must still be offered before declining"
+        );
+        assert_eq!(
+            shintai_p1p1_counters(&state, id),
+            0,
+            "declining must place no counter (CR 603.12 reflexive does not trigger)"
+        );
     }
 
     #[test]
@@ -15767,6 +16003,71 @@ mod phase_trigger_regression_tests {
         // Verify the choice was stored on the object
         let obj = state.objects.get(&obj_id).unwrap();
         assert_eq!(obj.chosen_color(), Some(ManaColor::Red));
+    }
+
+    #[test]
+    fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
+        let mut state = setup_game_at_main_phase();
+        let siege_id = create_object(
+            &mut state,
+            CardId(621),
+            PlayerId(0),
+            "Glacierwood Siege".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&siege_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        apply_oracle_to_object(
+            &mut state,
+            siege_id,
+            "Glacierwood Siege",
+            "As this enchantment enters, choose Temur or Sultai.\n\
+• Temur — Whenever you cast an instant or sorcery spell, target player mills four cards.\n\
+• Sultai — You may play lands from your graveyard.",
+        );
+
+        state.stack.push_back(StackEntry {
+            id: siege_id,
+            source_id: siege_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(621),
+                ability: None,
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(state.battlefield.contains(&siege_id));
+        match resolve.waiting_for {
+            WaitingFor::NamedChoice {
+                player,
+                choice_type: crate::types::ability::ChoiceType::Labeled { ref options },
+                source_id,
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(source_id, Some(siege_id));
+                assert_eq!(options, &vec!["Temur".to_string(), "Sultai".to_string()]);
+            }
+            other => panic!("expected Glacierwood Siege anchor choice, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseOption {
+                choice: "Temur".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&siege_id].chosen_label(), Some("Temur"));
     }
 
     #[test]

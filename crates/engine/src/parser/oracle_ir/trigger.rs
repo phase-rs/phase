@@ -8,8 +8,8 @@ use serde::Serialize;
 
 use super::effect_chain::EffectChainIr;
 use crate::types::ability::{
-    AbilityDefinition, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    UnlessPayModifier,
+    AbilityDefinition, ControllerRef, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayModifier,
 };
 use crate::types::triggers::TriggerMode;
 
@@ -66,4 +66,14 @@ pub(crate) struct TriggerModifiers {
     pub(crate) has_up_to: bool,
     /// Lowered effect text (after comma split), for `effect_adds_mana_to_triggering_player`.
     pub(crate) effect_lower: String,
+    /// CR 109.4 + CR 603.7c: The relative-player scope the trigger condition
+    /// established for its effect body (`TargetPlayer` for "deals [combat]
+    /// damage to a player" / "attacks a player", `ParentTargetController` for
+    /// damage-source-controller triggers, `ScopedPlayer` for scoped-phase
+    /// triggers). Lowering reads this to rebind the body's `PlayerScope::Target`
+    /// possessive quantities ("they lose half their life") to
+    /// `PlayerScope::ScopedPlayer` for the `TargetPlayer` case, which resolves
+    /// against the damaged/attacked player stamped on the resolving ability from
+    /// the triggering event.
+    pub(crate) relative_player_scope: Option<ControllerRef>,
 }

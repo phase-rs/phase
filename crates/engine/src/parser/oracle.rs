@@ -33,7 +33,8 @@ use super::oracle_classifier::{
     is_cant_win_lose_compound, is_compound_turn_limit, is_defiler_cost_pattern,
     is_enters_tapped_cant_untap_compound, is_flashback_equal_mana_cost, is_granted_static_line,
     is_instead_replacement_line, is_opening_hand_begin_game, is_replacement_pattern,
-    is_static_pattern, is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
+    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
+    should_defer_spell_to_effect,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
@@ -65,8 +66,8 @@ use super::oracle_special::{
 };
 use super::oracle_static::{
     lower_static_ir, parse_chosen_creature_type_static_prefix,
-    parse_every_creature_type_static_prefix, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    parse_every_creature_type_static_prefix, parse_spells_alternative_cost,
+    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -2132,6 +2133,20 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
+        // Priority 6c-altcost: CR 118.9 — "You may pay X rather than pay the mana
+        // cost for [filter] spells you cast." Mana-cost-alternative-grant static
+        // (Rooftop Storm, Fist of Suns, Jodah). Must run before Priority 7
+        // because `is_static_pattern` does not classify this shape, so the line
+        // would otherwise fall through to the imperative parser as
+        // Effect::PayCost.
+        if is_spells_alternative_cost_pattern(&lower) {
+            if let Some(static_def) = parse_spells_alternative_cost(&line) {
+                result.statics.push(static_def);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 6d: Compound "[~] enters tapped and doesn't untap during your
         // untap step." carries TWO independent rules in one sentence — an
         // ETB-tapped replacement (CR 614.1c) and a CantUntap static (CR 502.3).
@@ -4043,9 +4058,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, ObjectScope,
-        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr,
-        QuantityRef, ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation,
-        ShieldKind, StaticCondition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SharedQuality,
+        SharedQualityRelation, ShieldKind, StaticCondition, TargetFilter, TriggerCondition,
+        TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -4823,6 +4839,31 @@ mod tests {
         let r = parse("Destroy target creature.", "Murder", &[], &["Instant"], &[]);
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn cut_down_destroy_target_uses_total_power_toughness_filter() {
+        let r = parse(
+            "Destroy target creature with total power and toughness 5 or less.",
+            "Cut Down",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::Destroy { target, .. } = &*r.abilities[0].effect else {
+            panic!("expected Destroy effect");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::TotalPowerToughness,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 5 },
+        }));
     }
 
     #[test]
@@ -11749,6 +11790,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn vrondiss_enrage_damage_received_watches_self_not_controller() {
+        let result = parse(
+            "Enrage — Whenever Vrondiss, Rage of Ancients is dealt damage, you may create a 5/4 red and green Dragon Spirit creature token with \"When this creature deals damage, sacrifice it.\"",
+            "Vrondiss, Rage of Ancients",
+            &[],
+            &["Creature"],
+            &["Dragon", "Barbarian"],
+        );
+        assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+        let trigger = &result.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::DamageReceived);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger.valid_target, None);
     }
 
     #[test]

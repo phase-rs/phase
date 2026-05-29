@@ -197,6 +197,20 @@ pub fn source_matches_protection_target(
         // object-intrinsic properties (Cmc, HasColor, PowerLE/GE, etc.) that can
         // be evaluated from the source alone without game state.
         ProtectionTarget::Filter(filter) => source_matches_protection_filter(source, filter),
+        // CR 702.16k: "Protection from [a player]" — the source matches if it is
+        // controlled by the scoped player(s) relative to the protected object's
+        // controller, regardless of the source's characteristics. "Each of your
+        // opponents" (CR 702.16i) is captured by `Opponent`: any controller
+        // other than the protected object's controller is an opponent in 1v1 and
+        // free-for-all multiplayer. Player references with no static context
+        // (target/chosen/etc.) fail closed.
+        ProtectionTarget::FromPlayer(scope) => match scope {
+            crate::types::ability::ControllerRef::Opponent => {
+                source.controller != protected.controller
+            }
+            crate::types::ability::ControllerRef::You => source.controller == protected.controller,
+            _ => false,
+        },
     }
 }
 
@@ -629,6 +643,46 @@ mod tests {
             &ProtectionTarget::ChosenCardType,
             &no_choice,
             &creature_source,
+        ));
+    }
+
+    /// Issue #767 / CR 702.16k: "protection from each of your opponents"
+    /// (Figure of Fable's Avatar form) — a source controlled by an opponent of
+    /// the protected permanent's controller matches; a source the protected
+    /// permanent's own controller controls does not.
+    #[test]
+    fn source_matches_protection_from_opponents() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::player::PlayerId;
+
+        let mut protected = make_obj();
+        protected.controller = PlayerId(0);
+        let mut opponent_source = make_obj();
+        opponent_source.controller = PlayerId(1);
+        let mut own_source = make_obj();
+        own_source.controller = PlayerId(0);
+
+        let from_opponents = ProtectionTarget::FromPlayer(ControllerRef::Opponent);
+        assert!(
+            source_matches_protection_target(&from_opponents, &protected, &opponent_source),
+            "opponent-controlled source must match protection from each of your opponents"
+        );
+        assert!(
+            !source_matches_protection_target(&from_opponents, &protected, &own_source),
+            "own-controlled source must NOT match protection from each of your opponents"
+        );
+
+        // CR 702.16k with `You` scope is the controller-relative inverse.
+        let from_you = ProtectionTarget::FromPlayer(ControllerRef::You);
+        assert!(source_matches_protection_target(
+            &from_you,
+            &protected,
+            &own_source
+        ));
+        assert!(!source_matches_protection_target(
+            &from_you,
+            &protected,
+            &opponent_source
         ));
     }
 

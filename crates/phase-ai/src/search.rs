@@ -314,6 +314,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                     untap: true,
                 })
         }
+        // CR 508.1g: exert-as-attack is optional; the conservative fallback
+        // declines (never has a downside). Real exert decisions come from the
+        // evaluated candidate actions.
+        WaitingFor::ExertChoice { .. } => Some(GameAction::ChooseExert { exert: false }),
 
         // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is

@@ -47,13 +47,13 @@ use crate::types::ability::{
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
     ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction,
-    ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr,
-    QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
-    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter, UnlessPayModifier, UntilCondition,
+    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, IterationKindBinding,
+    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost,
+    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
+    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
+    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -2780,6 +2780,90 @@ fn all_core_type_categories() -> Vec<CoreType> {
     ]
 }
 
+/// CR 122.1 + CR 608.2d: Parse the body of Bribe Taker's "for each kind of
+/// counter on permanents you control, you may put your choice of a +1/+1 counter
+/// or a counter of that kind on this creature" into a `ChooseOneOf` between a
+/// fixed-counter branch and a dynamic "counter of that kind" branch.
+///
+/// This runs on the body remainder AFTER `strip_for_each_prefix` has lifted the
+/// `DistinctCounterKindsAmong` iteration source onto the parent ability's
+/// `repeat_for` (so the body text here has the "for each … , " prefix already
+/// removed). The leading "you may " is also already peeled by `peel_clause`
+/// (which sets `optional`), but is accepted here as well so direct invocations
+/// (tests, non-peeled paths) parse identically.
+///
+/// The dynamic branch is tagged `IterationKindBinding::RebindToIteratedKind`;
+/// the `repeat_for` loop rewrites its placeholder counter type to each iterated
+/// kind in turn (see `rebind_iterated_counter_kind` in `effects/mod.rs`). The
+/// fixed counter type is parsed via `parse_counter_type_typed`, so the class
+/// covers any fixed counter ("a lore counter or a counter of that kind"), not
+/// just +1/+1. The placeholder counter type on the dynamic branch is a
+/// don't-care — the loop overwrites every tagged branch each iteration.
+fn try_parse_for_each_counter_kind_choice(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, saw_you_may) = opt(tag::<_, _, E>("you may "))
+        .parse(tp.lower)
+        .map(|(rest, opt_match)| (rest, opt_match.is_some()))
+        .ok()?;
+    let (rest, _) = tag::<_, _, E>("put your choice of ").parse(rest).ok()?;
+    let (rest, _) = nom_primitives::parse_article.parse(rest).ok()?;
+    let (rest, fixed_counter) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    let (rest, _) = tag::<_, _, E>(" counter or a counter of that kind on ")
+        .parse(rest)
+        .ok()?;
+    // CR 109.4: self target — "this creature" is normalized to `~` upstream.
+    let (rest, _) = tag::<_, _, E>("~").parse(rest).ok()?;
+    if !rest.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+
+    // CR 608.2d: the controller chooses between the two branches at resolution.
+    // Fixed branch: put the parsed counter on self.
+    let fixed_branch = AbilityDefinition {
+        description: Some(format!("put a {} counter", fixed_counter.display_phrase())),
+        ..AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: fixed_counter,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )
+    };
+    // Dynamic branch: placeholder counter type is a don't-care — the
+    // `DistinctCounterKindsAmong` loop rewrites it to the current iterated kind
+    // each iteration via `rebind_iterated_counter_kind`.
+    let dynamic_branch = AbilityDefinition {
+        description: Some("put a counter of that kind".to_string()),
+        iteration_kind_binding: Some(IterationKindBinding::RebindToIteratedKind),
+        ..AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )
+    };
+
+    Some(ParsedEffectClause {
+        effect: Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![fixed_branch, dynamic_branch],
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        // CR 608.2: "you may" makes the per-iteration choice optional. When this
+        // body was peeled, `peel_clause` will OR its own optional flag in too.
+        optional: saw_you_may,
+        unless_pay: None,
+    })
+}
+
 fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     type E<'a> = OracleError<'a>;
 
@@ -3478,6 +3562,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // matched by the imperative "you may" arm or fall through to
     // `Effect::Unimplemented`.
     if let Some(clause) = try_parse_compound_subject_each(text, ctx) {
+        return clause;
+    }
+
+    // CR 122.1 + CR 608.2d: Bribe Taker — "[you may] put your choice of a
+    // <fixed> counter or a counter of that kind on ~". Runs before the generic
+    // for-each path; the `DistinctCounterKindsAmong` iteration source has already
+    // been lifted onto the parent's `repeat_for` by `strip_for_each_prefix`.
+    if let Some(clause) = try_parse_for_each_counter_kind_choice(tp) {
         return clause;
     }
 
@@ -5019,6 +5111,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         kept_destination: Zone::Hand,
         rest_destination: Zone::Library,
         enter_tapped: false,
+        enters_attacking: false,
         kept_optional_to: None,
     }))
 }
@@ -5298,6 +5391,16 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
         {
             return None;
         }
+        // CR 118.5 + CR 118.9 + CR 118.9a + CR 118.9b: "without paying [its|their]
+        // mana cost(s)" is a *free-cast alternative cost*, not a PlayFromExile
+        // permission. Defer to `try_parse_cast_effect`, which emits
+        // `CastFromZone { without_paying_mana_cost: true }` — the correct
+        // free-cast shape. Mirrors the bare-form guard below. Fallen Shinobi
+        // ("you may play those cards without paying their mana costs") and
+        // similar cards depend on this branch.
+        if scan_contains_phrase(tp.lower, "without paying") {
+            return None;
+        }
     } else {
         // Bare form (after "you may" was stripped by parse_effect_chain):
         // Only match when temporal context exists ("this turn", "until"),
@@ -5338,7 +5441,12 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
         },
-        target: TargetFilter::Any,
+        // CR 603.7 + CR 611.2a: The grant must reach the tracked exile set
+        // (the cards exiled by the prior clause) rather than fall back to the
+        // source object. `TargetFilter::Any` causes `grant_permission::resolve`
+        // to attach the permission to the source itself, which is wrong for
+        // impulse-draw chains like Act on Impulse, Light Up the Stage, etc.
+        target: tracked_set_filter(),
         grantee: Default::default(),
     }))
 }
@@ -5852,8 +5960,25 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         } else {
             after_counter_on
         };
+        // CR 608.2c: "put a counter on that <type> for each X" — when the
+        // counter target is an anaphoric back-reference (`that creature`,
+        // `that permanent`, etc.), `parse_subject_application` signals it
+        // with `inherits_parent: true` and returns the type filter as a
+        // suggestion. The contract documented inside `parse_subject_application`
+        // is that the call site must lower this to `TargetFilter::ParentTarget`
+        // so the counter lands on the inherited parent target (or, in passive
+        // contexts where there is no parent, on the post-replacement event
+        // recipient via the caller's post-parse rewrite). Without this, the
+        // typed `Creature` filter leaks through and the counter is placed on
+        // an unrelated creature.
         let target = parse_subject_application(counter_target_text, &mut ParseContext::default())
-            .map(|app| app.affected)
+            .map(|app| {
+                if app.inherits_parent {
+                    TargetFilter::ParentTarget
+                } else {
+                    app.affected
+                }
+            })
             .unwrap_or_else(|| {
                 ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
                     context: "unrecognized counter target".into(),
@@ -9556,7 +9681,9 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // power. Only `ObjectScope::Anaphoric` is rewritten — an explicit
         // possessive ("the sacrificed creature's power", `CostPaidObject` per
         // CR 608.2k) keeps its parser-fixed referent and is left untouched.
-        Effect::DealDamage { amount, .. } if subject_filter == TargetFilter::SelfRef => {
+        Effect::DealDamage { amount, .. } | Effect::DamageEachPlayer { amount, .. }
+            if subject_filter == TargetFilter::SelfRef =>
+        {
             rewrite_event_source_power_to_object_power(amount, ObjectScope::Source);
         }
         // CR 701.23a: "Its controller may search their library..." — the subject
@@ -11031,7 +11158,16 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::ChangeZone { target, .. }
-        | Effect::ChangeZoneAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
+        | Effect::ChangeZoneAll { target, .. }
+        // CR 603.7 + CR 608.2c: A cross-clause "cast/play that card / those
+        // cards" anaphor following an exile resolves to the *tracked set*
+        // (the cards exiled by the prior clause), not the trigger source.
+        // Fallen Shinobi ("...you may play those cards without paying their
+        // mana costs"), Daxos of Meletis ("...you may cast that card..."),
+        // and similar cross-clause cast forms reach `try_parse_cast_effect`
+        // with `target: ParentTarget`; this rewrite binds them to the
+        // tracked exile set during chain stitching.
+        | Effect::CastFromZone { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::Attach { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::UnattachAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::GenericEffect {
@@ -11175,7 +11311,7 @@ fn strip_trailing_activation_restriction_sentence(text: &str) -> String {
 /// "their hand") in Oracle text. Variants not listed here keep their
 /// expressions untouched; add arms here when a new variant surfaces a
 /// possessive quantity.
-fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mut QuantityExpr)) {
+pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mut QuantityExpr)) {
     match effect {
         Effect::LoseLife { amount, .. }
         | Effect::GainLife { amount, .. }
@@ -11441,6 +11577,81 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         apply_player_scope_rewrites(else_branch);
+    }
+}
+
+/// CR 603.7c + CR 119.3 + CR 120.3: Rebind the event-bound player possessive
+/// inside a "deals [combat] damage to a player" / "attacks a player" trigger
+/// body from the *targeting* reading (`PlayerScope::Target`, emitted by the
+/// generic "their life" / "their hand" possessive parser) to the
+/// *event* reading (`PlayerScope::ScopedPlayer`).
+///
+/// These triggers are NOT targeted (CR 603.6f): "they"/"their" binds to the
+/// damaged/attacked player carried on the triggering event, which the engine
+/// stamps onto `ResolvedAbility::scoped_player` at resolution. Without this
+/// rewrite, "they lose half their life" parses its amount as
+/// `LifeTotal { Target }`, which reads an absent player target and resolves to
+/// 0 (Unstoppable Slasher's silent no-op). Mirrors the each-player rewrite in
+/// [`rewrite_player_scope_refs`] but is deliberately narrower — it touches only
+/// quantity refs, never `You`-scoped filters, so "you draw a card" on the same
+/// trigger still acts for the controller.
+pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefinition) {
+    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+
+    fn rewrite_qty(expr: &mut QuantityExpr) {
+        match expr {
+            QuantityExpr::Ref { qty } => match qty {
+                QuantityRef::LifeTotal { player }
+                | QuantityRef::HandSize { player }
+                | QuantityRef::LifeLostThisTurn { player }
+                | QuantityRef::LifeGainedThisTurn { player }
+                | QuantityRef::PartySize { player }
+                    if *player == PlayerScope::Target =>
+                {
+                    *player = PlayerScope::ScopedPlayer;
+                }
+                QuantityRef::TargetZoneCardCount { zone } => match zone {
+                    ZoneRef::Hand => {
+                        *qty = QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        }
+                    }
+                    ZoneRef::Library | ZoneRef::Graveyard => {
+                        *qty = QuantityRef::ZoneCardCount {
+                            zone: zone.clone(),
+                            card_types: Vec::new(),
+                            scope: CountScope::ScopedPlayer,
+                        };
+                    }
+                    // No scoped-player equivalent for exile counts; leave as-is.
+                    ZoneRef::Exile => {}
+                },
+                _ => {}
+            },
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_qty(inner);
+                }
+            }
+            QuantityExpr::UpTo { max } => rewrite_qty(max),
+            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
+            QuantityExpr::Difference { left, right } => {
+                rewrite_qty(left);
+                rewrite_qty(right);
+            }
+            QuantityExpr::Fixed { .. } => {}
+        }
+    }
+
+    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_event_player_quantity_refs_to_scoped(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_event_player_quantity_refs_to_scoped(else_branch);
     }
 }
 
@@ -18823,6 +19034,103 @@ mod tests {
         }
     }
 
+    /// CR 122.1 + CR 608.2d: Bribe Taker building-block — "for each kind of
+    /// counter on permanents you control, you may put your choice of a +1/+1
+    /// counter or a counter of that kind on this creature" lifts a
+    /// `DistinctCounterKindsAmong` iteration source onto `repeat_for` and a
+    /// `ChooseOneOf` body with a fixed (+1/+1) branch and a dynamic
+    /// `RebindToIteratedKind` branch, both targeting `SelfRef`.
+    #[test]
+    fn bribe_taker_for_each_counter_kind_choice() {
+        let mut ctx = ParseContext::default();
+        let def = parse_effect_chain_with_context(
+            "for each kind of counter on permanents you control, you may put your choice of a +1/+1 counter or a counter of that kind on ~.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        // CR 122.1: iteration source lifted onto the parent's repeat_for.
+        match &def.repeat_for {
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong { filter },
+            }) => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected typed permanent filter, got {other:?}"),
+            },
+            other => panic!("expected DistinctCounterKindsAmong repeat_for, got {other:?}"),
+        }
+        // CR 608.2: "you may" → optional choice.
+        assert!(def.optional, "expected optional ChooseOneOf");
+        match &*def.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(*chooser, PlayerFilter::Controller);
+                assert_eq!(branches.len(), 2);
+                // Fixed branch: +1/+1 on self, no kind binding.
+                assert_eq!(branches[0].iteration_kind_binding, None);
+                match &*branches[0].effect {
+                    Effect::PutCounter {
+                        counter_type,
+                        target,
+                        ..
+                    } => {
+                        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                        assert_eq!(*target, TargetFilter::SelfRef);
+                    }
+                    other => panic!("expected PutCounter fixed branch, got {other:?}"),
+                }
+                // Dynamic branch: tagged RebindToIteratedKind, on self.
+                assert_eq!(
+                    branches[1].iteration_kind_binding,
+                    Some(IterationKindBinding::RebindToIteratedKind)
+                );
+                match &*branches[1].effect {
+                    Effect::PutCounter { target, .. } => {
+                        assert_eq!(*target, TargetFilter::SelfRef);
+                    }
+                    other => panic!("expected PutCounter dynamic branch, got {other:?}"),
+                }
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    /// Generality check: a non-+1/+1 fixed counter ("a lore counter or a counter
+    /// of that kind") proves the class is not hardcoded to +1/+1.
+    #[test]
+    fn for_each_counter_kind_choice_non_p1p1_fixed() {
+        let mut ctx = ParseContext::default();
+        let def = parse_effect_chain_with_context(
+            "for each kind of counter on permanents you control, put your choice of a lore counter or a counter of that kind on ~.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(matches!(
+            &def.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong { .. }
+            })
+        ));
+        // No "you may" → mandatory.
+        assert!(!def.optional);
+        match &*def.effect {
+            Effect::ChooseOneOf { branches, .. } => {
+                match &*branches[0].effect {
+                    Effect::PutCounter { counter_type, .. } => {
+                        assert_eq!(*counter_type, CounterType::Lore);
+                    }
+                    other => panic!("expected PutCounter, got {other:?}"),
+                }
+                assert_eq!(
+                    branches[1].iteration_kind_binding,
+                    Some(IterationKindBinding::RebindToIteratedKind)
+                );
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
     /// CR 608.2c (issue #503): "exile ~, then return him to the battlefield
     /// transformed" — clause 2's bare pronoun "him" binds to the source named
     /// by clause 1 (`exile ~` → SelfRef), NOT to the typed Cat trigger
@@ -25476,6 +25784,54 @@ mod tests {
         );
     }
 
+    /// Issue #594 (Maralen, Fae Ascendant ETB; Court of Locthwain ETB) —
+    /// "exile the top N cards of target opponent's library" must preserve
+    /// the count (N) and lower the targeted-player phrase to a typed
+    /// `controller: Opponent` filter. Prior to the fix the count was
+    /// silently dropped and the entire library was exiled.
+    /// CR 400.12 + CR 115.1.
+    #[test]
+    fn exile_top_target_opponents_library() {
+        let effect = parse_effect("Exile the top two cards of target opponent's library.");
+        match &effect {
+            Effect::ExileTop {
+                player,
+                count,
+                face_down,
+            } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+                assert!(!*face_down);
+                assert_eq!(
+                    *player,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    "Expected target-opponent filter, got {:?}",
+                    player
+                );
+            }
+            other => panic!("Expected ExileTop, got {:?}", other),
+        }
+    }
+
+    /// Issue #594 sibling — "target player's library" path. Must lower to
+    /// `TargetFilter::Player` (the canonical leaf `parse_target("target
+    /// player")` already produces). Singular "card" → count 1.
+    #[test]
+    fn exile_top_target_players_library_singular() {
+        let effect = parse_effect("Exile the top card of target player's library.");
+        assert!(
+            matches!(
+                &effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Player,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "Expected ExileTop(Player, 1, face_down=false), got {:?}",
+            effect
+        );
+    }
+
     #[test]
     fn put_counter_where_x_is_lowers_to_speed_quantity() {
         let def = parse_effect_chain_with_context(
@@ -28046,6 +28402,135 @@ mod tests {
         ));
     }
 
+    /// CR 118.5 + CR 118.9 + CR 603.7 + CR 608.2c: Fallen Shinobi class —
+    /// "Until end of turn, you may play those cards without paying their mana
+    /// costs" must lower to `CastFromZone { without_paying_mana_cost: true,
+    /// target: TrackedSet(0), mode: Play }` (a free-cast alternative cost
+    /// bound to the cards exiled by the prior clause), NOT
+    /// `GrantCastingPermission { PlayFromExile }` which silently drops the
+    /// free-cast clause.
+    #[test]
+    fn parse_fallen_shinobi_shape_emits_cast_from_zone_with_tracked_set() {
+        let def = parse_effect_chain(
+            "That player exiles the top two cards of their library. Until end of turn, you may play those cards without paying their mana costs.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Fallen Shinobi chain must produce a cast sub-ability");
+        match &*sub.effect {
+            Effect::CastFromZone {
+                target,
+                without_paying_mana_cost,
+                mode,
+                ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    "expected sub-ability to bind to the tracked exile set"
+                );
+                assert!(
+                    *without_paying_mana_cost,
+                    "expected `without paying their mana costs` to set the free-cast flag"
+                );
+                assert!(
+                    matches!(mode, CardPlayMode::Play),
+                    "expected `play` to lower to CardPlayMode::Play, got {mode:?}"
+                );
+            }
+            other => panic!("expected CastFromZone sub-ability, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7 + CR 611.2a + CR 118.9: Daxos of Meletis class — "Until end
+    /// of turn, you may cast that card" (single-card anaphor, no "without
+    /// paying"). Without `without paying` this is a normal casting permission
+    /// for the exiled card — i.e. `GrantCastingPermission { PlayFromExile }`
+    /// — but the target must bind to the tracked exile set (the card just
+    /// exiled), not `TargetFilter::Any` which would have grant_permission's
+    /// fallback attach the permission to the source object instead.
+    #[test]
+    fn parse_daxos_shape_emits_play_from_exile_with_tracked_set() {
+        let def = parse_effect_chain(
+            "Exile the top card of that player's library. Until end of turn, you may cast that card.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Daxos chain must produce a permission sub-ability");
+        match &*sub.effect {
+            Effect::GrantCastingPermission {
+                permission, target, ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    "Daxos grant must bind to the tracked exile set, not Any"
+                );
+                assert!(
+                    matches!(
+                        permission,
+                        CastingPermission::PlayFromExile {
+                            duration: Duration::UntilEndOfTurn,
+                            ..
+                        }
+                    ),
+                    "expected PlayFromExile(UntilEndOfTurn), got {permission:?}"
+                );
+            }
+            other => panic!("expected GrantCastingPermission sub-ability, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7 + CR 611.2a: Act on Impulse class — "Until end of turn, you
+    /// may play those cards" (no "without paying" clause) keeps the
+    /// `GrantCastingPermission { PlayFromExile }` shape but its target must
+    /// be the tracked exile set, not `TargetFilter::Any` (which would cause
+    /// the grant to attach to the source object at resolution per
+    /// `grant_permission::resolve`'s `Any` fallback).
+    #[test]
+    fn parse_act_on_impulse_targets_tracked_set() {
+        let def = parse_effect_chain(
+            "Exile the top three cards of your library. Until end of turn, you may play those cards.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Act on Impulse chain must produce a permission sub-ability");
+        match &*sub.effect {
+            Effect::GrantCastingPermission {
+                permission, target, ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    "Act on Impulse grant must bind to the tracked exile set, not Any"
+                );
+                assert!(
+                    matches!(
+                        permission,
+                        CastingPermission::PlayFromExile {
+                            duration: Duration::UntilEndOfTurn,
+                            ..
+                        }
+                    ),
+                    "expected PlayFromExile(UntilEndOfTurn), got {permission:?}"
+                );
+            }
+            other => panic!("expected GrantCastingPermission sub-ability, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_exile_target_spell_then_it_becomes_plotted() {
         let def = parse_effect_chain(
@@ -28405,6 +28890,7 @@ mod tests {
             def.effect
         );
         let sub = def.sub_ability.as_ref().expect("Expected sub_ability");
+        // CR 603.7 + CR 611.2a: target must be the tracked exile set, not `Any`.
         assert!(
             matches!(
                 *sub.effect,
@@ -28415,10 +28901,13 @@ mod tests {
                         },
                         ..
                     },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
                     ..
                 }
             ),
-            "Expected PlayFromExile(UntilYourNextTurn), got {:?}",
+            "Expected PlayFromExile(UntilYourNextTurn) on TrackedSet(0), got {:?}",
             sub.effect
         );
     }
@@ -34690,6 +35179,7 @@ mod tests {
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
                     enter_tapped: false,
+                    enters_attacking: false,
                     kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
@@ -34720,6 +35210,7 @@ mod tests {
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
                     enter_tapped: false,
+                    enters_attacking: false,
                     kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
@@ -34795,6 +35286,7 @@ mod tests {
                     kept_destination: Zone::Graveyard,
                     rest_destination: Zone::Graveyard,
                     enter_tapped: false,
+                    enters_attacking: false,
                     kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Land)
             ),
@@ -34871,6 +35363,7 @@ mod tests {
                     kept_destination: Zone::Battlefield,
                     rest_destination: Zone::Library,
                     enter_tapped: false,
+                    enters_attacking: false,
                     kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Artifact)
             ),

@@ -6,13 +6,13 @@
 //! the highest-frequency are mapped here; the long tail fails strict and
 //! shows up in the report.
 
-use engine::types::ability::{DamageKindFilter, TriggerConstraint};
-use engine::types::triggers::TriggerMode;
+use engine::types::ability::{CounterTriggerFilter, DamageKindFilter, TriggerConstraint};
+use engine::types::triggers::{AttackTargetFilter, TriggerMode};
 use engine::types::{Phase, TargetFilter, TriggerDefinition, TypedFilter, Zone};
 
 use crate::convert::filter::{
     cards_in_graveyard_to_filter, cards_to_filter, convert as convert_permanents,
-    players_to_controller, spells_to_filter,
+    counter_type_to_engine, players_to_controller, spells_to_filter,
 };
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{CardsInHand, Comparison, GameNumber, Players, Trigger};
@@ -286,6 +286,82 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
         Trigger::WhenAPermanentIsDestroyed(filter) => {
             TriggerDefinition::new(TriggerMode::Destroyed).valid_card(convert_permanents(filter)?)
         }
+
+        // CR 702.110b: Exploit trigger — "whenever [source] exploits [target]".
+        // Engine `TriggerMode::Exploited` mirrors the native parser at
+        // oracle_trigger.rs:5230. `valid_card` constrains the exploiting
+        // permanent (the source); the exploited-target filter (`_target`) is
+        // dropped — engine `TriggerDefinition` has no exploited-target axis today.
+        Trigger::WhenAPermanentExploitsAPermanent(source, _target) => {
+            TriggerDefinition::new(TriggerMode::Exploited)
+                .valid_card(convert_permanents(source)?)
+        }
+
+        // CR 122.6 + CR 603.2: "Whenever [one or more] counter[s] [of type X]
+        // are put on [permanents]" triggers. Engine `match_counter_added` fires on
+        // `GameEvent::CounterAdded` for both `CounterAdded` (single-counter Oracle
+        // phrasing) and `CounterAddedAll` (batched "one or more" Oracle phrasing).
+        // `CounterTriggerFilter` narrows by counter type when the variant carries one.
+        // Player-scoped variants (`WhenAPlayer*`) have no player-filter axis in
+        // `match_counter_added` today; strict-fail preserves rules correctness.
+        Trigger::WhenACounterIsPutOnAPermanent(permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .valid_card(convert_permanents(permanents)?)
+        }
+        Trigger::WhenACounterOfTypeIsPutOnAPermanent(ct, permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: counter_type_to_engine(ct)?,
+                    threshold: None,
+                })
+                .valid_card(convert_permanents(permanents)?)
+        }
+        Trigger::WhenAnyNumberOfCountersArePutOnAPermanent(permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAddedAll)
+                .valid_card(convert_permanents(permanents)?)
+        }
+        Trigger::WhenAnyNumberOfCountersOfTypeArePutOnAPermanent(ct, permanents)
+        | Trigger::WhenAnyNumberOfCountersOfTypeArePutOnAnyNumberOfPermanents(ct, permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAddedAll)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: counter_type_to_engine(ct)?,
+                    threshold: None,
+                })
+                .valid_card(convert_permanents(permanents)?)
+        }
+        // CR 122.6 + CR 603.2 + CR 603.10: "for the first time each turn" variant
+        // adds a per-turn frequency gate via `TriggerConstraint::OncePerTurn`.
+        Trigger::WhenAnyNumberOfCountersArePutOnAPermanentForTheFirstTimeEachTurn(permanents) => {
+            TriggerDefinition::new(TriggerMode::CounterAddedAll)
+                .valid_card(convert_permanents(permanents)?)
+                .constraint(TriggerConstraint::OncePerTurn)
+        }
+        Trigger::WhenAnyNumberOfCountersOfTypeArePutOnAPermanentForTheFirstTimeEachTurn(
+            ct,
+            permanents,
+        ) => {
+            TriggerDefinition::new(TriggerMode::CounterAddedAll)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: counter_type_to_engine(ct)?,
+                    threshold: None,
+                })
+                .valid_card(convert_permanents(permanents)?)
+                .constraint(TriggerConstraint::OncePerTurn)
+        }
+        // CR 122.6: Player-scoped counter-put triggers ("whenever YOU put counters…").
+        // Engine `match_counter_added` tracks no actor; silently firing on any putter
+        // would be rules-incorrect. Strict-fail until the engine gains a player-filter
+        // axis on counter-put events.
+        Trigger::WhenAPlayerPutsACounterOnAPermanent(..)
+        | Trigger::WhenAPlayerPutsACounterOfTypeOnAPermanent(..)
+        | Trigger::WhenAPlayerPutsAnyNumberOfCountersOfTypeOnAPermanent(..)
+        | Trigger::WhenAPlayerPutsAnyNumberOfGenericCountersOnAPermanent(..) => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "match_counter_added",
+                needed_variant: "player-filter axis on counter-put trigger".into(),
+            });
+        }
+
         // CR 701.9: Discard triggers — "when [players] discards [cards]". Engine
         // TriggerDefinition::Discarded has no valid_player or discarded-card
         // filter axis today, so dropping the player/card constraints fires the
@@ -335,6 +411,25 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
             def.constraint = Some(TriggerConstraint::OncePerTurn);
             def
         }
+        // CR 305.1 + CR 603.2: "Whenever [a player] plays a land" — fires when
+        // a player puts a land card onto the battlefield from their hand as a
+        // special action (CR 305.1). Engine `TriggerMode::LandPlayed` mirrors
+        // the native parser at oracle_trigger.rs:6982. `valid_target` carries
+        // the player filter when the player axis is not `AnyPlayer`; the
+        // `_lands` arg is always `IsCardtype::Land` in practice (all lands are
+        // lands) and adds no additional constraint beyond the mode itself, so
+        // it is dropped.
+        Trigger::WhenAPlayerPlaysALand(players, _lands) => {
+            let mut def = TriggerDefinition::new(TriggerMode::LandPlayed);
+            if !matches!(players.as_ref(), Players::AnyPlayer) {
+                let controller = players_to_controller(players)?;
+                def.valid_target = Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(controller),
+                ));
+            }
+            def
+        }
+
         // CR 702.37c (Morph) + CR 701.40b (Turn Face Up): "Whenever [permanent]
         // is turned face up" — fires when a face-down permanent flips face up
         // via the morph activation (or any other Turn-Face-Up effect, e.g.
@@ -586,6 +681,26 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
             TriggerDefinition::new(TriggerMode::Phase).phase(Phase::PreCombatMain)
         }
 
+        // CR 505.1 + CR 603.2b: "At the beginning of [a player's] postcombat
+        // (second) main phase" — the main phase after the combat phase. Engine
+        // `Phase::PostCombatMain` mirrors the native parser's mapping at
+        // oracle_trigger.rs:9063 ("postcombat main phase" / "second main phase").
+        // The `_players` axis is dropped, mirroring the convention on all other
+        // phase arms (e.g. AtTheBeginningOfAPlayersUpkeep).
+        Trigger::AtTheBeginningOfAPlayersSecondMainPhase(_players) => {
+            TriggerDefinition::new(TriggerMode::Phase).phase(Phase::PostCombatMain)
+        }
+
+        // CR 511.2 + CR 603.2b: "At end of combat" / "at the end of combat" —
+        // triggers as the end of combat step begins (CR 511.2). Engine
+        // `Phase::EndCombat` mirrors the native parser's mapping at
+        // oracle_trigger.rs:6820. No `_players` arm because this variant
+        // carries no player axis — it always fires for the active player's
+        // end of combat step.
+        Trigger::AtTheEndOfCombat => {
+            TriggerDefinition::new(TriggerMode::Phase).phase(Phase::EndCombat)
+        }
+
         // CR ???: Specialize is a Strixhaven Mystical Archive / Lost Caverns
         // mechanic not in CR text — needs manual verification (not in CR
         // text). Engine `TriggerMode::Specializes` is the unit mode used by
@@ -593,6 +708,63 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
         Trigger::WhenACreatureSpecializes(filter) => {
             TriggerDefinition::new(TriggerMode::Specializes)
                 .valid_card(convert_permanents(filter)?)
+        }
+
+        // CR 508.3a: "Whenever [creature] attacks a player" — fires per attacker
+        // via TriggerMode::Attacks. attack_target_filter restricts to Player-type
+        // targets only; valid_target carries the defending-player scope when not
+        // AnyPlayer (e.g. "attacks an opponent" → Opponent controller ref).
+        Trigger::WhenACreatureAttacksAPlayer(filter, players) => {
+            let mut def = TriggerDefinition::new(TriggerMode::Attacks)
+                .valid_card(convert_permanents(filter)?);
+            def.attack_target_filter = Some(AttackTargetFilter::Player);
+            if !matches!(players.as_ref(), Players::AnyPlayer) {
+                let controller = players_to_controller(players)?;
+                def.valid_target =
+                    Some(TargetFilter::Typed(TypedFilter::default().controller(controller)));
+            }
+            def
+        }
+
+        // CR 508.3a: "Whenever [creature] attacks a player or a planeswalker
+        // they control" — same per-attacker firing as above but target may be
+        // either a defending player or a planeswalker they control.
+        Trigger::WhenACreatureAttacksAPlayerOrPlaneswalkerTheyControl(filter, players) => {
+            let mut def = TriggerDefinition::new(TriggerMode::Attacks)
+                .valid_card(convert_permanents(filter)?);
+            def.attack_target_filter = Some(AttackTargetFilter::PlayerOrPlaneswalker);
+            if !matches!(players.as_ref(), Players::AnyPlayer) {
+                let controller = players_to_controller(players)?;
+                def.valid_target =
+                    Some(TargetFilter::Typed(TypedFilter::default().controller(controller)));
+            }
+            def
+        }
+
+        // CR 508.3d: "Whenever one or more [X] creatures attack" — batched,
+        // fires once per attack step via TriggerMode::YouAttack. valid_card
+        // narrows to the creature subtype; valid_target=None defaults to the
+        // source-controller check inside match_you_attack.
+        Trigger::WhenAnyNumberOfCreaturesAttack(filter) => {
+            TriggerDefinition::new(TriggerMode::YouAttack)
+                .valid_card(convert_permanents(filter)?)
+        }
+
+        // CR 508.3d: "Whenever [player] attacks with one or more [X] creatures"
+        // — batched, fires once. valid_target carries the attacking-player scope
+        // so match_you_attack can verify which player is attacking.
+        // AnyPlayer → TargetFilter::Player (permissive); otherwise scoped by
+        // controller ref.
+        Trigger::WhenAPlayerAttacksWithAnyNumberOfCreatures(players, filter) => {
+            let mut def = TriggerDefinition::new(TriggerMode::YouAttack)
+                .valid_card(convert_permanents(filter)?);
+            def.valid_target = Some(if matches!(players.as_ref(), Players::AnyPlayer) {
+                TargetFilter::Player
+            } else {
+                let controller = players_to_controller(players)?;
+                TargetFilter::Typed(TypedFilter::default().controller(controller))
+            });
+            def
         }
 
         _ => {

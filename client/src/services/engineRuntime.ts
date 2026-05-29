@@ -217,6 +217,21 @@ export async function isCardCommanderEligibleForFormat(
 }
 
 /**
+ * CR 702.124: Of `candidates`, which can legally pair with `firstCommander` as a
+ * co-commander? The engine is the single authority for the partner family
+ * (Partner, Partner with [Name], Friends Forever, Character Select, Doctor's
+ * Companion, Choose a Background) — the frontend never re-derives these rules.
+ */
+export async function commanderPartnerCandidates(
+  firstCommander: string,
+  candidates: string[],
+): Promise<string[]> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.commanderPartnerCandidates(firstCommander, candidates) as string[];
+}
+
+/**
  * CR 100.4a: Per-format sideboard policy as a discriminated union.
  *
  * `Forbidden` and `Unlimited` are unit variants and do not carry a `data`

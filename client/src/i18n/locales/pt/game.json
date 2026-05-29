@@ -644,6 +644,15 @@
       "keepTapped": "Manter virado",
       "keepTappedDescription": "{{name}} permanece virado nesta etapa de desvirar."
     },
+    "exert": {
+      "creatureFallback": "Criatura",
+      "title": "Esforçar {{name}}?",
+      "subtitle": "Escolha se deseja esforçar este atacante. Uma criatura esforçada não desvira durante sua próxima etapa de desvirar.",
+      "exert": "Esforçar",
+      "exertDescription": "{{name}} não desvira no próximo turno, ativando sua habilidade de esforço.",
+      "decline": "Não esforçar",
+      "declineDescription": "{{name}} ataca normalmente e desvira como de costume."
+    },
     "cost": {
       "discardCard": "descarte uma carta",
       "life": "{{amount}} de vida",

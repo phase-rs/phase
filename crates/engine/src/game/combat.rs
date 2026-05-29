@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::types::ability::StaticDefinition;
+use crate::types::ability::{StaticDefinition, TargetRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -157,7 +157,8 @@ pub enum DamageTarget {
 /// CR 508.4: Place a permanent onto the battlefield attacking.
 /// The creature is not "declared as an attacker" — attack triggers do not fire.
 /// Determines the defending player from: (1) source creature's combat info,
-/// (2) current trigger event context, (3) fallback to opponent.
+/// (2) explicit "that player" event context, (3) this controller's declared
+/// attackers in the current combat, (4) fallback to opponent.
 pub fn enter_attacking(
     state: &mut GameState,
     object_id: ObjectId,
@@ -165,31 +166,8 @@ pub fn enter_attacking(
     controller: PlayerId,
 ) {
     // Determine defending player and attack target before mutable combat borrow.
-    let (defending_player, attack_target) = state
-        .combat
-        .as_ref()
-        .and_then(|c| {
-            c.attackers
-                .iter()
-                .find(|a| a.object_id == source_id)
-                .map(|a| (a.defending_player, a.attack_target))
-        })
-        .or_else(|| {
-            state
-                .current_trigger_event
-                .as_ref()
-                .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
-                .map(|pid| (pid, AttackTarget::Player(pid)))
-        })
-        .unwrap_or_else(|| {
-            // CR 508.4: Fallback to first opponent in seat order (multiplayer-aware).
-            // In 2-player, this returns the sole opponent — identical to the old arithmetic.
-            let pid = players::opponents(state, controller)
-                .first()
-                .copied()
-                .unwrap_or(controller);
-            (pid, AttackTarget::Player(pid))
-        });
+    let (defending_player, attack_target) =
+        defending_player_for_enters_attacking(state, source_id, controller);
 
     if let Some(combat) = state.combat.as_mut() {
         combat.attackers.push(AttackerInfo::new(
@@ -198,6 +176,78 @@ pub fn enter_attacking(
             defending_player,
         ));
     }
+}
+
+/// CR 508.4: Resolve which player/planeswalker a permanent that *enters*
+/// attacking should attack. Unlike declared attackers, this path must not use
+/// `extract_player_from_event` wholesale — `AttackersDeclared` and
+/// `PermanentSacrificed` surface the attacking/sacrificing player, which would
+/// make tokens attack their own controller (Caesar #944, Dalkovan Encampment).
+fn defending_player_for_enters_attacking(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> (PlayerId, AttackTarget) {
+    if let Some(combat) = state.combat.as_ref() {
+        if let Some(a) = combat.attackers.iter().find(|a| a.object_id == source_id) {
+            return (a.defending_player, a.attack_target);
+        }
+    }
+
+    if let Some(event) = state.current_trigger_event.as_ref() {
+        match event {
+            GameEvent::DamageDealt {
+                target: TargetRef::Player(pid),
+                ..
+            }
+            | GameEvent::BecomesTarget {
+                target: TargetRef::Player(pid),
+                ..
+            } => return (*pid, AttackTarget::Player(*pid)),
+            GameEvent::AttackersDeclared { attacks, .. } => {
+                if let Some((_, target)) = attacks.iter().find(|(id, _)| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.controller == controller)
+                }) {
+                    return attack_target_defender(state, *target);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(combat) = state.combat.as_ref() {
+        if let Some(a) = combat.attackers.iter().find(|a| {
+            state
+                .objects
+                .get(&a.object_id)
+                .is_some_and(|obj| obj.controller == controller)
+        }) {
+            return (a.defending_player, a.attack_target);
+        }
+    }
+
+    let pid = players::opponents(state, controller)
+        .first()
+        .copied()
+        .unwrap_or(controller);
+    (pid, AttackTarget::Player(pid))
+}
+
+/// Map an `AttackTarget` to the defending player and the target pair stored on
+/// `AttackerInfo` (planeswalker/battle controllers for blocking purposes).
+fn attack_target_defender(state: &GameState, target: AttackTarget) -> (PlayerId, AttackTarget) {
+    let defending = match target {
+        AttackTarget::Player(pid) => pid,
+        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => state
+            .objects
+            .get(&id)
+            .map(|obj| obj.controller)
+            .unwrap_or(state.active_player),
+    };
+    (defending, target)
 }
 
 /// CR 702.49c + CR 702.190b: Place an object onto `combat.attackers` alongside
@@ -5221,5 +5271,52 @@ mod tests {
             "protected PlayerId(1) must not be a valid attack target, got {:?}",
             targets
         );
+    }
+
+    /// Issue #944 — Caesar, Legion's Emperor: reflexive Soldier tokens must
+    /// attack the same defender as the active player's declared attackers, not
+    /// the attacking player surfaced by `AttackersDeclared` /
+    /// `PermanentSacrificed` trigger context.
+    #[test]
+    fn enter_attacking_matches_controller_declared_defender_not_trigger_actor() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let caesar = create_creature(&mut state, PlayerId(0), "Caesar", 4, 4);
+        let token = create_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+        state.combat = Some(CombatState::default());
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .push(AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+        });
+
+        enter_attacking(&mut state, token, caesar, PlayerId(0));
+
+        let info = state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .find(|a| a.object_id == token)
+            .expect("token must be an attacking creature");
+        assert_eq!(
+            info.defending_player,
+            PlayerId(1),
+            "enters-attacking token must attack the declared defender, not its controller"
+        );
+        assert_eq!(info.attack_target, AttackTarget::Player(PlayerId(1)));
     }
 }

@@ -448,6 +448,16 @@ fn collect_matching_triggers(
                     .into_iter()
                     .map(|trigger_event| vec![trigger_event])
                     .collect()
+            } else if matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController) {
+                // CR 603.2c: One aggregate combat-damage event may satisfy this
+                // trigger once, while CR 608.2c makes the filtered source set
+                // available to later "those creatures" instructions.
+                super::trigger_matchers::matching_damage_done_once_by_controller_event(
+                    event, trig_def, obj_id, state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else {
                 vec![vec![event.clone()]]
             };
@@ -6553,6 +6563,77 @@ pub mod tests {
             ability.scoped_player,
             Some(PlayerId(1)),
             "Phase trigger must bind scoped_player to the active player so 'that player draws' resolves correctly on opponent's turn"
+        );
+    }
+
+    /// Issue #1304 — RUNTIME: Keeper of the Accord's intervening-if must compare
+    /// the active player's creatures to the source controller's at opponent end
+    /// step, not fail closed because the condition was never hoisted/parsed.
+    #[test]
+    fn keeper_of_the_accord_creature_intervening_if_true_when_opponent_ahead() {
+        let def = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        let condition = def
+            .condition
+            .expect("creature trigger must hoist intervening-if to def.condition");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        state.active_player = opponent;
+
+        let keeper = make_creature(&mut state, controller, "Keeper of the Accord", 3, 4);
+        let _opp_creature_a = make_creature(&mut state, opponent, "Opp A", 1, 1);
+        let _opp_creature_b = make_creature(&mut state, opponent, "Opp B", 1, 1);
+        let _opp_creature_c = make_creature(&mut state, opponent, "Opp C", 1, 1);
+
+        let phase_event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                controller,
+                Some(keeper),
+                Some(&phase_event),
+            ),
+            "opponent with three creatures vs controller with one (keeper) must satisfy intervening-if",
+        );
+    }
+
+    #[test]
+    fn keeper_of_the_accord_creature_intervening_if_false_when_tied() {
+        let def = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        let condition = def.condition.unwrap();
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        state.active_player = opponent;
+
+        let keeper = make_creature(&mut state, controller, "Keeper of the Accord", 3, 4);
+        let _self_b = make_creature(&mut state, controller, "Self B", 1, 1);
+        let _opp_a = make_creature(&mut state, opponent, "Opp A", 1, 1);
+        let _opp_b = make_creature(&mut state, opponent, "Opp B", 1, 1);
+
+        let phase_event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                controller,
+                Some(keeper),
+                Some(&phase_event),
+            ),
+            "two creatures each must not satisfy 'more creatures than you'",
         );
     }
 
@@ -13237,6 +13318,353 @@ pub mod tests {
             2,
             "the upkeep trigger must tick the exiled card's time counter 3 → 2 \
              (issue #501 follow-up, A + B combined)"
+        );
+    }
+
+    /// RUNTIME REGRESSION — issue #886 (Raph & Mikey, Troublemakers).
+    /// CR 508.4: "Put that card onto the battlefield tapped and attacking."
+    /// Drives the real `Attacks` trigger end-to-end and asserts the revealed
+    /// creature joins combat as an attacker and deals its combat damage. Also
+    /// covers the class member Fireflux Squad (same RevealUntil → attacking).
+    #[test]
+    fn raph_mikey_revealed_creature_enters_attacking_and_deals_damage() {
+        use crate::game::combat::AttackTarget;
+
+        let mut state = setup();
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 20;
+        state.players[1].life = 20;
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![],
+            valid_attack_targets: vec![],
+        };
+
+        // Raph & Mikey on P0's battlefield, carrying its real Attacks trigger.
+        let raph = make_creature(&mut state, PlayerId(0), "Raph & Mikey, Troublemakers", 7, 7);
+        {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "Trample, haste\nWhenever Raph & Mikey attack, reveal cards from the \
+                 top of your library until you reveal a creature card. Put that card \
+                 onto the battlefield tapped and attacking and the rest on the bottom \
+                 of your library in a random order.",
+                "Raph & Mikey, Troublemakers",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            let obj = state.objects.get_mut(&raph).unwrap();
+            obj.entered_battlefield_turn = Some(1);
+            for trig in &parsed.triggers {
+                obj.trigger_definitions.push(trig.clone());
+            }
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).extend(parsed.triggers);
+        }
+
+        // Top of P0's library: a 6/6 creature (the reveal-until hit).
+        let revealed = create_object(
+            &mut state,
+            CardId(8001),
+            PlayerId(0),
+            "Colossal Dreadmaw".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&revealed).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.power = Some(6);
+            o.toughness = Some(6);
+            o.base_power = Some(6);
+            o.base_toughness = Some(6);
+        }
+        // Library filler so neither player decks out.
+        for player in [PlayerId(0), PlayerId(1)] {
+            for i in 0..10u64 {
+                create_object(
+                    &mut state,
+                    CardId(8100 + u64::from(player.0) * 100 + i),
+                    player,
+                    format!("Filler {}-{i}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        // Declare Raph & Mikey attacking P1.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(raph, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .expect("declare attackers");
+
+        // Resolve the attack trigger by passing priority.
+        let mut safety = 40;
+        while !state.stack.is_empty() && safety > 0 {
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("pass priority to resolve Raph & Mikey trigger");
+            safety -= 1;
+        }
+
+        // FIX: the revealed creature is now an attacker (CR 508.4), tapped.
+        let combat = state.combat.as_ref().expect("combat in progress");
+        assert!(
+            combat.attackers.iter().any(|a| a.object_id == raph),
+            "Raph & Mikey itself attacks"
+        );
+        assert!(
+            combat.attackers.iter().any(|a| a.object_id == revealed),
+            "issue #886 FIX: the revealed creature must enter attacking"
+        );
+        assert!(
+            state.objects[&revealed].tapped,
+            "revealed creature is tapped"
+        );
+
+        // Drive combat to damage: P1 should lose 7 (Raph) + 6 (Dreadmaw) = 13.
+        let mut guard = 0;
+        while state.phase != Phase::PostCombatMain && guard < 60 {
+            guard += 1;
+            if !state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("resolve stack");
+                continue;
+            }
+            match &state.waiting_for {
+                WaitingFor::Priority { .. } => {
+                    crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("pass priority through combat");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                    )
+                    .expect("declare no blockers");
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(
+            state.players[1].life, 7,
+            "issue #886 FIX: P1 takes 7 (Raph) + 6 (revealed Dreadmaw) = 13 combat damage"
+        );
+    }
+
+    /// RUNTIME REGRESSION — multiple suspended cards (Jhoira of the Ghitu).
+    /// CR 603.3b + CR 702.62a: When 2+ cards are suspended (each granted Suspend
+    /// while in exile), the controller's upkeep fires one "remove a time counter"
+    /// trigger per card. Two-or-more simultaneous same-controller triggers require
+    /// the controller to ORDER them (CR 603.3b) before any player gets priority.
+    ///
+    /// This drives the scenario through the real `apply` pipeline (turn-roll →
+    /// `auto_advance` → upkeep). The bug: the Upkeep arm of `auto_advance` called
+    /// `process_phase_triggers` (which set `waiting_for = OrderTriggers` and
+    /// populated `pending_trigger_order`) and then unconditionally returned
+    /// `WaitingFor::Priority`. `apply` wrote that returned `Priority` back over
+    /// `state.waiting_for`, discarding the prompt and stranding all queued triggers
+    /// in `pending_trigger_order` forever — so NONE of the cards (including the
+    /// first) ticked. A single suspended card took the `NoChoiceNeeded` path (no
+    /// prompt to clobber), which is exactly why one card worked but several didn't.
+    ///
+    /// Discriminator: without the fix, the upkeep is reached with
+    /// `waiting_for == Priority`, the `OrderTriggers` submission below fails, both
+    /// counters stay at 3, and `pending_trigger_order` is left orphaned.
+    #[test]
+    fn multiple_suspended_cards_all_tick_on_upkeep() {
+        use crate::types::counter::CounterType;
+
+        let mut state = setup();
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![],
+            valid_attack_targets: vec![],
+        };
+
+        // CR 104.3c: stock both libraries so neither player decks out while the
+        // turn loop drives real turn progression to P0's next upkeep.
+        for player in [PlayerId(0), PlayerId(1)] {
+            for i in 0..12u64 {
+                create_object(
+                    &mut state,
+                    CardId(8100 + u64::from(player.0) * 100 + i),
+                    player,
+                    format!("Filler {}-{i}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        // Jhoira of the Ghitu — the grant source on the battlefield. Each exiled
+        // card is granted Suspend via a permanent continuous effect affecting it
+        // specifically (mirrors the real `AddKeyword{Suspend}` transient effect
+        // Jhoira's activated ability installs per CR 604.1 + CR 702.62a).
+        let jhoira = make_creature(&mut state, PlayerId(0), "Jhoira of the Ghitu", 1, 3);
+
+        // Two suspended cards in exile, each with 3 time counters and empty
+        // base_keywords (so the off-zone synthesis path treats Suspend as
+        // *granted* and installs the companion upkeep triggers).
+        let mut suspended = Vec::new();
+        for (i, name) in ["Nezahal, Primal Tide", "Omniscience"].iter().enumerate() {
+            let card = create_object(
+                &mut state,
+                CardId(8200 + i as u64),
+                PlayerId(0),
+                (*name).to_string(),
+                Zone::Exile,
+            );
+            state
+                .objects
+                .get_mut(&card)
+                .unwrap()
+                .counters
+                .insert(CounterType::Time, 3);
+            // Grant Suspend to this specific exiled card via a permanent
+            // continuous effect sourced from Jhoira — exactly the
+            // `AddKeyword{Suspend}` transient effect Jhoira's activated ability
+            // installs in real play (CR 604.1 + CR 702.62a).
+            state.transient_continuous_effects.push_back(
+                crate::types::game_state::TransientContinuousEffect {
+                    id: 100 + i as u64,
+                    source_id: jhoira,
+                    controller: PlayerId(0),
+                    timestamp: 1 + i as u64,
+                    duration: Duration::Permanent,
+                    affected: TargetFilter::SpecificObject { id: card },
+                    modifications: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Suspend {
+                            count: 0,
+                            cost: ManaCost::Cost {
+                                generic: 0,
+                                shards: vec![],
+                            },
+                        },
+                    }],
+                    condition: None,
+                    source_name: "Jhoira of the Ghitu".to_string(),
+                },
+            );
+            suspended.push(card);
+        }
+        state.layers_dirty = true;
+
+        // Sanity: both cards must carry granted Suspend off-zone before we drive
+        // the turn — otherwise the upkeep triggers never synthesize.
+        for &card in &suspended {
+            assert!(
+                crate::game::off_zone_characteristics::effective_off_zone_keywords(&state, card)
+                    .iter()
+                    .any(|k| k.kind() == KeywordKind::Suspend),
+                "exiled card {card:?} must have granted Suspend before the upkeep"
+            );
+        }
+
+        // Drive real turn progression (through `apply`, the clobber site) to
+        // PlayerId(0)'s NEXT upkeep.
+        let start_turn = state.turn_number;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 300, "turn progression stalled before P0's upkeep");
+            if state.phase == Phase::Upkeep
+                && state.active_player == PlayerId(0)
+                && state.turn_number > start_turn
+            {
+                break;
+            }
+            if !state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority pass to resolve stack");
+                continue;
+            }
+            match &state.waiting_for {
+                WaitingFor::Priority { .. } => {
+                    crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("priority pass to advance the turn");
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareAttackers { attacks: vec![] },
+                    )
+                    .expect("declare no attackers");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                    )
+                    .expect("declare no blockers");
+                }
+                other => panic!("unexpected waiting state during turn progression: {other:?}"),
+            }
+        }
+
+        // CR 603.3b: at P0's upkeep the engine MUST surface the ordering prompt
+        // for the two suspend triggers — not a bare Priority. This is the
+        // assertion that fails without the `auto_advance` fix.
+        match &state.waiting_for {
+            WaitingFor::OrderTriggers { player, triggers } => {
+                assert_eq!(*player, PlayerId(0), "controller orders own triggers");
+                assert_eq!(
+                    triggers.len(),
+                    2,
+                    "both suspend upkeep triggers must be in the ordering prompt"
+                );
+            }
+            other => panic!(
+                "expected OrderTriggers prompt for the two suspend triggers, got {other:?} \
+                 (pending_trigger_order = {:?})",
+                state.pending_trigger_order.is_some()
+            ),
+        }
+
+        // Submit an order, then drain the two triggers off the stack.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::OrderTriggers { order: vec![0, 1] },
+        )
+        .expect("submit suspend trigger order");
+        let mut guard = 0;
+        while !state.stack.is_empty() {
+            guard += 1;
+            assert!(guard < 20, "suspend upkeep-trigger stack failed to drain");
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve a suspend upkeep trigger");
+        }
+
+        // CR 702.62a: BOTH cards must have ticked 3 → 2, and the ordering queue
+        // must be fully consumed (no orphan).
+        for &card in &suspended {
+            assert_eq!(
+                state.objects[&card]
+                    .counters
+                    .get(&CounterType::Time)
+                    .copied()
+                    .unwrap_or(0),
+                2,
+                "suspended card {card:?} must tick 3 → 2 on P0's upkeep"
+            );
+        }
+        assert!(
+            state.pending_trigger_order.is_none(),
+            "pending_trigger_order must be cleared after the ordered triggers resolve"
         );
     }
 

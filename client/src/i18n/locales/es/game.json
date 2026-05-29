@@ -644,6 +644,15 @@
       "keepTapped": "Mantener girado",
       "keepTappedDescription": "{{name}} permanece girado en este paso de enderezar."
     },
+    "exert": {
+      "creatureFallback": "Criatura",
+      "title": "¿Esforzar {{name}}?",
+      "subtitle": "Elige si quieres esforzar a este atacante. Una criatura esforzada no se endereza durante tu próximo paso de enderezar.",
+      "exert": "Esforzar",
+      "exertDescription": "{{name}} no se endereza el próximo turno y activa su habilidad de esfuerzo.",
+      "decline": "No esforzar",
+      "declineDescription": "{{name}} ataca normalmente y se endereza como de costumbre."
+    },
     "cost": {
       "discardCard": "descarta una carta",
       "life": "{{amount}} vidas",

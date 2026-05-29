@@ -398,8 +398,10 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
         return results;
     }
 
-    // Pattern 2: "whenever ~ [event1] or [event2]" — compound events sharing a subject.
-    if let Some(halves) = split_or_event_compound(&cond_lower, &condition) {
+    // Pattern 2: disjunctive shared-subject event list — "whenever ~ A, B, or C"
+    // (N-way serial) or "whenever ~ A or B" (2-way). CR 603.1: each listed event
+    // is its own trigger condition, all sharing the one subject.
+    if let Some(halves) = split_shared_subject_event_list(&cond_lower, &condition) {
         let mut results = Vec::with_capacity(halves.len());
         for (i, cond) in halves.into_iter().enumerate() {
             let trigger_text = if effect.is_empty() {
@@ -699,6 +701,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     } else if condition_introduces_scoped_phase_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
     }
+    // Snapshot the condition-established scope before body parsing (which may
+    // temporarily rebind it via `with_player_scope`) so lowering sees the scope
+    // the condition introduced, not a transient nested-clause value.
+    let relative_player_scope = effect_ctx.relative_player_scope.clone();
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
@@ -780,6 +786,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             constraint,
             has_up_to,
             effect_lower: effect_lower.to_string(),
+            relative_player_scope,
         },
         source_text: text.to_string(),
     }
@@ -828,6 +835,18 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         Some(TriggerBody::PreLowered(ability)) => Some(ability.clone()),
         None => None,
     };
+
+    // CR 603.7c + CR 120.3 + CR 506.2: For triggers that introduce an
+    // event-bound player ("deals combat damage to a player, they lose half
+    // their life"), rebind the body's `PlayerScope::Target` possessive
+    // quantities to `PlayerScope::ScopedPlayer` so they resolve against the
+    // damaged/attacked player rather than an absent chosen target.
+    let mut execute = execute;
+    if modifiers.relative_player_scope == Some(ControllerRef::TargetPlayer) {
+        if let Some(ability) = execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_event_player_quantity_refs_to_scoped(ability);
+        }
+    }
 
     def.execute = execute;
     def.optional = modifiers.optional;
@@ -3619,6 +3638,86 @@ fn normalize_compound_pronouns(text: &str) -> String {
     result
 }
 
+/// Split a disjunctive shared-subject event trigger into one reconstructed
+/// trigger line per event, with the subject shared across all of them. This is
+/// the single entry point for the whole class: the N-way serial form
+/// ("Whenever ~ A, B, or C") and the 2-way "or" form ("Whenever ~ A or B") are
+/// its two branches. CR 603.1: each listed event is an independent trigger
+/// condition. Dedicated 2-way compound `TriggerMode` variants (AttacksOrBlocks,
+/// EntersOrAttacks) are intentionally left unsplit by `split_or_event_compound`.
+///
+/// Serial is tried first so a comma list ("A, B, or C") is not mis-split by the
+/// 2-way scanner; this preserves the prior dispatch order exactly.
+fn split_shared_subject_event_list(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
+    split_serial_event_compound(cond_lower, condition)
+        .or_else(|| split_or_event_compound(cond_lower, condition))
+}
+
+/// Split serial compound events sharing one subject — the N-way branch of
+/// [`split_shared_subject_event_list`].
+///
+/// Example: "Whenever ~ attacks, blocks, or becomes the target of a spell"
+/// becomes three trigger conditions, each reusing the same subject.
+fn split_serial_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
+    use super::oracle_nom::primitives::split_once_on;
+
+    // Split the original and lowercase forms in lockstep on the same ASCII
+    // delimiters rather than slicing `condition` with byte offsets taken from
+    // `cond_lower`. `str::to_lowercase()` is not byte-position-preserving for
+    // non-ASCII input (e.g. `İ` grows, `ẞ` shrinks), so a lowercase-derived
+    // offset could land mid-`char` in the original and panic. The delimiters
+    // (`", or "`, `", "`) are pure punctuation and identical in both views, so
+    // parallel splits keep the two aligned without cross-case byte arithmetic.
+    let Ok((_, (before_or_lower, after_or_lower))) = split_once_on(cond_lower, ", or ") else {
+        return None;
+    };
+    let Ok((_, (before_or, after_or))) = split_once_on(condition, ", or ") else {
+        return None;
+    };
+    if parse_event_verb_start(after_or_lower.trim_start()).is_err() {
+        return None;
+    }
+
+    let Ok((_, (first_lower, rest_events_lower))) = split_once_on(before_or_lower, ", ") else {
+        return None;
+    };
+    let Ok((_, (first_original, rest_events_original))) = split_once_on(before_or, ", ") else {
+        return None;
+    };
+    let keyword_and_subject = extract_keyword_and_subject(first_lower.trim());
+    let mut results = vec![first_original.trim().to_string()];
+
+    let mut remaining_lower = rest_events_lower;
+    let mut remaining_original = rest_events_original;
+    loop {
+        if let Ok((_, (event_lower, tail_lower))) = split_once_on(remaining_lower, ", ") {
+            let Ok((_, (event_original, tail_original))) = split_once_on(remaining_original, ", ")
+            else {
+                return None;
+            };
+            if parse_event_verb_start(event_lower.trim()).is_err() {
+                return None;
+            }
+            results.push(format!("{keyword_and_subject} {}", event_original.trim()));
+            remaining_lower = tail_lower;
+            remaining_original = tail_original;
+        } else {
+            if parse_event_verb_start(remaining_lower.trim()).is_err() {
+                return None;
+            }
+            results.push(format!(
+                "{keyword_and_subject} {}",
+                remaining_original.trim()
+            ));
+            break;
+        }
+    }
+
+    results.push(format!("{keyword_and_subject} {}", after_or.trim()));
+
+    Some(results)
+}
+
 /// Split compound conditions where "or" joins two event verbs sharing the same subject.
 /// Returns `Some(vec![first_trigger, second_trigger])` with reconstructed trigger lines,
 /// or `None` if no compound event "or" is found.
@@ -3767,6 +3866,10 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("exploits"),
         parse_event_word("mutates"),
         parse_event_word("transforms"),
+        parse_event_phrase("becomes the target of a spell or ability"),
+        parse_event_phrase("become the target of a spell or ability"),
+        parse_event_phrase("becomes the target of an aura spell"),
+        parse_event_phrase("becomes the target of a spell"),
     ));
     let player_actions = alt((
         passive_player_actions,
@@ -3912,6 +4015,7 @@ fn find_effect_boundary(lower: &str) -> Option<usize> {
         let comma_pos = search_start + before.len();
         if !continues_player_action_list(after)
             && !continues_disjunctive_zone_change_condition(after)
+            && !continues_serial_event_condition(after)
         {
             return Some(comma_pos);
         }
@@ -3941,6 +4045,21 @@ fn continues_disjunctive_zone_change_condition(after_comma: &str) -> bool {
     parse_zone_change_clause(&subject, verb).is_some()
 }
 
+fn continues_serial_event_condition(after_comma: &str) -> bool {
+    use super::oracle_nom::primitives::split_once_on;
+
+    let trimmed = after_comma.trim_start();
+    if let Ok((after_or, ())) = value((), tag::<_, _, OracleError<'_>>("or ")).parse(trimmed) {
+        return parse_event_verb_start(after_or.trim_start()).is_ok();
+    }
+
+    let Ok((_, (first_event, after_or))) = split_once_on(trimmed, ", or ") else {
+        return false;
+    };
+    parse_event_verb_start(first_event.trim()).is_ok()
+        && parse_event_verb_start(after_or.trim_start()).is_ok()
+}
+
 fn continues_player_action_list(after_comma: &str) -> bool {
     let trimmed = after_comma.trim_start();
     let candidate = value((), tag::<_, _, OracleError<'_>>("or "))
@@ -3955,6 +4074,10 @@ fn continues_player_action_list(after_comma: &str) -> bool {
         return true;
     }
 
+    if type_phrase_continues_to_combat_damage_player_event(trimmed) {
+        return true;
+    }
+
     // Recognize type-phrase continuations in comma-separated type lists.
     // E.g. "a creature, planeswalker, or battle enters" — after ", " we see
     // "planeswalker" (a bare type word) or "or battle enters" ("or" + type word).
@@ -3965,12 +4088,16 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // E.g. "creatures you control get +1/+1" starts with "creatures" (type word) but
     // has "get" (predicate verb) — this is the effect, not a continuation.
     let after_conjunction = alt((
+        value((), tag::<_, _, OracleError<'_>>("and/or ")),
         value((), tag::<_, _, OracleError<'_>>("or ")),
         value((), tag("and ")),
     ))
     .parse(trimmed)
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed);
+    if type_phrase_continues_to_combat_damage_player_event(after_conjunction) {
+        return true;
+    }
     if !starts_with_type_word(after_conjunction) {
         return false;
     }
@@ -3978,6 +4105,30 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // A continuation has no predicate verb before the trigger event verb;
     // a new sentence has a subject + predicate verb ("creatures you control get").
     !is_new_sentence_not_type_continuation(after_conjunction)
+}
+
+fn type_phrase_continues_to_combat_damage_player_event(text: &str) -> bool {
+    let (filter, rest) = parse_type_phrase(text);
+    if matches!(filter, TargetFilter::Any) || rest.len() >= text.len() {
+        return false;
+    }
+    let rest = rest.trim_start();
+    parse_combat_damage_to_player(rest).is_ok()
+}
+
+fn parse_combat_damage_to_player(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((
+                tag::<_, _, OracleError<'_>>("deal"),
+                tag::<_, _, OracleError<'_>>("deals"),
+            )),
+            tag(" combat damage"),
+            tag(" to a player"),
+        ),
+    )
+    .parse(input)
 }
 
 /// Check if the text starting at a type word is a new subject-predicate sentence
@@ -10107,6 +10258,74 @@ mod tests {
     // SelfRef trigger the entering object IS the source, so the evaluator's
     // `source_id` fallback resolves to the same permanent.
     #[test]
+    fn parse_serial_attack_block_target_compound() {
+        let defs = parse_trigger_lines(
+            "Whenever this creature attacks, blocks, or becomes the target of a spell, \
+             it deals damage equal to its power to each opponent.",
+            "Giggling Skitterspike",
+        );
+
+        assert_eq!(defs.len(), 3, "expected three trigger branches: {defs:?}");
+        assert_eq!(defs[0].mode, TriggerMode::Attacks);
+        assert_eq!(defs[0].valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(defs[1].mode, TriggerMode::Blocks);
+        assert_eq!(defs[1].valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(defs[2].mode, TriggerMode::BecomesTarget);
+        assert_eq!(defs[2].valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(defs[2].valid_source, Some(TargetFilter::StackSpell));
+
+        fn has_damage_each_player(ability: &AbilityDefinition) -> bool {
+            matches!(*ability.effect, Effect::DamageEachPlayer { .. })
+                || ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|s| has_damage_each_player(s))
+        }
+        fn has_unimplemented(ability: &AbilityDefinition) -> bool {
+            matches!(*ability.effect, Effect::Unimplemented { .. })
+                || ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|s| has_unimplemented(s))
+        }
+        fn damage_each_player_amount(ability: &AbilityDefinition) -> Option<&QuantityExpr> {
+            match ability.effect.as_ref() {
+                Effect::DamageEachPlayer { amount, .. } => Some(amount),
+                _ => ability
+                    .sub_ability
+                    .as_ref()
+                    .and_then(|s| damage_each_player_amount(s)),
+            }
+        }
+
+        for def in &defs {
+            let execute = def.execute.as_ref().expect("execute ability");
+            assert!(
+                has_damage_each_player(execute),
+                "expected DamageEachPlayer effect, got {:?}",
+                execute.effect
+            );
+            assert!(
+                !has_unimplemented(execute),
+                "effect chain leaked Unimplemented: {:?}",
+                execute
+            );
+            assert!(
+                matches!(
+                    damage_each_player_amount(execute),
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source
+                        }
+                    })
+                ),
+                "expected damage amount to use source power, got {:?}",
+                damage_each_player_amount(execute)
+            );
+        }
+    }
+
+    #[test]
     fn trigger_etb_self_enters_untapped_attaches_condition() {
         let def = parse_trigger_line(
             "When this land enters untapped, create a Food token.",
@@ -10852,6 +11071,52 @@ mod tests {
             "expected ExileTop to bind to TriggeringPlayer, got {:?}",
             execute.effect
         );
+    }
+
+    /// Issue #594 — Maralen, Fae Ascendant's ETB trigger: the full Oracle
+    /// "Whenever Maralen or another Elf or Faerie you control enters, exile
+    /// the top two cards of target opponent's library." Verifies the
+    /// trigger-half end-to-end: mode is `ChangesZone` (ETB) with battlefield
+    /// destination, and the execute step lowers to `Effect::ExileTop` with
+    /// count = 2 (not silently dropped) and the target-opponent typed filter
+    /// (not the generic library-zone fallback).
+    ///
+    /// CR 603.2a + CR 400.12 + CR 115.1.
+    #[test]
+    fn trigger_maralen_etb_exile_top_two_of_target_opponents_library() {
+        let def = parse_trigger_line(
+            "Whenever Maralen or another Elf or Faerie you control enters, \
+             exile the top two cards of target opponent's library.",
+            "Maralen, Fae Ascendant",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("trigger should have execute step");
+        match execute.effect.as_ref() {
+            Effect::ExileTop {
+                player,
+                count,
+                face_down,
+            } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 2 },
+                    "count must survive the targeted-library lowering"
+                );
+                assert!(!*face_down);
+                assert_eq!(
+                    *player,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    "expected target-opponent filter, got {:?}",
+                    player
+                );
+            }
+            other => panic!("Expected ExileTop, got {other:?}"),
+        }
     }
 
     #[test]
@@ -11766,6 +12031,55 @@ mod tests {
                 );
             }
             other => panic!("sub_ability effect must be LoseLife, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7c + CR 120.3 + CR 119.3: Unstoppable Slasher — "Whenever this
+    /// creature deals combat damage to a player, they lose half their life,
+    /// rounded up." is an event-bound (non-targeted) trigger per CR 603.6f.
+    /// "they" must resolve to `TriggeringPlayer` (the damaged player), and the
+    /// half-life amount must read `PlayerScope::ScopedPlayer`, NOT the
+    /// targeting `PlayerScope::Target` (which has no chosen target on an
+    /// event-bound trigger and resolves to 0 — the reported silent no-op).
+    #[test]
+    fn parse_unstoppable_slasher_combat_damage_half_life() {
+        use crate::types::ability::{Effect, PlayerScope, QuantityExpr, QuantityRef, RoundingMode};
+
+        let def = parse_trigger_line(
+            "Whenever this creature deals combat damage to a player, they lose half their life, rounded up.",
+            "Unstoppable Slasher",
+        );
+
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        match &*execute.effect {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(
+                    target.as_ref(),
+                    Some(&TargetFilter::TriggeringPlayer),
+                    "LoseLife.target must be TriggeringPlayer (the damaged player), not ParentTarget",
+                );
+                match amount {
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => {
+                        assert_eq!(*divisor, 2, "half ⇒ divisor 2");
+                        assert_eq!(*rounding, RoundingMode::Up, "rounded up");
+                        assert_eq!(
+                            **inner,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::LifeTotal {
+                                    player: PlayerScope::ScopedPlayer,
+                                },
+                            },
+                            "inner amount must read the event player's life (ScopedPlayer), got {inner:?}",
+                        );
+                    }
+                    other => panic!("amount must be DivideRounded, got {other:?}"),
+                }
+            }
+            other => panic!("effect must be LoseLife, got {other:?}"),
         }
     }
 
@@ -12904,6 +13218,8 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageReceived);
         assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_target, None);
     }
 
     #[test]
@@ -16740,6 +17056,71 @@ mod tests {
         );
     }
 
+    /// CR 513.1 + CR 603.4: Keeper of the Accord — opponent end-step token trigger
+    /// with intervening-if comparing that player's creatures to yours.
+    #[test]
+    fn keeper_of_the_accord_opponent_end_step_creature_token() {
+        let def = parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn)
+        );
+        match def.condition.as_ref() {
+            Some(TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: Comparator::GT,
+                rhs,
+            }) => {
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    } => {
+                        assert_eq!(tf.controller, Some(ControllerRef::ScopedPlayer));
+                    }
+                    other => panic!("expected scoped ObjectCount lhs, got {other:?}"),
+                }
+                match rhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    } => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                    }
+                    other => panic!("expected you-scoped ObjectCount rhs, got {other:?}"),
+                }
+            }
+            other => panic!("expected QuantityComparison intervening-if, got {other:?}"),
+        }
+        assert!(matches!(
+            def.execute.as_ref().map(|a| a.effect.as_ref()),
+            Some(Effect::Token { .. })
+        ));
+    }
+
+    /// CR 513.1 + CR 603.4: Keeper of the Accord — optional Plains search when
+    /// that player controls more lands.
+    #[test]
+    fn keeper_of_the_accord_opponent_end_step_plains_search() {
+        let def = parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more lands than you, you may search your library for a basic Plains card, put it onto the battlefield tapped, then shuffle.",
+            "Keeper of the Accord",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        assert!(def.optional);
+        assert!(def.condition.is_some());
+    }
+
     #[test]
     fn phase_trigger_each_combat_no_constraint() {
         let def = parse_trigger_line(
@@ -17203,6 +17584,36 @@ mod tests {
         assert!(
             matches!(&def.valid_source, Some(TargetFilter::Or { filters }) if filters.len() == 2)
         );
+    }
+
+    #[test]
+    fn trigger_one_or_more_comma_and_or_subtypes_combat_damage() {
+        let def = parse_trigger_line(
+            "Whenever one or more Mutants, Ninjas, and/or Turtles you control deal combat damage to a player, put a +1/+1 counter on each of those creatures and draw a card.",
+            "Heroes in a Half Shell",
+        );
+
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert!(matches!(
+            &def.valid_source,
+            Some(TargetFilter::Or { filters }) if filters.len() == 3
+        ));
+
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutCounterAll {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ));
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("draw should be chained");
+        assert!(matches!(*sub.effect, Effect::Draw { .. }));
     }
 
     #[test]

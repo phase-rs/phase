@@ -644,6 +644,15 @@
       "keepTapped": "Garder engagé",
       "keepTappedDescription": "{{name}} reste engagé pendant cette étape de dégagement."
     },
+    "exert": {
+      "creatureFallback": "Créature",
+      "title": "Surmener {{name}} ?",
+      "subtitle": "Choisissez si vous voulez surmener cet attaquant. Une créature surmenée ne se dégage pas pendant votre prochaine étape de dégagement.",
+      "exert": "Surmener",
+      "exertDescription": "{{name}} ne se dégage pas au prochain tour et déclenche sa capacité de surmenage.",
+      "decline": "Ne pas surmener",
+      "declineDescription": "{{name}} attaque normalement et se dégage comme d'habitude."
+    },
     "cost": {
       "discardCard": "se défausser d'une carte",
       "life": "{{amount}} points de vie",

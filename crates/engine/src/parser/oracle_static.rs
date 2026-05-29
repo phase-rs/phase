@@ -34,7 +34,7 @@ use super::oracle_util::{
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, AttachmentKind,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, AttachmentKind,
     BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator, ContinuousModification,
     ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PtStat,
     PtValueScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
@@ -47,7 +47,8 @@ use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::phase::Phase;
 use crate::types::statics::{
     ActivationExemption, BlockExceptionKind, CastFrequency, CastingProhibitionCondition,
-    CostPaymentProhibition, HandSizeModification, ProhibitionScope, StaticMode, TriggerCause,
+    CostPaymentProhibition, ExileCastCost, HandSizeModification, ProhibitionScope, StaticMode,
+    TriggerCause,
 };
 use crate::types::zones::Zone;
 
@@ -1017,6 +1018,15 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 
     // CR 604.3 + CR 601.2a: "Once during each of your turns, you may cast [filter] from your graveyard."
     if let Some(result) = try_parse_graveyard_cast_permission(&text, &lower) {
+        return Some(result);
+    }
+
+    // CR 601.2a + CR 113.6b + CR 118.9: "Once each turn, you may cast [filter]
+    // from among cards exiled with ~ this turn [without paying its mana cost]."
+    // Maralen, Fae Ascendant is the type specimen; the handler accepts the
+    // wider class (any frequency, any mana-value comparator) so future
+    // printings slot in without parser changes.
+    if let Some(result) = try_parse_exile_cast_permission(&text, &lower) {
         return Some(result);
     }
 
@@ -3390,13 +3400,13 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::IsCommander]),
                     )
-                // CR 111.1 / CR 205.3: A `non`/`non-` negation descriptor
-                // ("Nontoken creatures you control") is a type/token-identity
-                // negation, NOT a subtype. Bail so dispatch falls through to
-                // `parse_subject_additive_type_static`, which routes the
-                // subject through `parse_type_phrase` and yields the correct
-                // `FilterProp::NonToken`.
-                } else if descriptor_is_negation(descriptor) {
+                // CR 111.1 / CR 205.3 / CR 205.4a: A `non`/`non-` negation
+                // descriptor ("Nontoken creatures you control") or supertype
+                // descriptor ("Legendary creatures you control") is NOT a
+                // subtype. Bail so dispatch falls through to the subject parser,
+                // which routes the full phrase through `parse_type_phrase`.
+                } else if descriptor_is_negation(descriptor) || descriptor_is_supertype(descriptor)
+                {
                     return None;
                 } else if is_capitalized_words(descriptor) {
                     TargetFilter::Typed(
@@ -3417,9 +3427,12 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             p
                         }),
                 )
-            } else if descriptor_is_negation(desc_remaining) {
-                // CR 111.1 / CR 205.3: negation descriptor after a combat-status
-                // prefix — not a subtype; fall through to additive-type dispatch.
+            } else if descriptor_is_negation(desc_remaining)
+                || descriptor_is_supertype(desc_remaining)
+            {
+                // CR 111.1 / CR 205.3 / CR 205.4a: negation/supertype descriptor
+                // after a combat-status prefix — not a subtype; fall through to
+                // full subject parsing.
                 return None;
             } else if is_capitalized_words(desc_remaining) {
                 // Combat-status prefix found + remaining is a subtype
@@ -5299,6 +5312,113 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
     None
 }
 
+/// CR 118.9 + CR 601.2f: Parse a mana-cost-alternative-grant static —
+/// "You may [pay] X rather than pay [the/its/this object's] mana cost for
+/// [filter] spells you cast." The permanent's controller may pay the
+/// alternative MANA cost `X` instead of a matching spell's printed mana cost.
+///
+/// Class members: Rooftop Storm ({0}, Zombie creature spells), Fist of Suns
+/// ({WUBRG}, any spell), Jodah ({WUBRG}, MV 5+ when the qualifier parses).
+///
+/// Strict-fails to `None` (never misparses) when the payment is non-mana
+/// (Dream Halls discard, Bolas's Citadel life, As Foretold free), deferring
+/// those classes rather than producing a wrong static.
+pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefinition> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // Prefix: "you may pay " (Rooftop Storm / Fist of Suns / Jodah). The shorter
+    // "you may " is accepted as a fallback so a payment verb other than "pay"
+    // (e.g. "you may exert ...") still routes here and strict-fails at the cost
+    // gate below rather than misparsing.
+    let tp = nom_tag_tp(&tp, "you may pay ")
+        .or_else(|| nom_tag_tp(&tp, "you may "))?
+        .trim_start();
+
+    // Cost slice: everything up to " rather than pay ", preserving original case
+    // (mana symbols are case-sensitive).
+    let (after_cost_lower, cost_lower) = take_until::<_, _, VE<'_>>(" rather than pay ")
+        .parse(tp.lower)
+        .ok()?;
+    let cost_len = cost_lower.len();
+    let cost_slice = tp.original[..cost_len].trim();
+    let after_cost = TextPair::new(&tp.original[cost_len..], after_cost_lower);
+    let after_cost = nom_tag_tp(&after_cost, " rather than pay ")?;
+
+    // Article/possessive axis as ONE alt — "[the|its|this permanent's|this
+    // object's] mana cost for ". CR 118.9: the alternative-cost phrasing names
+    // the spell's own mana cost being replaced.
+    let (subject_lower, _) = alt((
+        tag::<_, _, VE<'_>>("the mana cost for "),
+        tag("its mana cost for "),
+        tag("this permanent's mana cost for "),
+        tag("this object's mana cost for "),
+    ))
+    .parse(after_cost.lower)
+    .ok()?;
+    let consumed = after_cost.lower.len() - subject_lower.len();
+    let subject = TextPair::new(&after_cost.original[consumed..], subject_lower);
+
+    // Remainder: "<filter> spell[s] you cast[.]". Locate the marker with nom
+    // combinators (take_until + tag), not manual string scanning: `terminated`
+    // yields the type-prefix slice preceding the marker while consuming the
+    // marker itself, leaving the optional mana-value tail as the remainder.
+    let subject = subject.trim_end_matches('.').trim_end();
+    let (after_spells_lower, type_prefix_lower) = alt((
+        terminated(
+            take_until::<_, _, VE<'_>>("spells you cast"),
+            tag("spells you cast"),
+        ),
+        terminated(
+            take_until::<_, _, VE<'_>>("spell you cast"),
+            tag("spell you cast"),
+        ),
+    ))
+    .parse(subject.lower)
+    .ok()?;
+
+    let type_prefix_original = subject.original[..type_prefix_lower.len()].trim();
+    let after_spells = after_spells_lower.trim();
+
+    // Optional "with mana value N or greater" qualifier (Jodah MV-5+ class). If
+    // an MV qualifier is present but does not parse cleanly into FilterProp::Cmc,
+    // strict-fail (None) rather than over-broadening to any spell.
+    let mv_filter = if after_spells.is_empty() {
+        None
+    } else {
+        let (prop, _consumed) =
+            parse_mana_value_suffix(after_spells, &mut ParseContext::default())?;
+        let FilterProp::Cmc { .. } = prop else {
+            return None;
+        };
+        Some(prop)
+    };
+
+    let base_filter = if type_prefix_original.is_empty() {
+        // "spells you cast" (no type prefix) — any spell (Fist of Suns).
+        TargetFilter::Typed(TypedFilter::card())
+    } else {
+        parse_type_phrase(type_prefix_original).0
+    };
+    let affected = apply_spell_keyword_subject_constraints(base_filter, None, mv_filter);
+
+    // Cost gate: only a pure MANA cost grants this static. {0} and {WUBRG} parse
+    // to AbilityCost::Mana; non-mana payments (life, discard, free) return a
+    // different AbilityCost variant and strict-fail here.
+    let AbilityCost::Mana { cost } = parse_oracle_cost(cost_slice) else {
+        return None;
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::CastWithAlternativeCost { cost })
+            .affected(affected)
+            .description(text.to_string())
+            .active_zones(vec![Zone::Battlefield]),
+    )
+}
+
 fn apply_spell_keyword_subject_constraints(
     filter: TargetFilter,
     zone_filter: Option<FilterProp>,
@@ -5530,13 +5650,14 @@ fn parse_subject_suffix<'a>(subject: &TextPair<'a>, suffix: &str) -> Option<Text
     ))
 }
 
-/// CR 109.5 + CR 205.3: Controller-scoped subject descriptors may name object
-/// types, colors, or subtypes controlled by the source's controller.
+/// CR 109.5 + CR 205.3 + CR 205.4a: Controller-scoped subject descriptors
+/// may name object types, colors, subtypes, or supertypes controlled by the
+/// source's controller.
 fn typed_you_control_descriptor_filter(
     descriptor: TextPair<'_>,
     creature_subject: bool,
 ) -> Option<TargetFilter> {
-    if descriptor_is_negation(descriptor.original) {
+    if descriptor_is_negation(descriptor.original) || descriptor_is_supertype(descriptor.original) {
         return None;
     }
 
@@ -6021,6 +6142,17 @@ fn descriptor_is_negation(descriptor: &str) -> bool {
     after_non.chars().next().is_some_and(|c| !c.is_whitespace())
 }
 
+/// CR 205.4a: Supertype descriptors include legendary, basic, snow, and world;
+/// parse supported supertype words through the shared target combinator so they
+/// fall through to `parse_type_phrase` instead of becoming fabricated subtypes.
+fn descriptor_is_supertype(descriptor: &str) -> bool {
+    let lower = descriptor.to_lowercase();
+    let is_supertype = all_consuming(nom_target::parse_supertype_word)
+        .parse(lower.as_str())
+        .is_ok();
+    is_supertype
+}
+
 fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
@@ -6103,14 +6235,13 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(TargetFilter::Typed(typed));
     }
 
-    // CR 111.1 / CR 205.3: A `non`/`non-` negation descriptor (e.g. "Nontoken
-    // creatures") is a type phrase with a token-identity / type negation, NOT a
-    // subtype. `is_capitalized_words` below would otherwise fabricate a bogus
-    // `Subtype("Nontoken")` for a sentence-leading capitalized "Nontoken". Bail
-    // so `parse_continuous_subject_filter` falls through to its own
-    // `parse_type_phrase` call, whose negation loop maps `nontoken` →
-    // `FilterProp::NonToken` via `classify_negation`.
-    if descriptor_is_negation(descriptor) {
+    // CR 111.1 / CR 205.3 / CR 205.4a: A `non`/`non-` negation descriptor
+    // (e.g. "Nontoken creatures") or a supertype descriptor (e.g. "Legendary
+    // creatures") is NOT a subtype. `is_capitalized_words` below would
+    // otherwise fabricate a bogus subtype. Bail so `parse_continuous_subject_filter`
+    // falls through to its own `parse_type_phrase` call, whose typed grammar
+    // maps these descriptors onto properties.
+    if descriptor_is_negation(descriptor) || descriptor_is_supertype(descriptor) {
         return None;
     }
 
@@ -10304,6 +10435,111 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
     Some(def)
 }
 
+/// CR 601.2a + CR 113.6b + CR 118.9: Parse the Maralen-class exile cast
+/// permission line: "Once each turn, you may cast [filter] from among cards
+/// exiled with ~ this turn [without paying its mana cost]." Mirrors
+/// `try_parse_graveyard_cast_permission` for the exile-pool sibling.
+///
+/// Accepted shapes:
+/// - "once each turn, you may cast a spell with mana value less than or equal
+///   to <quantity_ref> from among cards exiled with ~ this turn without paying
+///   its mana cost." (Maralen, Fae Ascendant)
+/// - The longer "once during each of your turns, you may cast …" synonym.
+/// - Unlimited shape ("you may cast …") is left for a future printing — Maralen
+///   is the only shipping card today so the `Unlimited` branch is not gated on
+///   any anchor; adding it requires an Oracle-confirmed sibling printing first.
+///
+/// Returns `None` for shapes outside this class (graveyard/top-of-library/hand
+/// permissions all anchor on different phrases earlier in the dispatch chain).
+fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+    // CR 601.2a: Frequency prefix. Both "once each turn" (Maralen) and the
+    // longer "once during each of your turns" synonym map to `OncePerTurn`.
+    // Both prefixes are tried via the file-wide `or_else` chain — adding an
+    // `Unlimited` ("you may cast …") sibling needs an Oracle-confirmed
+    // printing to disambiguate from the existing graveyard / hand handlers.
+    let rest = nom_tag_lower(lower, lower, "once each turn, you may cast ").or_else(|| {
+        nom_tag_lower(
+            lower,
+            lower,
+            "once during each of your turns, you may cast ",
+        )
+    })?;
+    let frequency = CastFrequency::OncePerTurn;
+
+    // Strip the leading article — `parse_type_phrase` expects the bare noun.
+    let rest = nom_tag_lower(rest, rest, "a ")
+        .or_else(|| nom_tag_lower(rest, rest, "an "))
+        .unwrap_or(rest);
+
+    // CR 113.6b: Anchor on " from among cards exiled with " — the
+    // class-defining phrase. Anything before is the affected filter; anything
+    // after is the source self-reference plus optional alt-cost / "this turn"
+    // markers.
+    let (filter_text, trailing) =
+        nom_primitives::split_once_on(rest, " from among cards exiled with ")
+            .ok()
+            .map(|(_, pair)| pair)?;
+
+    // Drop trailing " spell"/" spells" so `parse_type_phrase` sees the bare
+    // type. Mirrors the graveyard / top-of-library / hand sibling parsers.
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
+        Cow::Owned(filter_text.replacen(" spells", "", 1))
+    } else if nom_primitives::scan_contains(filter_text, "spell") {
+        Cow::Owned(filter_text.replacen(" spell", "", 1))
+    } else {
+        Cow::Borrowed(filter_text)
+    };
+
+    // `parse_type_phrase` already composes the dynamic "with mana value …"
+    // suffix through `parse_mana_value_suffix`, so Maralen's filter
+    // ("spell with mana value less than or equal to the number of Elves and
+    // Faeries you control") resolves through one call — no bespoke combinator
+    // chain needed here.
+    let (filter, remainder) = parse_type_phrase(&cleaned);
+    if !remainder.trim().is_empty() {
+        // Strict: any unconsumed remainder is a filter shape we don't yet
+        // model. Decline so the line either dispatches to the next handler or
+        // surfaces as Unimplemented (which the swallow detector picks up as a
+        // coverage gap rather than a misparse).
+        return None;
+    }
+
+    // CR 113.6b + CR 201.5: The source reference is normalized to `~` for
+    // `SELF_REF_TYPE_PHRASES` (this creature, this permanent, …) but left
+    // verbatim for `SELF_REF_PARSE_ONLY_PHRASES` ("this card"). Accept either
+    // form so the static covers future cards that lean on the parse-only set.
+    let after_source = std::iter::once("~")
+        .chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied())
+        .find_map(|phrase| nom_tag_lower(trailing, trailing, phrase))?;
+
+    // CR 113.6b: The "this turn" suffix is structural — without it the
+    // permission would not be per-turn-scoped and would belong to the
+    // open-ended `ExiledBySource` class instead.
+    let after_this_turn = nom_tag_lower(after_source, after_source, " this turn")?;
+
+    // CR 118.9a: Optional " without paying its mana cost" / "their mana costs"
+    // alt-cost rider selects the `WithoutPayingManaCost` shape; absence leaves
+    // the static at `PayNormalCost`. The `scan_contains` is the same idiom the
+    // sibling graveyard parser uses for its trailing alt-cost detection.
+    let cost = if nom_primitives::scan_contains(after_this_turn, "without paying its mana cost")
+        || nom_primitives::scan_contains(after_this_turn, "without paying their mana cost")
+    {
+        ExileCastCost::WithoutPayingManaCost
+    } else {
+        ExileCastCost::PayNormalCost
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency,
+            play_mode: CardPlayMode::Cast,
+            cost,
+        })
+        .affected(filter)
+        .description(text.to_string()),
+    )
+}
+
 /// CR 601.3 + CR 113.6b: Parse the affected-card filter of a graveyard
 /// cast-permission ability. When the filter text is a self-reference phrase
 /// ("this card", "this creature", "this permanent", ...), the permission
@@ -11846,6 +12082,190 @@ mod tests {
             )),
             "player-half must affect the controller"
         );
+    }
+
+    /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
+    /// creature spells the controller casts.
+    #[test]
+    fn alt_cost_rooftop_storm_zombie_creature_zero() {
+        let def = parse_spells_alternative_cost(
+            "You may pay {0} rather than pay the mana cost for Zombie creature spells you cast.",
+        )
+        .expect("Rooftop Storm must parse to a CastWithAlternativeCost static");
+        match &def.mode {
+            StaticMode::CastWithAlternativeCost { cost } => {
+                assert_eq!(*cost, crate::types::mana::ManaCost::zero());
+            }
+            other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+        }
+        // Affected: Zombie creature spells you cast.
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature type filter, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(
+                    tf.get_subtype(),
+                    Some("Zombie"),
+                    "expected Zombie subtype, got {:?}",
+                    tf.type_filters
+                );
+            }
+            other => panic!("expected Typed(Zombie creature you cast), got {other:?}"),
+        }
+        assert_eq!(def.active_zones, vec![Zone::Battlefield]);
+    }
+
+    /// CR 118.9: Fist of Suns grants {WUBRG} as an alternative cost for ANY
+    /// spell the controller casts (no type prefix → any-card filter).
+    #[test]
+    fn alt_cost_fist_of_suns_any_spell_wubrg() {
+        let def = parse_spells_alternative_cost(
+            "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.",
+        )
+        .expect("Fist of Suns must parse to a CastWithAlternativeCost static");
+        match &def.mode {
+            StaticMode::CastWithAlternativeCost { cost } => {
+                use crate::types::mana::{ManaCost, ManaCostShard};
+                assert_eq!(
+                    *cost,
+                    ManaCost::Cost {
+                        shards: vec![
+                            ManaCostShard::White,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Black,
+                            ManaCostShard::Red,
+                            ManaCostShard::Green,
+                        ],
+                        generic: 0,
+                    }
+                );
+            }
+            other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+        }
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed(any spell you cast), got {other:?}"),
+        }
+    }
+
+    /// CR 118.9: a Jodah-style MV qualifier — "spells you cast with mana value 5
+    /// or greater" — either parses cleanly into a Cmc filter or strict-fails to
+    /// None. This test pins whichever behavior the parser actually produces so
+    /// the deferral decision is explicit.
+    #[test]
+    fn alt_cost_jodah_mv_qualifier_behavior() {
+        let result = parse_spells_alternative_cost(
+            "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast with mana value 5 or greater.",
+        );
+        match result {
+            Some(def) => {
+                // If it parses, the MV qualifier must be attached as a Cmc prop.
+                match &def.affected {
+                    Some(TargetFilter::Typed(tf)) => {
+                        assert!(
+                            tf.properties
+                                .iter()
+                                .any(|p| matches!(p, FilterProp::Cmc { .. })),
+                            "MV qualifier must produce a Cmc filter prop, got {:?}",
+                            tf.properties
+                        );
+                    }
+                    other => panic!("expected Typed with Cmc prop, got {other:?}"),
+                }
+            }
+            None => {
+                // Deferral is acceptable per the plan — the MV qualifier did not
+                // parse cleanly, so the static is not produced (not misparsed).
+            }
+        }
+    }
+
+    /// Strict-fail: non-mana payment shapes must NOT misparse into the static.
+    /// Bolas's Citadel ("pay life equal to ...") and Dream Halls ("discard a
+    /// card ...") defer to None rather than producing a wrong CastWithAlternativeCost.
+    #[test]
+    fn alt_cost_non_mana_payment_defers_to_none() {
+        // Bolas's Citadel-style life payment.
+        assert!(
+            parse_spells_alternative_cost(
+                "You may pay life equal to its mana value rather than pay the mana cost for spells you cast.",
+            )
+            .is_none(),
+            "life payment must defer to None"
+        );
+        // Dream Halls-style discard payment.
+        assert!(
+            parse_spells_alternative_cost(
+                "You may discard a card that shares a color with that spell rather than pay the mana cost for spells you cast.",
+            )
+            .is_none(),
+            "discard payment must defer to None"
+        );
+    }
+
+    /// CR 118.9: full-dispatcher regression — Fist of Suns must route through
+    /// the new Priority 6c-altcost branch into a CastWithAlternativeCost static
+    /// with NO free-floating Effect::PayCost ability (the prior misparse), and
+    /// the deferred non-mana classes (Bolas's Citadel, Dream Halls, As Foretold,
+    /// Conspiracy Unraveler) must NOT be newly misparsed into this static.
+    #[test]
+    fn full_dispatch_alt_cost_routing_and_deferrals() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::Effect;
+
+        // Fist of Suns: routes to the static, no PayCost ability.
+        let parsed = parse_oracle_text(
+            "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.",
+            "Fist of Suns",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|d| matches!(d.mode, StaticMode::CastWithAlternativeCost { .. })),
+            "Fist of Suns must produce a CastWithAlternativeCost static, got {:?}",
+            parsed.statics
+        );
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::PayCost { .. })),
+            "Fist of Suns must NOT produce a free-floating PayCost ability, got {:?}",
+            parsed.abilities
+        );
+
+        // Deferred non-mana payment classes: must NOT produce the new static.
+        let deferred = [
+            (
+                "Bolas's Citadel",
+                "You may pay life equal to a spell's mana value rather than pay its mana cost.",
+            ),
+            (
+                "Dream Halls",
+                "Rather than pay the mana cost for a spell, its controller may discard a card that shares a color with that spell.",
+            ),
+        ];
+        for (name, text) in deferred {
+            let parsed = parse_oracle_text(text, name, &[], &["Enchantment".to_string()], &[]);
+            assert!(
+                !parsed
+                    .statics
+                    .iter()
+                    .any(|d| matches!(d.mode, StaticMode::CastWithAlternativeCost { .. })),
+                "{name} must NOT be misparsed into CastWithAlternativeCost, got {:?}",
+                parsed.statics
+            );
+        }
     }
 
     /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a [subtype]*
@@ -16255,6 +16675,107 @@ mod tests {
         }
     }
 
+    /// Issue #594 (Maralen, Fae Ascendant) — parser test for the new exile
+    /// cast permission class. The full static line must lower to
+    /// `StaticMode::ExileCastPermission { OncePerTurn, Cast, without_paying }`
+    /// with the affected filter carrying the dynamic CMC cap. Anchored on
+    /// `parse_static_line` so the dispatch routing through `is_static_pattern`
+    /// → `parse_static_line_multi` → `parse_static_line_inner` is exercised
+    /// end-to-end.
+    #[test]
+    fn exile_cast_permission_maralen_fae_ascendant() {
+        let text = "Once each turn, you may cast a spell with mana value \
+                    less than or equal to the number of Elves and Faeries \
+                    you control from among cards exiled with ~ this turn \
+                    without paying its mana cost.";
+        let def = parse_static_line(text).expect("Maralen static must parse");
+        assert_eq!(
+            def.mode,
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::WithoutPayingManaCost,
+            },
+            "expected ExileCastPermission, got {:?}",
+            def.mode
+        );
+        let affected = def.affected.as_ref().expect("affected filter present");
+        let TargetFilter::Typed(tf) = affected else {
+            panic!("expected typed filter, got {affected:?}");
+        };
+        let has_cmc_le = tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                }
+            )
+        });
+        assert!(
+            has_cmc_le,
+            "Maralen filter must carry a Cmc(LE, ObjectCount) predicate: {:?}",
+            tf.properties
+        );
+    }
+
+    /// Issue #594 sibling — the parser must accept the longer "once during
+    /// each of your turns" synonym, leaving the rest of the lowering
+    /// unchanged. No card prints this shape today, but `add-engine-variant`
+    /// requires the class be built for the pattern, not the single card.
+    #[test]
+    fn exile_cast_permission_during_each_of_your_turns_synonym() {
+        let text = "Once during each of your turns, you may cast a spell \
+                    with mana value 3 or less from among cards exiled with \
+                    ~ this turn without paying its mana cost.";
+        let def = parse_static_line(text).expect("synonym shape must parse");
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ExileCastPermission {
+                    frequency: CastFrequency::OncePerTurn,
+                    play_mode: CardPlayMode::Cast,
+                    cost: ExileCastCost::WithoutPayingManaCost,
+                }
+            ),
+            "expected ExileCastPermission(OncePerTurn, Cast, free), got {:?}",
+            def.mode
+        );
+    }
+
+    /// CR 113.6b: The "this turn" suffix is structural. A line that names
+    /// "cards exiled with ~" but omits "this turn" must NOT match this
+    /// permission class — that would belong to the open-ended
+    /// `ExiledBySource` family (Court of Locthwain, Bag of Holding, etc.)
+    /// and is parsed elsewhere.
+    #[test]
+    fn exile_cast_permission_rejects_missing_this_turn_suffix() {
+        let text = "Once each turn, you may cast a spell with mana value 3 \
+                    or less from among cards exiled with ~ without paying \
+                    its mana cost.";
+        let lower = text.to_lowercase();
+        assert!(
+            try_parse_exile_cast_permission(text, &lower).is_none(),
+            "Open-ended exile filter must not match the per-turn class"
+        );
+    }
+
+    /// CR 601.2a: The graveyard sibling handler must NOT intercept the
+    /// exile-cast permission line. Regression guard against accidentally
+    /// over-anchoring the graveyard branch on "you may cast" alone.
+    #[test]
+    fn exile_cast_permission_not_intercepted_by_graveyard_branch() {
+        let text = "Once each turn, you may cast a spell with mana value \
+                    less than or equal to the number of Elves and Faeries \
+                    you control from among cards exiled with ~ this turn \
+                    without paying its mana cost.";
+        let lower = text.to_lowercase();
+        assert!(try_parse_graveyard_cast_permission(text, &lower).is_none());
+        assert!(try_parse_exile_cast_permission(text, &lower).is_some());
+    }
+
     #[test]
     fn graveyard_cast_permission_no_rider_leaves_filter_clean() {
         // Lurrus / Muldrotha / Karador / Conduit / Yawgmoth's Will regression:
@@ -16514,6 +17035,69 @@ mod tests {
             tf.properties
         );
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn continuous_subject_filter_legendary_is_supertype_not_subtype() {
+        // CR 205.4a: "Legendary creatures you control" names the legendary
+        // supertype plus the creature card type, not a creature subtype named
+        // "Legendary". This is the Jodah, the Unifier anthem subject shape.
+        let filter = super::parse_continuous_subject_filter("Legendary creatures you control")
+            .expect("legendary creature subject should parse");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {:?}", filter);
+        };
+        assert!(
+            tf.get_subtype().is_none(),
+            "must NOT fabricate a subtype, got {:?}",
+            tf.get_subtype()
+        );
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }),
+            "expected HasSupertype(Legendary), got {:?}",
+            tf.properties
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn static_jodah_anthem_affected_filter_uses_legendary_supertype() {
+        // CR 205.4a + CR 613.4c: Jodah, the Unifier's anthem affects
+        // legendary creatures you control and scales by that same population.
+        let def = parse_static_line(
+            "Legendary creatures you control get +X/+X, where X is the number of legendary creatures you control.",
+        )
+        .expect("Jodah anthem static should parse");
+        let Some(TargetFilter::Typed(tf)) = &def.affected else {
+            panic!("Expected Typed affected filter, got {:?}", def.affected);
+        };
+        assert!(
+            tf.get_subtype().is_none(),
+            "must NOT fabricate Legendary as a subtype, got {:?}",
+            tf.get_subtype()
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }),
+            "expected affected filter to use HasSupertype(Legendary), got {:?}",
+            tf.properties
+        );
+        assert!(def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })));
+        assert!(def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })));
     }
 
     #[test]

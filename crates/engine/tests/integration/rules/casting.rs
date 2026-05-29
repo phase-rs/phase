@@ -1864,3 +1864,146 @@ fn miracle_sorcery_casts_during_draw_step() {
         "sorcery should be on the stack via Miracle variant"
     );
 }
+
+/// CR 118.9: Rooftop Storm — "You may pay {0} rather than pay the mana cost for
+/// Zombie creature spells you cast." End-to-end: parse the Oracle text onto a
+/// battlefield permanent, then casting a Zombie creature offers the alternative
+/// {0} cost (CR 118.9 grant), accepting reaches the stack with the alternative
+/// paid, while a non-Zombie creature is NOT offered the grant.
+#[test]
+fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
+    use engine::types::statics::StaticMode;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Rooftop Storm on the battlefield, abilities from Oracle text (full parser
+    // path → CastWithAlternativeCost static).
+    let storm_id = scenario
+        .add_creature(P0, "Rooftop Storm", 0, 0)
+        .from_oracle_text(
+            "You may pay {0} rather than pay the mana cost for Zombie creature spells you cast.",
+        )
+        .id();
+
+    // A Zombie creature in hand with a nonzero printed mana cost (so {0} is a
+    // meaningful alternative).
+    let zombie_id = scenario
+        .add_creature_to_hand(P0, "Test Zombie", 2, 2)
+        .with_subtypes(vec!["Zombie"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 6,
+        })
+        .id();
+
+    // A non-Zombie creature in hand — must NOT receive the grant.
+    let elf_id = scenario
+        .add_creature_to_hand(P0, "Test Elf", 1, 1)
+        .with_subtypes(vec!["Elf"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Regression: the line must parse to a CastWithAlternativeCost static, NOT
+    // a free-floating Effect::PayCost ability (the prior misparse).
+    {
+        use engine::types::ability::Effect;
+        let storm = &runner.state().objects[&storm_id];
+        assert!(
+            storm
+                .static_definitions
+                .iter_unchecked()
+                .any(|d| matches!(d.mode, StaticMode::CastWithAlternativeCost { .. })),
+            "Rooftop Storm must carry a CastWithAlternativeCost static"
+        );
+        assert!(
+            !storm
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::PayCost { .. })),
+            "Rooftop Storm must NOT have a free-floating PayCost ability (prior misparse)"
+        );
+    }
+
+    // --- Zombie: grant offered, accepting reaches the stack. ---
+    let zombie_card = runner.state().objects[&zombie_id].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: zombie_id,
+            card_id: zombie_card,
+            targets: vec![],
+        })
+        .expect("casting a Zombie should succeed");
+    handle_target_selection(&mut runner, &result);
+
+    match &runner.state().waiting_for {
+        WaitingFor::OptionalCostChoice { cost, .. } => match cost {
+            AdditionalCost::Choice(alt, printed) => {
+                assert_eq!(
+                    *alt,
+                    AbilityCost::Mana {
+                        cost: ManaCost::zero()
+                    },
+                    "alternative cost must be {{0}} (Rooftop Storm)"
+                );
+                assert_eq!(
+                    *printed,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![],
+                            generic: 6,
+                        }
+                    },
+                    "printed fallback must be the Zombie's {{6}} mana cost"
+                );
+            }
+            other => panic!("expected AdditionalCost::Choice(alt, printed), got {other:?}"),
+        },
+        other => panic!("expected OptionalCostChoice for the grant, got {other:?}"),
+    }
+
+    // Accept the alternative cost → Zombie reaches the stack with {0} paid.
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("accepting the alternative cost should succeed");
+    assert_eq!(
+        runner.state().objects[&zombie_id].zone,
+        Zone::Stack,
+        "Zombie should be on the stack after paying the alternative cost"
+    );
+
+    // --- Non-Zombie: grant NOT offered. ---
+    // Sanity: the static is present so the negative is meaningful.
+    assert!(
+        runner.state().objects.values().any(|o| matches!(
+            o.static_definitions.first().map(|d| &d.mode),
+            Some(StaticMode::CastWithAlternativeCost { .. })
+        )),
+        "Rooftop Storm must carry a CastWithAlternativeCost static"
+    );
+
+    let elf_card = runner.state().objects[&elf_id].card_id;
+    let elf_result = runner.act(GameAction::CastSpell {
+        object_id: elf_id,
+        card_id: elf_card,
+        targets: vec![],
+    });
+    // The Elf has a {2} cost and no mana available, so the cast may fail at
+    // payment — but it must NEVER enter the OptionalCostChoice grant prompt.
+    if let Ok(elf_result) = elf_result {
+        handle_target_selection(&mut runner, &elf_result);
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "non-Zombie spell must not be offered the Rooftop Storm grant, got {:?}",
+            runner.state().waiting_for,
+        );
+    }
+}
