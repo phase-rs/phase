@@ -312,9 +312,11 @@ while true; do
     }
   }")
   UNRESOLVED=$(( UNRESOLVED + $(echo "$PAGE" | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length') ))
+  # `.author` is null for deleted GitHub users; `?` + `// "ghost"` keeps
+  # jq from crashing with "cannot index null" when sniffing fake resolutions.
   PAGE_FAKES=$(echo "$PAGE" | jq '[.data.repository.pullRequest.reviewThreads.nodes[]
       | select(.isResolved == true)
-      | {body: .comments.nodes[0].body[:120], author: .comments.nodes[0].author.login}
+      | {body: .comments.nodes[0].body[:120], author: (.comments.nodes[0].author.login? // "ghost")}
       | select(.body | test("Fixed in|Removed in|Addressed in") | not)]')
   FAKE_RESOLUTIONS=$(echo "$FAKE_RESOLUTIONS $PAGE_FAKES" | jq -s 'add')
   HAS_NEXT=$(echo "$PAGE" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')

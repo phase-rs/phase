@@ -266,7 +266,9 @@ FIRST=true
 FAILED_UPLOADS=()
 for img in "${SCREENSHOT_FILES[@]}"; do
   BASENAME=$(basename "$img")
-  B64=$(base64 < "$img")
+  # `base64` wraps lines on Linux (76 cols default) which corrupts the API
+  # payload; macOS doesn't wrap. `tr -d '\n'` normalizes both platforms.
+  B64=$(base64 < "$img" | tr -d '\n')
   BLOB_SHA=""
   for attempt in 1 2 3; do
     BLOB_SHA=$(gh api "repos/${REPO}/git/blobs" \
@@ -338,7 +340,9 @@ Attach them manually in a follow-up PR comment:
 **Run status:** INCOMPLETE until the files above are attached and visible inline."
 fi
 
-COMMENT_FILE=$(mktemp)
+# BSD mktemp (macOS) requires a template or `-t` flag; GNU mktemp doesn't.
+# Use `-t` so the same line works on both platforms.
+COMMENT_FILE=$(mktemp -t phase-e2e-comment.XXXXXX)
 cat > "$COMMENT_FILE" <<EOF
 ## E2E Frontend Test Report
 
@@ -350,7 +354,9 @@ ${IMAGE_MARKDOWN}
 ${FAILED_SECTION}
 EOF
 
-gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -F body=@"$COMMENT_FILE"
+# `-f body=@FILE` reads as string; `-F` would type-infer (JSON literals,
+# numbers, etc.) and can mangle markdown content. Always use `-f` for text.
+gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body=@"$COMMENT_FILE"
 rm -f "$COMMENT_FILE"
 ```
 
