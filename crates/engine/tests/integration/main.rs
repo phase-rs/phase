@@ -31,6 +31,7 @@ mod dralnu_dealt_damage_sacrifice;
 mod dredgers_insight_mill_from_among;
 mod elemental_spectacle_regression;
 mod elusive_otter_repro;
+mod emissary_green;
 #[cfg(feature = "proptest")]
 mod engine_invariants;
 mod enlightened_tutor_regression;
@@ -67,6 +68,7 @@ mod madame_null_integration;
 mod magnetic_mountain_choose_and_pay;
 mod mana_drain_refund;
 mod master_of_ceremonies;
+mod mycoloth_upkeep_trigger;
 mod mystic_forge_regression;
 mod old_growth_troll_return_as_aura;
 mod oracle_parser;

@@ -544,6 +544,52 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    // CR 107.x: Binary arithmetic over two dynamic quantities, e.g. "the number
+    // of Caves you control plus the number of Cave cards in your graveyard"
+    // (Calamitous Cave-In) or "the number of cards in their hand minus 4"
+    // (Bant Charm class). Composes the existing Sum/Multiply/Offset variants
+    // over recursively-parsed operands so the whole arithmetic class types
+    // instead of falling through to an unresolved `Variable` (which resolves to
+    // 0 at runtime — a silent no-op). Mirrors the leading-number "N plus inner"
+    // arm above for the reversed operand order. Placed after the specific arms
+    // and before the single-ref delegate; it only fires when the LEFT operand is
+    // itself a dynamic quantity, so single refs and unparseable tails fall
+    // through untouched. The runtime clamps a negative total to 0 (CR 107.1b),
+    // matching the existing "N minus inner" handling.
+    for (separator, negate) in [(" plus ", false), (" minus ", true)] {
+        let Ok((_, (left_text, right_text))) = nom_primitives::split_once_on(text, separator)
+        else {
+            continue;
+        };
+        let Some(left) = parse_cda_quantity_with_context(left_text, ctx) else {
+            continue;
+        };
+        // Right operand is either another dynamic quantity (→ Sum) or a bare
+        // integer offset (→ Offset).
+        if let Some(right) = parse_cda_quantity_with_context(right_text, ctx) {
+            let right = if negate {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(right),
+                }
+            } else {
+                right
+            };
+            return Some(QuantityExpr::Sum {
+                exprs: vec![left, right],
+            });
+        }
+        if let Ok((rest, n)) = nom_primitives::parse_number(right_text.trim()) {
+            if rest.trim().is_empty() {
+                let offset = if negate { -(n as i32) } else { n as i32 };
+                return Some(QuantityExpr::Offset {
+                    inner: Box::new(left),
+                    offset,
+                });
+            }
+        }
+    }
+
     // Delegate to existing parse_quantity_ref for patterns like
     // "the number of {type} you control", "your devotion to X"
     if let Some(qty) = parse_quantity_ref_with_context(text, ctx) {

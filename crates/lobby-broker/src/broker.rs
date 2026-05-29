@@ -331,6 +331,10 @@ impl Broker {
             }
         };
 
+        if conn.client_hello.is_none() {
+            return vec![error("ClientHello required before any other message")];
+        }
+
         let mut out = Vec::new();
 
         // Re-registration cleanup: drop a previously-owned entry first so a
@@ -983,6 +987,19 @@ mod tests {
             })
             .unwrap();
         assert!(updated_pos < removed_pos, "Updated must precede Removed");
+    }
+
+    #[test]
+    fn create_without_client_hello_is_rejected() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        let out = create(&mut conn, &mut broker, &env);
+        assert!(matches!(
+            out.as_slice(),
+            [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
+        ));
+        assert!(conn.host_game.is_none());
     }
 
     #[test]

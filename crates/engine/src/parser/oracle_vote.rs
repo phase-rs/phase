@@ -19,11 +19,11 @@
 //!   `AbilityDefinition`. Failure to match returns `None`, leaving the caller
 //!   free to fall back to the standard chain parser.
 
-use crate::parser::oracle_nom::error::OracleError;
-use crate::parser::oracle_nom::primitives::scan_split_at_phrase;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
+use crate::parser::oracle_nom::primitives::{parse_number, scan_preceded, scan_split_at_phrase};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_while1};
-use nom::combinator::value;
+use nom::combinator::{map, success, value};
 use nom::Parser;
 
 use crate::types::ability::{
@@ -75,19 +75,45 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
     let mut slots: Vec<Option<Box<AbilityDefinition>>> = (0..choices.len()).map(|_| None).collect();
     let mut walk = i.trim_start();
     while !walk.is_empty() {
-        let (rest, (choice, effect_text, who_chose)) = if is_controller_labels {
-            parse_each_class_clause(walk, &choices)?
+        // Each iteration consumes exactly one per-choice clause. Shapes are
+        // tried in priority order (ControllerLabels is mutually exclusive with
+        // the other two):
+        //   1. ControllerLabels  → "Each <choice> <effect>."         (Battlebond)
+        //   2. "For each <choice> vote, <effect>." / "...who chose..." (classic)
+        //   3. Aggregate tally   → "<effect ...a number of...> equal to
+        //      [<multiplier>] the number of <choice> votes."          (Emissary Green)
+        // `voted_for` records whether the parsed sub-effect must fan out across
+        // the players who chose this option (CR 701.38 + CR 101.4); the
+        // aggregate-tally shape is controller-performed, so it stays `false`.
+        let (rest, idx, mut parsed, voted_for) = if is_controller_labels {
+            let (rest, (choice, effect_text, who_chose)) = parse_each_class_clause(walk, &choices)?;
+            let idx = choices.iter().position(|c| c == &choice)?;
+            let parsed =
+                parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
+            (rest, idx, parsed, who_chose)
+        } else if let Some((rest, (choice, effect_text, who_chose))) =
+            parse_for_each_vote_clause(walk, &choices)
+        {
+            let idx = choices.iter().position(|c| c == &choice)?;
+            let parsed =
+                parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
+            (rest, idx, parsed, who_chose)
         } else {
-            parse_for_each_vote_clause(walk, &choices)?
+            // CR 701.38 + CR 122.1: aggregate-tally shape (Emissary Green). The
+            // per-vote multiplier folds into the sub-effect's fixed count, and
+            // the Vote resolver runs each per-choice sub-effect once per tallied
+            // vote, so `count = multiplier` yields `multiplier × votes` total.
+            let (rest, choice, rewritten) = parse_aggregate_tally_clause(walk, &choices)?;
+            let idx = choices.iter().position(|c| c == &choice)?;
+            let parsed =
+                parse_effect_chain_with_context(&rewritten, kind, &mut ParseContext::default());
+            (rest, idx, parsed, false)
         };
-        let idx = choices.iter().position(|c| c == &choice)?;
         if slots[idx].is_some() {
             // Same choice referenced twice — shape we don't yet model.
             return None;
         }
-        let mut parsed =
-            parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
-        if who_chose || is_controller_labels {
+        if voted_for {
             // CR 701.38 + CR 101.4: Wire the per-vote sub-effect to fan out
             // across the players who received this choice index.
             // - "for each player who chose <choice>, <effect>" (Master of
@@ -373,6 +399,89 @@ fn read_effect_until_next_clause(input: &str) -> (&str, &str) {
     (head_no_period.trim(), tail.trim_start())
 }
 
+/// Parse one aggregate-tally per-choice clause (Emissary Green):
+///
+///   `"<effect ...a number of <X>...> equal to [<multiplier>] the number of <choice> votes."`
+///
+/// Canonical bodies:
+///   * "You create a number of Treasure tokens equal to twice the number of profit votes."
+///   * "Put a number of +1/+1 counters on each creature you control equal to the number of security votes."
+///
+/// The per-vote multiplier ("twice" → 2, "<n> times" → n, absent → 1) folds
+/// into the sub-effect's fixed count. The Vote resolver runs each per-choice
+/// sub-effect once per tallied vote (CR 701.38), so a `count = multiplier`
+/// sub-effect produces `multiplier × votes` total — exactly the aggregate the
+/// Oracle text describes.
+///
+/// Returns `(remainder_after_sentence, choice_lowercase, rewritten_effect_text)`.
+/// `None` when the clause is not in this shape, letting the caller fall through.
+fn parse_aggregate_tally_clause<'a>(
+    input: &'a str,
+    choices: &[String],
+) -> Option<(&'a str, String, String)> {
+    let (sentence, rest) = read_sentence(input);
+    // Locate "equal to [<multiplier>] the number of <choice> votes" at a word
+    // boundary via a single combinator; `scan_preceded` returns the head before
+    // the match, the parsed (choice, multiplier), and the post-match remainder.
+    let suffix = |i: &'a str| -> nom::IResult<&'a str, (String, u32), OracleError<'a>> {
+        let (i, _) = tag_no_case("equal to ").parse(i)?;
+        let (i, multiplier) = parse_tally_multiplier(i)?;
+        let (i, _) = tag_no_case("the number of ").parse(i)?;
+        let (i, choice) =
+            take_while1(|c: char| c.is_alphanumeric() || c == '\'' || c == '-').parse(i)?;
+        if !choices.iter().any(|c| c.eq_ignore_ascii_case(choice)) {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        let (i, _) = tag_no_case(" votes").parse(i)?;
+        Ok((i, (choice.to_lowercase(), multiplier)))
+    };
+    let (head, (choice, multiplier), tail) = scan_preceded(sentence, suffix)?;
+    // The tally clause must be the sentence suffix — reject trailing text we
+    // are not modeling (keeps the detector tight).
+    if !tail.trim().is_empty() {
+        return None;
+    }
+    let rewritten = rewrite_a_number_of(head.trim_end(), multiplier)?;
+    Some((rest, choice, rewritten))
+}
+
+/// Parse the optional per-vote multiplier preceding "the number of <choice>
+/// votes": `"twice "` → 2, `"<n> times "` → n (digit or English word), and an
+/// absent multiplier → 1. Always succeeds so it composes inside the tally
+/// combinator.
+fn parse_tally_multiplier(input: &str) -> OracleResult<'_, u32> {
+    alt((
+        value(2u32, tag_no_case("twice ")),
+        map((parse_number, tag_no_case(" times ")), |(n, _)| n),
+        success(1u32),
+    ))
+    .parse(input)
+}
+
+/// Rewrite an effect head of the form `"...a number of <X>..."` into the
+/// fixed-count imperative `"...<count> <X>..."`, which the standard effect
+/// chain parser maps to a `Fixed` count. Returns `None` when the head lacks the
+/// "a number of " quantity phrase (i.e. not an aggregate-tally effect).
+fn rewrite_a_number_of(head: &str, count: u32) -> Option<String> {
+    let (before, _, after) = scan_preceded(head, |i| {
+        tag_no_case::<_, _, OracleError<'_>>("a number of ").parse(i)
+    })?;
+    Some(format!("{before}{count} {after}"))
+}
+
+/// Split the input at the first period: returns `(sentence, remainder)` with
+/// surrounding whitespace trimmed. The final clause may lack a trailing period,
+/// in which case the whole input is the sentence and the remainder is empty.
+fn read_sentence(input: &str) -> (&str, &str) {
+    match input.find('.') {
+        Some(idx) => (input[..idx].trim(), input[idx + 1..].trim_start()),
+        None => (input.trim(), ""),
+    }
+}
+
 /// Read a word (alphanumeric + apostrophes). Returns (word, remainder).
 fn read_word(input: &str) -> Option<(&str, &str)> {
     let end = input
@@ -651,6 +760,108 @@ mod tests {
     #[test]
     fn rejects_non_vote_text() {
         assert!(parse_vote_block("Draw a card.", AbilityKind::Spell).is_none());
+    }
+
+    /// CR 701.38 + CR 122.1: Emissary Green's aggregate-tally vote. The
+    /// per-choice effects reference the vote count via "a number of … equal to
+    /// [twice] the number of <choice> votes" rather than the classic "For each
+    /// <choice> vote, …" repetition. Each per-choice sub-effect must carry a
+    /// fixed count equal to the multiplier (the Vote resolver runs it once per
+    /// tallied vote), and must NOT be VotedFor-scoped (controller-performed).
+    #[test]
+    fn parses_emissary_green_aggregate_vote_block() {
+        use crate::types::ability::QuantityExpr;
+        let text = "starting with you, each player votes for profit or security. \
+                    You create a number of Treasure tokens equal to twice the number of profit votes. \
+                    Put a number of +1/+1 counters on each creature you control equal to the number of security votes.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
+        match *def.effect {
+            Effect::Vote {
+                ref choices,
+                ref per_choice_effect,
+                starting_with,
+                voter_scope,
+            } => {
+                assert_eq!(choices, &vec!["profit".to_string(), "security".to_string()]);
+                assert_eq!(starting_with, ControllerRef::You);
+                assert_eq!(voter_scope, VoterScope::AllPlayers);
+                assert_eq!(per_choice_effect.len(), 2);
+
+                // profit → "create Treasure tokens", count = 2 (the "twice"
+                // multiplier), so each profit vote makes 2 Treasures.
+                match &*per_choice_effect[0].effect {
+                    Effect::Token { name, count, .. } => {
+                        assert_eq!(name, "Treasure");
+                        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+                    }
+                    other => panic!("expected profit → Token, got {:?}", other),
+                }
+                // security → "put +1/+1 counters on each creature you control",
+                // count = 1, so each security vote adds one counter to each.
+                match &*per_choice_effect[1].effect {
+                    Effect::PutCounterAll { count, target, .. } => {
+                        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                        match target {
+                            TargetFilter::Typed(tf) => {
+                                assert_eq!(tf.controller, Some(ControllerRef::You));
+                                assert!(
+                                    tf.type_filters.iter().any(|t| matches!(
+                                        t,
+                                        crate::types::ability::TypeFilter::Creature
+                                    )),
+                                    "expected a Creature type filter, got {:?}",
+                                    tf.type_filters
+                                );
+                            }
+                            other => panic!("expected Typed creature target, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected security → PutCounterAll, got {:?}", other),
+                }
+
+                // Controller-performed: no per-voter fan-out wiring.
+                assert!(per_choice_effect[0].player_scope.is_none());
+                assert!(per_choice_effect[1].player_scope.is_none());
+            }
+            other => panic!("expected Vote, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_tally_multiplier_covers_twice_times_and_default() {
+        // "twice " → 2
+        let (rest, m) = parse_tally_multiplier("twice the number of profit votes").unwrap();
+        assert_eq!(m, 2);
+        assert_eq!(rest, "the number of profit votes");
+        // "three times " → 3 (English word via parse_number)
+        let (rest, m) = parse_tally_multiplier("three times the number of x votes").unwrap();
+        assert_eq!(m, 3);
+        assert_eq!(rest, "the number of x votes");
+        // "4 times " → 4 (digit)
+        let (_, m) = parse_tally_multiplier("4 times the number of x votes").unwrap();
+        assert_eq!(m, 4);
+        // absent → 1, consuming nothing
+        let (rest, m) = parse_tally_multiplier("the number of security votes").unwrap();
+        assert_eq!(m, 1);
+        assert_eq!(rest, "the number of security votes");
+    }
+
+    #[test]
+    fn rewrite_a_number_of_inserts_fixed_count() {
+        assert_eq!(
+            rewrite_a_number_of("You create a number of Treasure tokens", 2).unwrap(),
+            "You create 2 Treasure tokens"
+        );
+        assert_eq!(
+            rewrite_a_number_of(
+                "Put a number of +1/+1 counters on each creature you control",
+                1
+            )
+            .unwrap(),
+            "Put 1 +1/+1 counters on each creature you control"
+        );
+        // No "a number of " phrase → not an aggregate-tally effect.
+        assert!(rewrite_a_number_of("create a Treasure token", 1).is_none());
     }
 
     /// CR 608.2c + CR 701.38: Documented parser gap (R5 in the
