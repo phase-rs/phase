@@ -5893,7 +5893,7 @@ mod tests {
         }
 
         // (2) + (3) rider PutCounter targets the event recipient with
-        // EventContextAmount (driven by the per-1-damage repeat).
+        // EventContextAmount on the `count` field.
         let execute = def.execute.as_ref().expect("execute present");
         match &*execute.effect {
             Effect::PutCounter {
@@ -5903,21 +5903,19 @@ mod tests {
             } => {
                 assert_eq!(*counter_type, CounterType::Plus1Plus1);
                 assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
-                let repeat_or_count_uses_event_amount = matches!(
-                    execute.repeat_for,
-                    Some(QuantityExpr::Ref {
-                        qty: QuantityRef::EventContextAmount
-                    })
-                ) || matches!(
-                    count,
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::EventContextAmount
-                    }
-                );
+                // The suffix-form for-each ("... for each 1 damage prevented
+                // this way") lands the prevented amount on the PutCounter
+                // `count` field via `try_parse_for_each_effect`, so pin the
+                // exact field rather than accepting an either/or shape.
                 assert!(
-                    repeat_or_count_uses_event_amount,
-                    "expected either repeat_for or count to be EventContextAmount; got repeat_for={:?}, count={:?}",
-                    execute.repeat_for, count
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }
+                    ),
+                    "expected count to be EventContextAmount; got count={count:?}, repeat_for={:?}",
+                    execute.repeat_for
                 );
             }
             other => panic!("expected Effect::PutCounter, got {other:?}"),
