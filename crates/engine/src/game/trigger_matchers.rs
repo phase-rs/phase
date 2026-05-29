@@ -2472,8 +2472,9 @@ pub(super) fn match_damage_received(
         }
         match target {
             TargetRef::Object(target_id) => {
-                // CR 120.3: Player-scoped triggers ("you're dealt damage") must not
-                // fire when the trigger source object takes damage.
+                // CR 603.2 + CR 120.1: a player-scoped trigger ("you're dealt
+                // damage") matches only player-recipient events, not damage to
+                // the source object.
                 if trigger.valid_card.is_none() && trigger.valid_target.is_some() {
                     return false;
                 }
@@ -2482,8 +2483,9 @@ pub(super) fn match_damage_received(
                     && valid_source_matches(trigger, state, *damage_source_id, source_id)
             }
             TargetRef::Player(pid) => {
-                // CR 120.3: Object-scoped triggers ("~ is dealt damage", Enrage) must
-                // not fire when the controller takes damage.
+                // CR 603.2 + CR 120.1: an object-scoped trigger ("~ is dealt
+                // damage", Enrage) matches only permanent-recipient events, not
+                // damage to the controller.
                 if trigger.valid_card.is_some() {
                     return false;
                 }
