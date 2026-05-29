@@ -11786,9 +11786,9 @@ mod tests {
         }
     }
 
-    /// CR 603.7c + CR 120.3 + CR 119.3: Unstoppable Slasher — "Whenever this
+    /// CR 120.3a + CR 119.3: Unstoppable Slasher — "Whenever this
     /// creature deals combat damage to a player, they lose half their life,
-    /// rounded up." is an event-bound (non-targeted) trigger per CR 603.6f.
+    /// rounded up." is an event-bound (non-targeted) trigger per CR 115.10a.
     /// "they" must resolve to `TriggeringPlayer` (the damaged player), and the
     /// half-life amount must read `PlayerScope::ScopedPlayer`, NOT the
     /// targeting `PlayerScope::Target` (which has no chosen target on an

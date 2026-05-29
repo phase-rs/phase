@@ -188,29 +188,35 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         ),
     };
 
-    // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" /
+    // CR 120.3a + CR 115.10a + CR 506.2: A "deals [combat] damage to a player" /
     // "attacks a player" trigger introduces the damaged/attacked player as the
-    // event referent. Stamp it onto the resolving ability's `scoped_player`
-    // (when not already bound) so `PlayerScope::ScopedPlayer` quantities such as
-    // "they lose half their life, rounded up" (Unstoppable Slasher) resolve
-    // against that player rather than falling back to the source's controller.
-    // Mirrors the Phase-trigger stamping in `triggers::build_triggered_ability`;
-    // the parser rebinds these possessives to `ScopedPlayer` in
-    // `lower_trigger_ir`.
-    if let Some(ability) = ability.as_mut() {
-        if ability.scoped_player.is_none() {
-            if let Some(pid) = state.current_trigger_event.as_ref().and_then(|event| {
-                matches!(
-                    event,
-                    GameEvent::DamageDealt {
-                        target: TargetRef::Player(_),
-                        ..
-                    } | GameEvent::AttackersDeclared { .. }
-                )
-                .then(|| targeting::extract_player_from_event(event, state))
-                .flatten()
-            }) {
-                ability.set_scoped_player_recursive(pid);
+    // event referent. Per CR 120.3a damage to a player makes that player lose
+    // life, and per CR 115.10a the player is not a *target* — so "they"/"their"
+    // binds to the event's player, not a chosen target. Stamp it onto the
+    // resolving ability's `scoped_player` (when not already bound) so
+    // `PlayerScope::ScopedPlayer` quantities such as "they lose half their life,
+    // rounded up" (Unstoppable Slasher) resolve against that player rather than
+    // falling back to the source's controller. Mirrors the Phase-trigger
+    // stamping in `triggers::build_triggered_ability`; the parser rebinds these
+    // possessives to `ScopedPlayer` in `lower_trigger_ir`. Gated on
+    // `TriggeredAbility` because only triggered abilities carry an event
+    // referent in `current_trigger_event`.
+    if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
+        if let Some(ability) = ability.as_mut() {
+            if ability.scoped_player.is_none() {
+                if let Some(pid) = state.current_trigger_event.as_ref().and_then(|event| {
+                    matches!(
+                        event,
+                        GameEvent::DamageDealt {
+                            target: TargetRef::Player(_),
+                            ..
+                        } | GameEvent::AttackersDeclared { .. }
+                    )
+                    .then(|| targeting::extract_player_from_event(event, state))
+                    .flatten()
+                }) {
+                    ability.set_scoped_player_recursive(pid);
+                }
             }
         }
     }

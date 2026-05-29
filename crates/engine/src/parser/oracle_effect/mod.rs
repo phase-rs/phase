@@ -11536,13 +11536,13 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 603.7c + CR 119.3 + CR 120.3: Rebind the event-bound player possessive
+/// CR 120.3a + CR 119.3 + CR 115.10a: Rebind the event-bound player possessive
 /// inside a "deals [combat] damage to a player" / "attacks a player" trigger
 /// body from the *targeting* reading (`PlayerScope::Target`, emitted by the
 /// generic "their life" / "their hand" possessive parser) to the
 /// *event* reading (`PlayerScope::ScopedPlayer`).
 ///
-/// These triggers are NOT targeted (CR 603.6f): "they"/"their" binds to the
+/// These triggers are NOT targeted (CR 115.10a): "they"/"their" binds to the
 /// damaged/attacked player carried on the triggering event, which the engine
 /// stamps onto `ResolvedAbility::scoped_player` at resolution. Without this
 /// rewrite, "they lose half their life" parses its amount as
