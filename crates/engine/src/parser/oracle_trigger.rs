@@ -2299,6 +2299,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone

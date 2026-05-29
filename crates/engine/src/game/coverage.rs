@@ -5268,6 +5268,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
+        StaticCondition::RecipientMatchesFilter { .. } => ("RecipientMatchesFilter", Handled),
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
