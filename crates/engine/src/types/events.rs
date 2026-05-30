@@ -87,6 +87,8 @@ pub enum PlayerActionKind {
     ShuffledLibrary,
     /// CR 701.34a: A player proliferated.
     Proliferate,
+    /// CR 701.16a: A player investigated (created a Clue token).
+    Investigate,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.

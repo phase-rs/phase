@@ -26,7 +26,7 @@
     "crates/engine/src/types/card_type.rs"
   ],
   "enum_count": 245,
-  "variant_count": 2774,
+  "variant_count": 2775,
   "smell_summary": [
     {
       "enum_name": "AbilityCondition",
@@ -3769,7 +3769,7 @@
     },
     "ClashResult": {
       "file": "crates/engine/src/types/events.rs",
-      "line": 94,
+      "line": 96,
       "doc": "CR 701.30d: Result of a clash — whether the controller won, lost, or tied.",
       "cr_refs": [
         "CR 701.30d"
@@ -3777,7 +3777,7 @@
       "variants": [
         {
           "name": "Won",
-          "line": 95,
+          "line": 97,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -3785,7 +3785,7 @@
         },
         {
           "name": "Lost",
-          "line": 96,
+          "line": 98,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -3793,7 +3793,7 @@
         },
         {
           "name": "Tied",
-          "line": 97,
+          "line": 99,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -7154,9 +7154,9 @@
           "line": 5508,
           "kind": "unit",
           "field_names": [],
-          "doc": "CR 702.136: Investigate — create a Clue artifact token.",
+          "doc": "CR 701.16: Investigate — create a Clue token.",
           "cr_refs": [
-            "CR 702.136"
+            "CR 701.16"
           ]
         },
         {
@@ -12616,13 +12616,13 @@
     },
     "GameEvent": {
       "file": "crates/engine/src/types/events.rs",
-      "line": 102,
+      "line": 104,
       "doc": "",
       "cr_refs": [],
       "variants": [
         {
           "name": "GameStarted",
-          "line": 103,
+          "line": 105,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -12630,7 +12630,7 @@
         },
         {
           "name": "TurnStarted",
-          "line": 104,
+          "line": 106,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12641,7 +12641,7 @@
         },
         {
           "name": "PhaseChanged",
-          "line": 108,
+          "line": 110,
           "kind": "struct",
           "field_names": [
             "phase"
@@ -12651,7 +12651,7 @@
         },
         {
           "name": "PriorityPassed",
-          "line": 111,
+          "line": 113,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -12661,7 +12661,7 @@
         },
         {
           "name": "SpellCast",
-          "line": 114,
+          "line": 116,
           "kind": "struct",
           "field_names": [
             "card_id",
@@ -12673,7 +12673,7 @@
         },
         {
           "name": "SpellCopied",
-          "line": 123,
+          "line": 125,
           "kind": "struct",
           "field_names": [
             "card_id",
@@ -12688,7 +12688,7 @@
         },
         {
           "name": "XValueChosen",
-          "line": 131,
+          "line": 133,
           "kind": "struct",
           "field_names": [
             "player",
@@ -12703,7 +12703,7 @@
         },
         {
           "name": "AbilityActivated",
-          "line": 145,
+          "line": 147,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12717,7 +12717,7 @@
         },
         {
           "name": "ZoneChanged",
-          "line": 161,
+          "line": 163,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -12733,7 +12733,7 @@
         },
         {
           "name": "LifeChanged",
-          "line": 170,
+          "line": 172,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12744,7 +12744,7 @@
         },
         {
           "name": "ManaAdded",
-          "line": 174,
+          "line": 176,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12757,7 +12757,7 @@
         },
         {
           "name": "TappedForMana",
-          "line": 190,
+          "line": 192,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12774,7 +12774,7 @@
         },
         {
           "name": "ManaPoolEmptied",
-          "line": 206,
+          "line": 208,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12790,7 +12790,7 @@
         },
         {
           "name": "ManaRecolored",
-          "line": 214,
+          "line": 216,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12805,7 +12805,7 @@
         },
         {
           "name": "PermanentTapped",
-          "line": 219,
+          "line": 221,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -12816,7 +12816,7 @@
         },
         {
           "name": "CreatureExerted",
-          "line": 229,
+          "line": 231,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -12829,7 +12829,7 @@
         },
         {
           "name": "PlayerLost",
-          "line": 232,
+          "line": 234,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -12839,7 +12839,7 @@
         },
         {
           "name": "MulliganStarted",
-          "line": 235,
+          "line": 237,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -12847,7 +12847,7 @@
         },
         {
           "name": "CardsDrawn",
-          "line": 236,
+          "line": 238,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12858,7 +12858,7 @@
         },
         {
           "name": "CardDrawn",
-          "line": 240,
+          "line": 242,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12871,7 +12871,7 @@
         },
         {
           "name": "PermanentUntapped",
-          "line": 257,
+          "line": 259,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -12881,7 +12881,7 @@
         },
         {
           "name": "PermanentPhasedOut",
-          "line": 263,
+          "line": 265,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -12895,7 +12895,7 @@
         },
         {
           "name": "PermanentPhasedIn",
-          "line": 269,
+          "line": 271,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -12907,7 +12907,7 @@
         },
         {
           "name": "PlayerPhasedOut",
-          "line": 277,
+          "line": 279,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -12919,7 +12919,7 @@
         },
         {
           "name": "PlayerPhasedIn",
-          "line": 282,
+          "line": 284,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -12929,7 +12929,7 @@
         },
         {
           "name": "LandPlayed",
-          "line": 285,
+          "line": 287,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -12941,7 +12941,7 @@
         },
         {
           "name": "StackPushed",
-          "line": 290,
+          "line": 292,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -12951,7 +12951,7 @@
         },
         {
           "name": "StackResolved",
-          "line": 293,
+          "line": 295,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -12961,7 +12961,7 @@
         },
         {
           "name": "Discarded",
-          "line": 296,
+          "line": 298,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -12972,7 +12972,7 @@
         },
         {
           "name": "DamageCleared",
-          "line": 300,
+          "line": 302,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -12982,7 +12982,7 @@
         },
         {
           "name": "GameOver",
-          "line": 303,
+          "line": 305,
           "kind": "struct",
           "field_names": [
             "winner"
@@ -12992,7 +12992,7 @@
         },
         {
           "name": "DamageDealt",
-          "line": 306,
+          "line": 308,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13006,7 +13006,7 @@
         },
         {
           "name": "DamagePrevented",
-          "line": 317,
+          "line": 319,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13020,7 +13020,7 @@
         },
         {
           "name": "SpellCountered",
-          "line": 322,
+          "line": 324,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13031,7 +13031,7 @@
         },
         {
           "name": "CounterAdded",
-          "line": 326,
+          "line": 328,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13043,7 +13043,7 @@
         },
         {
           "name": "Evolved",
-          "line": 333,
+          "line": 335,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13055,7 +13055,7 @@
         },
         {
           "name": "CounterRemoved",
-          "line": 336,
+          "line": 338,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13067,7 +13067,7 @@
         },
         {
           "name": "TokenCreated",
-          "line": 341,
+          "line": 343,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13078,7 +13078,7 @@
         },
         {
           "name": "ObjectConjured",
-          "line": 346,
+          "line": 348,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13089,7 +13089,7 @@
         },
         {
           "name": "CreatureDestroyed",
-          "line": 350,
+          "line": 352,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13099,7 +13099,7 @@
         },
         {
           "name": "PermanentSacrificed",
-          "line": 353,
+          "line": 355,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13110,7 +13110,7 @@
         },
         {
           "name": "EffectResolved",
-          "line": 357,
+          "line": 359,
           "kind": "struct",
           "field_names": [
             "kind",
@@ -13121,7 +13121,7 @@
         },
         {
           "name": "Unattached",
-          "line": 363,
+          "line": 365,
           "kind": "struct",
           "field_names": [
             "attachment_id",
@@ -13134,7 +13134,7 @@
         },
         {
           "name": "AttackersDeclared",
-          "line": 367,
+          "line": 369,
           "kind": "struct",
           "field_names": [
             "attacker_ids",
@@ -13146,7 +13146,7 @@
         },
         {
           "name": "BlockersDeclared",
-          "line": 374,
+          "line": 376,
           "kind": "struct",
           "field_names": [
             "assignments"
@@ -13156,7 +13156,7 @@
         },
         {
           "name": "CombatTaxPaid",
-          "line": 379,
+          "line": 381,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13170,7 +13170,7 @@
         },
         {
           "name": "CombatTaxDeclined",
-          "line": 385,
+          "line": 387,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13184,7 +13184,7 @@
         },
         {
           "name": "BecomesTarget",
-          "line": 389,
+          "line": 391,
           "kind": "struct",
           "field_names": [
             "target",
@@ -13195,7 +13195,7 @@
         },
         {
           "name": "VehicleCrewed",
-          "line": 395,
+          "line": 397,
           "kind": "struct",
           "field_names": [
             "vehicle_id",
@@ -13208,7 +13208,7 @@
         },
         {
           "name": "Stationed",
-          "line": 405,
+          "line": 407,
           "kind": "struct",
           "field_names": [
             "spacecraft_id",
@@ -13222,7 +13222,7 @@
         },
         {
           "name": "Saddled",
-          "line": 415,
+          "line": 417,
           "kind": "struct",
           "field_names": [
             "mount_id",
@@ -13235,7 +13235,7 @@
         },
         {
           "name": "ReplacementApplied",
-          "line": 419,
+          "line": 421,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13246,7 +13246,7 @@
         },
         {
           "name": "Transformed",
-          "line": 423,
+          "line": 425,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13256,7 +13256,7 @@
         },
         {
           "name": "DayNightChanged",
-          "line": 426,
+          "line": 428,
           "kind": "struct",
           "field_names": [
             "new_state"
@@ -13266,7 +13266,7 @@
         },
         {
           "name": "TurnedFaceUp",
-          "line": 429,
+          "line": 431,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13276,7 +13276,7 @@
         },
         {
           "name": "CardsRevealed",
-          "line": 432,
+          "line": 434,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13288,7 +13288,7 @@
         },
         {
           "name": "CombatDamageDealtToPlayer",
-          "line": 438,
+          "line": 440,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13300,7 +13300,7 @@
         },
         {
           "name": "PlayerEliminated",
-          "line": 464,
+          "line": 466,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13310,7 +13310,7 @@
         },
         {
           "name": "CrimeCommitted",
-          "line": 467,
+          "line": 469,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13320,7 +13320,7 @@
         },
         {
           "name": "Cycled",
-          "line": 470,
+          "line": 472,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13331,7 +13331,7 @@
         },
         {
           "name": "PlayerPerformedAction",
-          "line": 474,
+          "line": 476,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13342,7 +13342,7 @@
         },
         {
           "name": "Regenerated",
-          "line": 479,
+          "line": 481,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13354,7 +13354,7 @@
         },
         {
           "name": "CreatureSuspected",
-          "line": 483,
+          "line": 485,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13366,7 +13366,7 @@
         },
         {
           "name": "Detained",
-          "line": 490,
+          "line": 492,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13378,7 +13378,7 @@
         },
         {
           "name": "BecamePrepared",
-          "line": 496,
+          "line": 498,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13390,7 +13390,7 @@
         },
         {
           "name": "BecameUnprepared",
-          "line": 502,
+          "line": 504,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13402,7 +13402,7 @@
         },
         {
           "name": "CaseSolved",
-          "line": 506,
+          "line": 508,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13414,7 +13414,7 @@
         },
         {
           "name": "ClassLevelGained",
-          "line": 510,
+          "line": 512,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13427,7 +13427,7 @@
         },
         {
           "name": "MonarchChanged",
-          "line": 515,
+          "line": 517,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13439,7 +13439,7 @@
         },
         {
           "name": "CityBlessingGained",
-          "line": 519,
+          "line": 521,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13451,7 +13451,7 @@
         },
         {
           "name": "DieRolled",
-          "line": 523,
+          "line": 525,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13465,7 +13465,7 @@
         },
         {
           "name": "CoinFlipped",
-          "line": 529,
+          "line": 531,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13478,7 +13478,7 @@
         },
         {
           "name": "RingTemptsYou",
-          "line": 534,
+          "line": 536,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13490,7 +13490,7 @@
         },
         {
           "name": "RoomEntered",
-          "line": 538,
+          "line": 540,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13505,7 +13505,7 @@
         },
         {
           "name": "RoomDoorUnlocked",
-          "line": 545,
+          "line": 547,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13520,7 +13520,7 @@
         },
         {
           "name": "BecomesPlotted",
-          "line": 552,
+          "line": 554,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13533,7 +13533,7 @@
         },
         {
           "name": "DungeonCompleted",
-          "line": 557,
+          "line": 559,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13546,7 +13546,7 @@
         },
         {
           "name": "InitiativeTaken",
-          "line": 562,
+          "line": 564,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13558,7 +13558,7 @@
         },
         {
           "name": "Firebend",
-          "line": 566,
+          "line": 568,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13569,7 +13569,7 @@
         },
         {
           "name": "Airbend",
-          "line": 571,
+          "line": 573,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13580,7 +13580,7 @@
         },
         {
           "name": "Earthbend",
-          "line": 576,
+          "line": 578,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13591,7 +13591,7 @@
         },
         {
           "name": "Waterbend",
-          "line": 581,
+          "line": 583,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13602,7 +13602,7 @@
         },
         {
           "name": "CompanionRevealed",
-          "line": 586,
+          "line": 588,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13615,7 +13615,7 @@
         },
         {
           "name": "CompanionMovedToHand",
-          "line": 591,
+          "line": 593,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13628,7 +13628,7 @@
         },
         {
           "name": "NinjutsuActivated",
-          "line": 598,
+          "line": 600,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13641,7 +13641,7 @@
         },
         {
           "name": "KeywordAbilityActivated",
-          "line": 608,
+          "line": 610,
           "kind": "struct",
           "field_names": [
             "ability_tag",
@@ -13658,7 +13658,7 @@
         },
         {
           "name": "CreatureExploited",
-          "line": 616,
+          "line": 618,
           "kind": "struct",
           "field_names": [
             "exploiter",
@@ -13671,7 +13671,7 @@
         },
         {
           "name": "EnergyChanged",
-          "line": 621,
+          "line": 623,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13684,7 +13684,7 @@
         },
         {
           "name": "SpeedChanged",
-          "line": 626,
+          "line": 628,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13698,7 +13698,7 @@
         },
         {
           "name": "PlayerCounterChanged",
-          "line": 632,
+          "line": 634,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13712,7 +13712,7 @@
         },
         {
           "name": "ManaExpended",
-          "line": 638,
+          "line": 640,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13726,7 +13726,7 @@
         },
         {
           "name": "Clash",
-          "line": 644,
+          "line": 646,
           "kind": "struct",
           "field_names": [
             "controller",
@@ -13742,7 +13742,7 @@
         },
         {
           "name": "VoteCast",
-          "line": 655,
+          "line": 657,
           "kind": "struct",
           "field_names": [
             "voter",
@@ -13756,7 +13756,7 @@
         },
         {
           "name": "VoteResolved",
-          "line": 663,
+          "line": 665,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13769,7 +13769,7 @@
         },
         {
           "name": "PowerToughnessChanged",
-          "line": 669,
+          "line": 671,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13783,7 +13783,7 @@
         },
         {
           "name": "CascadeMissed",
-          "line": 680,
+          "line": 682,
           "kind": "struct",
           "field_names": [
             "controller",
@@ -13797,7 +13797,7 @@
         },
         {
           "name": "DebugActionUsed",
-          "line": 688,
+          "line": 690,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13808,7 +13808,7 @@
         },
         {
           "name": "DebugPermissionGranted",
-          "line": 694,
+          "line": 696,
           "kind": "struct",
           "field_names": [
             "host",
@@ -13819,7 +13819,7 @@
         },
         {
           "name": "DebugPermissionRevoked",
-          "line": 699,
+          "line": 701,
           "kind": "struct",
           "field_names": [
             "host",
@@ -20530,6 +20530,16 @@
           "doc": "CR 701.34a: A player proliferated.",
           "cr_refs": [
             "CR 701.34a"
+          ]
+        },
+        {
+          "name": "Investigate",
+          "line": 91,
+          "kind": "unit",
+          "field_names": [],
+          "doc": "CR 701.16a: A player investigated (created a Clue token).",
+          "cr_refs": [
+            "CR 701.16a"
           ]
         }
       ],

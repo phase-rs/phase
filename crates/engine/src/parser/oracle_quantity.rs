@@ -382,6 +382,20 @@ pub(crate) fn parse_quantity_ref_with_context(
                 return Some(QuantityRef::PlayerCount { filter });
             }
         }
+        // CR 608.2c + CR 109.5: "the number of [population] who [verb]ed … this
+        // way" — the count of players who performed the preceding optional
+        // action (Wernog's "the number of opponents who investigated this way").
+        // Shares the verb-dispatched combinator with the for-each path above, so
+        // search and investigate (and any future verb) stay one building block.
+        // Tried before the generic ObjectCount fall-through so the player
+        // population — not battlefield permanents — is counted.
+        if let Ok((remainder, (relation, action))) = parse_action_this_way(rest) {
+            if remainder.trim().is_empty() {
+                return Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PerformedActionThisWay { relation, action },
+                });
+            }
+        }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
         // including the empty-shaped form (no `type_filters`, no `controller`, no
@@ -1666,19 +1680,50 @@ fn target_hand_card_filter(
     })
 }
 
-/// CR 608.2c + CR 109.5: Recognize "opponent who searched their library this
-/// way" as a player-action quantity. The runtime accumulator is keyed by
+/// CR 608.2c + CR 109.5: Recognize "[population] who [verb]ed [this way]" as a
+/// player-action quantity, returning the player relation and the action that
+/// keys the runtime accumulator. The runtime accumulator is keyed by
 /// `GameEvent::PlayerPerformedAction`, not by zone changes, so it still counts
-/// a player who searched and failed to find.
-fn parse_opponent_searched_library_this_way(
+/// a player who performed the action without an observable board result (e.g.
+/// searched and failed to find).
+///
+/// Nesting: the population word ("opponent(s)"/"player(s)") fixes the relation,
+/// then the shared `"who "` prefix dispatches on the verb arm. The search arm
+/// carries an object-noun ("searched their library"); the investigate arm is
+/// object-less ("investigated"). Composed entirely from `alt`/`value`/`tag` —
+/// no permutation enumeration.
+fn parse_action_this_way(
     input: &str,
-) -> nom::IResult<&str, (), OracleError<'_>> {
-    let (input, _) = tag("opponent who ").parse(input)?;
+) -> nom::IResult<&str, (PlayerRelation, PlayerActionKind), OracleError<'_>> {
+    let (input, relation) = alt((
+        value(PlayerRelation::Opponent, tag("opponents ")),
+        value(PlayerRelation::Opponent, tag("opponent ")),
+        value(PlayerRelation::All, tag("players ")),
+        value(PlayerRelation::All, tag("player ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("who ").parse(input)?;
+    let (input, action) = alt((parse_searched_arm, parse_investigated_arm)).parse(input)?;
+    let (input, _) = tag(" this way").parse(input)?;
+    Ok((input, (relation, action)))
+}
+
+/// "searches/searched a/their library" → `SearchedLibrary` (Tempting Offer cycle).
+fn parse_searched_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
     let (input, _) = alt((tag("searches"), tag("searched"))).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
     let (input, _) = alt((tag("a "), tag("their "))).parse(input)?;
-    let (input, _) = tag("library this way").parse(input)?;
-    Ok((input, ()))
+    let (input, _) = tag("library").parse(input)?;
+    Ok((input, PlayerActionKind::SearchedLibrary))
+}
+
+/// "investigates/investigated" → `Investigate` (Wernog, Rider's Chaplain).
+fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
+    value(
+        PlayerActionKind::Investigate,
+        alt((tag("investigates"), tag("investigated"))),
+    )
+    .parse(input)
 }
 
 /// Parse the clause after "for each" into a QuantityRef.
@@ -1746,20 +1791,18 @@ fn parse_for_each_clause_with_they_controller(
         if lower == "1 damage prevented this way" || lower == "damage prevented this way" {
             return Some(QuantityRef::EventContextAmount);
         }
-        // CR 608.2c + CR 109.5: "opponent who searches/searched [a/their] library
-        // this way" — Tempting Offer cycle's bonus-tutor-per-accepting-opponent
-        // step. A single nom combinator handles all four (verb tense × article)
-        // permutations, returning a player-count quantity rather than the
-        // object-count `TrackedSetSize` fallback below. Must be tried before that
-        // fallback because every "opponent who … this way" clause does contain
-        // "this way".
-        if let Ok((rest, ())) = parse_opponent_searched_library_this_way(lower.as_str()) {
+        // CR 608.2c + CR 109.5: "[population] who [verb]ed … this way" — the
+        // Tempting Offer cycle's bonus-tutor-per-accepting-opponent step and
+        // Wernog's bonus-investigate-per-investigating-opponent step. A single
+        // verb-dispatched combinator handles every (population × verb tense ×
+        // article) permutation, returning a player-count quantity rather than
+        // the object-count `TrackedSetSize` fallback below. Must be tried before
+        // that fallback because every "[population] who … this way" clause does
+        // contain "this way".
+        if let Ok((rest, (relation, action))) = parse_action_this_way(lower.as_str()) {
             if rest.is_empty() {
                 return Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::PerformedActionThisWay {
-                        relation: PlayerRelation::Opponent,
-                        action: PlayerActionKind::SearchedLibrary,
-                    },
+                    filter: PlayerFilter::PerformedActionThisWay { relation, action },
                 });
             }
         }
@@ -4094,6 +4137,50 @@ mod tests {
                 filter: PlayerFilter::PerformedActionThisWay {
                     relation: PlayerRelation::Opponent,
                     action: PlayerActionKind::SearchedLibrary,
+                },
+            }
+        );
+    }
+
+    /// CR 608.2c + CR 109.5 + CR 701.16a: Wernog, Rider's Chaplain — "the number
+    /// of opponents who investigated this way" must count the player population
+    /// that performed the optional `Investigate`, NOT battlefield objects. The
+    /// verb-dispatched combinator shared with the search-this-way path returns
+    /// `PerformedActionThisWay { Opponent, Investigate }`.
+    #[test]
+    fn the_number_of_opponents_who_investigated_this_way_is_player_count() {
+        let qty = parse_quantity_ref("the number of opponents who investigated this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::Investigate,
+                },
+            }
+        );
+    }
+
+    /// CR 604.3 + CR 609.3: Wernog's full repeat count "one plus the number of
+    /// opponents who investigated this way" composes the "N plus" Offset arm
+    /// over the inner player-action count. Before the inner resolved, the whole
+    /// phrase collapsed to an opaque `Variable`.
+    #[test]
+    fn one_plus_opponents_who_investigated_this_way_is_offset_player_count() {
+        let expr = parse_cda_quantity("one plus the number of opponents who investigated this way")
+            .unwrap();
+        let QuantityExpr::Offset { inner, offset } = expr else {
+            panic!("expected Offset, got {expr:?}");
+        };
+        assert_eq!(offset, 1);
+        assert_eq!(
+            *inner,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PerformedActionThisWay {
+                        relation: PlayerRelation::Opponent,
+                        action: PlayerActionKind::Investigate,
+                    },
                 },
             }
         );

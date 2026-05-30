@@ -5504,7 +5504,7 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         filter: TargetFilter,
     },
-    /// CR 702.136: Investigate — create a Clue artifact token.
+    /// CR 701.16: Investigate — create a Clue token.
     Investigate,
     /// CR 702.104a: Tribute — "As this creature enters, an opponent of your choice may
     /// put N +1/+1 counters on it." The chosen opponent (persisted on the source as
