@@ -11544,6 +11544,7 @@ mod bloodthirst_runtime_tests {
             target_controller: PlayerId(1),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
@@ -11590,6 +11591,7 @@ mod bloodthirst_runtime_tests {
                 target_controller: PlayerId(1),
                 amount: 2,
                 is_combat: false,
+                ..Default::default()
             },
             DamageRecord {
                 source_id,
@@ -11598,6 +11600,7 @@ mod bloodthirst_runtime_tests {
                 target_controller: PlayerId(1),
                 amount: 3,
                 is_combat: true,
+                ..Default::default()
             },
             DamageRecord {
                 source_id,
@@ -11606,6 +11609,7 @@ mod bloodthirst_runtime_tests {
                 target_controller: PlayerId(0),
                 amount: 7,
                 is_combat: false,
+                ..Default::default()
             },
         ]);
 
@@ -11639,6 +11643,7 @@ mod bloodthirst_runtime_tests {
             target_controller: PlayerId(1),
             amount: 4,
             is_combat: true,
+            ..Default::default()
         });
         state.objects.remove(&source_id);
 
@@ -11677,6 +11682,7 @@ mod bloodthirst_runtime_tests {
             target_controller: PlayerId(1),
             amount: 4,
             is_combat: false,
+            ..Default::default()
         });
 
         let obj = state.objects.get(&obj_id).expect("object exists");
@@ -11719,6 +11725,7 @@ mod bloodthirst_runtime_tests {
             target_controller: third_player,
             amount: 2,
             is_combat: false,
+            ..Default::default()
         });
 
         let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
@@ -11752,6 +11759,7 @@ mod bloodthirst_runtime_tests {
             target_controller: PlayerId(1),
             amount: 1,
             is_combat: true,
+            ..Default::default()
         });
 
         // Install Hardened Scales as a battlefield object.
@@ -11805,6 +11813,7 @@ mod bloodthirst_runtime_tests {
             target_controller: PlayerId(1),
             amount: 2,
             is_combat: true,
+            ..Default::default()
         });
 
         // Advance to the next turn via the real engine path that clears

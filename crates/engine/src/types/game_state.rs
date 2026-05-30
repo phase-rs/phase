@@ -509,6 +509,14 @@ pub struct ChosenDamageSource {
 }
 
 /// CR 120.1: Snapshot of a damage event for "was dealt damage by" queries.
+///
+/// CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
+/// (look-back; criteria need not still hold). Queries such as "opponents who
+/// were dealt combat damage by ~ or a Dragon this turn" (Estinien Varlineau)
+/// must match the source's qualities *as they were when damage was dealt* — the
+/// source may have since changed type, left the battlefield, or been removed.
+/// The `source_*` snapshot fields mirror `CounterAddedRecord`'s event-time
+/// characteristic capture and feed `matches_target_filter_on_damage_record_source`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageRecord {
     pub source_id: ObjectId,
@@ -520,6 +528,59 @@ pub struct DamageRecord {
     pub amount: u32,
     #[serde(default)]
     pub is_combat: bool,
+    // CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
+    // (look-back; criteria need not still hold).
+    #[serde(default)]
+    pub source_name: String,
+    #[serde(default)]
+    pub source_core_types: Vec<CoreType>,
+    #[serde(default)]
+    pub source_subtypes: Vec<String>,
+    #[serde(default)]
+    pub source_supertypes: Vec<Supertype>,
+    #[serde(default)]
+    pub source_keywords: Vec<Keyword>,
+    #[serde(default)]
+    pub source_power: Option<i32>,
+    #[serde(default)]
+    pub source_toughness: Option<i32>,
+    #[serde(default)]
+    pub source_colors: Vec<ManaColor>,
+    #[serde(default)]
+    pub source_mana_value: u32,
+    #[serde(default)]
+    pub source_controller_snapshot: PlayerId,
+    #[serde(default)]
+    pub source_owner: PlayerId,
+}
+
+impl Default for DamageRecord {
+    /// A non-combat, zero-amount record from/to player 0 with an empty source
+    /// snapshot. Production damage recording (`deal_damage.rs`) always fills
+    /// every field explicitly; this default exists so test and synthesis
+    /// fixtures that only care about a few fields can spread `..Default::default()`
+    /// for the CR 608.2i source-snapshot fields they don't exercise.
+    fn default() -> Self {
+        Self {
+            source_id: ObjectId(0),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(0)),
+            target_controller: PlayerId(0),
+            amount: 0,
+            is_combat: false,
+            source_name: String::new(),
+            source_core_types: Vec::new(),
+            source_subtypes: Vec::new(),
+            source_supertypes: Vec::new(),
+            source_keywords: Vec::new(),
+            source_power: None,
+            source_toughness: None,
+            source_colors: Vec::new(),
+            source_mana_value: 0,
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+        }
+    }
 }
 
 /// CR 122.1 + CR 122.6: Snapshot of counters put on an object this turn.

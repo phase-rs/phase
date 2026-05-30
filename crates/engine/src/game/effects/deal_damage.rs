@@ -473,14 +473,45 @@ pub(crate) fn apply_damage_after_replacement(
                 .map(|object| object.controller)
                 .unwrap_or(ctx.controller),
         };
-        state.damage_dealt_this_turn.push(DamageRecord {
+        // CR 608.2i + CR 608.2h: Snapshot the damage source's characteristics at
+        // damage time so look-back source-filter queries ("opponents who were
+        // dealt combat damage by ~ or a Dragon this turn") evaluate against the
+        // source as it was when the damage was dealt — the source may later
+        // change type, leave the battlefield (CR 113.7a LKI), or be removed.
+        let src = state.objects.get(&ctx.source_id);
+        let mut record = DamageRecord {
             source_id: ctx.source_id,
             source_controller: ctx.controller,
             target: t.clone(),
             target_controller,
             amount: actual_amount,
             is_combat,
-        });
+            source_name: String::new(),
+            source_core_types: Vec::new(),
+            source_subtypes: Vec::new(),
+            source_supertypes: Vec::new(),
+            source_keywords: Vec::new(),
+            source_power: None,
+            source_toughness: None,
+            source_colors: Vec::new(),
+            source_mana_value: 0,
+            source_controller_snapshot: ctx.controller,
+            source_owner: ctx.controller,
+        };
+        if let Some(obj) = src {
+            record.source_name = obj.name.clone();
+            record.source_core_types = obj.card_types.core_types.clone();
+            record.source_subtypes = obj.card_types.subtypes.clone();
+            record.source_supertypes = obj.card_types.supertypes.clone();
+            record.source_keywords = obj.keywords.clone();
+            record.source_power = obj.power;
+            record.source_toughness = obj.toughness;
+            record.source_colors = obj.color.clone();
+            record.source_mana_value = obj.mana_cost.mana_value();
+            record.source_controller_snapshot = obj.controller;
+            record.source_owner = obj.owner;
+        }
+        state.damage_dealt_this_turn.push(record);
     }
 
     // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to damage dealt.
@@ -855,14 +886,17 @@ fn collect_matching_players(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != source_controller && p.life_gained_this_turn > 0
                     }
-                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
-                    // damage this turn (`damage_dealt_this_turn` ledger).
-                    PlayerFilter::OpponentDealtCombatDamage => {
-                        p.id != source_controller
-                            && state.damage_dealt_this_turn.iter().any(|r| {
-                                r.is_combat
-                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
-                            })
+                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
+                    // who was dealt combat damage this turn, optionally
+                    // restricted to a matching source.
+                    PlayerFilter::OpponentDealtCombatDamage { ref source } => {
+                        crate::game::quantity::opponent_dealt_combat_damage_matches(
+                            state,
+                            p.id,
+                            source_controller,
+                            source,
+                            source_id,
+                        )
                     }
                     // CR 508.6: opponent this player attacked this turn.
                     PlayerFilter::OpponentAttackedThisTurn => {
@@ -1023,14 +1057,17 @@ pub fn resolve_each_player(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != ability.controller && p.life_gained_this_turn > 0
                     }
-                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
-                    // damage this turn (`damage_dealt_this_turn` ledger).
-                    PlayerFilter::OpponentDealtCombatDamage => {
-                        p.id != ability.controller
-                            && state.damage_dealt_this_turn.iter().any(|r| {
-                                r.is_combat
-                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
-                            })
+                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
+                    // who was dealt combat damage this turn, optionally
+                    // restricted to a matching source.
+                    PlayerFilter::OpponentDealtCombatDamage { source } => {
+                        crate::game::quantity::opponent_dealt_combat_damage_matches(
+                            state,
+                            p.id,
+                            ability.controller,
+                            source,
+                            ability.source_id,
+                        )
                     }
                     // CR 508.6: opponent this player attacked this turn.
                     PlayerFilter::OpponentAttackedThisTurn => {

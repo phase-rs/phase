@@ -18,7 +18,7 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CounterAddedRecord, GameState, LKISnapshot, SpellCastRecord, ZoneChangeRecord,
+    CounterAddedRecord, DamageRecord, GameState, LKISnapshot, SpellCastRecord, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -378,6 +378,48 @@ pub fn matches_target_filter_on_counter_added_record(
         state,
         &obj,
         record.object_id,
+        filter,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+        ctx.recipient_id,
+    )
+}
+
+/// CR 120.9 + CR 608.2i + CR 608.2h: Check whether a per-turn combat-damage
+/// snapshot's *source* matches a target filter using the source's event-time
+/// characteristics. Look-back queries ("opponents who were dealt combat damage
+/// by ~ or a Dragon this turn", Estinien Varlineau) match against the source as
+/// it was when the damage was dealt (CR 608.2i — criteria need not still hold);
+/// the source may have since changed type, left the battlefield, or been
+/// removed. `SelfRef` matches iff the snapshot's source is the ability source.
+pub fn matches_target_filter_on_damage_record_source(
+    state: &GameState,
+    record: &DamageRecord,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let mut obj = GameObject::new(
+        record.source_id,
+        CardId(0),
+        record.source_owner,
+        record.source_name.clone(),
+        Zone::Battlefield,
+    );
+    obj.controller = record.source_controller_snapshot;
+    obj.power = record.source_power;
+    obj.toughness = record.source_toughness;
+    obj.card_types.core_types = record.source_core_types.clone();
+    obj.card_types.subtypes = record.source_subtypes.clone();
+    obj.card_types.supertypes = record.source_supertypes.clone();
+    obj.mana_cost = crate::types::mana::ManaCost::generic(record.source_mana_value);
+    obj.keywords = record.source_keywords.clone();
+    obj.color = record.source_colors.clone();
+
+    filter_inner_for_object(
+        state,
+        &obj,
+        record.source_id,
         filter,
         ctx.source_id,
         ctx.source_controller,
@@ -3494,6 +3536,7 @@ mod tests {
             target_controller: PlayerId(0),
             amount: 2,
             is_combat: true,
+            ..Default::default()
         });
         state.objects.get_mut(&creature).unwrap().damage_marked = 0;
 

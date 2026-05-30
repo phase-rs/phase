@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
     matches_target_filter, matches_target_filter_on_counter_added_record,
-    matches_target_filter_on_zone_change_record, player_matches_target_filter,
-    spell_record_matches_filter, type_filter_matches, FilterContext,
+    matches_target_filter_on_damage_record_source, matches_target_filter_on_zone_change_record,
+    player_matches_target_filter, spell_record_matches_filter, type_filter_matches, FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
@@ -20,7 +20,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{DamageRecord, GameState};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
@@ -1894,16 +1894,19 @@ fn counter_added_actor_matches(
     }
 }
 
+/// CR 120.9 + CR 608.2i + CR 608.2h: Match a damage record's source against
+/// `filter` using the source's snapshot captured at damage time (look-back —
+/// criteria need not still hold). `TargetFilter::Any` short-circuits.
 fn damage_record_source_matches(
     state: &GameState,
-    source_id: ObjectId,
+    record: &DamageRecord,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
     if matches!(filter, TargetFilter::Any) {
         return true;
     }
-    matches_target_filter(state, source_id, filter, ctx)
+    matches_target_filter_on_damage_record_source(state, record, filter, ctx)
 }
 
 /// CR 120.1 + CR 120.9 + CR 603.4: Resolver for `QuantityRef::DamageDealtThisTurn`.
@@ -1926,32 +1929,19 @@ fn resolve_damage_dealt_this_turn(
 ) -> i32 {
     use crate::types::ability::DamageGroupKey;
 
-    // CR 120.9: Apply the source filter's `controller` predicate (if any)
-    // against `record.source_controller` (LKI at time of damage), so a control
-    // change between damage and check still answers the rules-correct question.
-    // Pass the rest of the filter (controller stripped) through the live-source
-    // matcher for type/property predicates.
-    let (live_source_filter, lki_controller) = split_controller_filter(source);
-    let live_source_filter_ref: &TargetFilter = live_source_filter.as_ref().unwrap_or(source);
-
-    let source_matches = |record_source_id: ObjectId, record_source_controller: PlayerId| {
-        if let Some(expected) = lki_controller.as_ref() {
-            if !damage_source_controller_matches(
-                state,
-                record_source_controller,
-                controller,
-                ctx,
-                ability,
-                expected,
-            ) {
-                return false;
-            }
-        }
-        damage_record_source_matches(state, record_source_id, live_source_filter_ref, filter_ctx)
-    };
+    // CR 120.9 + CR 608.2i + CR 608.2h: Match the source filter (including any
+    // `controller` predicate) against each record's source snapshot captured at
+    // damage time, not the live object. The snapshot carries the source's
+    // event-time controller, type, and characteristics, so a control change,
+    // type change, or the source leaving the battlefield after damage still
+    // answers the rules-correct look-back question. The controller predicate is
+    // served by the snapshot's controller via the matcher's controller arm — no
+    // separate `split_controller_filter` lift is needed on the source side.
+    let source_matches =
+        |record: &DamageRecord| damage_record_source_matches(state, record, source, filter_ctx);
 
     let matching = state.damage_dealt_this_turn.iter().filter(|record| {
-        source_matches(record.source_id, record.source_controller)
+        source_matches(record)
             && damage_record_target_matches(
                 state, record, controller, ctx, ability, target, filter_ctx,
             )
@@ -2812,6 +2802,38 @@ pub(crate) fn compute_party_size(state: &GameState, player: PlayerId) -> i32 {
     best as i32
 }
 
+/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Single authority for
+/// `PlayerFilter::OpponentDealtCombatDamage` matching. `player` was dealt combat
+/// damage this turn (relative to `controller`'s opponents) when a
+/// `damage_dealt_this_turn` record targets it with `is_combat = true` AND its
+/// source matches `source`. `source = None` accepts any source (Tymna the
+/// Weaver); `source = Some(Any)` short-circuits to true; otherwise (CR 120.9)
+/// the record's CR 608.2i look-back source snapshot is matched against the
+/// filter, so the source's qualities are evaluated as of damage time.
+pub(crate) fn opponent_dealt_combat_damage_matches(
+    state: &GameState,
+    player: PlayerId,
+    controller: PlayerId,
+    source: &Option<Box<TargetFilter>>,
+    ability_source_id: ObjectId,
+) -> bool {
+    if player == controller {
+        return false;
+    }
+    let ctx = FilterContext::from_source_with_controller(ability_source_id, controller);
+    state.damage_dealt_this_turn.iter().any(|r| {
+        r.is_combat
+            && matches!(r.target, TargetRef::Player(pid) if pid == player)
+            && match source {
+                None => true,
+                Some(f) => {
+                    matches!(**f, TargetFilter::Any)
+                        || matches_target_filter_on_damage_record_source(state, r, f, &ctx)
+                }
+            }
+    })
+}
+
 /// Count players matching a PlayerFilter relative to the controller.
 pub(crate) fn resolve_player_count(
     state: &GameState,
@@ -2845,16 +2867,13 @@ pub(crate) fn resolve_player_count(
                         PlayerFilter::OpponentGainedLife => {
                             p.id != controller && p.life_gained_this_turn > 0
                         }
-                        // CR 120.1 + CR 510.1: Each opponent who was dealt combat
-                        // damage this turn. Probes the `damage_dealt_this_turn`
-                        // ledger for any record targeting this player with
-                        // `is_combat = true`.
-                        PlayerFilter::OpponentDealtCombatDamage => {
-                            p.id != controller
-                                && state.damage_dealt_this_turn.iter().any(|r| {
-                                    r.is_combat
-                                        && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
-                                })
+                        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each
+                        // opponent who was dealt combat damage this turn,
+                        // optionally restricted to a matching source.
+                        PlayerFilter::OpponentDealtCombatDamage { source } => {
+                            opponent_dealt_combat_damage_matches(
+                                state, p.id, controller, source, source_id,
+                            )
                         }
                         // CR 508.6: opponent this player attacked this turn.
                         PlayerFilter::OpponentAttackedThisTurn => {
@@ -4166,6 +4185,7 @@ mod tests {
                 target_controller: PlayerId(1),
                 amount: 3,
                 is_combat: false,
+                ..Default::default()
             },
             DamageRecord {
                 source_id: p0_source,
@@ -4174,6 +4194,7 @@ mod tests {
                 target_controller: PlayerId(1),
                 amount: 2,
                 is_combat: false,
+                ..Default::default()
             },
             DamageRecord {
                 source_id: p0_other_source,
@@ -4182,6 +4203,7 @@ mod tests {
                 target_controller: PlayerId(1),
                 amount: 4,
                 is_combat: false,
+                ..Default::default()
             },
             DamageRecord {
                 source_id: p1_source,
@@ -4190,6 +4212,8 @@ mod tests {
                 target_controller: PlayerId(0),
                 amount: 9,
                 is_combat: false,
+                source_controller_snapshot: PlayerId(1),
+                ..Default::default()
             },
         ]);
 
@@ -4232,6 +4256,7 @@ mod tests {
                 target_controller: PlayerId(1),
                 amount: 1,
                 is_combat: true,
+                ..Default::default()
             },
             DamageRecord {
                 source_id: other_source,
@@ -4240,6 +4265,7 @@ mod tests {
                 target_controller: PlayerId(1),
                 amount: 1,
                 is_combat: true,
+                ..Default::default()
             },
         ]);
 
@@ -4280,6 +4306,8 @@ mod tests {
             target_controller: PlayerId(0),
             amount: 1,
             is_combat: false,
+            source_controller_snapshot: PlayerId(1),
+            ..Default::default()
         });
 
         let expr = QuantityExpr::Ref {
@@ -4339,6 +4367,7 @@ mod tests {
                 target_controller: PlayerId(1),
                 amount: 3,
                 is_combat: false,
+                ..Default::default()
             },
             DamageRecord {
                 source_id: p0_source,
@@ -4347,6 +4376,7 @@ mod tests {
                 target_controller: PlayerId(1),
                 amount: 2,
                 is_combat: false,
+                ..Default::default()
             },
             DamageRecord {
                 source_id: p0_other,
@@ -4355,6 +4385,7 @@ mod tests {
                 target_controller: PlayerId(1),
                 amount: 4,
                 is_combat: false,
+                ..Default::default()
             },
             DamageRecord {
                 source_id: p1_source,
@@ -4363,6 +4394,8 @@ mod tests {
                 target_controller: PlayerId(0),
                 amount: 9,
                 is_combat: false,
+                source_controller_snapshot: PlayerId(1),
+                ..Default::default()
             },
         ]);
 
@@ -4409,6 +4442,9 @@ mod tests {
             Zone::Battlefield,
         );
         // Damage was dealt while P0 controlled the source.
+        // CR 608.2i: the source-controller snapshot captures P0 at damage time;
+        // the source-side filter now matches against this snapshot, not the live
+        // object's controller (which changes below).
         state.damage_dealt_this_turn.push(DamageRecord {
             source_id: damage_source,
             source_controller: PlayerId(0),
@@ -4416,6 +4452,8 @@ mod tests {
             target_controller: PlayerId(1),
             amount: 4,
             is_combat: false,
+            source_controller_snapshot: PlayerId(0),
+            ..Default::default()
         });
         // Then control changed (e.g., Threaten); the live object now belongs to P1.
         state.objects.get_mut(&damage_source).unwrap().controller = PlayerId(1);
@@ -4467,6 +4505,7 @@ mod tests {
             target_controller: PlayerId(1),
             amount: 3,
             is_combat: false,
+            ..Default::default()
         });
         state.objects.get_mut(&target).unwrap().controller = PlayerId(0);
 
@@ -5390,6 +5429,7 @@ mod tests {
             target_controller: PlayerId(1),
             amount: 4,
             is_combat: true,
+            ..Default::default()
         });
         state.damage_dealt_this_turn.push(DamageRecord {
             source_id: ObjectId(99),
@@ -5398,6 +5438,7 @@ mod tests {
             target_controller: PlayerId(2),
             amount: 2,
             is_combat: false,
+            ..Default::default()
         });
         // Self-damage record must not count as an "opponent dealt combat damage".
         state.damage_dealt_this_turn.push(DamageRecord {
@@ -5407,11 +5448,12 @@ mod tests {
             target_controller: PlayerId(0),
             amount: 1,
             is_combat: true,
+            ..Default::default()
         });
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage,
+                filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
             },
         };
         // Controller = player 0: only player 1 satisfies (combat + opponent).
@@ -5426,10 +5468,110 @@ mod tests {
         let state = GameState::new_two_player(42);
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage,
+                filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    /// CR 608.2i (the whole point): a source-restricted `OpponentDealtCombatDamage`
+    /// must match against the record's damage-time source snapshot, NOT the live
+    /// object. Record combat damage from a Dragon to an opponent, then remove
+    /// the live Dragon from the battlefield. A resolve-now model would see no
+    /// Dragon and return 0; the snapshot model still counts the opponent (1).
+    #[test]
+    fn opponent_dealt_combat_damage_source_uses_damage_time_snapshot() {
+        let mut state = GameState::new_two_player(42);
+        let dragon = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Shivan Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        // The live object's subtype at damage time IS Dragon; record the snapshot.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: dragon,
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 5,
+            is_combat: true,
+            source_subtypes: vec!["Dragon".to_string()],
+            source_core_types: vec![CoreType::Creature],
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            ..Default::default()
+        });
+        // The live Dragon leaves the battlefield (or is transformed). A
+        // resolve-now matcher against the live object would now find nothing.
+        state.objects.remove(&dragon);
+
+        let dragon_filter =
+            TargetFilter::Typed(TypedFilter::default().subtype("Dragon".to_string()));
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage {
+                    source: Some(Box::new(dragon_filter)),
+                },
+            },
+        };
+        // CR 608.2i: the opponent was dealt combat damage by a Dragon this turn,
+        // even though the Dragon no longer exists.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), dragon), 1);
+    }
+
+    /// CR 120.9 + CR 608.2i: source-filter discrimination — a Dragon-restricted
+    /// filter counts a Dragon-snapshot record but not a non-Dragon one; a
+    /// `SelfRef` filter matches only the record whose source is the ability source.
+    #[test]
+    fn opponent_dealt_combat_damage_source_filter_discriminates() {
+        let mut state = GameState::new_two_player(42);
+        let ability_source = ObjectId(50);
+        // Record 1: combat damage to opponent from a Dragon that IS the ability source.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ability_source,
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 2,
+            is_combat: true,
+            source_subtypes: vec!["Dragon".to_string()],
+            source_core_types: vec![CoreType::Creature],
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            ..Default::default()
+        });
+
+        let dragon = TargetFilter::Typed(TypedFilter::default().subtype("Dragon".to_string()));
+        let goblin = TargetFilter::Typed(TypedFilter::default().subtype("Goblin".to_string()));
+
+        let count = |source: TargetFilter| {
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::OpponentDealtCombatDamage {
+                            source: Some(Box::new(source)),
+                        },
+                    },
+                },
+                PlayerId(0),
+                ability_source,
+            )
+        };
+
+        assert_eq!(count(dragon), 1, "Dragon snapshot matches Dragon filter");
+        assert_eq!(
+            count(goblin),
+            0,
+            "Dragon snapshot does not match Goblin filter"
+        );
+        assert_eq!(
+            count(TargetFilter::SelfRef),
+            1,
+            "record source IS the ability source → SelfRef matches"
+        );
     }
 
     /// CR 119.3: `LifeLostThisTurn { Opponent { Sum } }` sums life lost across

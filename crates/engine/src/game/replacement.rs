@@ -11,7 +11,8 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 
 use super::filter::{
-    matches_target_filter, matches_target_filter_on_battlefield_entry, FilterContext,
+    matches_target_filter, matches_target_filter_on_battlefield_entry,
+    matches_target_filter_on_damage_record_source, FilterContext,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
@@ -2468,8 +2469,11 @@ fn evaluate_replacement_condition(
             };
             let ctx = FilterContext::from_source(state, source_id);
             state.damage_dealt_this_turn.iter().any(|record| {
+                // CR 608.2i + CR 608.2h: match the damage source against its
+                // damage-time snapshot (look-back), consistent with
+                // DamageDealtThisTurn / OpponentDealtCombatDamage.
                 record.target == TargetRef::Object(affected_id)
-                    && matches_target_filter(state, record.source_id, source, &ctx)
+                    && matches_target_filter_on_damage_record_source(state, record, source, &ctx)
             })
         }
         ReplacementCondition::EventSourceControlledBy {
@@ -6006,6 +6010,7 @@ mod tests {
             target_controller: PlayerId(0),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         let cond = ReplacementCondition::DealtDamageThisTurnBySource {
@@ -6049,6 +6054,7 @@ mod tests {
             target_controller: PlayerId(1),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         assert!(evaluate_replacement_condition(
@@ -6097,6 +6103,7 @@ mod tests {
             target_controller: PlayerId(0),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         assert!(evaluate_replacement_condition(
@@ -6109,6 +6116,105 @@ mod tests {
             Some(ObjectId(30)),
             &dummy_begin_turn_event(),
         ));
+    }
+
+    /// CR 608.2i + CR 608.2h: `DealtDamageThisTurnBySource` matches the damage
+    /// source against its damage-time *snapshot*, not the live object. A Dragon
+    /// deals damage this turn and is then transformed into a non-Dragon (or
+    /// leaves the battlefield). A live-object source match would now read the
+    /// current characteristics and fail; the snapshot match still recognizes
+    /// the source was a Dragon when the damage was dealt. This is the
+    /// discriminating regression guard for the lookback unification — it would
+    /// FAIL under the previous `matches_target_filter(state, record.source_id,
+    /// ..)` live read.
+    #[test]
+    fn dealt_damage_by_source_uses_damage_time_snapshot() {
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let dragon_id = ObjectId(20);
+        let victim_id = ObjectId(30);
+
+        // The damage source: a Dragon creature controlled by PlayerId(0) at damage time.
+        let mut dragon = GameObject::new(
+            dragon_id,
+            CardId(2),
+            PlayerId(0),
+            "Shivan Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        dragon.card_types.core_types.push(CoreType::Creature);
+        dragon.card_types.subtypes.push("Dragon".to_string());
+        state.objects.insert(dragon_id, dragon);
+        state.battlefield.push_back(dragon_id);
+
+        let victim = GameObject::new(
+            victim_id,
+            CardId(3),
+            PlayerId(0),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(victim_id, victim);
+
+        // Record damage with the Dragon characteristics captured at damage time.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: dragon_id,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(victim_id),
+            target_controller: PlayerId(0),
+            amount: 3,
+            is_combat: false,
+            source_subtypes: vec!["Dragon".to_string()],
+            source_core_types: vec![CoreType::Creature],
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            ..Default::default()
+        });
+
+        // Now mutate the LIVE source: strip its Dragon subtype (transformed into
+        // a non-Dragon permanent). A live-object match would no longer see a Dragon.
+        let live = state.objects.get_mut(&dragon_id).unwrap();
+        live.card_types.subtypes.clear();
+        live.card_types.core_types.clear();
+
+        let dragon_filter =
+            TargetFilter::Typed(TypedFilter::default().subtype("Dragon".to_string()));
+        let cond = ReplacementCondition::DealtDamageThisTurnBySource {
+            source: dragon_filter,
+        };
+
+        // The snapshot says the source was a Dragon at damage time → matches.
+        assert!(
+            evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                Some(victim_id),
+                &dummy_begin_turn_event(),
+            ),
+            "source matched its damage-time Dragon snapshot even after the live \
+             object lost the Dragon subtype (CR 608.2i lookback)"
+        );
+
+        // A non-matching filter (Goblin) must NOT match the Dragon snapshot —
+        // confirms the swap discriminates on snapshot characteristics, not Any.
+        let goblin_cond = ReplacementCondition::DealtDamageThisTurnBySource {
+            source: TargetFilter::Typed(TypedFilter::default().subtype("Goblin".to_string())),
+        };
+        assert!(
+            !evaluate_replacement_condition(
+                &goblin_cond,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                Some(victim_id),
+                &dummy_begin_turn_event(),
+            ),
+            "Dragon snapshot must not satisfy a Goblin source filter"
+        );
     }
 
     #[test]

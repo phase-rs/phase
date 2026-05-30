@@ -48,21 +48,17 @@ fn players_for_filter(
             .filter(|player| player.id != controller && player.life_gained_this_turn > 0)
             .map(|player| player.id)
             .collect(),
-        // CR 120.1 + CR 510.1: Each opponent who was dealt combat damage this
-        // turn (`damage_dealt_this_turn` ledger).
-        PlayerFilter::OpponentDealtCombatDamage => state
+        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was
+        // dealt combat damage this turn, optionally restricted to a matching
+        // source.
+        PlayerFilter::OpponentDealtCombatDamage { source } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
-                player.id != controller
-                    && state.damage_dealt_this_turn.iter().any(|r| {
-                        r.is_combat
-                            && matches!(
-                                r.target,
-                                crate::types::ability::TargetRef::Player(pid) if pid == player.id
-                            )
-                    })
+                crate::game::quantity::opponent_dealt_combat_damage_matches(
+                    state, player.id, controller, source, source_id,
+                )
             })
             .map(|player| player.id)
             .collect(),

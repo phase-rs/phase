@@ -3293,12 +3293,19 @@ pub enum PlayerFilter {
     OpponentLostLife,
     /// Each opponent who gained life this turn (life_gained_this_turn > 0).
     OpponentGainedLife,
-    /// CR 120.1 + CR 510.1: Each opponent who was dealt combat damage this turn.
-    /// Resolved against `state.damage_dealt_this_turn` records whose
-    /// `is_combat = true` and `target = Player(p.id)`. Used by partner-quality
-    /// "for each opponent that was dealt combat damage this turn" cards
-    /// (Tymna the Weaver).
-    OpponentDealtCombatDamage,
+    /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was dealt
+    /// combat damage this turn, optionally restricted to damage from a source
+    /// matching `source`. Resolved against `state.damage_dealt_this_turn`
+    /// records whose `is_combat = true` and `target = Player(p.id)`. `source =
+    /// None` counts any combat-damage source (Tymna the Weaver); `source =
+    /// Some(f)` (CR 120.9) counts only opponents dealt combat damage by a source
+    /// matching `f` — matched against each record's CR 608.2i look-back source
+    /// snapshot, so the source's qualities are checked as they were at damage
+    /// time (Estinien Varlineau: "by ~ or a Dragon").
+    OpponentDealtCombatDamage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<Box<TargetFilter>>,
+    },
     /// CR 508.6: A player has "attacked [a player]" if they declared one or more
     /// creatures attacking that player. Each opponent the controller attacked this
     /// turn, resolved against `state.attacked_defenders_this_turn[controller]`.

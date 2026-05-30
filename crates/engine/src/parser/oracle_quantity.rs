@@ -24,7 +24,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_effect::parse_controls_permanent_object;
-use crate::parser::oracle_target::{parse_type_phrase, parse_type_phrase_with_ctx};
+use crate::parser::oracle_target::{parse_target, parse_type_phrase, parse_type_phrase_with_ctx};
+use crate::parser::oracle_util::merge_or_filters;
 use crate::types::ability::{
     AggregateFunction, Comparator, ControllerRef, CountScope, DevotionColors, FilterProp,
     ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
@@ -318,9 +319,11 @@ pub(crate) fn parse_quantity_ref_with_context(
         // upstream callers may strip durations before this parser sees the
         // phrase. PlayerCount{OpponentDealtCombatDamage} is inherently scoped
         // to this turn through `state.damage_dealt_this_turn`.
-        if parse_opponent_dealt_combat_damage_clause(rest).is_ok() {
+        if let Ok((_, source)) = parse_opponent_dealt_combat_damage_clause(rest) {
             return Some(QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage,
+                filter: PlayerFilter::OpponentDealtCombatDamage {
+                    source: source.map(Box::new),
+                },
             });
         }
         // CR 508.6: "opponents you attacked [this turn]" (Militant Angel).
@@ -829,20 +832,64 @@ fn parse_counters_removed_phrase(input: &str) -> nom::IResult<&str, (), OracleEr
     Ok((input, ()))
 }
 
+/// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Parse "[your] opponents who were
+/// dealt combat damage [by <source>] [this turn]" into the optional source
+/// filter. Returns `Ok((_, None))` for the unfiltered class (Tymna the Weaver,
+/// Moonshae Pixie) and `Ok((_, Some(f)))` for a `by <source>` restriction
+/// (Estinien Varlineau: "by ~ or a Dragon" → `Or[SelfRef, Typed{Dragon}]`).
+/// `Err` means the clause did not match. The whole clause must be consumed
+/// (explicit `eof`) so trailing unrecognized text doesn't silently drop.
 fn parse_opponent_dealt_combat_damage_clause(
     input: &str,
-) -> nom::IResult<&str, (), OracleError<'_>> {
-    all_consuming((
-        alt((tag::<_, _, OracleError<'_>>("opponents"), tag("opponent"))),
-        tag(" "),
-        alt((tag("that"), tag("who"))),
-        tag(" "),
-        alt((tag("were"), tag("was"))),
-        tag(" dealt combat damage"),
-        opt(tag(" this turn")),
-    ))
-    .parse(input)
-    .map(|(rest, _)| (rest, ()))
+) -> OracleResult<'_, Option<TargetFilter>> {
+    let (input, _) = opt(tag("your ")).parse(input)?;
+    let (input, _) = alt((tag("opponents"), tag("opponent"))).parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    let (input, _) = alt((tag("that"), tag("who"))).parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    let (input, _) = alt((tag("were"), tag("was"))).parse(input)?;
+    let (input, _) = tag(" dealt combat damage").parse(input)?;
+    // CR 120.9: optional "by <source>" restriction. The source phrase is
+    // isolated from the optional trailing " this turn" with a combinator
+    // (`take_until` / `eof`), then parsed via the `parse_target` + " or " +
+    // `merge_or_filters` building block.
+    let (input, source) = opt(preceded(tag(" by "), parse_damage_source_chain)).parse(input)?;
+    let (input, _) = opt(tag(" this turn")).parse(input)?;
+    let (input, _) = eof.parse(input)?;
+    Ok((input, source))
+}
+
+/// CR 120.9 + CR 608.2i: Parse a damage-source phrase ("~", "a Dragon", "~ or a
+/// Dragon") into a `TargetFilter`, composing chained "or"-separated subjects via
+/// `parse_target` + `merge_or_filters`. The source phrase ends at the optional
+/// trailing " this turn" or at end-of-input. Isolating the phrase with
+/// `take_until`/`eof` (not `.split`/`.rfind`/`.contains`) lets `parse_target`
+/// consume the whole subject without swallowing the duration suffix.
+fn parse_damage_source_chain(input: &str) -> OracleResult<'_, TargetFilter> {
+    // Isolate the source phrase: everything up to " this turn", or the whole
+    // remainder if no duration suffix is present.
+    let (rest, phrase) = alt((take_until(" this turn"), nom::combinator::rest)).parse(input)?;
+    if phrase.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+    let filter = parse_source_chain_phrase(phrase);
+    Ok((rest, filter))
+}
+
+/// Recursively parse "X or Y or ..." over a fully-isolated source phrase using
+/// `parse_target` (which maps "~" → `SelfRef` and "a Dragon" → `Typed{Dragon}`)
+/// and `merge_or_filters` to fold the disjunction.
+fn parse_source_chain_phrase(phrase: &str) -> TargetFilter {
+    let (first, rest) = parse_target(phrase);
+    let rest = rest.trim_start();
+    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("or ").parse(rest) {
+        let second = parse_source_chain_phrase(after);
+        return merge_or_filters(first, second);
+    }
+    first
 }
 
 /// CR 508.6: "opponents you attacked [this turn]". Trailing " this turn"
@@ -1758,9 +1805,11 @@ fn parse_for_each_clause_with_they_controller(
     // / "opponent who was dealt combat damage this turn". Mirrors the
     // lost-life / gained-life arms above, but consumes the full clause instead
     // of doing substring dispatch.
-    if parse_opponent_dealt_combat_damage_clause(clause).is_ok() {
+    if let Ok((_, source)) = parse_opponent_dealt_combat_damage_clause(clause) {
         return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentDealtCombatDamage,
+            filter: PlayerFilter::OpponentDealtCombatDamage {
+                source: source.map(Box::new),
+            },
         });
     }
 
@@ -2330,7 +2379,7 @@ mod tests {
             assert_eq!(
                 parse_for_each_clause(phrase),
                 Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtCombatDamage"
             );
@@ -2933,7 +2982,7 @@ mod tests {
             qty,
             QuantityExpr::Ref {
                 qty: QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
                 }
             }
         );
@@ -2950,7 +2999,7 @@ mod tests {
             qty,
             QuantityExpr::Ref {
                 qty: QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
                 }
             }
         );
@@ -2979,10 +3028,78 @@ mod tests {
                 qty,
                 QuantityExpr::Ref {
                     qty: QuantityRef::PlayerCount {
-                        filter: PlayerFilter::OpponentDealtCombatDamage,
+                        filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
                     }
                 },
                 "phrase {phrase:?} must route to OpponentDealtCombatDamage",
+            );
+        }
+    }
+
+    /// CR 120.9 + CR 608.2i: Estinien Varlineau — "the number of your opponents
+    /// who were dealt combat damage by ~ or a Dragon this turn" must parse the
+    /// `by <source>` restriction into `Some(Or[SelfRef, Typed{Dragon}])`. The
+    /// `your ` possessive head and the trailing ` this turn` duration are both
+    /// consumed by combinators; the source phrase folds via `parse_target` +
+    /// `merge_or_filters`. Previously this produced a bare `Variable("...")`
+    /// that resolved to 0 at runtime.
+    #[test]
+    fn opponent_dealt_combat_damage_by_self_or_dragon() {
+        let qty = parse_quantity_ref(
+            "the number of your opponents who were dealt combat damage by ~ or a Dragon this turn",
+        )
+        .expect("must parse to PlayerCount");
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage {
+                    source: Some(Box::new(TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::SelfRef,
+                            TargetFilter::Typed(
+                                TypedFilter::default().subtype("Dragon".to_string())
+                            ),
+                        ],
+                    })),
+                },
+            }
+        );
+    }
+
+    /// CR 120.9 + CR 608.2i: a single-source `by ~` restriction parses to
+    /// `Some(SelfRef)` — the source filter is the ability source alone.
+    #[test]
+    fn opponent_dealt_combat_damage_by_self_only() {
+        let qty = parse_quantity_ref(
+            "the number of opponents who were dealt combat damage by ~ this turn",
+        )
+        .expect("must parse to PlayerCount");
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage {
+                    source: Some(Box::new(TargetFilter::SelfRef)),
+                },
+            }
+        );
+    }
+
+    /// CR 120.1 + CR 510.1: the unfiltered class (Tymna the Weaver, Moonshae
+    /// Pixie) — no `by <source>` clause — must still parse to `source: None`,
+    /// including with the optional `your ` possessive head.
+    #[test]
+    fn opponent_dealt_combat_damage_unfiltered_is_none() {
+        for phrase in [
+            "the number of opponents who were dealt combat damage this turn",
+            "the number of your opponents who were dealt combat damage this turn",
+            "the number of opponents that were dealt combat damage",
+        ] {
+            assert_eq!(
+                parse_quantity_ref(phrase),
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
+                }),
+                "phrase {phrase:?} must parse to unfiltered OpponentDealtCombatDamage"
             );
         }
     }
