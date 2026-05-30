@@ -2326,8 +2326,11 @@ pub enum WaitingFor {
     /// CR 118.3 / CR 601.2b: Player must choose permanent(s) to sacrifice as cost.
     SacrificeForCost {
         player: PlayerId,
-        /// How many permanents to sacrifice (usually 1; covers "sacrifice two creatures").
+        /// Maximum number of permanents the player may sacrifice for this cost.
         count: usize,
+        /// Minimum number of permanents the player must sacrifice.
+        #[serde(default)]
+        min_count: usize,
         /// Pre-filtered eligible permanents on the battlefield.
         permanents: Vec<ObjectId>,
         /// The pending cast to resume after the sacrifice is complete.
@@ -5653,6 +5656,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::SacrificeForCost {
             player: PlayerId(0),
             count: 1,
+            min_count: 1,
             permanents: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));

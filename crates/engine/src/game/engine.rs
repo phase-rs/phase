@@ -1835,6 +1835,7 @@ fn apply_action(
             WaitingFor::SacrificeForCost {
                 player,
                 count,
+                min_count,
                 permanents,
                 pending_cast,
             },
@@ -1843,7 +1844,7 @@ fn apply_action(
             state,
             *player,
             *pending_cast.clone(),
-            *count,
+            (*min_count, *count),
             permanents,
             &chosen,
             &mut events,

@@ -1470,12 +1470,16 @@ function DrawnThisTurnTopdeckModal({ data }: { data: DrawnThisTurnTopdeckChoice[
 
 function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
   const { t } = useTranslation("game");
+  const isVariable = data.min_count !== data.count;
+  const subtitle = isVariable
+    ? t("cardChoice.effectZone.subtitleSacrificeUpTo", { count: data.count })
+    : t("cardChoice.sacrifice.subtitle", { count: data.count });
   return (
     <PermanentCostModal
       data={data}
       choices={data.permanents}
       title={t("cardChoice.sacrifice.title")}
-      subtitle={t("cardChoice.sacrifice.subtitle", { count: data.count })}
+      subtitle={subtitle}
       label={t("cardChoice.badges.sacrifice")}
       selectedClassName="z-10 ring-2 ring-red-400/80"
       overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20"

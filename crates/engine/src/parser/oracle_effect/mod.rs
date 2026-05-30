@@ -7125,6 +7125,7 @@ fn try_parse_verb_and_target<'a>(
                             enter_transformed: d.transformed,
                             enters_under: d.enters_under,
                             enter_tapped: d.enter_tapped,
+                            enters_attacking: d.enters_attacking,
                             enter_with_counters: d.enter_with_counters,
                         },
                         rem,
@@ -16849,6 +16850,8 @@ struct ReturnDestination {
     enters_under: Option<ControllerRef>,
     // CR 614.1: "tapped" — enters the battlefield tapped.
     enter_tapped: bool,
+    // CR 508.4: "tapped and attacking" — enters attacking.
+    enters_attacking: bool,
     // CR 122.1 + CR 122.6: Counters placed on the returned object as it enters.
     enter_with_counters: Vec<(CounterType, QuantityExpr)>,
 }
@@ -16865,12 +16868,12 @@ fn strip_return_destination_ext_with_remainder(
     let lower = text.to_lowercase();
     // Ordered longest-first to avoid partial matches.
     // "transformed" variants must come before their non-transformed counterparts.
-    // Tuples: (phrase, zone, transformed, enters_under_you, enter_tapped)
+    // Tuples: (phrase, zone, transformed, enters_under_you, enter_tapped, enters_attacking)
     // The `enters_under_you` bool is the parser-table carrier for the
     // controller-override flag; it maps to `Some(ControllerRef::You)` / `None`
     // at the `ReturnDestination` construction site below (CR 110.2a).
     // Ordered longest-first; compound patterns must precede their shorter substrings.
-    let patterns: &[(&str, Zone, bool, bool, bool)] = &[
+    let patterns: &[(&str, Zone, bool, bool, bool, bool)] = &[
         // Tapped + transformed + owner's control (compound, longest)
         (
             " to the battlefield tapped and transformed under its owner's control",
@@ -16878,6 +16881,7 @@ fn strip_return_destination_ext_with_remainder(
             true,
             false,
             true,
+            false,
         ),
         // Transformed + your control
         (
@@ -16885,6 +16889,7 @@ fn strip_return_destination_ext_with_remainder(
             Zone::Battlefield,
             true,
             true,
+            false,
             false,
         ),
         // Transformed + owner's control variants
@@ -16894,11 +16899,13 @@ fn strip_return_destination_ext_with_remainder(
             true,
             false,
             false,
+            false,
         ),
         (
             " to the battlefield transformed under its owner's control",
             Zone::Battlefield,
             true,
+            false,
             false,
             false,
         ),
@@ -16908,11 +16915,13 @@ fn strip_return_destination_ext_with_remainder(
             true,
             false,
             false,
+            false,
         ),
         (
             " to the battlefield transformed under her owner's control",
             Zone::Battlefield,
             true,
+            false,
             false,
             false,
         ),
@@ -16922,6 +16931,24 @@ fn strip_return_destination_ext_with_remainder(
             true,
             false,
             false,
+            false,
+        ),
+        // CR 508.4: Tapped and attacking (must precede shorter "tapped" variants)
+        (
+            " to the battlefield tapped and attacking",
+            Zone::Battlefield,
+            false,
+            false,
+            true,
+            true,
+        ),
+        (
+            " onto the battlefield tapped and attacking",
+            Zone::Battlefield,
+            false,
+            false,
+            true,
+            true,
         ),
         // Tapped + control variants (must precede shorter "tapped" and "under X control")
         (
@@ -16930,6 +16957,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             true,
+            false,
         ),
         (
             " to the battlefield tapped under its owner's control",
@@ -16937,6 +16965,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             true,
+            false,
         ),
         (
             " to the battlefield tapped under your control",
@@ -16944,6 +16973,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             true,
             true,
+            false,
         ),
         // Simple control variants
         (
@@ -16952,10 +16982,12 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             false,
+            false,
         ),
         (
             " to the battlefield under its owner's control",
             Zone::Battlefield,
+            false,
             false,
             false,
             false,
@@ -16967,6 +16999,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             true,
             false,
+            false,
         ),
         // CR 614.1: "tapped" — enters tapped.
         (
@@ -16975,10 +17008,12 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             true,
+            false,
         ),
         (
             " to the battlefield",
             Zone::Battlefield,
+            false,
             false,
             false,
             false,
@@ -16990,6 +17025,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             true,
             false,
+            false,
         ),
         (
             " onto the battlefield tapped",
@@ -16997,6 +17033,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             true,
+            false,
         ),
         (
             " onto the battlefield",
@@ -17004,17 +17041,40 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             false,
+            false,
         ),
         // Hand destinations
-        (" to its owner's hand", Zone::Hand, false, false, false),
-        (" to their owner's hand", Zone::Hand, false, false, false),
-        (" to their owners' hands", Zone::Hand, false, false, false),
-        (" to their hand", Zone::Hand, false, false, false),
-        (" to your hand", Zone::Hand, false, false, false),
+        (
+            " to its owner's hand",
+            Zone::Hand,
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            " to their owner's hand",
+            Zone::Hand,
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            " to their owners' hands",
+            Zone::Hand,
+            false,
+            false,
+            false,
+            false,
+        ),
+        (" to their hand", Zone::Hand, false, false, false, false),
+        (" to your hand", Zone::Hand, false, false, false, false),
         // Graveyard destinations
         (
             " to its owner's graveyard",
             Zone::Graveyard,
+            false,
             false,
             false,
             false,
@@ -17025,6 +17085,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             false,
+            false,
         ),
         (
             " to their owners' graveyards",
@@ -17032,15 +17093,30 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             false,
+            false,
         ),
-        (" to your graveyard", Zone::Graveyard, false, false, false),
+        (
+            " to your graveyard",
+            Zone::Graveyard,
+            false,
+            false,
+            false,
+            false,
+        ),
         // Command-zone destinations
-        (" to the command zone", Zone::Command, false, false, false),
+        (
+            " to the command zone",
+            Zone::Command,
+            false,
+            false,
+            false,
+            false,
+        ),
         // NOTE: Library destinations ("to the top/bottom of owner's library") are
         // intentionally NOT handled here. They require PutAtLibraryPosition (positional
         // placement without shuffling), not ChangeZone (which auto-shuffles).
     ];
-    for (phrase, zone, transformed, enters_under_you, enter_tapped) in patterns {
+    for (phrase, zone, transformed, enters_under_you, enter_tapped, enters_attacking) in patterns {
         if let Some(pos) = lower.rfind(phrase) {
             let after_destination = &lower[pos + phrase.len()..];
             let original_after_destination = &text[pos + phrase.len()..];
@@ -17051,6 +17127,7 @@ fn strip_return_destination_ext_with_remainder(
                     transformed: *transformed,
                     enters_under: enters_under_you.then_some(ControllerRef::You),
                     enter_tapped: *enter_tapped,
+                    enters_attacking: *enters_attacking,
                     enter_with_counters: parse_with_counters_suffix(after_destination),
                 }),
                 original_after_destination,
@@ -17089,11 +17166,13 @@ fn parse_leading_battlefield_return_destination(
         tag("onto the battlefield"),
     ))
     .parse(input)?;
+    // (transformed, enter_tapped, enters_attacking)
     let (input, modifier) = alt((
-        value((true, true), tag(" tapped and transformed")),
-        value((true, false), tag(" transformed")),
-        value((false, true), tag(" tapped")),
-        value((false, false), tag("")),
+        value((true, true, false), tag(" tapped and transformed")),
+        value((true, false, false), tag(" transformed")),
+        value((false, true, true), tag(" tapped and attacking")),
+        value((false, true, false), tag(" tapped")),
+        value((false, false, false), tag("")),
     ))
     .parse(input)?;
     // CR 110.2a: parse the controller-override clause (or its absence) directly
@@ -17118,6 +17197,7 @@ fn parse_leading_battlefield_return_destination(
             transformed: modifier.0,
             enters_under,
             enter_tapped: modifier.1,
+            enters_attacking: modifier.2,
             enter_with_counters: vec![],
         },
     ))
@@ -17139,6 +17219,7 @@ fn parse_leading_hand_return_destination(input: &str) -> OracleResult<'_, Return
             transformed: false,
             enters_under: None,
             enter_tapped: false,
+            enters_attacking: false,
             enter_with_counters: vec![],
         },
     ))
@@ -17159,6 +17240,7 @@ fn parse_leading_graveyard_return_destination(input: &str) -> OracleResult<'_, R
             transformed: false,
             enters_under: None,
             enter_tapped: false,
+            enters_attacking: false,
             enter_with_counters: vec![],
         },
     ))
@@ -17173,6 +17255,7 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
             transformed: false,
             enters_under: None,
             enter_tapped: false,
+            enters_attacking: false,
             enter_with_counters: vec![],
         },
     ))
@@ -33980,6 +34063,45 @@ mod tests {
         assert_eq!(d.enters_under, None);
         assert!(!d.enter_tapped);
         assert!(!d.transformed);
+    }
+
+    #[test]
+    fn return_destination_tapped_and_attacking() {
+        let (target_text, dest) = strip_return_destination_ext(
+            "target creature card to the battlefield tapped and attacking",
+        );
+        assert_eq!(target_text, "target creature card");
+        let d = dest.expect("should parse destination");
+        assert_eq!(d.zone, Zone::Battlefield);
+        assert!(d.enter_tapped);
+        assert!(d.enters_attacking);
+        assert!(!d.transformed);
+        assert_eq!(d.enters_under, None);
+    }
+
+    /// CR 508.4: "return target creature card from your graveyard to the
+    /// battlefield tapped and attacking" (Dauntless Avenger / Yore-Tiller
+    /// Nephilim) must lower to `Effect::ChangeZone` with `enters_attacking: true`.
+    #[test]
+    fn effect_return_from_graveyard_tapped_and_attacking() {
+        let e = parse_effect(
+            "return target creature card from your graveyard to the battlefield tapped and attacking",
+        );
+        match e {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(origin, Some(Zone::Graveyard));
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(enter_tapped);
+                assert!(enters_attacking);
+            }
+            other => panic!("expected Effect::ChangeZone, got {other:?}"),
+        }
     }
 
     /// Collect all effects in a sub_ability chain into a flat Vec.

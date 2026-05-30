@@ -2187,6 +2187,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.173a: Freerunning alternative cost.
         "Freerunning" => Ok(Keyword::Freerunning(mana(data)?)),
         "Surge" => Ok(Keyword::Surge(mana(data)?)),
+        // CR 702.59a: Recover {cost}
+        "Recover" => Ok(Keyword::Recover(mana(data)?)),
         "Encore" => Ok(Keyword::Encore(mana(data)?)),
         "Buyback" => {
             // Accept both legacy ManaCost format and new BuybackCost tagged format.
@@ -3180,6 +3182,45 @@ mod tests {
                 }
             })
         );
+    }
+
+    /// CR 702.59a: Recover keyword FromStr parsing.
+    #[test]
+    fn recover_from_str_parses_cost() {
+        let parsed = Keyword::from_str("recover:{2}{B}").unwrap();
+        let expected_cost = parse_keyword_mana_cost("{2}{B}");
+        match parsed {
+            Keyword::Recover(cost) => {
+                assert_eq!(cost, expected_cost, "Recover cost mismatch");
+            }
+            other => panic!("expected Keyword::Recover, got {other:?}"),
+        }
+    }
+
+    /// CR 702.59a: Recover keyword discriminant and serde round-trip.
+    #[test]
+    fn recover_kind_and_round_trip() {
+        let kw = Keyword::Recover(parse_keyword_mana_cost("{2}{B}"));
+        assert_eq!(kw.kind(), KeywordKind::Recover);
+        let json = serde_json::to_value(&kw).unwrap();
+        let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(kw, deserialized, "round-trip failed for {json}");
+    }
+
+    /// CR 702.59a: Recover keyword_from_tagged deserialization.
+    #[test]
+    fn recover_keyword_from_tagged() {
+        let data = serde_json::json!({
+            "type": "Cost",
+            "shards": ["Black"],
+            "generic": 2
+        });
+        let kw = keyword_from_tagged("Recover", &data).unwrap();
+        assert_eq!(kw.kind(), KeywordKind::Recover);
+        match kw {
+            Keyword::Recover(_) => {} // cost shape validated by ManaCost deser
+            other => panic!("expected Keyword::Recover, got {other:?}"),
+        }
     }
 
     /// CR 702.173a: Freerunning keyword FromStr parsing.

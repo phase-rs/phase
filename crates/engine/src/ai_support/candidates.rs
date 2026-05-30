@@ -1393,9 +1393,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         WaitingFor::SacrificeForCost {
             player,
             count,
+            min_count,
             permanents,
             ..
-        } => bounded_select_card_candidates(*player, permanents, [*count]),
+        } => bounded_select_card_candidates(*player, permanents, *min_count..=*count),
         // CR 118.12a: AI selects a branch of a disjunctive activation cost.
         WaitingFor::ActivationCostOneOfChoice {
             player,
