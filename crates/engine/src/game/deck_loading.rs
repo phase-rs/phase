@@ -305,7 +305,11 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         }
     }
 
-    // Collect all creature subtypes for Changeling CDA expansion
+    // Collect all creature subtypes for Changeling CDA expansion.
+    // CR 205.3m + CR 308.1: creature subtypes are shared by Creature and
+    // Kindred (legacy Tribal) faces, so all three core types contribute.
+    // This filter must stay in lockstep with `collect_creature_type_vocabulary`
+    // in `database/card_db.rs`.
     let mut creature_types: HashSet<String> = HashSet::new();
     let all_entries = payload
         .player
@@ -321,11 +325,10 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 .flat_map(|d| d.main_deck.iter().chain(d.commander.iter())),
         );
     for entry in all_entries {
-        if entry
-            .card
-            .card_type
-            .core_types
-            .contains(&crate::types::card_type::CoreType::Creature)
+        let core_types = &entry.card.card_type.core_types;
+        if core_types.contains(&crate::types::card_type::CoreType::Creature)
+            || core_types.contains(&crate::types::card_type::CoreType::Kindred)
+            || core_types.contains(&crate::types::card_type::CoreType::Tribal)
         {
             creature_types.extend(entry.card.card_type.subtypes.iter().cloned());
         }

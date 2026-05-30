@@ -313,16 +313,21 @@ impl CardDatabase {
     }
 }
 
-/// CR 205.3m: Union every creature face's `subtypes` into a sorted, deduped
-/// list. A face contributes its subtypes only when its `core_types` includes
-/// `Creature` — non-creature subtypes (artifact types, enchantment types,
-/// land types) are tracked separately and must not leak into this vocabulary.
+/// CR 205.3m + CR 308.1: creature subtypes are shared by Creature and Kindred
+/// (legacy Tribal) faces. Union every qualifying face's `subtypes` into a
+/// sorted, deduped list. Non-creature subtypes (artifact types, enchantment
+/// types, land types) attached to faces without a Creature/Kindred/Tribal
+/// core type are tracked separately and must not leak into this vocabulary.
 pub(crate) fn collect_creature_type_vocabulary<'a>(
     faces: impl Iterator<Item = &'a CardFace>,
 ) -> Vec<String> {
     let mut types: HashSet<String> = HashSet::new();
     for face in faces {
-        if face.card_type.core_types.contains(&CoreType::Creature) {
+        let core_types = &face.card_type.core_types;
+        if core_types.contains(&CoreType::Creature)
+            || core_types.contains(&CoreType::Kindred)
+            || core_types.contains(&CoreType::Tribal)
+        {
             types.extend(face.card_type.subtypes.iter().cloned());
         }
     }
@@ -885,6 +890,59 @@ mod tests {
         // Deduped: "Bear" appears on two faces but only once in the vocab.
         let bear_count = vocab.iter().filter(|s| *s == "Bear").count();
         assert_eq!(bear_count, 1, "duplicate subtypes must dedupe");
+    }
+
+    #[test]
+    fn creature_type_vocabulary_includes_kindred_and_tribal_only_faces() {
+        // CR 205.3m + CR 308.1: kindred (and legacy tribal) cards share the
+        // creature subtype list. A face whose only qualifying core type is
+        // Kindred or Tribal (e.g. "Tribal Enchantment — Faerie", "Kindred
+        // Sorcery — Elf") must still contribute its subtype to the vocabulary,
+        // even though no Creature core type is present.
+        let mut map = serde_json::Map::new();
+        // Legacy Tribal-only face (Bitterblossom-shaped: Tribal Enchantment — Faerie).
+        map.insert(
+            "fae enchantment".to_string(),
+            serde_json::json!({
+                "name": "Fae Enchantment",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": [],
+                    "core_types": ["Tribal", "Enchantment"],
+                    "subtypes": ["Faerie"],
+                },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+            }),
+        );
+        // Kindred-only face (current-rules shape: Kindred Sorcery — Elf).
+        map.insert(
+            "elf rite".to_string(),
+            serde_json::json!({
+                "name": "Elf Rite",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": [],
+                    "core_types": ["Kindred", "Sorcery"],
+                    "subtypes": ["Elf"],
+                },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+            }),
+        );
+        let json = serde_json::Value::Object(map).to_string();
+        let db = CardDatabase::from_json_str(&json).unwrap();
+        let vocab = db.creature_type_vocabulary();
+        assert!(
+            vocab.contains(&"Faerie".to_string()),
+            "Faerie must appear from a Tribal-only face (no Creature core type)"
+        );
+        assert!(
+            vocab.contains(&"Elf".to_string()),
+            "Elf must appear from a Kindred-only face (no Creature core type)"
+        );
     }
 
     #[test]
