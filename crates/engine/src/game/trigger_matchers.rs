@@ -972,7 +972,8 @@ pub(super) fn match_damage_done_once_by_controller(
 ) -> bool {
     let GameEvent::CombatDamageDealtToPlayer {
         player_id,
-        source_ids,
+        source_amounts,
+        ..
     } = event
     else {
         return false;
@@ -1002,12 +1003,12 @@ pub(super) fn match_damage_done_once_by_controller(
     }
 
     if let Some(filter) = &trigger.valid_source {
-        return source_ids
+        return source_amounts
             .iter()
-            .any(|source| target_filter_matches_object(state, *source, filter, source_id));
+            .any(|(source, _)| target_filter_matches_object(state, *source, filter, source_id));
     }
 
-    source_ids.contains(&source_id)
+    source_amounts.iter().any(|(id, _)| *id == source_id)
 }
 
 pub(super) fn matching_damage_done_once_by_controller_event(
@@ -1022,7 +1023,8 @@ pub(super) fn matching_damage_done_once_by_controller_event(
     // effects read this filtered event context.
     let GameEvent::CombatDamageDealtToPlayer {
         player_id,
-        source_ids,
+        source_amounts,
+        ..
     } = event
     else {
         return None;
@@ -1032,14 +1034,23 @@ pub(super) fn matching_damage_done_once_by_controller_event(
         return None;
     }
 
-    let matching_sources = if let Some(filter) = &trigger.valid_source {
-        source_ids
+    // CR 120.1 + CR 510.2 + CR 608.2c: Filter to matching sources using the
+    // step-local per-source amounts carried by the event (the resolving ability
+    // reads its triggering-event context per the function header above). This
+    // avoids summing `damage_dealt_this_turn` which accumulates across combat
+    // damage steps and would inflate the total on double-strike / extra-combat.
+    let matching_sources: Vec<(ObjectId, u32)> = if let Some(filter) = &trigger.valid_source {
+        source_amounts
             .iter()
+            .filter(|(src, _)| target_filter_matches_object(state, *src, filter, source_id))
             .copied()
-            .filter(|source| target_filter_matches_object(state, *source, filter, source_id))
-            .collect::<Vec<_>>()
-    } else if source_ids.contains(&source_id) {
-        vec![source_id]
+            .collect()
+    } else if source_amounts.iter().any(|(id, _)| *id == source_id) {
+        source_amounts
+            .iter()
+            .filter(|(id, _)| *id == source_id)
+            .copied()
+            .collect()
     } else {
         Vec::new()
     };
@@ -1047,9 +1058,11 @@ pub(super) fn matching_damage_done_once_by_controller_event(
     if matching_sources.is_empty() {
         None
     } else {
+        let filtered_total: u32 = matching_sources.iter().map(|(_, amt)| amt).sum();
         Some(GameEvent::CombatDamageDealtToPlayer {
             player_id: *player_id,
-            source_ids: matching_sources,
+            source_amounts: matching_sources,
+            total_damage: filtered_total,
         })
     }
 }
@@ -5399,7 +5412,8 @@ mod tests {
 
         let event = GameEvent::CombatDamageDealtToPlayer {
             player_id: PlayerId(1),
-            source_ids: vec![source_a, source_b],
+            source_amounts: vec![(source_a, 2), (source_b, 3)],
+            total_damage: 5,
         };
         assert!(match_damage_done_once_by_controller(
             &event,
@@ -5442,7 +5456,8 @@ mod tests {
 
         let event = GameEvent::CombatDamageDealtToPlayer {
             player_id: PlayerId(1),
-            source_ids: vec![source],
+            source_amounts: vec![(source, 3)],
+            total_damage: 3,
         };
 
         assert!(matching_damage_done_once_by_controller_event(
@@ -5452,6 +5467,82 @@ mod tests {
             &state,
         )
         .is_none());
+    }
+
+    #[test]
+    fn matching_damage_done_once_by_controller_event_computes_filtered_total() {
+        // CR 120.1 + CR 510.2 + CR 608.2c: when only a subset of the
+        // combat-damage sources satisfy the trigger's source filter, the rebuilt
+        // event's total_damage must reflect ONLY the matching sources' damage —
+        // not the aggregate. The per-source amounts come directly from the
+        // event's `source_amounts` field (step-local), so double-strike /
+        // extra-combat records in `damage_dealt_this_turn` do NOT inflate this.
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Combat Damage Watcher".to_string(),
+            Zone::Battlefield,
+        );
+
+        // creature_a: a Fractal creature controlled by player 0 — matches the filter.
+        let creature_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Fractal".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Fractal".to_string());
+        }
+
+        // creature_b: a plain creature controlled by player 0 — fails the subtype filter.
+        let creature_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        // The event carries step-local per-source amounts. No damage_dealt_this_turn
+        // setup needed — the function reads directly from source_amounts.
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(creature_a, 3), (creature_b, 2)],
+            total_damage: 5,
+        };
+
+        // Trigger matches only Fractal creatures (i.e., creature_a) controlled by you.
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .subtype("Fractal".to_string()),
+        ));
+
+        let rebuilt =
+            matching_damage_done_once_by_controller_event(&event, &trigger, trigger_source, &state)
+                .expect("a matching source should fire the trigger");
+        let GameEvent::CombatDamageDealtToPlayer {
+            source_amounts: rebuilt_amounts,
+            total_damage,
+            ..
+        } = rebuilt
+        else {
+            panic!("expected CombatDamageDealtToPlayer, got {rebuilt:?}");
+        };
+        assert_eq!(rebuilt_amounts, vec![(creature_a, 3)]);
+        // Only creature_a's 3 damage counts, not the aggregate 5.
+        assert_eq!(total_damage, 3);
     }
 
     #[test]

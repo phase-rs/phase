@@ -1901,8 +1901,8 @@ fn collect_ring_emblem_triggers(
                 // CR 701.54c: Once the Ring has tempted a player four or more
                 // times, it has "Whenever your Ring-bearer deals combat damage
                 // to a player, each opponent loses 3 life."
-                if let GameEvent::CombatDamageDealtToPlayer { source_ids, .. } = event {
-                    if source_ids.contains(&bearer_id) {
+                if let GameEvent::CombatDamageDealtToPlayer { source_amounts, .. } = event {
+                    if source_amounts.iter().any(|(id, _)| *id == bearer_id) {
                         pending.push(ring_pending_trigger(
                             bearer_id,
                             player,

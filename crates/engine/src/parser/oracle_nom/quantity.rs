@@ -1504,6 +1504,11 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         value(QuantityRef::EventContextAmount, tag("that much")),
         value(QuantityRef::EventContextAmount, tag("that many")),
         value(QuantityRef::EventContextAmount, tag("that damage")),
+        // CR 120.1 + CR 603.7c: "the damage dealt" bare form in a triggered
+        // ability body — refers to the total from the triggering combat-damage
+        // event. Distinct from "that damage" (different article+verb) and
+        // "damage dealt this way" (PreviousEffectAmount).
+        value(QuantityRef::EventContextAmount, tag("the damage dealt")),
         value(
             QuantityRef::Power {
                 scope: ObjectScope::CostPaidObject,
@@ -3773,6 +3778,11 @@ mod tests {
         assert_eq!(rest, " life");
 
         let (rest, q) = parse_quantity_ref("that damage").unwrap();
+        assert_eq!(q, QuantityRef::EventContextAmount);
+        assert_eq!(rest, "");
+
+        // CR 603.7c: bare "the damage dealt" form maps to EventContextAmount.
+        let (rest, q) = parse_quantity_ref("the damage dealt").unwrap();
         assert_eq!(q, QuantityRef::EventContextAmount);
         assert_eq!(rest, "");
 

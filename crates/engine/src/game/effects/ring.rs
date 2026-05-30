@@ -374,7 +374,8 @@ mod tests {
             &mut state,
             &[GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
-                source_ids: vec![bearer],
+                source_amounts: vec![(bearer, 3)],
+                total_damage: 3,
             }],
         );
 

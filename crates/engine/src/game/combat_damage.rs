@@ -649,8 +649,10 @@ pub(crate) fn apply_combat_damage(
     assignments: &[(ObjectId, DamageAssignment)],
 ) -> Vec<GameEvent> {
     let mut events = Vec::new();
-    let mut combat_damage_to_players: Vec<(crate::types::player::PlayerId, Vec<ObjectId>)> =
-        Vec::new();
+    // CR 510.2: accumulates per-player, per-source damage for this step only.
+    // `(player, [(source_id, amount)], step_total)`.
+    type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
+    let mut combat_damage_to_players: Vec<PerPlayerCombatDamage> = Vec::new();
 
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
@@ -732,17 +734,25 @@ pub(crate) fn apply_combat_damage(
         // Combat-only bookkeeping (not part of the shared damage pipeline):
         if let DamageTarget::Player(player_id) = &entry.assignment.target {
             let source_id = entry.ctx.source_id;
-            // Track CombatDamageDealtToPlayer source batching
-            let player_sources = combat_damage_to_players
+            // CR 510.2: Track per-source amounts for this step. Each source
+            // appears at most once per player per step; dedup guards any edge
+            // where the same source is re-applied (e.g. split-damage riders).
+            if let Some((_, sources, total)) = combat_damage_to_players
                 .iter_mut()
-                .find(|(damaged_player, _)| *damaged_player == *player_id)
-                .map(|(_, source_ids)| source_ids);
-            if let Some(source_ids) = player_sources {
-                if !source_ids.contains(&source_id) {
-                    source_ids.push(source_id);
+                .find(|(damaged_player, _, _)| *damaged_player == *player_id)
+            {
+                if let Some((_, amt)) = sources.iter_mut().find(|(id, _)| *id == source_id) {
+                    *amt += actual_amount;
+                } else {
+                    sources.push((source_id, actual_amount));
                 }
+                *total += actual_amount;
             } else {
-                combat_damage_to_players.push((*player_id, vec![source_id]));
+                combat_damage_to_players.push((
+                    *player_id,
+                    vec![(source_id, actual_amount)],
+                    actual_amount,
+                ));
             }
 
             // CR 704.6c: Track commander combat damage for the 21-damage loss condition.
@@ -766,10 +776,11 @@ pub(crate) fn apply_combat_damage(
         }
     }
 
-    for (player_id, source_ids) in combat_damage_to_players {
+    for (player_id, source_amounts, total_damage) in combat_damage_to_players {
         events.push(GameEvent::CombatDamageDealtToPlayer {
             player_id,
-            source_ids,
+            source_amounts,
+            total_damage,
         });
     }
 
@@ -1669,11 +1680,12 @@ mod tests {
                 event,
                 GameEvent::CombatDamageDealtToPlayer {
                     player_id,
-                    source_ids,
+                    source_amounts,
+                    ..
                 } if *player_id == PlayerId(1)
-                    && source_ids.len() == 2
-                    && source_ids.contains(&attacker_a)
-                    && source_ids.contains(&attacker_b)
+                    && source_amounts.len() == 2
+                    && source_amounts.iter().any(|(id, _)| *id == attacker_a)
+                    && source_amounts.iter().any(|(id, _)| *id == attacker_b)
             )
         }));
     }

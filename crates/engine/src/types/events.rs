@@ -437,7 +437,29 @@ pub enum GameEvent {
     },
     CombatDamageDealtToPlayer {
         player_id: PlayerId,
-        source_ids: Vec<ObjectId>,
+        /// CR 120.1 + CR 510.2: Per-source combat damage amounts for this
+        /// specific combat damage step. Using step-local amounts instead of a
+        /// bare `Vec<ObjectId>` prevents double-strike / extra-combat inflation
+        /// in `matching_damage_done_once_by_controller_event`: each
+        /// `apply_combat_damage` call produces exactly one event per player with
+        /// the amounts from that step only.
+        ///
+        /// Migration note: this field replaces the former `source_ids:
+        /// Vec<ObjectId>`. `#[serde(default)]` keeps deserialization of older
+        /// persisted state infallible, but an old-format event (a game persisted
+        /// mid-combat-damage-trigger by a pre-rename binary and restored after an
+        /// upgrade) decodes to an empty set — the legacy `source_ids` array is
+        /// dropped. This is acceptable: the event is transient (produced and
+        /// consumed within one combat-damage step), the window is the rare
+        /// mid-trigger save across a server upgrade, and it degrades to "no
+        /// matching sources" rather than crashing. The old format carried no
+        /// amounts, so no migration shim could recover `total_damage` regardless.
+        #[serde(default)]
+        source_amounts: Vec<(ObjectId, u32)>,
+        /// CR 120.1: Total actual damage dealt to this player in this combat
+        /// damage step — the sum of all `source_amounts` entries.
+        #[serde(default)]
+        total_damage: u32,
     },
     PlayerEliminated {
         player_id: PlayerId,
@@ -768,7 +790,8 @@ mod tests {
     fn combat_damage_dealt_to_player_roundtrips() {
         let event = GameEvent::CombatDamageDealtToPlayer {
             player_id: PlayerId(1),
-            source_ids: vec![ObjectId(10), ObjectId(11)],
+            source_amounts: vec![(ObjectId(10), 3), (ObjectId(11), 4)],
+            total_damage: 7,
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();

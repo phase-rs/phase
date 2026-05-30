@@ -305,8 +305,16 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         }
     }
 
-    // Collect all creature subtypes for Changeling CDA expansion
-    let mut creature_types: HashSet<String> = HashSet::new();
+    // Collect all creature subtypes for Changeling CDA expansion.
+    // CR 205.2b + CR 205.3m + CR 308.1: creature subtypes are shared by Creature
+    // and Kindred (legacy Tribal) faces. Subtype categories are disjoint, so a
+    // multi-type entry ("Land Creature — Forest Dryad") carries non-creature
+    // subtypes alongside the creature type; subtract any subtype that also
+    // appears on a non-creature entry so land/artifact/enchantment types don't
+    // leak in. This must stay in lockstep with `collect_creature_type_vocabulary`
+    // in `database/card_db.rs` (the db==Some path's corpus seed).
+    let mut creature_candidates: HashSet<String> = HashSet::new();
+    let mut non_creature_subtypes: HashSet<String> = HashSet::new();
     let all_entries = payload
         .player
         .main_deck
@@ -321,16 +329,21 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 .flat_map(|d| d.main_deck.iter().chain(d.commander.iter())),
         );
     for entry in all_entries {
-        if entry
-            .card
-            .card_type
-            .core_types
-            .contains(&crate::types::card_type::CoreType::Creature)
-        {
-            creature_types.extend(entry.card.card_type.subtypes.iter().cloned());
-        }
+        let core_types = &entry.card.card_type.core_types;
+        let is_creature = core_types.contains(&crate::types::card_type::CoreType::Creature)
+            || core_types.contains(&crate::types::card_type::CoreType::Kindred)
+            || core_types.contains(&crate::types::card_type::CoreType::Tribal);
+        let bucket = if is_creature {
+            &mut creature_candidates
+        } else {
+            &mut non_creature_subtypes
+        };
+        bucket.extend(entry.card.card_type.subtypes.iter().cloned());
     }
-    let mut sorted: Vec<String> = creature_types.into_iter().collect();
+    let mut sorted: Vec<String> = creature_candidates
+        .difference(&non_creature_subtypes)
+        .cloned()
+        .collect();
     sorted.sort();
     state.all_creature_types = sorted;
 
@@ -365,6 +378,18 @@ pub fn load_and_hydrate_decks(
     match db {
         Some(db) => {
             super::printed_cards::rehydrate_game_from_card_db(state, db);
+            // CR 205.3m: Seed the creature subtype vocabulary from the full
+            // card corpus (not just loaded decks) so token-only types like
+            // Saproling and not-in-this-deck types like Golem are recognized
+            // by `SharesQuality::CreatureType` (Coat of Arms #1471), the
+            // Changeling expansion, and `ChoiceType::CreatureType` (Morophon
+            // #1472). The deck-only union performed by `load_deck_into_state`
+            // remains as a safety net for the `db == None` path below.
+            let mut merged: HashSet<String> = state.all_creature_types.drain(..).collect();
+            merged.extend(db.creature_type_vocabulary().iter().cloned());
+            let mut sorted: Vec<String> = merged.into_iter().collect();
+            sorted.sort();
+            state.all_creature_types = sorted;
         }
         None => {
             // Latch the warning so a long-running desktop session that
@@ -934,6 +959,107 @@ mod tests {
         assert_eq!(commander.name, "Brigid, Clachan's Heart");
         assert_eq!(commander.zone, Zone::Command);
         assert!(commander.is_commander);
+    }
+
+    #[test]
+    fn load_and_hydrate_seeds_creature_types_from_card_database() {
+        // CR 205.3m + #1471/#1472: the creature type vocabulary must come from
+        // the full CardDatabase corpus, not just from the loaded decks. A deck
+        // that lists only Grizzly Bears must still recognize "Saproling" and
+        // "Golem" as creature types because they appear on cards in the DB
+        // (Saproling token producers, Golem artifact creatures, etc.).
+        //
+        // This is the building-block test for SharesQuality::CreatureType
+        // (Coat of Arms) and ChoiceType::CreatureType (Morophon) — once the
+        // vocabulary is populated from the corpus, both effects see the
+        // complete creature-type universe regardless of deck composition.
+        let bears = make_creature_face();
+        let saproling_token = CardFace {
+            name: "Saproling Token".to_string(),
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Saproling".to_string()],
+            },
+            ..make_creature_face()
+        };
+        let golem_creature = CardFace {
+            name: "Walking Golem".to_string(),
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![
+                    crate::types::card_type::CoreType::Artifact,
+                    crate::types::card_type::CoreType::Creature,
+                ],
+                subtypes: vec!["Golem".to_string()],
+            },
+            ..make_creature_face()
+        };
+        let db_json = serde_json::json!({
+            "grizzly bears": bears.clone(),
+            "saproling token": saproling_token,
+            "walking golem": golem_creature,
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+
+        // Deck lists ONLY Grizzly Bears — Saproling and Golem must still be
+        // recognized after hydration because the DB knows about them.
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: bears,
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload::default(),
+            ..Default::default()
+        };
+
+        let mut state = GameState::new_two_player(42);
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+
+        assert!(
+            state.all_creature_types.contains(&"Saproling".to_string()),
+            "Saproling must be recognized via corpus seeding (#1471 Coat of Arms)"
+        );
+        assert!(
+            state.all_creature_types.contains(&"Golem".to_string()),
+            "Golem must be recognized via corpus seeding (#1472 Morophon)"
+        );
+        assert!(
+            state.all_creature_types.contains(&"Bear".to_string()),
+            "deck-listed subtype must still appear"
+        );
+        // Sorted and deduped.
+        let mut sorted = state.all_creature_types.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(state.all_creature_types, sorted);
+    }
+
+    #[test]
+    fn load_and_hydrate_without_db_preserves_deck_only_vocabulary() {
+        // The db == None path must still seed creature types from the loaded
+        // deck (the existing fallback behavior in `load_deck_into_state`).
+        // This guards against regressing the safety net when callers do not
+        // thread a CardDatabase through.
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload::default(),
+            ..Default::default()
+        };
+
+        let mut state = GameState::new_two_player(42);
+        load_and_hydrate_decks(&mut state, &payload, None);
+        assert!(state.all_creature_types.contains(&"Bear".to_string()));
     }
 
     #[test]

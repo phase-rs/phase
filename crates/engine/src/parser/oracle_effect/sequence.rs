@@ -3572,6 +3572,15 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
             let qty_text = rest_where.trim().trim_end_matches('.');
             parse_cda_quantity(qty_text)
                 .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
+        } else if let Ok((rest_equal, _)) =
+            tag::<_, _, OracleError<'_>>("equal to ").parse(rest.trim_start_matches(['.', ' ']))
+        {
+            // CR 122.6a: "put a number of counters on it equal to [qty]" — dynamic
+            // counter count in the imperative followup form (Primo, the Unbounded).
+            // allow-noncombinator: trailing-period cleanup on a pre-tokenized suffix.
+            let qty_text = rest_equal.trim().trim_end_matches('.');
+            parse_cda_quantity(qty_text)
+                .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
         } else {
             None
         };
@@ -5078,6 +5087,31 @@ mod tests {
         } else {
             panic!("expected TokenEntersWithCounters");
         }
+    }
+
+    #[test]
+    fn put_counters_on_token_followup_equal_to_damage_dealt() {
+        // Primo, the Unbounded: "Put a number of +1/+1 counters on it equal to
+        // the damage dealt." After sentence splitting the continuation sees:
+        // "put a number of +1/+1 counters on it equal to the damage dealt"
+        let result = try_parse_put_counters_on_token_followup(
+            "put a number of +1/+1 counters on it equal to the damage dealt",
+        );
+        let Some(ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        }) = result
+        else {
+            panic!("expected TokenEntersWithCounters, got {result:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            "count must be EventContextAmount (the damage dealt)"
+        );
     }
 
     #[test]
