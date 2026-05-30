@@ -909,7 +909,9 @@ fn mana_ability_ready_without_simulation(
     if obj.controller != player {
         return false;
     }
-    // Zone gate — battlefield by default, honoring Hand/Graveyard mana abilities.
+    // CR 113.6 + CR 113.6b: A permanent's abilities function only on the battlefield by
+    // default; an ability that states which zones it functions in (activation_zone, e.g.
+    // Hand/Graveyard mana abilities) functions only from those zones.
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
     if obj.zone != required_zone {
         return false;
@@ -1908,28 +1910,29 @@ fn batch_eligible_siblings(
     exclude: ObjectId,
     ability_def: &AbilityDefinition,
 ) -> Vec<ObjectId> {
-    let candidates: Vec<ObjectId> = state
+    // A permanent may carry the same ability definition more than once (granted by
+    // multiple Auras/effects). Checking only the first matching index would wrongly
+    // reject the source when that copy is unavailable (e.g. a once-each-turn
+    // restriction) while a later identical copy is ready, so test whether *any*
+    // matching ability index is ready.
+    let mut siblings: Vec<ObjectId> = state
         .objects
         .iter()
         .filter_map(|(id, obj)| {
             (*id != exclude
                 && obj.controller == player
                 && obj.zone == Zone::Battlefield
-                && obj.abilities.iter().any(|ability| ability == ability_def))
+                && obj.abilities.iter().enumerate().any(|(index, ability)| {
+                    ability == ability_def
+                        && mana_ability_ready_without_simulation(
+                            state,
+                            player,
+                            *id,
+                            index,
+                            ability_def,
+                        )
+                }))
             .then_some(*id)
-        })
-        .collect();
-    let mut siblings: Vec<ObjectId> = candidates
-        .into_iter()
-        .filter(|&id| {
-            state.objects.get(&id).is_some_and(|obj| {
-                obj.abilities
-                    .iter()
-                    .position(|ability| ability == ability_def)
-                    .is_some_and(|index| {
-                        mana_ability_ready_without_simulation(state, player, id, index, ability_def)
-                    })
-            })
         })
         .collect();
     siblings.sort_unstable_by_key(|id| id.0);
