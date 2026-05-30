@@ -1,4 +1,7 @@
 {
+  "resolutionProgress": {
+    "label": "Resolviendo {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Carta boca abajo",
     "loading": "Cargando {{name}}",

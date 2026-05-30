@@ -1878,6 +1878,9 @@ export interface BatchResolveResult {
   waitingFor: WaitingFor;
   logEntries?: GameLogEntry[];
   itemsResolved: number;
+  /** Stack depth at this chunk's entry; the drive loop latches the first
+   *  chunk's value as the "resolving X of Y" denominator. */
+  total: number;
 }
 
 export interface EngineAdapter {

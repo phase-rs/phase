@@ -1,4 +1,7 @@
 {
+  "resolutionProgress": {
+    "label": "Résolution {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Carte face cachée",
     "loading": "Chargement de {{name}}",

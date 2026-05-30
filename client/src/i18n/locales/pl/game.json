@@ -1,4 +1,7 @@
 {
+  "resolutionProgress": {
+    "label": "Rozwiązywanie {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Karta zakryta",
     "loading": "Wczytywanie {{name}}",

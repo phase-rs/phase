@@ -1,4 +1,7 @@
 {
+  "resolutionProgress": {
+    "label": "Auflösen {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Verdeckte Karte",
     "loading": "{{name}} wird geladen",

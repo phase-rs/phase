@@ -88,6 +88,7 @@ import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
 import { ConnectionToast } from "../components/multiplayer/ConnectionToast.tsx";
 import { EmoteOverlay } from "../components/multiplayer/EmoteOverlay.tsx";
+import { ResolutionProgressOverlay } from "../components/board/ResolutionProgressOverlay.tsx";
 import { LobbyProgress } from "../components/multiplayer/LobbyProgress.tsx";
 import { DisconnectChoiceDialog } from "../components/hud/DisconnectChoiceDialog.tsx";
 import { PlayerEnchantmentsDialog } from "../components/hud/PlayerEnchantmentsDialog.tsx";
@@ -1278,6 +1279,7 @@ function GamePageContent({
 
       {/* Overlay layers */}
       <DebugPanel />
+      <ResolutionProgressOverlay />
 
       {viewingZone && (
         <ZoneViewer

@@ -1222,6 +1222,11 @@ struct BatchResolveResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     log_entries: Vec<engine::types::log::GameLogEntry>,
     items_resolved: u32,
+    /// Stack depth at this chunk's entry. The frontend latches the FIRST
+    /// chunk's `total` as the storm-origin denominator for "resolving X of Y"
+    /// progress (this per-chunk value shrinks across chunks, so only the first
+    /// is the true origin total). Display-only; carries no rules meaning.
+    total: u32,
 }
 
 #[derive(serde::Deserialize)]
@@ -1346,6 +1351,7 @@ pub fn resolve_all(
             waiting_for: state.waiting_for.clone(),
             log_entries: all_log_entries,
             items_resolved,
+            total: initial_stack_len as u32,
         }))
     })?
 }

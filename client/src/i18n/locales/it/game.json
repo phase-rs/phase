@@ -1,4 +1,7 @@
 {
+  "resolutionProgress": {
+    "label": "Risoluzione {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Carta coperta",
     "loading": "Caricamento {{name}}",
