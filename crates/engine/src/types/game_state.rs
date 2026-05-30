@@ -372,6 +372,20 @@ pub struct ZoneChangeRecord {
     /// snapshot rather than current combat state.
     #[serde(default)]
     pub combat_status: ZoneChangeCombatStatus,
+    /// CR 603.10a: ObjectIds that left the battlefield in the SAME simultaneous
+    /// event as this object (every permanent destroyed by one board wipe, every
+    /// creature destroyed together by a single state-based-action check, etc.),
+    /// excluding this object. Populated only by producers of a simultaneous
+    /// departure batch via `zones::mark_simultaneous_departures`; empty for a
+    /// lone departure or for departures that are separate sequential instructions
+    /// of one resolution. A leaves-the-battlefield / dies observer listed here
+    /// observes this departure via last-known information (CR 603.10a's worked
+    /// example); a creature that left in an earlier, separate event is not listed
+    /// and therefore does not cross-observe. This is the authority for
+    /// simultaneity — trigger collection must not infer it from the shape of the
+    /// accumulated event vector.
+    #[serde(default)]
+    pub co_departed: Vec<ObjectId>,
 }
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
@@ -438,6 +452,7 @@ impl ZoneChangeRecord {
             linked_exile_snapshot: Vec::new(),
             is_token: false,
             combat_status: ZoneChangeCombatStatus::default(),
+            co_departed: Vec::new(),
         }
     }
 }
@@ -1431,6 +1446,11 @@ pub enum AlternativeCastKeyword {
     Overload,
     /// CR 702.103a: Spell becomes an Aura with enchant creature (CR 702.103b).
     Bestow,
+    /// CR 702.113a: "If this spell's awaken cost was paid, put N +1/+1 counters
+    /// on target land you control. That land becomes a 0/0 Elemental creature
+    /// with haste. It's still a land." Paying the awaken cost adds the land
+    /// target (CR 702.113b); casting normally adds no target and no rider.
+    Awaken,
     /// CR 702.148a-b + CR 612: Paying the cleave cost removes every
     /// square-bracketed span from the spell's text (a text-changing effect).
     Cleave,
@@ -2306,8 +2326,11 @@ pub enum WaitingFor {
     /// CR 118.3 / CR 601.2b: Player must choose permanent(s) to sacrifice as cost.
     SacrificeForCost {
         player: PlayerId,
-        /// How many permanents to sacrifice (usually 1; covers "sacrifice two creatures").
+        /// Maximum number of permanents the player may sacrifice for this cost.
         count: usize,
+        /// Minimum number of permanents the player must sacrifice.
+        #[serde(default)]
+        min_count: usize,
         /// Pre-filtered eligible permanents on the battlefield.
         permanents: Vec<ObjectId>,
         /// The pending cast to resume after the sacrifice is complete.
@@ -3478,6 +3501,17 @@ pub enum CastingVariant {
     /// battlefield, the type-changing effect ends — it remains as an
     /// enchantment creature (overrides CR 704.5m for bestow Auras).
     Bestow,
+    /// CR 702.113a: Cast from hand via Awaken's alternative cost. The printed
+    /// mana cost is replaced by `Keyword::Awaken { cost }` at cast preparation
+    /// (mirrors `Overload`). A resolution rider is appended to the tail of the
+    /// spell's ability tree (`effects::awaken::append_awaken_rider`): the
+    /// printed effect resolves first, then "put N +1/+1 counters on target land
+    /// you control; that land becomes a 0/0 Elemental creature with haste; it's
+    /// still a land." Per CR 702.113b, the land target only exists on the awaken
+    /// variant — a normal cast appends no rider and requests no land target.
+    /// CR 702.113a: the spell goes to the graveyard normally, so this variant is
+    /// deliberately absent from `exiles_when_leaving_stack_for_any_reason`.
+    Awaken,
     /// CR 702.148a-b + CR 612: Cast from hand via Cleave's alternative cost
     /// (CR 118.9). The printed mana cost is replaced by `Keyword::Cleave(cost)`
     /// at cast preparation (mirrors `Evoke`/`Overload`). Per CR 702.148a, paying
@@ -5622,6 +5656,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::SacrificeForCost {
             player: PlayerId(0),
             count: 1,
+            min_count: 1,
             permanents: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));

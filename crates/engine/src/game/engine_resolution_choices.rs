@@ -2073,6 +2073,17 @@ pub(super) fn handle_resolution_choice(
                 EffectKind::Sacrifice | EffectKind::ChangeZone | EffectKind::BounceAll
             );
             if moves_permanents {
+                // CR 603.10a: the chosen permanents left the battlefield together
+                // in this single resolution event, so co-departing
+                // leaves-the-battlefield observers among them (Blood Artist among
+                // the sacrificed group) observe each other. Stamp only the
+                // sub-slice this handler produced — never the whole events vector —
+                // so earlier sequential departures in this resolution aren't grouped
+                // with these.
+                super::zones::mark_simultaneous_departures(
+                    &mut events[events_before_effect..events_after_move],
+                    &super::zones::departed_subset(state, &chosen),
+                );
                 if let Some(wf) = batch_or_drain_observer_triggers(
                     state,
                     events,
@@ -2425,6 +2436,16 @@ pub(super) fn handle_resolution_choice(
             } else {
                 // The sacrifice (if any) is complete. Mark its event slice.
                 let events_after_sacrifice = events.len();
+                // CR 603.10a + CR 608.2f + CR 701.21a: the permanents sacrificed by
+                // `sacrifice_unchosen` (keep-one-sacrifice-rest: Cataclysm,
+                // Tragic Arrogance) left the battlefield together in this single
+                // resolution event, so a co-departing leaves-the-battlefield
+                // observer among them (Blood Artist) observes the rest. Stamp the
+                // sacrifice sub-slice before the B1/B2 trigger dispatch reads it.
+                super::zones::stamp_simultaneous_from_slice(
+                    state,
+                    &mut events[events_before_sacrifice..events_after_sacrifice],
+                );
                 // Step B: if the sacrifice did not itself pause (no replacement
                 // choice was raised by `sacrifice_unchosen`), resolve any
                 // reflexive continuation. `state.waiting_for` is the `Priority`

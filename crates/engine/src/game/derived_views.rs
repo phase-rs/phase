@@ -864,6 +864,7 @@ mod tests {
                 linked_exile_snapshot: Vec::new(),
                 is_token: false,
                 combat_status: Default::default(),
+                co_departed: Vec::new(),
             }),
         };
         let ability = ResolvedAbility::new(

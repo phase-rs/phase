@@ -72,6 +72,14 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.bestowSubtitle", { name: cardName }),
       };
+    case "Awaken":
+      return {
+        eyebrow: t("alternativeCost.awakenEyebrow"),
+        normalLabel: t("alternativeCost.awakenNormalLabel"),
+        altLabel: t("alternativeCost.awakenAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.awakenSubtitle", { name: cardName }),
+      };
     case "Cleave":
       return {
         eyebrow: t("alternativeCost.cleaveEyebrow"),

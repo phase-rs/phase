@@ -421,6 +421,7 @@ pub fn matches_target_filter_on_lki_snapshot(
         linked_exile_snapshot: vec![],
         is_token: false,
         combat_status: Default::default(),
+        co_departed: Vec::new(),
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -7169,6 +7170,7 @@ mod tests {
             linked_exile_snapshot: vec![],
             is_token: false,
             combat_status: Default::default(),
+            co_departed: Vec::new(),
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");

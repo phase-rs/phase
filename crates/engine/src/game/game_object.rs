@@ -292,6 +292,15 @@ pub struct GameObject {
     /// attached to each other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paired_with: Option<ObjectId>,
+    /// CR 702.95a + CR 702.95e: The player who controlled this creature when the
+    /// soulbond pair was formed. A pair persists only while *both* creatures
+    /// remain on the battlefield under their respective pairing controllers; if
+    /// another player gains control of either, the pair must break. Comparing the
+    /// two creatures' current controllers to each other (rather than to this
+    /// recorded value) misses the case where one effect gains control of both
+    /// halves at once. `None` when the creature is unpaired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair_controller: Option<PlayerId>,
 
     // Counters
     pub counters: HashMap<CounterType, u32>,
@@ -753,6 +762,7 @@ impl GameObject {
             // "whenever a creature token dies").
             is_token: self.is_token,
             combat_status: Default::default(),
+            co_departed: Vec::new(),
         }
     }
 
@@ -823,6 +833,7 @@ impl GameObject {
             attached_to: None,
             attachments: Vec::new(),
             paired_with: None,
+            pair_controller: None,
             counters: HashMap::new(),
             name: name.clone(),
             power: None,
@@ -969,6 +980,7 @@ impl GameObject {
         self.prepared = None;
         self.is_saddled = false;
         self.paired_with = None;
+        self.pair_controller = None;
         self.chosen_attributes.clear();
         self.cast_variant_paid = None;
         // CR 400.7 + CR 603.6a: Ability-placement provenance is per-entry. Clear

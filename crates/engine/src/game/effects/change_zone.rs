@@ -961,6 +961,7 @@ pub fn resolve_all(
     }
 
     let mut moved_count: i32 = 0;
+    let mut departed: Vec<ObjectId> = Vec::new();
     for obj_id in matching {
         // CR 400.3: Each object's actual current zone is the source zone for the
         // move. Single-zone callers pass `origin_zones = [zone]`; multi-zone
@@ -989,6 +990,19 @@ pub fn resolve_all(
         ) {
             ZoneMoveResult::Done => {
                 moved_count += 1;
+                // CR 603.10a + CR 608.2f: Collect battlefield-origin objects that
+                // actually left (post-move zone != Battlefield). `execute_zone_move`
+                // returns `Done` even when a replacement Prevented the move, so the
+                // post-move zone check excludes prevented members from the
+                // co-departed group.
+                if per_object_origin == Zone::Battlefield
+                    && state
+                        .objects
+                        .get(&obj_id)
+                        .is_some_and(|o| o.zone != Zone::Battlefield)
+                {
+                    departed.push(obj_id);
+                }
                 // CR 400.7 + CR 608.2c: Track hand-origin exiles separately so
                 // QuantityRef::ExiledFromHandThisResolution can resolve "draws a
                 // card for each card exiled from their hand this way".
@@ -1009,6 +1023,11 @@ pub fn resolve_all(
             }
         }
     }
+
+    // CR 603.10a + CR 608.2f: Every battlefield-origin object that left did so as
+    // part of the same mass zone-change event, so leaves-the-battlefield observers
+    // among the departed group observe each other via last-known information.
+    zones::mark_simultaneous_departures(events, &departed);
 
     // CR 608.2c: "that many" in a later instruction refers back to the prior
     // action's count. Record the number of objects moved so downstream

@@ -1287,6 +1287,9 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Bestow => {
                     "AlternativeCastChoice(Bestow)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Awaken => {
+                    "AlternativeCastChoice(Awaken)"
+                }
                 crate::types::game_state::AlternativeCastKeyword::Cleave => {
                     "AlternativeCastChoice(Cleave)"
                 }
