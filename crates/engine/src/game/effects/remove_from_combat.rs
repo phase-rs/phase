@@ -69,7 +69,7 @@ pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::ident
     // when an attacker was actually removed — removing a pure blocker doesn't
     // affect FilterProp::Attacking statics.
     if attacker_removed {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -213,7 +213,7 @@ mod tests {
             }],
             ..Default::default()
         });
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
 
         remove_object_from_combat(&mut state, attacker_id);
 
@@ -222,7 +222,7 @@ mod tests {
             "attacker should be removed from combat"
         );
         assert!(
-            state.layers_dirty,
+            state.layers_dirty.is_dirty(),
             "removing an attacker must mark layers dirty to revoke FilterProp::Attacking grants"
         );
     }
@@ -265,7 +265,7 @@ mod tests {
             .blocker_to_attacker
             .insert(blocker_id, vec![attacker_id]);
         state.combat = Some(combat);
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
 
         // Remove the blocker — it is not in combat.attackers.
         remove_object_from_combat(&mut state, blocker_id);
@@ -276,7 +276,7 @@ mod tests {
             "attacker should remain"
         );
         assert!(
-            !state.layers_dirty,
+            !state.layers_dirty.is_dirty(),
             "removing a pure blocker must not dirty layers — no FilterProp::Attacking change"
         );
     }

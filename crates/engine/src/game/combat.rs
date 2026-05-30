@@ -178,7 +178,7 @@ pub fn enter_attacking(
         // CR 508.4 + CR 506.4 + CR 613.1f: a permanent put onto the battlefield
         // attacking is an attacking creature; re-evaluate Layer 6
         // FilterProp::Attacking grants immediately.
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -290,7 +290,7 @@ pub fn place_attacking_alongside(
         // CR 702.49c + CR 702.190b + CR 506.4 + CR 613.1f: Ninjutsu/Sneak place a
         // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking
         // grants.
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -1540,7 +1540,7 @@ pub fn declare_attackers(
     // layers dirty forces Layer 6 ability-adding effects (CR 613.1f) with
     // FilterProp::Attacking (e.g. Crossway Troublemakers) to re-evaluate now, so
     // the grant is live for the whole combat, not just after damage.
-    state.layers_dirty = true;
+    state.layers_dirty.mark_full();
     let attacker_count = combat.attackers.len();
 
     // Use the first attacker's defending player for the event
@@ -5355,7 +5355,7 @@ mod tests {
                 PlayerId(1),
             ));
 
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
         enter_attacking(&mut state, token, attacker, PlayerId(0));
 
         assert!(
@@ -5369,7 +5369,7 @@ mod tests {
             "entered-attacking creature must be in combat.attackers"
         );
         assert!(
-            state.layers_dirty,
+            state.layers_dirty.is_dirty(),
             "putting a creature onto the battlefield attacking must mark layers dirty"
         );
     }
@@ -5383,7 +5383,7 @@ mod tests {
         let ninja = create_creature(&mut state, PlayerId(0), "Ninja", 2, 2);
 
         state.combat = Some(CombatState::default());
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
 
         let mut events = Vec::new();
         place_attacking_alongside(
@@ -5405,7 +5405,7 @@ mod tests {
             "place_attacking_alongside must add the creature to combat.attackers"
         );
         assert!(
-            state.layers_dirty,
+            state.layers_dirty.is_dirty(),
             "placing a creature already attacking must mark layers dirty"
         );
     }
