@@ -662,6 +662,8 @@ pub(crate) enum TargetedImperativeAst {
         enters_under: Option<ControllerRef>,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
+        /// CR 508.4: "tapped and attacking" — enters attacking.
+        enters_attacking: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
         /// enters the battlefield.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,

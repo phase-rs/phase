@@ -1261,6 +1261,7 @@ fn zone_change_record_from_spec(
         linked_exile_snapshot: Vec::new(),
         is_token: true,
         combat_status: Default::default(),
+        co_departed: Vec::new(),
     }
 }
 

@@ -81,6 +81,17 @@ pub(crate) fn begin_variable_speed_payment(
     }
 }
 
+/// CR 107.3a + CR 118.3: X in an activation/additional cost is chosen as part
+/// of activating or casting, bounded by the resources available to pay fully.
+pub(crate) fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
+    if count == u32::MAX {
+        (0, eligible_len)
+    } else {
+        let exact = count as usize;
+        (exact, exact)
+    }
+}
+
 /// Emit `BecomesTarget` and `CrimeCommitted` events for each target.
 ///
 /// Called whenever targets are locked in for a spell or ability. CR 700.13:
@@ -712,7 +723,89 @@ fn granted_spell_keywords(
         upsert_keyword_by_kind(&mut keywords, keyword.clone());
     }
 
+    // CR 611.2c: Player-scoped flash-timing grants applied by activated/triggered
+    // abilities (e.g. Teferi +1) live in the TCE table, not on a battlefield static.
+    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords);
+
     keywords
+}
+
+/// CR 611.2c + CR 601.3b: Player-scoped spell-casting keyword grants (e.g. Teferi,
+/// Time Raveler's +1 "you may cast sorcery spells as though they had flash") are
+/// registered by `effect.rs` as `SpecificPlayer { id }`-bound transient continuous
+/// effects rather than battlefield statics, so the grant survives the source
+/// permanent leaving play and expires on its own duration (CR 611.2a). This scan is
+/// the player-scoped counterpart to the `game_active_statics` loop in
+/// `granted_spell_keywords`; it mirrors the condition gating of the sibling player
+/// query `transient_grants_static_mode_to_player` (static_abilities.rs).
+fn transient_granted_spell_keywords(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: &crate::game::game_object::GameObject,
+    origin_zone: Zone,
+    keywords: &mut Vec<Keyword>,
+) {
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id } = tce.affected else {
+            continue;
+        };
+        if id != caster {
+            continue;
+        }
+        // CR 603.4 + CR 608.2h: mirror `transient_grants_static_mode_to_player`'s
+        // dual-condition gating exactly.
+        if let Duration::ForAsLongAs { ref condition } = tce.duration {
+            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(ref condition) = tce.condition {
+            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        for modification in &tce.modifications {
+            let ContinuousModification::GrantStaticAbility { definition } = modification else {
+                continue;
+            };
+            let StaticMode::CastWithKeyword { keyword } = &definition.mode else {
+                continue;
+            };
+            // CR 611.2c: the grant is bound to the grantee (outer SpecificPlayer
+            // gate); its lifetime is the stated duration, independent of the
+            // source's presence OR control. Match only the spell's type axis — do
+            // not re-derive "you" from the (possibly stolen/relocated) source
+            // object. `spell_object_matches_filter_from_state` resolves
+            // `ControllerRef::You` against the *current* source controller, which
+            // becomes an opponent if Teferi is stolen before the grantee's next
+            // turn; stripping the controller axis preserves the SORCERY type axis
+            // (and any others) while removing that stale-source dependency. The
+            // spell being evaluated is by construction the grantee's own cast
+            // (`caster` == the bound player), so controller scoping is already
+            // guaranteed by the call context plus the outer gate.
+            let affected = definition.affected.as_ref().map(|filter| {
+                let mut filter = filter.clone();
+                if let TargetFilter::Typed(tf) = &mut filter {
+                    tf.controller = None;
+                }
+                filter
+            });
+            let matches = affected.as_ref().is_none_or(|filter| {
+                super::filter::spell_object_matches_filter_from_state(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    filter,
+                    tce.source_id,
+                    &state.all_creature_types,
+                )
+            });
+            if matches {
+                upsert_keyword_by_kind(keywords, keyword.clone());
+            }
+        }
+    }
 }
 
 /// CR 118.9 + CR 604.1: Collect an alternative MANA cost granted to `object_id`
@@ -2341,6 +2434,21 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.113a + CR 118.9: When the caller explicitly opted into Awaken (via
+    // `variant_override = Some(CastingVariant::Awaken)`), read the
+    // `Keyword::Awaken { count, cost }` payload from the hand object. `cost`
+    // substitutes the printed mana cost (mirrors Overload / Bestow); `count` is
+    // the number of +1/+1 counters the resolution rider places (CR 702.113a).
+    // This is the sole awaken-cost substitution site; the standard resolver pays
+    // the substituted cost and no call site inspects the awaken cost.
+    let awaken_payload = if casting_variant == CastingVariant::Awaken {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Awaken { count, cost } => Some((*count, cost.clone())),
+            _ => None,
+        })
+    } else {
+        None
+    };
     // CR 702.148a + CR 118.9: When the caller explicitly opted into Cleave (via
     // `variant_override = Some(CastingVariant::Cleave)`), substitute the cleave
     // mana cost taken from the hand object's `Keyword::Cleave(cost)` payload.
@@ -2356,6 +2464,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from hand. Auto-application is restricted to `Unlimited` sources
     // (Omniscience, Tamiyo emblem); `OncePerTurn` sources (Zaffai) must be opted
@@ -2473,6 +2582,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(evoke_cost)
             .or(overload_cost)
             .or(bestow_cost)
+            .or(awaken_cost)
             .or(cleave_cost)
             .or(effective_escape_cost_for_path)
             .or(effective_harmonize_cost_for_path)
@@ -2573,6 +2683,18 @@ fn prepare_spell_cast_with_variant_override_inner(
     if casting_variant == CastingVariant::Overload {
         if let Some(def) = ability_def.as_mut() {
             super::effects::overload::transform_ability_def(def);
+        }
+    }
+
+    // CR 702.113a: When casting with Awaken, append the awaken rider to the tail
+    // of the spell's ability tree so the printed effect resolves first, then "put
+    // N +1/+1 counters on target land you control; that land becomes a 0/0
+    // Elemental creature with haste; it's still a land." The land target only
+    // exists on the awaken variant (CR 702.113b) — a normal cast leaves the
+    // ability tree untouched and requests no land target.
+    if casting_variant == CastingVariant::Awaken {
+        if let (Some(def), Some((count, _))) = (ability_def.as_mut(), awaken_payload.as_ref()) {
+            super::effects::awaken::append_awaken_rider(def, *count);
         }
     }
 
@@ -3696,6 +3818,60 @@ pub fn handle_overload_cost_choice_with_payment_mode(
                 player,
                 object_id,
                 Some(CastingVariant::Overload),
+            )?;
+            prepared.payment_mode = payment_mode;
+            continue_with_prepared(state, player, prepared, events)
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
+/// CR 702.113a: Handle Awaken cost choice and proceed with casting. For
+/// `AlternativeCastDecision::Alternative`, the cast is prepared with
+/// `CastingVariant::Awaken` — the awaken mana cost substitutes for the printed
+/// cost and `append_awaken_rider` appends the "put N +1/+1 counters on target
+/// land you control; that land becomes a 0/0 Elemental creature with haste"
+/// rider to the tail of the spell's ability tree. The land target then exists
+/// (CR 702.113b). For `Normal`, the cast proceeds normally with no rider and no
+/// land target — the discriminating "normal cast does not awaken" path.
+pub fn handle_awaken_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    handle_awaken_cost_choice_with_payment_mode(
+        state,
+        player,
+        object_id,
+        card_id,
+        decision,
+        CastPaymentMode::Auto,
+        events,
+    )
+}
+
+pub fn handle_awaken_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    use crate::types::actions::AlternativeCastDecision;
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            let mut prepared = prepare_spell_cast_with_variant_override(
+                state,
+                player,
+                object_id,
+                Some(CastingVariant::Awaken),
             )?;
             prepared.payment_mode = payment_mode;
             continue_with_prepared(state, player, prepared, events)
@@ -5110,6 +5286,76 @@ pub fn handle_cast_spell_with_payment_mode(
                     );
                 }
                 // Otherwise (normal-only / no legal target / neither affordable):
+                // fall through to the normal cast path.
+            }
+        }
+    }
+
+    // CR 702.113a: Awaken — when a hand card has `Keyword::Awaken { cost }` and
+    // both the printed cost AND the awaken cost are affordable AND there is at
+    // least one land you control to awaken, present the choice. Auto-skip when
+    // only one path is viable. Mirrors the Overload / Bestow opt-in flow: awaken
+    // is opt-in via `variant_override` so a fall-through proceeds as a normal
+    // (non-awakening) cast.
+    //
+    // CR 601.2c + CR 702.113b: the awaken target (the land you control) only
+    // exists if the awaken cost is paid. If you control no land, the awaken path
+    // would have no legal target, so the only legal cast is the normal path —
+    // fall through without offering the prompt (mirrors Bestow's
+    // `has_legal_creature_target` gate).
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand {
+            if let Some(awaken_cost) = obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Awaken { cost, .. } => Some(cost.clone()),
+                _ => None,
+            }) {
+                // CR 601.2c + CR 702.113b: a land you control must exist for the
+                // awaken spell ability's target to be legal.
+                let land_filter = TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::land()
+                        .controller(crate::types::ability::ControllerRef::You),
+                );
+                let has_legal_land =
+                    !targeting::find_legal_targets(state, &land_filter, player, object_id)
+                        .is_empty();
+                // CR 601.2f + CR 118.9d: affordability and the displayed costs
+                // must reflect active cost modifiers — applied to BOTH the printed
+                // cost and the awaken alternative cost (CR 118.9d).
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let awaken_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, awaken_cost.clone())
+                        .unwrap_or_else(|| awaken_cost.clone());
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                let awaken_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &awaken_cost_eff);
+                if has_legal_land && normal_affordable && awaken_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Awaken,
+                        normal_cost,
+                        alternative_cost: Some(awaken_cost_eff),
+                        alternative_additional_cost: None,
+                    });
+                }
+                if has_legal_land && !normal_affordable && awaken_affordable {
+                    // Only awaken is payable — proceed via the awaken path.
+                    return handle_awaken_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
+                // Otherwise (normal-only / no legal land / neither affordable):
                 // fall through to the normal cast path.
             }
         }
@@ -7591,7 +7837,9 @@ pub(crate) fn find_eligible_remove_counter_for_cost_targets(
             state.objects.get(&id).is_some_and(|obj| {
                 obj.controller == player
                     && super::filter::matches_target_filter(state, id, target, &ctx)
-                    && removable_counter_count(obj, counter_type) >= count
+                    // CR 107.2: u32::MAX encodes "any number of" — always eligible.
+                    && (count == u32::MAX
+                        || removable_counter_count(obj, counter_type) >= count)
             })
         })
         .collect()
@@ -7780,12 +8028,9 @@ fn can_pay_ability_cost_now(
     // The simulation would give a false positive since pay_ability_cost's
     // non-self Sacrifice arm is a no-op (it's handled interactively).
     if let Some((count, sac_filter)) = find_non_self_sacrifice_cost(cost) {
-        // CR 118.3: a multi-permanent sacrifice cost is unpayable without
-        // `count` legal permanents — keep AI legal actions in sync with
-        // `handle_activate_ability`.
-        if find_eligible_sacrifice_targets(state, player, source_id, sac_filter).len()
-            < count as usize
-        {
+        let eligible = find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
+        let (min_count, _) = sacrifice_cost_bounds(count, eligible.len());
+        if eligible.len() < min_count {
             return false;
         }
     }
@@ -8106,9 +8351,8 @@ pub fn handle_activate_ability(
     if let Some(ref cost) = ability_def.cost {
         if let Some((count, sac_filter)) = find_non_self_sacrifice_cost(cost) {
             let eligible = find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
-            // CR 118.3: cannot pay a multi-permanent sacrifice cost without
-            // `count` legal permanents to sacrifice.
-            if eligible.len() < count as usize {
+            let (min_count, max_count) = sacrifice_cost_bounds(count, eligible.len());
+            if eligible.len() < min_count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible permanents to sacrifice".into(),
                 ));
@@ -8119,7 +8363,8 @@ pub fn handle_activate_ability(
             pending_sac.activation_ability_index = Some(ability_index);
             return Ok(WaitingFor::SacrificeForCost {
                 player,
-                count: count as usize,
+                count: max_count,
+                min_count,
                 permanents: eligible,
                 pending_cast: Box::new(pending_sac),
             });
@@ -27993,5 +28238,348 @@ mod tests {
             !available.contains(&stale_exile),
             "previous-turn exile card must not be surfaced by the static"
         );
+    }
+
+    /// PR #1441: Teferi, Time Raveler's +1 ("you may cast sorcery spells as
+    /// though they had flash") is a player-scoped flash-timing grant. The grant
+    /// must be a `SpecificPlayer`-bound transient continuous effect read by
+    /// `granted_spell_keywords`, so it survives Teferi leaving the battlefield
+    /// (CR 611.2c — a rules-modifying effect, not an object-characteristic one)
+    /// and expires on its own duration at the controller's next turn (CR 611.2a).
+    mod flash_timing_grant_seam {
+        use super::*;
+        use crate::game::effects::effect::resolve as resolve_effect;
+        use crate::game::turns::execute_untap;
+        use crate::game::zones::move_to_zone;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{Duration, PlayerScope, ResolvedAbility, StaticDefinition};
+        use crate::types::statics::StaticMode;
+
+        /// Parse the real Teferi, Time Raveler +1 effect AST and resolve it as an
+        /// ability controlled by `controller`, registering the player-scoped TCE
+        /// through the production pipeline (parser → effect.rs::resolve → TCE).
+        fn grant_teferi_flash(state: &mut GameState, controller: PlayerId, teferi: ObjectId) {
+            let parsed = parse_oracle_text(
+                "Each opponent can cast spells only any time they could cast a sorcery.\n\
+                 [+1]: Until your next turn, you may cast sorcery spells as though they had flash.\n\
+                 [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+                "Teferi, Time Raveler",
+                &[],
+                &["Planeswalker".to_string()],
+                &["Teferi".to_string()],
+            );
+            // abilities[0] is the +1 GenericEffect grant.
+            let ability = ResolvedAbility::new(
+                (*parsed.abilities[0].effect).clone(),
+                vec![],
+                teferi,
+                controller,
+            );
+            let mut events = Vec::new();
+            resolve_effect(state, &ability, &mut events).expect("grant resolves");
+        }
+
+        /// Create a sorcery costing {1} in `player`'s hand with a trivial draw
+        /// spell ability, returning its ObjectId.
+        fn sorcery_in_hand(state: &mut GameState, player: PlayerId, card_id: CardId) -> ObjectId {
+            let id = create_object(
+                state,
+                card_id,
+                player,
+                "Test Sorcery".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::generic(1);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            id
+        }
+
+        fn teferi_on_battlefield(state: &mut GameState, owner: PlayerId) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(700),
+                owner,
+                "Teferi, Time Raveler".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Planeswalker);
+            id
+        }
+
+        fn sorcery_has_flash(state: &GameState, player: PlayerId, sorcery: ObjectId) -> bool {
+            effective_spell_keyword_kinds(state, player, sorcery).contains(&KeywordKind::Flash)
+        }
+
+        /// (a) After +1, a sorcery is instant-castable even outside the
+        /// sorcery-speed window (here: P0's main phase but with a non-empty
+        /// stack, so `is_sorcery_speed_window` is false). The grant — and only
+        /// the grant — permits the cast.
+        #[test]
+        fn plus_one_lets_sorcery_be_cast_outside_sorcery_window() {
+            let mut state = setup_game_at_main_phase();
+            let teferi = teferi_on_battlefield(&mut state, PlayerId(0));
+            let sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(701));
+            // Mana to pay the {1} cost so the cast clears payment and exercises
+            // the timing gate (the behavior under test), not the cost guard.
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+            // Force a non-sorcery-speed window: an object on the stack. P0 is the
+            // active player in PreCombatMain, so the only thing missing for a
+            // sorcery-speed window is the empty stack.
+            state.stack.push_back(StackEntry {
+                id: ObjectId(9000),
+                source_id: ObjectId(9000),
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(9000),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            assert!(
+                !restrictions::is_sorcery_speed_window(&state, PlayerId(0)),
+                "test setup must be outside the sorcery-speed window"
+            );
+
+            // Without the grant, the sorcery has no flash and would be rejected.
+            assert!(!sorcery_has_flash(&state, PlayerId(0), sorcery));
+
+            grant_teferi_flash(&mut state, PlayerId(0), teferi);
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "sorcery must gain Flash from the player-scoped grant"
+            );
+
+            let mut events = Vec::new();
+            let result =
+                handle_cast_spell(&mut state, PlayerId(0), sorcery, CardId(701), &mut events);
+            assert!(
+                result.is_ok(),
+                "flash-granted sorcery must be castable outside the sorcery window: {result:?}"
+            );
+        }
+
+        /// (b) SEAM-DEFINING regression lock: after +1, move Teferi to the
+        /// graveyard through the real zone-change path (which fires
+        /// `prune_affected_object_left_effects`). The grant must SURVIVE because
+        /// it is bound to `SpecificPlayer`, not `SpecificObject`. This test FAILS
+        /// on the round-1 `SelfRef` → `SpecificObject` seam and PASSES on the
+        /// `Controller` → `SpecificPlayer` seam.
+        #[test]
+        fn grant_survives_teferi_leaving_battlefield() {
+            let mut state = setup_game_at_main_phase();
+            let teferi = teferi_on_battlefield(&mut state, PlayerId(0));
+            let sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(701));
+
+            grant_teferi_flash(&mut state, PlayerId(0), teferi);
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "grant must be live immediately after +1"
+            );
+
+            // Real zone change → fires apply_zone_exit_cleanup →
+            // prune_affected_object_left_effects.
+            let mut events = Vec::new();
+            move_to_zone(&mut state, teferi, Zone::Graveyard, &mut events);
+            assert_eq!(
+                state.objects[&teferi].zone,
+                Zone::Graveyard,
+                "Teferi actually left the battlefield"
+            );
+
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "player-scoped grant must survive Teferi leaving play (CR 611.2c); \
+                 this is the seam the round-1 SpecificObject binding broke"
+            );
+        }
+
+        /// (c) The grant expires at the grantee's next untap step (CR 611.2a:
+        /// `UntilNextTurnOf { Controller }`). It survives the opponent's untap
+        /// step and is pruned on the controller's.
+        #[test]
+        fn grant_expires_at_grantee_next_untap() {
+            let mut state = setup_game_at_main_phase();
+            let teferi = teferi_on_battlefield(&mut state, PlayerId(0));
+            let sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(701));
+
+            grant_teferi_flash(&mut state, PlayerId(0), teferi);
+            assert!(sorcery_has_flash(&state, PlayerId(0), sorcery));
+
+            // Opponent (P1) untap step first — the P0-controlled grant survives.
+            state.active_player = PlayerId(1);
+            let mut events = Vec::new();
+            execute_untap(&mut state, &mut events);
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "grant must survive the opponent's untap step"
+            );
+
+            // P0's own untap step — the grant expires (CR 611.2a / CR 514.2).
+            state.active_player = PlayerId(0);
+            let mut events = Vec::new();
+            execute_untap(&mut state, &mut events);
+            assert!(
+                state.transient_continuous_effects.is_empty(),
+                "the UntilNextTurnOf grant must be pruned at the controller's untap step"
+            );
+            assert!(
+                !sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "sorcery must lose Flash after the grant expires"
+            );
+        }
+
+        /// (e) Building-block test: a `SpecificPlayer`-bound TCE granting
+        /// `CastWithKeyword { Flash }` against a Sorcery-typed `affected` filter
+        /// applies Flash to sorceries the bound player casts, but not to
+        /// non-sorceries nor to spells cast by other players.
+        #[test]
+        fn specific_player_cast_with_keyword_tce_scopes_to_player_and_filter() {
+            let mut state = setup_game_at_main_phase();
+            let source = create_object(
+                &mut state,
+                CardId(800),
+                PlayerId(0),
+                "Grant Source".to_string(),
+                Zone::Battlefield,
+            );
+
+            let p0_sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(801));
+            let p1_sorcery = sorcery_in_hand(&mut state, PlayerId(1), CardId(802));
+            let p0_instant = create_object(
+                &mut state,
+                CardId(803),
+                PlayerId(0),
+                "Test Instant".to_string(),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&p0_instant).unwrap();
+                obj.card_types.core_types.push(CoreType::Instant);
+                obj.mana_cost = ManaCost::NoCost;
+            }
+
+            // affected = sorcery spells you cast.
+            let sorcery_filter = TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Sorcery).controller(ControllerRef::You),
+            );
+            let granted_static = StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash,
+            })
+            .affected(sorcery_filter);
+            state.add_transient_continuous_effect(
+                source,
+                PlayerId(0),
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                TargetFilter::SpecificPlayer { id: PlayerId(0) },
+                vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(granted_static),
+                }],
+                None,
+            );
+
+            assert!(
+                effective_spell_keyword_kinds(&state, PlayerId(0), p0_sorcery)
+                    .contains(&KeywordKind::Flash),
+                "sorcery cast by the bound player must gain Flash"
+            );
+            assert!(
+                !effective_spell_keyword_kinds(&state, PlayerId(0), p0_instant)
+                    .contains(&KeywordKind::Flash),
+                "non-sorcery must not gain Flash (filter scopes to sorceries)"
+            );
+            assert!(
+                !effective_spell_keyword_kinds(&state, PlayerId(1), p1_sorcery)
+                    .contains(&KeywordKind::Flash),
+                "sorcery cast by another player must not gain Flash (player scope)"
+            );
+        }
+
+        /// (g) CR 611.2c regression lock: the grant is bound to the grantee via
+        /// the outer `SpecificPlayer` gate, so it must survive an opponent GAINING
+        /// CONTROL of Teferi (not just Teferi leaving play — that is test (b)).
+        ///
+        /// Before the controller-axis-stripping fix, the inner `Typed { controller:
+        /// You }` filter re-derived "you" from the live source object. Stealing
+        /// Teferi flips `source_obj.controller` to P1, so the `ControllerRef::You`
+        /// check (`caster != source_controller`) fails and the grantee silently
+        /// loses the grant they legitimately still own. CR 611.2c: a rules-modifying
+        /// continuous effect's affected set is fixed at creation and is independent
+        /// of the source's presence OR control.
+        #[test]
+        fn grant_survives_opponent_gaining_control_of_teferi() {
+            let mut state = setup_game_at_main_phase();
+            let teferi = teferi_on_battlefield(&mut state, PlayerId(0));
+            let p0_sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(701));
+            let p1_sorcery = sorcery_in_hand(&mut state, PlayerId(1), CardId(702));
+
+            grant_teferi_flash(&mut state, PlayerId(0), teferi);
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), p0_sorcery),
+                "grant must be live immediately after +1"
+            );
+
+            // Drive a REAL control change through the engine pipeline: P1 gains
+            // control of Teferi via `Effect::GainControl`, which registers a
+            // `SpecificObject`-bound `ChangeController` TCE (controller = P1).
+            // Re-evaluating layers (CR 613.1b, Layer 2) then sets
+            // `state.objects[&teferi].controller = P1`.
+            let steal = ResolvedAbility::new(
+                Effect::GainControl {
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Object(teferi)],
+                teferi,
+                PlayerId(1),
+            );
+            let mut events = Vec::new();
+            // The full effect dispatcher (not the `GenericEffect`-only
+            // `effect::resolve` used by `grant_teferi_flash`) routes
+            // `Effect::GainControl` to `gain_control::resolve`, which registers
+            // the `ChangeController` TCE.
+            crate::game::effects::resolve_effect(&mut state, &steal, &mut events)
+                .expect("steal resolves");
+            crate::game::layers::evaluate_layers(&mut state);
+            assert_eq!(
+                state.objects[&teferi].controller,
+                PlayerId(1),
+                "opponent actually gained control of Teferi"
+            );
+
+            // The grant is the grantee's (P0's) — it must survive the steal.
+            // This FAILS before the fix (inner `You` re-derives to P1) and PASSES
+            // after (controller axis stripped; only the SORCERY type axis matches).
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), p0_sorcery),
+                "player-scoped grant must survive an opponent gaining control of \
+                 the source (CR 611.2c); the inner controller axis must not \
+                 re-derive 'you' from the stolen source"
+            );
+
+            // Sharpening: the thief (P1) does NOT inherit the grant on P1's own
+            // sorceries — the outer `SpecificPlayer { id: P0 }` gate still pins it
+            // to P0, regardless of who now controls Teferi.
+            assert!(
+                !sorcery_has_flash(&state, PlayerId(1), p1_sorcery),
+                "stealing Teferi must not hand the grant to the thief"
+            );
+        }
     }
 }

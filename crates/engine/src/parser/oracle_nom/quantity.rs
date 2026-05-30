@@ -2527,8 +2527,11 @@ pub fn parse_the_number_of_player_counters(input: &str) -> OracleResult<'_, Quan
 }
 
 /// CR 122.1: Typed alt over named player-counter kinds. Each arm emits the
-/// `PlayerCounterKind` variant directly (no intermediate string).
-fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
+/// `PlayerCounterKind` variant directly (no intermediate string). `pub(crate)`
+/// so the `PlayerCounter` player-attribute predicate parser
+/// (`oracle_quantity::parse_player_attribute_predicate`) shares this single
+/// kind grammar rather than re-enumerating counter tags.
+pub(crate) fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
     alt((
         value(PlayerCounterKind::Experience, tag("experience")),
         value(PlayerCounterKind::Poison, tag("poison")),

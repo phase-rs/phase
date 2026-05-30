@@ -2910,21 +2910,46 @@ pub(crate) fn resolve_player_count(
                         // single-player-count meaning here (no parent object
                         // target is in scope for a player-count quantity).
                         PlayerFilter::ParentObjectTargetController => false,
-                        // CR 109.4 + CR 700.1: "each [player class] who
-                        // [doesn't] control [filter]" — count candidates that
+                        // CR 109.4 + CR 109.5: "each [player class] who controls
+                        // [comparator] [count] [filter]" — count candidates that
                         // satisfy both the `relation` predicate and the
-                        // controls/controls-none predicate. Mirrors the arm in
-                        // `effects::mod::matches_player_scope` (the two copies
+                        // controlled-permanent count comparison. Mirrors the arm
+                        // in `effects::mod::matches_player_scope` (the two copies
                         // must stay in sync).
-                        PlayerFilter::ControlsPermanent {
+                        PlayerFilter::ControlsCount {
                             relation,
-                            presence,
                             filter,
+                            comparator,
+                            count,
                         } => {
+                            let threshold = resolve_quantity(state, count, controller, source_id);
                             crate::game::players::matches_relation(p.id, controller, *relation)
-                                && crate::game::effects::player_controls_matching_permanent(
-                                    state, p.id, presence, filter, source_id,
+                                && crate::game::effects::player_control_count_compares(
+                                    state,
+                                    p.id,
+                                    filter,
+                                    *comparator,
+                                    threshold,
+                                    source_id,
                                 )
+                        }
+                        // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                        // whose [scalar attr] [comparator] [value]" — count
+                        // candidates satisfying both the `relation` predicate and
+                        // the per-candidate scalar comparison. Mirrors the arm in
+                        // `effects::mod::matches_player_scope` (the two copies must
+                        // stay in sync). `attr` is read directly off `p`; `value`
+                        // is the controller-relative threshold, resolved once.
+                        PlayerFilter::PlayerAttribute {
+                            relation,
+                            attr,
+                            comparator,
+                            value,
+                        } => {
+                            let threshold = resolve_quantity(state, value, controller, source_id);
+                            crate::game::players::matches_relation(p.id, controller, *relation)
+                                && crate::game::effects::candidate_player_scalar(p, attr)
+                                    .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                         }
                     }
             })
@@ -5506,12 +5531,14 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
     }
 
-    /// CR 109.4: `resolve_player_count` for `PlayerFilter::ControlsPermanent`
-    /// counts candidates by the controls / controls-none predicate. Kept in
-    /// sync with `effects::matches_player_scope`'s identical arm.
+    /// CR 109.4 + CR 109.5: `resolve_player_count` for
+    /// `PlayerFilter::ControlsCount` counts candidates by the controlled-permanent
+    /// count comparison. Kept in sync with `effects::matches_player_scope`'s
+    /// identical arm. `{ EQ, Fixed(0) }` ≡ old `ControlsNone`; `{ GE, Fixed(1) }`
+    /// ≡ old `Controls`.
     #[test]
     fn resolve_player_count_controls_permanent_presence() {
-        use crate::types::ability::{ControlPresence, PlayerRelation, TypeFilter, TypedFilter};
+        use crate::types::ability::{Comparator, PlayerRelation, TypeFilter, TypedFilter};
         use crate::types::format::FormatConfig;
 
         let mut state = GameState::new(FormatConfig::commander(), 3, 42);
@@ -5532,32 +5559,224 @@ mod tests {
         let elf_filter =
             TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Elf".to_string())));
 
-        // "each opponent who doesn't control an Elf" — controller P0:
+        // "each opponent who doesn't control an Elf" (count == 0) — controller P0:
         // opponents are P1 (controls Elf → excluded) and P2 → count 1.
         let none = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::ControlsPermanent {
+                filter: PlayerFilter::ControlsCount {
                     relation: PlayerRelation::Opponent,
-                    presence: ControlPresence::ControlsNone,
                     filter: elf_filter.clone(),
+                    comparator: Comparator::EQ,
+                    count: Box::new(QuantityExpr::Fixed { value: 0 }),
                 },
             },
         };
         assert_eq!(resolve_quantity(&state, &none, PlayerId(0), ObjectId(1)), 1);
 
-        // "each opponent who controls an Elf" — only P1 → count 1.
+        // "each opponent who controls an Elf" (count >= 1) — only P1 → count 1.
         let controls = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::ControlsPermanent {
+                filter: PlayerFilter::ControlsCount {
                     relation: PlayerRelation::Opponent,
-                    presence: ControlPresence::Controls,
                     filter: elf_filter,
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
                 },
             },
         };
         assert_eq!(
             resolve_quantity(&state, &controls, PlayerId(0), ObjectId(1)),
             1
+        );
+    }
+
+    /// CR 109.4 + CR 109.5: discriminating coverage for the comparative
+    /// "controls more <type> than you" shape. 3-player board: controller P0
+    /// controls 1 creature, opponent P1 controls 2, opponent P2 controls 0.
+    /// "the number of opponents who control more creatures than you" must count
+    /// exactly the opponent who controls *strictly more* (P1) → 1. A `GE`
+    /// comparator against the same `You` count would also include P2's tie-or-
+    /// fewer reading wrongly, so this test discriminates the GT semantics.
+    #[test]
+    fn resolve_player_count_controls_more_creatures_than_you() {
+        use crate::types::ability::{
+            Comparator, ControllerRef, PlayerRelation, TypeFilter, TypedFilter,
+        };
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+
+        let add_creature = |state: &mut GameState, owner: PlayerId, id: u64| {
+            let c = create_object(
+                state,
+                CardId(id),
+                owner,
+                format!("Bear {id}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&c)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        };
+        // P0 (controller): 1 creature. P1: 2 creatures. P2: 0 creatures.
+        add_creature(&mut state, PlayerId(0), 900);
+        add_creature(&mut state, PlayerId(1), 901);
+        add_creature(&mut state, PlayerId(1), 902);
+
+        let bare_creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        let you_creature = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+
+        // GT: only P1 (2 > 1) counts; P2 (0 > 1 is false) and P0 (not an
+        // opponent) do not → 1.
+        let more_than_you = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Opponent,
+                    filter: bare_creature.clone(),
+                    comparator: Comparator::GT,
+                    count: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: you_creature.clone(),
+                        },
+                    }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &more_than_you, PlayerId(0), ObjectId(1)),
+            1,
+            "only the opponent with strictly more creatures than the controller counts"
+        );
+
+        // Discriminator: flipping the comparator to GE (>=1) would also include
+        // P2, whose 0 creatures is NOT >= the controller's 1 — but P1's 2 >= 1
+        // and would still count. To prove the GT/GE distinction bites, give P2
+        // exactly 1 creature (tie with controller). Then GT still yields 1 (only
+        // P1), but GE would yield 2 (P1 and P2).
+        add_creature(&mut state, PlayerId(2), 903);
+        assert_eq!(
+            resolve_quantity(&state, &more_than_you, PlayerId(0), ObjectId(1)),
+            1,
+            "a tied opponent (P2: 1 == controller's 1) is excluded by GT"
+        );
+        let at_least_you = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Opponent,
+                    filter: bare_creature,
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: you_creature,
+                        },
+                    }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &at_least_you, PlayerId(0), ObjectId(1)),
+            2,
+            "GE includes the tied opponent — confirms the GT result is comparator-sensitive"
+        );
+    }
+
+    /// CR 122.1f: discriminating coverage for Glissa's Retriever — "the number
+    /// of opponents who have three or more poison counters". The per-candidate
+    /// poison total must be read off each candidate player, NOT the controller.
+    /// 3-player board: opp1 poison=3 (≥3 → counts), opp2 poison=1 (<3 →
+    /// excluded), CONTROLLER poison=5 (≥3 but is not an opponent → must NOT
+    /// leak in). Expect 1. A controller-scoped read of the threshold would have
+    /// nothing to do with this — the discriminator is that the controller's own
+    /// 5 poison never inflates the result, proving `candidate_player_scalar`
+    /// reads each candidate directly.
+    #[test]
+    fn resolve_player_count_opponents_who_have_n_poison_counters_is_per_candidate() {
+        use crate::types::ability::{Comparator, PlayerRelation};
+        use crate::types::format::FormatConfig;
+        use crate::types::player::PlayerCounterKind;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Controller P0 has the MOST poison; if the read were controller-scoped
+        // instead of per-candidate, every opponent would erroneously satisfy the
+        // ≥3 test (the threshold N=3 is fixed; the leak would be on the attribute
+        // side). P1 qualifies, P2 does not, P0 is excluded as the controller.
+        state.players[0].poison_counters = 5;
+        state.players[1].poison_counters = 3;
+        state.players[2].poison_counters = 1;
+
+        let glissa = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::PlayerCounter {
+                        kind: PlayerCounterKind::Poison,
+                        scope: CountScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 3 }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &glissa, PlayerId(0), ObjectId(1)),
+            1,
+            "only opp1 (poison 3 ≥ 3) counts; opp2 (1) is excluded and the \
+             controller's own 5 poison must NOT leak in — proves per-candidate read"
+        );
+
+        // Discriminator on the threshold side: dropping opp1 below the threshold
+        // must drop the count to 0, confirming the comparison bites per candidate.
+        state.players[1].poison_counters = 2;
+        assert_eq!(
+            resolve_quantity(&state, &glissa, PlayerId(0), ObjectId(1)),
+            0,
+            "with no opponent at ≥3, the count is 0 even though the controller has 5"
+        );
+    }
+
+    /// CR 402.1: discriminating coverage for Wolfcaller's Howl — "the number of
+    /// your opponents with four or more cards in hand". Hand size is read off
+    /// each candidate. 3-player board: opp1 hand=4 (counts), opp2 hand=2
+    /// (excluded), CONTROLLER hand=9 (not an opponent → must not leak). Expect 1.
+    #[test]
+    fn resolve_player_count_opponents_with_n_cards_in_hand_is_per_candidate() {
+        use crate::types::ability::{Comparator, PlayerRelation, PlayerScope};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        let fill_hand = |state: &mut GameState, pid: usize, n: u64| {
+            for i in 0..n {
+                state.players[pid]
+                    .hand
+                    .push_back(ObjectId(1000 + pid as u64 * 100 + i));
+            }
+        };
+        fill_hand(&mut state, 0, 9); // controller — must not leak
+        fill_hand(&mut state, 1, 4); // opp1 — counts
+        fill_hand(&mut state, 2, 2); // opp2 — excluded
+
+        let wolfcaller = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 4 }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &wolfcaller, PlayerId(0), ObjectId(1)),
+            1,
+            "only opp1 (hand 4 ≥ 4) counts; the controller's 9-card hand must not leak in"
         );
     }
 

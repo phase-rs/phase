@@ -1619,6 +1619,17 @@ fn apply_action(
                         &mut events,
                     )?
                 }
+                AlternativeCastKeyword::Awaken => {
+                    casting::handle_awaken_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
                 AlternativeCastKeyword::Cleave => {
                     casting::handle_cleave_cost_choice_with_payment_mode(
                         state,
@@ -1824,6 +1835,7 @@ fn apply_action(
             WaitingFor::SacrificeForCost {
                 player,
                 count,
+                min_count,
                 permanents,
                 pending_cast,
             },
@@ -1832,7 +1844,7 @@ fn apply_action(
             state,
             *player,
             *pending_cast.clone(),
-            *count,
+            (*min_count, *count),
             permanents,
             &chosen,
             &mut events,
@@ -2253,7 +2265,7 @@ fn apply_action(
                 if super::pairing::is_unpaired_creature_you_control(state, *source_id, *player)
                     && super::pairing::is_unpaired_creature_you_control(state, partner_id, *player)
                 {
-                    super::pairing::pair_objects(state, *source_id, partner_id);
+                    super::pairing::pair_objects(state, *source_id, partner_id, *player);
                 }
             }
             events.push(GameEvent::EffectResolved {

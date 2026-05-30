@@ -16,7 +16,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
-use crate::types::player::PlayerId;
+use crate::types::player::{Player, PlayerId};
 
 pub mod adapt;
 pub mod add_restriction;
@@ -25,6 +25,7 @@ pub mod additional_phase;
 pub mod amass;
 pub mod animate;
 pub mod attach;
+pub mod awaken;
 pub mod become_copy;
 pub mod become_monarch;
 pub mod blight;
@@ -280,51 +281,111 @@ pub(crate) fn matches_player_scope(
                     // `speed_effects::players_for_filter` instead, which has
                     // the ability in scope. Unreachable here.
                     PlayerFilter::ParentObjectTargetController => false,
-                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
-                    // control [filter]" — the candidate must satisfy both the
-                    // `relation` predicate and the controls/controls-none
-                    // predicate over the permanents they control.
-                    PlayerFilter::ControlsPermanent {
+                    // CR 109.4 + CR 109.5: "each [player class] who controls
+                    // [comparator] [count] [filter]" — the candidate must
+                    // satisfy both the `relation` predicate and the
+                    // controlled-permanent count comparison.
+                    PlayerFilter::ControlsCount {
                         relation,
-                        presence,
                         filter,
+                        comparator,
+                        count,
                     } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state, count, controller, source_id,
+                        );
                         crate::game::players::matches_relation(p.id, controller, *relation)
-                            && player_controls_matching_permanent(
-                                state, p.id, presence, filter, source_id,
+                            && player_control_count_compares(
+                                state,
+                                p.id,
+                                filter,
+                                *comparator,
+                                threshold,
+                                source_id,
                             )
+                    }
+                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // whose [scalar attr] [comparator] [value]" — the candidate
+                    // satisfies both `relation` and the per-candidate scalar
+                    // comparison. `value` is the controller-relative threshold,
+                    // resolved once; `attr` is read directly off the candidate.
+                    PlayerFilter::PlayerAttribute {
+                        relation,
+                        attr,
+                        comparator,
+                        value,
+                    } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state, value, controller, source_id,
+                        );
+                        crate::game::players::matches_relation(p.id, controller, *relation)
+                            && candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
         })
 }
 
-/// CR 109.4: Evaluate the controls / controls-none predicate of
-/// `PlayerFilter::ControlsPermanent` for one candidate player. Counts
-/// battlefield permanents the candidate controls that match `filter`;
-/// `Controls` requires at least one, `ControlsNone` requires zero.
+/// CR 109.4 + CR 109.5: Evaluate the controlled-permanent count predicate of
+/// `PlayerFilter::ControlsCount` for one candidate player. Counts battlefield
+/// permanents the candidate controls that match `filter`, then compares that
+/// count to `threshold` under `comparator`.
+///
+/// This exactly preserves the old presence semantics: `{ GE, 1 }` is the old
+/// `Controls` (count >= 1) and `{ EQ, 0 }` is the old `ControlsNone`
+/// (count == 0). Comparative "more X than you" phrasings pass `{ GT, n }` where
+/// `n` is the controller's own resolved count.
 ///
 /// The `filter` ("an Elf", "an artifact", …) carries no controller axis — the
 /// control relationship is enforced here by `obj.controller == player`, so the
 /// shared `matches_target_filter` evaluates only the printed object qualities.
-pub(crate) fn player_controls_matching_permanent(
+pub(crate) fn player_control_count_compares(
     state: &GameState,
-    player: PlayerId,
-    presence: &crate::types::ability::ControlPresence,
+    candidate_player: PlayerId,
     filter: &TargetFilter,
+    comparator: crate::types::ability::Comparator,
+    threshold: i32,
     source_id: ObjectId,
 ) -> bool {
-    use crate::types::ability::ControlPresence;
-    let ctx = filter::FilterContext::from_source_with_controller(source_id, player);
-    let controls_any = state.battlefield.iter().any(|id| {
-        state
-            .objects
-            .get(id)
-            .is_some_and(|obj| obj.controller == player)
-            && filter::matches_target_filter(state, *id, filter, &ctx)
-    });
-    match presence {
-        ControlPresence::Controls => controls_any,
-        ControlPresence::ControlsNone => !controls_any,
+    let ctx = filter::FilterContext::from_source_with_controller(source_id, candidate_player);
+    let count = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.controller == candidate_player)
+                && filter::matches_target_filter(state, **id, filter, &ctx)
+        })
+        .count();
+    comparator.evaluate(
+        crate::game::arithmetic::usize_to_i32_saturating(count),
+        threshold,
+    )
+}
+
+/// CR 402.1 / 119.1 / 122.1f / 404.1: Read scalar `attr` for one candidate
+/// player DIRECTLY off the candidate `Player` (NOT via the controller-scoped
+/// `resolve_quantity`), so `PlayerFilter::PlayerAttribute` reads each player's
+/// own hand size / life / graveyard / player-counter rather than the
+/// controller's. Returns `None` for any non-scalar `QuantityRef`; the parser
+/// invariant guarantees only the scalar subset reaches here, and `None` fails
+/// the candidate predicate closed.
+pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<i32> {
+    use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
+    match attr {
+        // CR 402.1: cards in the candidate's hand.
+        QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
+        // CR 119.1: the candidate's current life total.
+        QuantityRef::LifeTotal { .. } => Some(p.life),
+        // CR 404.1: cards in the candidate's graveyard.
+        QuantityRef::GraveyardSize { .. } => Some(usize_to_i32_saturating(p.graveyard.len())),
+        // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
+        QuantityRef::PlayerCounter { kind, .. } => {
+            Some(u32_to_i32_saturating(p.player_counter(kind)))
+        }
+        _ => None,
     }
 }
 
@@ -449,6 +510,14 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             duration,
             track_exiled_by_source,
         };
+        // CR 603.10a: scope this drain pass's battlefield-exit events so the
+        // members moved in THIS resume can be stamped as a co-departed group and
+        // their observer triggers collected. NOTE (no-field DEFERRED residual):
+        // members moved in a PRIOR pause segment (before this resume) cannot be
+        // grouped with these without a co_departed_group carrier field on
+        // PendingChangeZoneIteration — the cross-pause observation gap is
+        // documented by an ignored test. See plan STEP 4b.
+        let events_before_drain = events.len();
         let mut paused = false;
         for (i, obj_id) in remaining.iter().enumerate() {
             match crate::game::effects::change_zone::process_one_zone_move(
@@ -480,14 +549,50 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             }
         }
         if paused {
+            // CR 603.10a: paused again on a further replacement choice. Stamp the
+            // members this pass moved so any co-departing observer among them
+            // observes the rest, then B2-park their observer triggers: `waiting_for`
+            // is now a replacement choice (not Priority), so `run_post_action_pipeline`
+            // will not scan these events — deferring keeps issue #423 dies-triggers
+            // from being lost across the pause.
+            crate::game::zones::stamp_simultaneous_from_slice(
+                state,
+                &mut events[events_before_drain..],
+            );
+            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                .iter()
+                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                .cloned()
+                .collect();
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
             break;
         }
-        // Loop completed — emit the trailing EffectResolved event that the
-        // non-pause path emits at the tail of `change_zone::resolve`.
+        // Loop completed — stamp the members this pass moved (CR 603.10a) so a
+        // co-departing observer among the resumed group observes the rest, then
+        // emit the trailing EffectResolved event that the non-pause path emits at
+        // the tail of `change_zone::resolve`.
+        crate::game::zones::stamp_simultaneous_from_slice(
+            state,
+            &mut events[events_before_drain..],
+        );
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
         });
+        // CR 603.2 + CR 603.3b: the resume settled the iteration. When the move
+        // landed us back at Priority (no further replacement choice), B1-drain the
+        // deferred observer triggers parked during earlier pause segments plus the
+        // ones this resume produced; otherwise leave them parked for the next drain.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            crate::game::triggers::drain_deferred_trigger_queue(state, events);
+        } else {
+            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                .iter()
+                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                .cloned()
+                .collect();
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        }
     }
 }
 
@@ -967,6 +1072,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::NthResolutionThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ScopedPlayerMatches { .. }
             | AbilityCondition::EffectOutcome {
                 signal: EffectOutcomeSignal::CurrentScopeSucceeded,
             },
@@ -4451,6 +4557,81 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&ability.source_id)
             .is_some_and(|obj| !obj.has_keyword(keyword)),
+        // CR 101.3 + CR 109.5 + CR 608.2c: per-iteration scoped-player filter.
+        // The decline-tail body for a cross-scope decline clause (parent
+        // iterates a wider set than the decline-clause `PlayerFilter`) fires
+        // only when the iterated player matches the decline scope. Outside a
+        // `player_scope` iteration `scoped_player` is `None` and we fall back
+        // to the ability's controller — the canonical
+        // `ScopedPlayer`/`Controller` fallback semantics.
+        AbilityCondition::ScopedPlayerMatches { filter } => {
+            let candidate = ability.scoped_player.unwrap_or(ability.controller);
+            scoped_player_matches_filter(state, ability, candidate, filter)
+        }
+    }
+}
+
+/// CR 101.3 + CR 109.5: Evaluate a `PlayerFilter` against a single per-iteration
+/// candidate player. Mirrors the per-candidate predicates in
+/// `quantity::resolve_player_count`, but applied to one already-bound iteration
+/// player rather than a fold over all players. Set-valued / event-context
+/// variants that have no single-player semantic outside an iteration loop fail
+/// closed — `ScopedPlayerMatches` is only emitted by the parser for `All` /
+/// `Opponent` / `Controller` today (the canonical decline-tail scopes), so the
+/// fall-through is defensive rather than load-bearing.
+fn scoped_player_matches_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    candidate: PlayerId,
+    filter: &PlayerFilter,
+) -> bool {
+    // CR 109.5: During a `player_scope` iteration the driver rebinds
+    // `ability.controller = scoped_player` (effects/mod.rs:2884) so that
+    // body effects whose leaf target is `Controller` resolve to the
+    // iterated player. The decline-clause scope filter, however, evaluates
+    // "Opponent of whom" relative to the PRINTED controller — the canonical
+    // idiom used by `quantity.rs` (see `original_controller.unwrap_or(controller)`
+    // at quantity.rs:479,514,530,721). Without this fallback, `Opponent`
+    // here would evaluate `candidate != iterated_player` and short-circuit
+    // to false for every per-iteration call, silently dropping cross-scope
+    // bodies (e.g. Liliana, Waker of the Dead [+1]).
+    let controller = ability.original_controller.unwrap_or(ability.controller);
+    match filter {
+        PlayerFilter::Controller => candidate == controller,
+        PlayerFilter::Opponent => candidate != controller,
+        PlayerFilter::All => true,
+        PlayerFilter::OpponentLostLife => {
+            candidate != controller
+                && state
+                    .players
+                    .iter()
+                    .find(|p| p.id == candidate)
+                    .is_some_and(|p| p.life_lost_this_turn > 0)
+        }
+        PlayerFilter::OpponentGainedLife => {
+            candidate != controller
+                && state
+                    .players
+                    .iter()
+                    .find(|p| p.id == candidate)
+                    .is_some_and(|p| p.life_gained_this_turn > 0)
+        }
+        // Set-valued / event-context / aggregate variants: not used by
+        // decline-tail today. Fail closed (mirrors the
+        // `TriggerCondition::DuringPlayersTurn` fallthrough pattern at
+        // game/triggers.rs:3703-3723).
+        PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentDealtCombatDamage
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::PlayerAttribute { .. } => false,
     }
 }
 
@@ -12612,6 +12793,100 @@ mod tests {
         assert_eq!(
             state.waiting_for, initial_waiting,
             "empty counter set must not prompt"
+        );
+    }
+
+    /// CR 402.1 / 119.1 / 122.1f / 404.1: `candidate_player_scalar` reads each
+    /// of the four scalar `QuantityRef` attributes directly off the candidate
+    /// `Player`, and returns `None` for any non-scalar `QuantityRef` (failing
+    /// the predicate closed). Exercises the building block across its full input
+    /// range, not a single card.
+    #[test]
+    fn candidate_player_scalar_reads_each_attribute() {
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Give the player distinguishable scalar values so the wrong attribute
+        // can never accidentally pass.
+        {
+            let p = &mut state.players[1];
+            p.life = 17;
+            p.poison_counters = 4;
+            p.hand.push_back(ObjectId(1));
+            p.hand.push_back(ObjectId(2));
+            p.hand.push_back(ObjectId(3));
+            p.graveyard.push_back(ObjectId(4));
+            p.graveyard.push_back(ObjectId(5));
+            p.player_counter(&PlayerCounterKind::Experience); // no-op read
+            p.add_player_counters(&PlayerCounterKind::Experience, 6);
+        }
+        let p = &state.players[1];
+
+        // CR 402.1: hand size reads p.hand.len(), ignoring the inert PlayerScope.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::HandSize {
+                    player: PlayerScope::Controller
+                }
+            ),
+            Some(3)
+        );
+        // CR 119.1: life total reads p.life.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer
+                }
+            ),
+            Some(17)
+        );
+        // CR 404.1: graveyard size reads p.graveyard.len().
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::GraveyardSize {
+                    player: PlayerScope::Controller
+                }
+            ),
+            Some(2)
+        );
+        // CR 122.1f: poison reads the dedicated poison_counters field.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Poison,
+                    scope: crate::types::ability::CountScope::ScopedPlayer,
+                }
+            ),
+            Some(4)
+        );
+        // CR 122.1: a generic player counter reads the player_counters map.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Experience,
+                    scope: crate::types::ability::CountScope::ScopedPlayer,
+                }
+            ),
+            Some(6)
+        );
+        // Non-scalar QuantityRef → None (parser invariant; fails the predicate
+        // closed rather than reading a controller-scoped quantity off a
+        // candidate).
+        assert_eq!(
+            candidate_player_scalar(p, &QuantityRef::Variable { name: "X".into() }),
+            None
+        );
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::ObjectCount {
+                    filter: TargetFilter::Any
+                }
+            ),
+            None
         );
     }
 }

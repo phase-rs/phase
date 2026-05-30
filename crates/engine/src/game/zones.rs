@@ -445,6 +445,86 @@ pub fn move_to_zone(
     });
 }
 
+/// CR 603.10a: Record that every member of `group` left the battlefield in the
+/// SAME simultaneous event, so leaves-the-battlefield / dies observers that are
+/// themselves in the group observe each other via last-known information (the
+/// CR 603.10a worked example: a Blood Artist destroyed by the same Wrath of God
+/// as the creatures it counts triggers once per co-dying creature).
+///
+/// Producers of a simultaneous departure batch — one board wipe (`DestroyAll`),
+/// one state-based-action destruction pass (CR 704.7), one mass bounce/exile —
+/// call this on the events they just produced, AFTER moving every member. This
+/// is the authority for simultaneity: it is established here at the
+/// event-production layer rather than inferred downstream from the shape of the
+/// accumulated event vector, so sequential departures within a single
+/// resolution are never grouped (a member only appears in another member's
+/// `co_departed` when they truly left together).
+pub fn mark_simultaneous_departures(events: &mut [GameEvent], group: &[ObjectId]) {
+    if group.len() < 2 {
+        return;
+    }
+    for event in events.iter_mut() {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if group.contains(object_id) {
+                record.co_departed = group
+                    .iter()
+                    .copied()
+                    .filter(|&member| member != *object_id)
+                    .collect();
+            }
+        }
+    }
+}
+
+/// CR 603.10a: Filter `ids` to those whose object has actually left the
+/// battlefield (now resides in some other zone). Producers that accumulate a
+/// candidate ID list — bounce, change-zone, sacrifice, destroy — pass that list
+/// through this filter before `mark_simultaneous_departures` so that a member
+/// which never actually departed (regenerated, sacrifice-prevented, bounce
+/// guarded out) is excluded from every survivor's `co_departed` group.
+pub fn departed_subset(state: &GameState, ids: &[ObjectId]) -> Vec<ObjectId> {
+    ids.iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.zone != Zone::Battlefield)
+        })
+        .collect()
+}
+
+/// CR 603.10a: Stamp simultaneous departure on a slice of events produced by a
+/// sweep that does not expose an explicit ID list (e.g. `sacrifice_unchosen`
+/// internal loops). Collects every battlefield-origin `ZoneChanged` in `slice`
+/// whose object is now off-battlefield, then groups them as co-departed.
+pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent]) {
+    let departed: Vec<ObjectId> = slice
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            } if state
+                .objects
+                .get(object_id)
+                .is_some_and(|o| o.zone != Zone::Battlefield) =>
+            {
+                Some(*object_id)
+            }
+            _ => None,
+        })
+        .collect();
+    mark_simultaneous_departures(slice, &departed);
+}
+
 fn capture_linked_exile_snapshot(
     state: &GameState,
     source_id: ObjectId,

@@ -46,15 +46,14 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
-    ControlPresence, ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition,
-    DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
-    IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
-    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
-    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
-    StepSkipTarget, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    UntilCondition,
+    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
+    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, IterationKindBinding,
+    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost,
+    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
+    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
+    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -7126,6 +7125,7 @@ fn try_parse_verb_and_target<'a>(
                             enter_transformed: d.transformed,
                             enters_under: d.enters_under,
                             enter_tapped: d.enter_tapped,
+                            enters_attacking: d.enters_attacking,
                             enter_with_counters: d.enter_with_counters,
                         },
                         rem,
@@ -9980,6 +9980,70 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
     .is_ok()
 }
 
+/// CR 601.3b + CR 702.8a: "you may cast [type] spells as though they had flash"
+/// — a duration-scoped flash-timing grant (Teferi, Time Raveler +1 class),
+/// not a `CastFromZone` card-selection permission. Must dispatch before
+/// `try_parse_cast_effect`, which misclassifies the spell-type filter as an
+/// activation-time target and blocks loyalty activation (issue #878).
+fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (type_text_orig, _) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
+        let (i, _) = tag("cast ").parse(i)?;
+        let (i, type_part) = take_until(" spells as though they had flash").parse(i)?;
+        let (i, _) = tag(" spells as though they had flash").parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, type_part.trim().to_string()))
+    })
+    .or_else(|| {
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, _) = opt(tag("you may ")).parse(i)?;
+            let (i, _) = tag("cast ").parse(i)?;
+            let (i, _) = tag("spells as though they had flash").parse(i)?;
+            let (i, _) = eof.parse(i)?;
+            Ok((i, String::new()))
+        })
+    })?;
+
+    let mut spell_filter = if type_text_orig.is_empty() {
+        TargetFilter::Any
+    } else {
+        let phrase = format!("{type_text_orig} spells");
+        parse_type_phrase(&phrase).0
+    };
+    if let TargetFilter::Typed(ref mut tf) = spell_filter {
+        if tf.controller.is_none() {
+            tf.controller = Some(ControllerRef::You);
+        }
+    }
+
+    let granted_static = StaticDefinition::new(StaticMode::CastWithKeyword {
+        keyword: Keyword::Flash,
+    })
+    .affected(spell_filter);
+
+    // CR 611.2c + CR 601.3b + CR 702.8a: This grant modifies the rules of the game
+    // for its CONTROLLER (the player gains permission to cast matching spells at
+    // instant speed), not the characteristics of an object. Store it as a
+    // player-scoped transient continuous effect: `target: Controller` resolves at
+    // effect.rs (the `Some(TargetFilter::Controller)` arm) to a
+    // `SpecificPlayer { id: controller }` binding, read by `granted_spell_keywords`
+    // (casting.rs). Binding it to the source object (`SelfRef` → `SpecificObject`)
+    // was the wrong seam — `prune_affected_object_left_effects` (layers.rs) drops it
+    // the instant Teferi leaves, violating CR 611.2a/c (the effect's DURATION, not
+    // its source's presence, governs its lifetime).
+    Some(parsed_clause(Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous().modifications(vec![
+            ContinuousModification::GrantStaticAbility {
+                definition: Box::new(granted_static),
+            },
+        ])],
+        duration: Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        }),
+        target: Some(TargetFilter::Controller),
+    }))
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -10428,6 +10492,13 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     // just exiled by the preceding clause. It is not an immediate cast/play
     // instruction, so it must win before the generic CastFromZone parser.
     if let Some(clause) = try_parse_play_from_exile(tp) {
+        return clause;
+    }
+
+    // CR 601.3b + CR 702.8a: Flash-timing grants ("cast sorcery spells as though
+    // they had flash") are not CastFromZone card picks — route before the cast
+    // parser (issue #878).
+    if let Some(clause) = try_parse_cast_as_though_flash_permission(tp) {
         return clause;
     }
 
@@ -13153,15 +13224,27 @@ pub(crate) fn parse_effect_chain_ir(
             .or(implicit_player_scope)
             .or(carried_player_scope);
 
-        // CR 608.2e + CR 608.2c: "For each opponent who doesn't, <body>" is a
-        // separate-sentence decline-tail of a preceding "each opponent may
-        // <optional action>". Strip the prefix, then stamp `player_scope:
-        // Opponent` (the body iterates per opponent) + `condition: Not{IfYouDo}`
-        // (the body runs only for an opponent who did NOT perform the optional
-        // action). Retarget the preceding clause's trailing boundary to `Then`
-        // so this clause lowers as a within-action `ContinuationStep` — never a
-        // `SequentialSibling` that would resolve even when the opponent accepts.
-        let (text, condition, is_decline_head) =
+        // CR 608.2e + CR 608.2c + CR 101.3: A decline-tail strips one of four
+        // shapes (prepositional vs subject-only × optional `doesn't` vs
+        // mandatory `can't`) into a body that runs only when the parent's
+        // per-iteration action did NOT happen. Track which quadrant dispatched
+        // so the recipient-rebinding walker fires on the right axis. Both
+        // paths share the single `rebind_clause_recipients_with` walker; the
+        // per-quadrant mapping is the leaf rebinder:
+        //   - Prepositional ("for each opponent who …, <body>") uses
+        //     `rebind_decline_body_recipient` (Controller → OriginalController).
+        //   - SubjectOnly ("each <scope> who can't, <body>") uses
+        //     `rebind_subject_only_body_recipient` (Controller → ScopedPlayer).
+        // Both leaf rebinders run on every chunk while the sticky
+        // `decline_consequence_active` flag remains set, so only the kind
+        // (which leaf rebinder) needs to be tracked — no head bit.
+        #[derive(Copy, Clone)]
+        enum DeclineDispatch {
+            None,
+            Prepositional,
+            SubjectOnly,
+        }
+        let (text, condition, decline_dispatch) =
             if let Some((body, decline_condition)) = strip_for_each_opponent_who_doesnt(&text) {
                 // CR 608.2e + CR 101.3: Do NOT stamp `player_scope` on the body
                 // — it inherits the parent's `player_scope: Opponent` iteration
@@ -13184,28 +13267,71 @@ pub(crate) fn parse_effect_chain_ir(
                     Some(AbilityCondition::Not {
                         condition: Box::new(decline_condition),
                     }),
-                    true,
+                    DeclineDispatch::Prepositional,
                 )
-            } else if let Some(body) = strip_for_each_opponent_who_cant(&text) {
-                player_scope = Some(PlayerFilter::Opponent);
-                (
-                    body,
-                    Some(AbilityCondition::QuantityCheck {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextAmount,
+            } else if let Some((scope, body)) = strip_each_scope_who_cant_subject(&text) {
+                // CR 608.2c + CR 101.3 + CR 118.12: subject-only
+                // mandatory-impossible decline-tail (Plaguecrafter:
+                // "each player sacrifices …. Each player who can't discards a
+                // card."). Retarget the preceding clause's Sentence boundary
+                // to Then so this clause lowers as a within-action
+                // ContinuationStep, then stamp the And-of-two-conjuncts gate.
+                //
+                // Do NOT stamp `player_scope = Some(scope)` here — the body
+                // inherits the parent's per-player iteration by being
+                // attached as `sub_ability` inside the scoped clone. The
+                // parent's first-sentence parse already stamps the matching
+                // `player_scope` (e.g. `All` for "each player sacrifices …")
+                // via `strip_player_scope_subject`, so a second stamp here
+                // would start a nested per-player fan-out that resets
+                // `cost_payment_failed_flag` for each inner iteration —
+                // exactly the failure mode the second stamp is omitted to
+                // avoid. Parallel to `strip_for_each_opponent_who_doesnt`
+                // above.
+                //
+                // CR 101.3 + CR 109.5: The body's gate has TWO conjuncts:
+                //   (a) `Not{IfCurrentScopeSucceeded}` — fires only on
+                //       iterations whose mandatory parent action failed
+                //       (the canonical "who can't" filter from CR 101.3).
+                //   (b) `ScopedPlayerMatches { filter: scope }` — fires only
+                //       on iterations whose scoped player matches the
+                //       decline clause's OWN PlayerFilter, relative to the
+                //       ability controller.
+                //
+                // Conjunct (b) is the cross-scope fix (Liliana, Waker of the
+                // Dead: parent "each player discards a card" iterates `All`,
+                // decline clause "each opponent who can't loses 3 life"
+                // filters to `Opponent`; without (b) the controller would
+                // lose 3 life if they couldn't discard, violating CR 109.5).
+                // For same-scope cards (Plaguecrafter, Entropic Battlecruiser,
+                // Skull Storm, Momentum Breaker, Lurking Spinecrawler — parent
+                // and decline share the scope) the `ScopedPlayerMatches`
+                // conjunct is trivially true for every iteration and acts as
+                // a no-op, so this is uniformly safe for the whole class.
+                if let Some(prev) = clauses.last_mut() {
+                    if prev.boundary == Some(ClauseBoundary::Sentence) {
+                        prev.boundary = Some(ClauseBoundary::Then);
+                    }
+                }
+                let condition = AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::Not {
+                            condition: Box::new(AbilityCondition::current_scope_succeeded()),
                         },
-                        comparator: Comparator::LT,
-                        rhs: QuantityExpr::Fixed { value: 1 },
-                    }),
-                    true,
-                )
+                        AbilityCondition::ScopedPlayerMatches { filter: scope },
+                    ],
+                };
+                (body, Some(condition), DeclineDispatch::SubjectOnly)
             } else {
-                (text, condition, false)
+                (text, condition, DeclineDispatch::None)
             };
-        // Recipient rebinds apply to every chunk of the decline-consequence
-        // sentence; the `Not{IfYouDo}` condition and `player_scope` only to the
-        // head chunk that carried the "for each opponent who doesn't" prefix.
-        let is_decline_consequence = is_decline_head || decline_consequence_active;
+        // Recipient rebinds apply to every chunk of the prepositional
+        // decline-consequence sentence; the `Not{IfYouDo}` condition and
+        // `player_scope` only to the head chunk that carried the "for each
+        // opponent who doesn't" prefix. The subject-only quadrant rebinds
+        // independently below via its own walker — see Step 4 site.
+        let is_decline_consequence = matches!(decline_dispatch, DeclineDispatch::Prepositional)
+            || decline_consequence_active;
 
         let (text, mut unless_pay) = extract_resolution_unless_pay_modifier(&text);
 
@@ -13541,13 +13667,21 @@ pub(crate) fn parse_effect_chain_ir(
         // the resolver iterates all players and `Controller` reads the
         // rebound per-player controller.
         lift_each_player_exile_top_scope(&mut clause.effect, &mut player_scope);
-        // CR 109.5: For a "for each opponent who doesn't" decline body, rebind
-        // every recipient-bearing node so "that player" → ScopedPlayer and
-        // "you" → OriginalController resolve relative to the per-opponent
-        // iteration. The undirected `LoseLife { target: None }` shape is rebound
-        // to `Some(ScopedPlayer)` so the life loss hits the declining opponent.
+        // CR 109.5: Rebind recipient-bearing nodes inside a decline body so the
+        // body's "you"/"that player" anaphors resolve relative to the surrounding
+        // per-player iteration. The two walkers are parallel inverses:
+        //   - Prepositional ("for each opponent who …, you draw …"): rebinds
+        //     Controller → OriginalController so "you" stays the printed
+        //     controller inside the Opponent-scoped iteration; also covers the
+        //     sticky continuation chunks via `decline_consequence_active`.
+        //   - SubjectOnly ("each player who can't discards a card"): rebinds
+        //     Controller → ScopedPlayer so the body's implicit recipient binds
+        //     to the per-iteration player who couldn't perform the predicate.
+        if matches!(decline_dispatch, DeclineDispatch::SubjectOnly) {
+            rebind_clause_recipients_with(&mut clause, rebind_subject_only_body_recipient);
+        }
         if is_decline_consequence {
-            rebind_decline_body_recipients(&mut clause);
+            rebind_clause_recipients_with(&mut clause, rebind_decline_body_recipient);
         }
         if inherits_carried_targeted_player_subject {
             if let Some(subject) = carried_targeted_player_subject.as_ref() {
@@ -15750,10 +15884,11 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
         return (None, text.to_string());
     };
 
-    // CR 109.4 + CR 700.1: A "who [doesn't] control [type-phrase]" relative
-    // clause restricts the player set to those who do (or don't) control a
-    // matching permanent (Thornbow Archer: "each opponent who doesn't control
-    // an Elf loses 1 life"). The clause must be consumed and reflected in the
+    // CR 109.4 + CR 109.5: A "who controls [comparator] [count] [type-phrase]"
+    // relative clause restricts the player set to those whose controlled-permanent
+    // count satisfies the comparison (Thornbow Archer: "each opponent who doesn't
+    // control an Elf loses 1 life"; Heidegger: "each opponent who controls more
+    // creatures than you"). The clause must be consumed and reflected in the
     // scope — silently dropping it over-applies the effect to every player.
     if let Some((controls_scope, after_clause)) = strip_controls_permanent_clause(&scope, rest) {
         let deconjugated = subject::deconjugate_verb(&after_clause);
@@ -15771,6 +15906,17 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
         tag("may only"),
         tag("may not"),
         tag("may cast"),
+        // CR 101.3 + CR 109.5: Reserve the relative-clause shape "who can't" /
+        // "who cannot" for the Plaguecrafter-class subject-only decline-tail
+        // dispatcher (`strip_each_scope_who_cant_subject` in
+        // `parse_effect_clause_inner`). The dispatcher runs AFTER this
+        // function returns, so we must return `(None, text)` for these
+        // shapes — otherwise we'd strip `each player ` and leave
+        // `who can't …` orphaned to be misclassified as a static
+        // restriction. This is load-bearing for the dispatch contract, not
+        // a defensive escape.
+        tag("who can't"),
+        tag("who cannot"),
     ))
     .parse(rest_lower.as_str())
     .is_ok()
@@ -15803,6 +15949,32 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     // Deconjugate the verb: "discards" → "discard", "draws" → "draw"
     let deconjugated = subject::deconjugate_verb(rest);
     (Some(scope), deconjugated)
+}
+
+/// CR 101.3 + CR 118.12 + CR 109.5: Strip a leading "each <scope> who can't /
+/// cannot, <body>" subject-only mandatory-impossible decline-tail. Returns the
+/// player scope and the body text. The body's recipient (e.g. Discard.target)
+/// must be rewritten Controller → ScopedPlayer by the caller; the body's
+/// condition must be stamped Not { current_scope_succeeded() }; the preceding
+/// clause's boundary must be retargeted Sentence → Then. Caller responsibilities
+/// — this combinator only does subject + scope detection.
+///
+/// Parallel to `strip_for_each_opponent_who_doesnt` (prepositional + optional);
+/// fills the subject-only + mandatory-impossible quadrant of the 2×2 matrix.
+fn strip_each_scope_who_cant_subject(text: &str) -> Option<(PlayerFilter, String)> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |i| {
+        let (i, scope) = alt((
+            value(PlayerFilter::Opponent, tag("each other player who ")),
+            value(PlayerFilter::Opponent, tag("each opponent who ")),
+            value(PlayerFilter::All, tag("each player who ")),
+        ))
+        .parse(i)?;
+        let (i, _) = alt((tag("can't"), tag("cannot"))).parse(i)?;
+        let (i, _) = preceded(opt(tag(",")), opt(multispace1)).parse(i)?;
+        Ok((i, scope))
+    })
+    .map(|(scope, rest)| (scope, rest.to_string()))
 }
 
 /// CR 608.2e + CR 608.2c + CR 101.3: Strip a leading "For each opponent who
@@ -15855,28 +16027,6 @@ fn strip_for_each_opponent_who_doesnt(text: &str) -> Option<(String, AbilityCond
     .map(|(cond, rest)| (rest.to_string(), cond))
 }
 
-/// CR 608.2c: Strip a leading "For each opponent who can't, " consequence
-/// prefix. This differs from "who doesn't": no optional decision exists. The
-/// body runs later as a separate per-opponent sibling, gated by that opponent's
-/// previous-effect count being zero.
-fn strip_for_each_opponent_who_cant(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    nom_on_lower(text, &lower, |i| {
-        value(
-            (),
-            preceded(
-                alt((
-                    tag("for each opponent who can't"),
-                    tag("for each opponent who cannot"),
-                )),
-                preceded(opt(tag(",")), opt(multispace1)),
-            ),
-        )
-        .parse(i)
-    })
-    .map(|((), rest)| rest.to_string())
-}
-
 /// CR 109.5 + CR 115.10: Within a "for each opponent who doesn't" decline body,
 /// "that player" is the scoped (per-iteration) opponent and "you" is the printed
 /// ability controller. Rewrite a recipient-bearing effect's recipient so it
@@ -15912,24 +16062,76 @@ fn rebind_decline_body_recipient(effect: &mut Effect) {
     }
 }
 
-/// CR 109.5: Walk a decline-consequence body chain (`effect` + every
-/// `sub_ability` descendant) and rebind each recipient-bearing node so "that
-/// player"/"you" resolve relative to the per-opponent iteration.
-fn rebind_decline_body_recipients(clause: &mut ParsedEffectClause) {
-    rebind_decline_body_recipient(&mut clause.effect);
+/// CR 109.5: Walk a decline-body chain (`effect` + every `sub_ability`
+/// descendant) and apply `rebind` to each node's `effect`. Single shared
+/// walker; the per-quadrant mapping is supplied as the leaf rebinder.
+///
+/// Used by both the prepositional decline path
+/// (`rebind_decline_body_recipient`: `Controller → OriginalController`) and
+/// the subject-only decline path (`rebind_subject_only_body_recipient`:
+/// `Controller → ScopedPlayer`). Replaces the previous byte-for-byte
+/// duplicated `rebind_decline_body_recipients` / `rebind_subject_only_body_recipients`
+/// pair — the two walkers differed only in which leaf function they called.
+fn rebind_clause_recipients_with(clause: &mut ParsedEffectClause, rebind: impl Fn(&mut Effect)) {
+    rebind(&mut clause.effect);
     let mut cursor = clause.sub_ability.as_deref_mut();
     while let Some(node) = cursor {
-        rebind_decline_body_recipient(&mut node.effect);
+        rebind(&mut node.effect);
         cursor = node.sub_ability.as_deref_mut();
     }
 }
 
-/// CR 109.4: Parse the shared "who [doesn't] control [type-phrase]" control
-/// predicate — the present/absent axis plus the controlled-permanent filter.
-/// Returns `(ControlPresence, TargetFilter, remainder)` where `remainder` is the
-/// text after the consumed object sub-phrase, or `None` when no control predicate
-/// is present (or the object resolves to the everything-matching
-/// `TargetFilter::Any`, which must not silently match every permanent).
+/// CR 109.5 + CR 101.3: Inside a subject-only "each <scope> who can't, <body>"
+/// decline-tail, the body's implicit recipient binds to the SCOPED player (the
+/// one who couldn't perform the predicate), not to the printed ability
+/// controller. Rewrite Controller → ScopedPlayer.
+///
+/// PARALLEL INVERSE to `rebind_decline_body_recipient`: this rewrites
+/// `Controller → ScopedPlayer` (subject-only "each X who can't"), whereas
+/// the prepositional walker rewrites `Controller → OriginalController`
+/// ("for each opponent who doesn't" — "you" stays "you" inside an
+/// Opponent-scoped iteration).
+///
+/// Same five-variant surface: `{ LoseLife, Draw, Discard, Mill, Token }`.
+/// `Sacrifice` is NOT covered (it carries its own target on the parent node).
+fn rebind_subject_only_body_recipient(effect: &mut Effect) {
+    fn rebind(filter: &mut TargetFilter) {
+        if matches!(filter, TargetFilter::Controller) {
+            *filter = TargetFilter::ScopedPlayer;
+        }
+    }
+    match effect {
+        Effect::LoseLife { target, .. } => match target {
+            Some(filter) => rebind(filter),
+            None => *target = Some(TargetFilter::ScopedPlayer),
+        },
+        Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. } => rebind(target),
+        Effect::Token { owner, .. } => rebind(owner),
+        _ => {}
+    }
+}
+
+/// CR 109.4 + CR 109.5: Parse the shared "who controls [comparator] [count]
+/// [type-phrase]" control predicate — the comparison axis (presence or
+/// comparative) plus the controlled-permanent filter.
+/// Returns `(Comparator, QuantityExpr, TargetFilter, remainder)` where
+/// `remainder` is the text after the consumed object sub-phrase, or `None` when
+/// no control predicate is present (or the object resolves to the
+/// everything-matching `TargetFilter::Any`, which must not silently match every
+/// permanent).
+///
+/// Three presence/comparison classes are recognized as a single parameterized
+/// `(Comparator, QuantityExpr)` pair:
+/// - "controls"/"control" → `(GE, Fixed(1))` (at least one matching permanent).
+/// - "doesn't/does not/don't/do not control" → `(EQ, Fixed(0))` (none).
+/// - "controls/control more <type> than you" → `(GT, Ref(ObjectCount {
+///   filter: <type>.controller(You) }))` — strictly more than the effect
+///   controller's own count of the same type (CR 109.5 — "you" is the controller
+///   of the object the ability is on). The carried `filter` is the BARE type
+///   (no controller axis); the per-candidate control relationship is enforced at
+///   runtime by `player_control_count_compares`.
 ///
 /// The object sub-phrase ("an Elf", "a creature with power 4 or greater")
 /// delegates to the shared `parse_type_phrase_with_ctx` combinator — no bespoke
@@ -15939,25 +16141,87 @@ fn rebind_decline_body_recipients(clause: &mut ParsedEffectClause) {
 pub(crate) fn parse_controls_permanent_object<'a>(
     rest: &'a str,
     ctx: &mut ParseContext,
-) -> Option<(ControlPresence, TargetFilter, &'a str)> {
+) -> Option<(Comparator, QuantityExpr, TargetFilter, &'a str)> {
     let lower = rest.to_lowercase();
+    // Comparative form tried FIRST: "who controls more <type> than you".
+    // Mirrors `oracle_nom::condition::parse_that_player_controls_more_comparison`:
+    // consume the verb prefix, then split the original-case remainder on
+    // " than you" so the isolated type text and the trailing remainder both stay
+    // in original case. `split_once_on_lower` is a structural boundary lookup
+    // (permitted), not parsing dispatch.
+    if let Some(((), after_verb)) = nom_on_lower(rest, &lower, |i| {
+        let (i, _) = tag("who ").parse(i)?;
+        let (i, _) = alt((tag("controls more "), tag("control more "))).parse(i)?;
+        Ok((i, ()))
+    }) {
+        let after_verb_lower = after_verb.to_lowercase();
+        if let Some((type_text, comparative_remainder)) =
+            crate::parser::oracle_nom::bridge::split_once_on_lower(
+                after_verb,
+                &after_verb_lower,
+                " than you",
+            )
+        {
+            let (bare_filter, _) = super::oracle_target::parse_type_phrase_with_ctx(type_text, ctx);
+            if matches!(bare_filter, TargetFilter::Any) {
+                return None;
+            }
+            // CR 109.5: the controller's own count uses a `You`-controlled filter.
+            let you_count = match &bare_filter {
+                TargetFilter::Typed(tf) => QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf.clone().controller(ControllerRef::You)),
+                    },
+                },
+                // Non-typed filters cannot carry a controller axis; reject rather
+                // than silently mis-counting.
+                _ => return None,
+            };
+            return Some((
+                Comparator::GT,
+                you_count,
+                bare_filter,
+                comparative_remainder,
+            ));
+        }
+    }
+
     // "who controls " / "who doesn't control " — one alt() arm per presence axis.
     // Both singular ("each opponent who controls") and plural ("opponents who
     // control") subject-verb agreement forms are accepted: the present/absent
     // axis is identical regardless of grammatical number. Negative forms are
     // longest-match-first so "doesn't/does not/don't/do not control" win before
     // the bare affirmative; "controls " precedes "control " so the singular form
-    // is not split.
-    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
+    // is not split. `(GE, Fixed(1))` ≡ old `Controls` (count >= 1);
+    // `(EQ, Fixed(0))` ≡ old `ControlsNone` (count == 0).
+    let ((comparator, count), after_verb) = nom_on_lower(rest, &lower, |i| {
         preceded(
             tag("who "),
             alt((
-                value(ControlPresence::ControlsNone, tag("doesn't control ")),
-                value(ControlPresence::ControlsNone, tag("does not control ")),
-                value(ControlPresence::ControlsNone, tag("don't control ")),
-                value(ControlPresence::ControlsNone, tag("do not control ")),
-                value(ControlPresence::Controls, tag("controls ")),
-                value(ControlPresence::Controls, tag("control ")),
+                value(
+                    (Comparator::EQ, QuantityExpr::Fixed { value: 0 }),
+                    tag("doesn't control "),
+                ),
+                value(
+                    (Comparator::EQ, QuantityExpr::Fixed { value: 0 }),
+                    tag("does not control "),
+                ),
+                value(
+                    (Comparator::EQ, QuantityExpr::Fixed { value: 0 }),
+                    tag("don't control "),
+                ),
+                value(
+                    (Comparator::EQ, QuantityExpr::Fixed { value: 0 }),
+                    tag("do not control "),
+                ),
+                value(
+                    (Comparator::GE, QuantityExpr::Fixed { value: 1 }),
+                    tag("controls "),
+                ),
+                value(
+                    (Comparator::GE, QuantityExpr::Fixed { value: 1 }),
+                    tag("control "),
+                ),
             )),
         )
         .parse(i)
@@ -15967,14 +16231,15 @@ pub(crate) fn parse_controls_permanent_object<'a>(
     if matches!(filter, TargetFilter::Any) {
         return None;
     }
-    Some((presence, filter, remainder))
+    Some((comparator, count, filter, remainder))
 }
 
-/// CR 109.4: Strip a "who [doesn't] control [type-phrase]" relative clause that
-/// follows an "each opponent"/"each player" subject. Returns the
-/// `PlayerFilter::ControlsPermanent` scope (carrying the base subject's
-/// relation, the present/absent axis, and the controlled-permanent filter) and
-/// the verb-phrase remainder. Returns `None` when no control clause is present.
+/// CR 109.4 + CR 109.5: Strip a "who controls [comparator] [count]
+/// [type-phrase]" relative clause that follows an "each opponent"/"each player"
+/// subject. Returns the `PlayerFilter::ControlsCount` scope (carrying the base
+/// subject's relation, the controlled-permanent filter, and the comparator/count
+/// pair) and the verb-phrase remainder. Returns `None` when no control clause is
+/// present.
 ///
 /// Delegates the control predicate to the shared
 /// `parse_controls_permanent_object` core; this function adds the subject-path
@@ -15994,16 +16259,17 @@ fn strip_controls_permanent_clause(
     };
     // Match today's no-ctx behaviour for the subject path.
     let mut ctx = ParseContext::default();
-    let (presence, filter, remainder) = parse_controls_permanent_object(rest, &mut ctx)?;
+    let (comparator, count, filter, remainder) = parse_controls_permanent_object(rest, &mut ctx)?;
     let verb_phrase = remainder.trim_start();
     if verb_phrase.is_empty() {
         return None;
     }
     Some((
-        PlayerFilter::ControlsPermanent {
+        PlayerFilter::ControlsCount {
             relation,
-            presence,
             filter,
+            comparator,
+            count: Box::new(count),
         },
         verb_phrase.to_string(),
     ))
@@ -16701,6 +16967,8 @@ struct ReturnDestination {
     enters_under: Option<ControllerRef>,
     // CR 614.1: "tapped" — enters the battlefield tapped.
     enter_tapped: bool,
+    // CR 508.4: "tapped and attacking" — enters attacking.
+    enters_attacking: bool,
     // CR 122.1 + CR 122.6: Counters placed on the returned object as it enters.
     enter_with_counters: Vec<(CounterType, QuantityExpr)>,
 }
@@ -16717,12 +16985,12 @@ fn strip_return_destination_ext_with_remainder(
     let lower = text.to_lowercase();
     // Ordered longest-first to avoid partial matches.
     // "transformed" variants must come before their non-transformed counterparts.
-    // Tuples: (phrase, zone, transformed, enters_under_you, enter_tapped)
+    // Tuples: (phrase, zone, transformed, enters_under_you, enter_tapped, enters_attacking)
     // The `enters_under_you` bool is the parser-table carrier for the
     // controller-override flag; it maps to `Some(ControllerRef::You)` / `None`
     // at the `ReturnDestination` construction site below (CR 110.2a).
     // Ordered longest-first; compound patterns must precede their shorter substrings.
-    let patterns: &[(&str, Zone, bool, bool, bool)] = &[
+    let patterns: &[(&str, Zone, bool, bool, bool, bool)] = &[
         // Tapped + transformed + owner's control (compound, longest)
         (
             " to the battlefield tapped and transformed under its owner's control",
@@ -16730,6 +16998,7 @@ fn strip_return_destination_ext_with_remainder(
             true,
             false,
             true,
+            false,
         ),
         // Transformed + your control
         (
@@ -16737,6 +17006,7 @@ fn strip_return_destination_ext_with_remainder(
             Zone::Battlefield,
             true,
             true,
+            false,
             false,
         ),
         // Transformed + owner's control variants
@@ -16746,11 +17016,13 @@ fn strip_return_destination_ext_with_remainder(
             true,
             false,
             false,
+            false,
         ),
         (
             " to the battlefield transformed under its owner's control",
             Zone::Battlefield,
             true,
+            false,
             false,
             false,
         ),
@@ -16760,11 +17032,13 @@ fn strip_return_destination_ext_with_remainder(
             true,
             false,
             false,
+            false,
         ),
         (
             " to the battlefield transformed under her owner's control",
             Zone::Battlefield,
             true,
+            false,
             false,
             false,
         ),
@@ -16774,6 +17048,24 @@ fn strip_return_destination_ext_with_remainder(
             true,
             false,
             false,
+            false,
+        ),
+        // CR 508.4: Tapped and attacking (must precede shorter "tapped" variants)
+        (
+            " to the battlefield tapped and attacking",
+            Zone::Battlefield,
+            false,
+            false,
+            true,
+            true,
+        ),
+        (
+            " onto the battlefield tapped and attacking",
+            Zone::Battlefield,
+            false,
+            false,
+            true,
+            true,
         ),
         // Tapped + control variants (must precede shorter "tapped" and "under X control")
         (
@@ -16782,6 +17074,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             true,
+            false,
         ),
         (
             " to the battlefield tapped under its owner's control",
@@ -16789,6 +17082,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             true,
+            false,
         ),
         (
             " to the battlefield tapped under your control",
@@ -16796,6 +17090,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             true,
             true,
+            false,
         ),
         // Simple control variants
         (
@@ -16804,10 +17099,12 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             false,
+            false,
         ),
         (
             " to the battlefield under its owner's control",
             Zone::Battlefield,
+            false,
             false,
             false,
             false,
@@ -16819,6 +17116,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             true,
             false,
+            false,
         ),
         // CR 614.1: "tapped" — enters tapped.
         (
@@ -16827,10 +17125,12 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             true,
+            false,
         ),
         (
             " to the battlefield",
             Zone::Battlefield,
+            false,
             false,
             false,
             false,
@@ -16842,6 +17142,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             true,
             false,
+            false,
         ),
         (
             " onto the battlefield tapped",
@@ -16849,6 +17150,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             true,
+            false,
         ),
         (
             " onto the battlefield",
@@ -16856,17 +17158,40 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             false,
+            false,
         ),
         // Hand destinations
-        (" to its owner's hand", Zone::Hand, false, false, false),
-        (" to their owner's hand", Zone::Hand, false, false, false),
-        (" to their owners' hands", Zone::Hand, false, false, false),
-        (" to their hand", Zone::Hand, false, false, false),
-        (" to your hand", Zone::Hand, false, false, false),
+        (
+            " to its owner's hand",
+            Zone::Hand,
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            " to their owner's hand",
+            Zone::Hand,
+            false,
+            false,
+            false,
+            false,
+        ),
+        (
+            " to their owners' hands",
+            Zone::Hand,
+            false,
+            false,
+            false,
+            false,
+        ),
+        (" to their hand", Zone::Hand, false, false, false, false),
+        (" to your hand", Zone::Hand, false, false, false, false),
         // Graveyard destinations
         (
             " to its owner's graveyard",
             Zone::Graveyard,
+            false,
             false,
             false,
             false,
@@ -16877,6 +17202,7 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             false,
+            false,
         ),
         (
             " to their owners' graveyards",
@@ -16884,15 +17210,30 @@ fn strip_return_destination_ext_with_remainder(
             false,
             false,
             false,
+            false,
         ),
-        (" to your graveyard", Zone::Graveyard, false, false, false),
+        (
+            " to your graveyard",
+            Zone::Graveyard,
+            false,
+            false,
+            false,
+            false,
+        ),
         // Command-zone destinations
-        (" to the command zone", Zone::Command, false, false, false),
+        (
+            " to the command zone",
+            Zone::Command,
+            false,
+            false,
+            false,
+            false,
+        ),
         // NOTE: Library destinations ("to the top/bottom of owner's library") are
         // intentionally NOT handled here. They require PutAtLibraryPosition (positional
         // placement without shuffling), not ChangeZone (which auto-shuffles).
     ];
-    for (phrase, zone, transformed, enters_under_you, enter_tapped) in patterns {
+    for (phrase, zone, transformed, enters_under_you, enter_tapped, enters_attacking) in patterns {
         if let Some(pos) = lower.rfind(phrase) {
             let after_destination = &lower[pos + phrase.len()..];
             let original_after_destination = &text[pos + phrase.len()..];
@@ -16903,6 +17244,7 @@ fn strip_return_destination_ext_with_remainder(
                     transformed: *transformed,
                     enters_under: enters_under_you.then_some(ControllerRef::You),
                     enter_tapped: *enter_tapped,
+                    enters_attacking: *enters_attacking,
                     enter_with_counters: parse_with_counters_suffix(after_destination),
                 }),
                 original_after_destination,
@@ -16941,11 +17283,13 @@ fn parse_leading_battlefield_return_destination(
         tag("onto the battlefield"),
     ))
     .parse(input)?;
+    // (transformed, enter_tapped, enters_attacking)
     let (input, modifier) = alt((
-        value((true, true), tag(" tapped and transformed")),
-        value((true, false), tag(" transformed")),
-        value((false, true), tag(" tapped")),
-        value((false, false), tag("")),
+        value((true, true, false), tag(" tapped and transformed")),
+        value((true, false, false), tag(" transformed")),
+        value((false, true, true), tag(" tapped and attacking")),
+        value((false, true, false), tag(" tapped")),
+        value((false, false, false), tag("")),
     ))
     .parse(input)?;
     // CR 110.2a: parse the controller-override clause (or its absence) directly
@@ -16970,6 +17314,7 @@ fn parse_leading_battlefield_return_destination(
             transformed: modifier.0,
             enters_under,
             enter_tapped: modifier.1,
+            enters_attacking: modifier.2,
             enter_with_counters: vec![],
         },
     ))
@@ -16991,6 +17336,7 @@ fn parse_leading_hand_return_destination(input: &str) -> OracleResult<'_, Return
             transformed: false,
             enters_under: None,
             enter_tapped: false,
+            enters_attacking: false,
             enter_with_counters: vec![],
         },
     ))
@@ -17011,6 +17357,7 @@ fn parse_leading_graveyard_return_destination(input: &str) -> OracleResult<'_, R
             transformed: false,
             enters_under: None,
             enter_tapped: false,
+            enters_attacking: false,
             enter_with_counters: vec![],
         },
     ))
@@ -17025,6 +17372,7 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
             transformed: false,
             enters_under: None,
             enter_tapped: false,
+            enters_attacking: false,
             enter_with_counters: vec![],
         },
     ))
@@ -18028,6 +18376,14 @@ fn apply_where_x_quantity_expression(
                 },
             })
         }
+        // CR 107.3i: "search ... for up to X ..., where X is …" wraps the X
+        // count in `UpTo`. Recurse into `max` so the defining clause rewrites
+        // the inner `Variable("X")` (Oreskos Explorer's "up to X Plains cards"
+        // must bind X to the where-clause population, not stay at 0). `up_to`
+        // re-asserts the non-nesting invariant.
+        QuantityExpr::UpTo { max } => {
+            QuantityExpr::up_to(apply_where_x_quantity_expression(*max, where_x_expression))
+        }
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
             inner: Box::new(apply_where_x_quantity_expression(
                 *inner,
@@ -18072,6 +18428,15 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
+        // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
+        // is …" binds the search count to the defining clause (Oreskos
+        // Explorer: "search your library for up to X Plains cards, where X is
+        // the number of players who control more lands than you"). The count is
+        // an `UpTo` wrapper whose inner `Variable("X")` is rewritten by the
+        // recursion arm; the where-clause population is a control comparison
+        // (CR 109.4) relative to "you" (CR 109.5).
+        | Effect::SearchLibrary { count: amount, .. }
+        | Effect::Seek { count: amount, .. }
         | Effect::ExileTop { count: amount, .. }
         | Effect::Discover {
             mana_value_limit: amount,
@@ -26361,6 +26726,68 @@ mod tests {
         ));
     }
 
+    // CR 107.3i + CR 109.4 + CR 109.5: A "search ... for up to X ..., where X
+    // is the number of {players|opponents} who control more <filter> than you"
+    // clause must bind the `UpTo` search count's inner `Variable("X")` to the
+    // comparative-control population (Oreskos Explorer and every card in the
+    // class), not leave it as a 0-resolving `Variable`. This exercises the
+    // `apply_where_x_effect_expression` → `apply_where_x_quantity_expression`
+    // UpTo recursion that routes the where-clause through the shared
+    // `ControlsCount` quantity combinator.
+    #[test]
+    fn search_up_to_x_where_x_is_players_who_control_more_lands_binds_controls_count() {
+        use crate::types::ability::PlayerRelation;
+        let def = parse_effect_chain_with_context(
+            "Search your library for up to X Plains cards, where X is the number of players who control more lands than you. Reveal those cards, put them into your hand, then shuffle.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+
+        let Effect::SearchLibrary { count, .. } = &*def.effect else {
+            panic!("expected SearchLibrary, got {:?}", def.effect);
+        };
+        let QuantityExpr::UpTo { max } = count else {
+            panic!("expected UpTo count, got {count:?}");
+        };
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::PlayerCount {
+                    filter:
+                        PlayerFilter::ControlsCount {
+                            relation,
+                            filter,
+                            comparator,
+                            count: inner_count,
+                        },
+                },
+        } = max.as_ref()
+        else {
+            panic!("expected UpTo(PlayerCount(ControlsCount)), got {max:?}");
+        };
+        assert_eq!(*relation, PlayerRelation::All);
+        assert_eq!(*comparator, Comparator::GT);
+        let TargetFilter::Typed(bare) = filter else {
+            panic!("expected typed land filter, got {filter:?}");
+        };
+        assert_eq!(bare.type_filters, vec![TypeFilter::Land]);
+        assert_eq!(
+            bare.controller, None,
+            "the compared population's filter must be controller-free"
+        );
+        // The comparison reads the controller's own land count (CR 109.5 "you").
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(you_filter),
+                },
+        } = inner_count.as_ref()
+        else {
+            panic!("expected ObjectCount(you) inner count, got {inner_count:?}");
+        };
+        assert_eq!(you_filter.type_filters, vec![TypeFilter::Land]);
+        assert_eq!(you_filter.controller, Some(ControllerRef::You));
+    }
+
     #[test]
     fn choose_a_color() {
         let e = parse_effect("Choose a color");
@@ -31753,6 +32180,244 @@ mod tests {
         assert_eq!(result, "lose 2 life");
     }
 
+    /// CR 101.3 + CR 118.12 + CR 109.5: `strip_each_scope_who_cant_subject`
+    /// covers the full subject-only × scope × can't/cannot matrix
+    /// (Plaguecrafter: "each player who can't discards a card") and rejects
+    /// non-matching variants ("doesn't") and non-subject phrases
+    /// ("target opponent ...").
+    #[test]
+    fn strip_each_scope_who_cant_subject_matrix() {
+        // Each scope × can't / cannot.
+        let (scope, body) =
+            strip_each_scope_who_cant_subject("each player who can't, discards a card")
+                .expect("each player who can't");
+        assert_eq!(scope, PlayerFilter::All);
+        assert_eq!(body, "discards a card");
+
+        let (scope, body) =
+            strip_each_scope_who_cant_subject("each player who cannot discards a card")
+                .expect("each player who cannot");
+        assert_eq!(scope, PlayerFilter::All);
+        assert_eq!(body, "discards a card");
+
+        let (scope, body) =
+            strip_each_scope_who_cant_subject("each opponent who can't, discards a card")
+                .expect("each opponent who can't");
+        assert_eq!(scope, PlayerFilter::Opponent);
+        assert_eq!(body, "discards a card");
+
+        let (scope, body) =
+            strip_each_scope_who_cant_subject("each opponent who cannot, discards a card")
+                .expect("each opponent who cannot");
+        assert_eq!(scope, PlayerFilter::Opponent);
+        assert_eq!(body, "discards a card");
+
+        let (scope, body) =
+            strip_each_scope_who_cant_subject("each other player who can't, discards a card")
+                .expect("each other player who can't");
+        assert_eq!(scope, PlayerFilter::Opponent);
+        assert_eq!(body, "discards a card");
+
+        let (scope, body) =
+            strip_each_scope_who_cant_subject("each other player who cannot discards a card")
+                .expect("each other player who cannot");
+        assert_eq!(scope, PlayerFilter::Opponent);
+        assert_eq!(body, "discards a card");
+
+        // Case insensitivity via the nom_on_lower bridge.
+        let (scope, body) =
+            strip_each_scope_who_cant_subject("Each Player Who Can't, discards a card")
+                .expect("case insensitivity");
+        assert_eq!(scope, PlayerFilter::All);
+        assert_eq!(body, "discards a card");
+    }
+
+    /// Negative cases — `strip_each_scope_who_cant_subject` MUST return None
+    /// for shapes outside the subject-only × can't quadrant:
+    /// - optional "doesn't" decline-tail is the other quadrant
+    ///   (`strip_for_each_opponent_who_doesnt`'s job).
+    /// - non-"each" subjects are not relative-clause decline-tails.
+    /// - target-phrased subjects belong to the imperative pipeline.
+    #[test]
+    fn strip_each_scope_who_cant_subject_rejects_non_matches() {
+        assert!(
+            strip_each_scope_who_cant_subject("each player who doesn't discards a card").is_none(),
+            "doesn't is the optional-decline arm, not subject-only mandatory-impossible"
+        );
+        assert!(
+            strip_each_scope_who_cant_subject("each player who does not discard a card").is_none(),
+            "does not is the optional-decline arm"
+        );
+        assert!(
+            strip_each_scope_who_cant_subject("target opponent discards a card").is_none(),
+            "target-phrased subject is not a relative-clause decline-tail"
+        );
+        assert!(
+            strip_each_scope_who_cant_subject("each player sacrifices a creature").is_none(),
+            "no who can't clause means this is a normal imperative subject"
+        );
+        assert!(
+            strip_each_scope_who_cant_subject("for each opponent who can't, you draw a card")
+                .is_none(),
+            "prepositional shape belongs to strip_for_each_opponent_who_doesnt"
+        );
+    }
+
+    /// CR 101.3 + CR 118.12 + CR 109.5: Plaguecrafter's ETB body — "each
+    /// player sacrifices a creature or planeswalker of their choice. Each
+    /// player who can't discards a card." — must lower into a two-clause chain
+    /// whose second clause is `Effect::Discard { target: ScopedPlayer }`,
+    /// gated by `Not{IfCurrentScopeSucceeded}`, and whose preceding clause's
+    /// boundary was retargeted from `Sentence` to `Then` so this lowers as a
+    /// within-action `ContinuationStep`.
+    ///
+    /// Mirrors the style of
+    /// `for_each_opponent_who_cant_lowers_to_if_current_scope_succeeded`.
+    #[test]
+    fn plaguecrafter_etb_lowers_subject_only_decline_tail() {
+        use crate::types::ability::SubAbilityLink;
+        let def = parse_effect_chain(
+            "each player sacrifices a creature or planeswalker of their choice. Each \
+             player who can't discards a card.",
+            AbilityKind::Spell,
+        );
+
+        // Root: each player sacrifices — player_scope: All (each player).
+        assert!(matches!(*def.effect, Effect::Sacrifice { .. }));
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "the sacrifice iterates per player"
+        );
+
+        // Decline body: Discard, gated on
+        // `And { [Not{IfCurrentScopeSucceeded}, ScopedPlayerMatches(All)] }`,
+        // recipient rewritten Controller → ScopedPlayer so the discard
+        // applies to the per-iteration player who couldn't sacrifice.
+        //
+        // Plaguecrafter is the same-scope class: parent and decline both
+        // iterate `All`, so the `ScopedPlayerMatches(All)` conjunct is
+        // trivially true for every iteration. The conjunct is load-bearing
+        // for cross-scope cards (Liliana, Waker of the Dead — parent `All`,
+        // decline `Opponent`); pinning it here documents the same-scope
+        // no-op invariant and protects against a future regression that
+        // drops it.
+        let discard = def
+            .sub_ability
+            .as_ref()
+            .expect("sacrifice should chain to the decline body");
+        assert_eq!(
+            discard.condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::Not {
+                        condition: Box::new(AbilityCondition::current_scope_succeeded()),
+                    },
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::All,
+                    },
+                ],
+            }),
+            "Plaguecrafter's discard body fires only for the per-iteration player whose mandatory sacrifice failed AND whose scope matches the decline clause's PlayerFilter (here `All`, trivially true)"
+        );
+        assert_eq!(
+            discard.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "Sentence → Then retargeting makes this a within-action continuation"
+        );
+        assert_eq!(
+            discard.player_scope, None,
+            "the body inherits the parent's per-player iteration instead of stamping its own loop"
+        );
+        match &*discard.effect {
+            Effect::Discard { count, target, .. } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(
+                    target,
+                    &TargetFilter::ScopedPlayer,
+                    "the body's implicit recipient binds to the per-iteration scoped player, not the printed controller"
+                );
+            }
+            other => panic!("expected Discard, got {other:?}"),
+        }
+    }
+
+    /// CR 101.3 + CR 109.5: Liliana, Waker of the Dead [+1]:
+    /// "Each player discards a card. Each opponent who can't loses 3 life."
+    ///
+    /// The parent's `player_scope` is `All` ("each player") but the decline
+    /// clause's own scope is `Opponent` ("each opponent who can't") — they
+    /// DIFFER. This is the discriminating cross-scope case maintainer review
+    /// flagged: without the `ScopedPlayerMatches` conjunct, the body would
+    /// inherit the parent's `All` iteration and fire for the controller too —
+    /// the controller would lose 3 life if they couldn't discard, violating
+    /// CR 109.5 (CR restricts it to opponents per the printed scope of the
+    /// decline clause).
+    ///
+    /// The fix encodes the gate as
+    /// `And { [Not{IfCurrentScopeSucceeded}, ScopedPlayerMatches(Opponent)] }`
+    /// — the body fires only when (a) the parent's per-iteration action
+    /// failed AND (b) the iterated player matches `Opponent` relative to the
+    /// controller. The companion Plaguecrafter test
+    /// (`plaguecrafter_etb_lowers_subject_only_decline_tail`) pins the
+    /// same-scope class where the new conjunct is `ScopedPlayerMatches(All)`
+    /// — trivially true and safe.
+    #[test]
+    fn liliana_waker_of_the_dead_plus_one_cross_scope_decline_tail() {
+        let def = parse_effect_chain(
+            "each player discards a card. Each opponent who can't loses 3 life.",
+            AbilityKind::Activated,
+        );
+
+        // Root: each player discards — player_scope: All (each player).
+        assert!(matches!(*def.effect, Effect::Discard { .. }));
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "the parent discard iterates per player"
+        );
+
+        // Decline body: LoseLife(3), gated on
+        // `And { [Not{IfCurrentScopeSucceeded}, ScopedPlayerMatches(Opponent)] }`.
+        let lose_life = def
+            .sub_ability
+            .as_ref()
+            .expect("discard should chain to the decline body");
+        assert_eq!(
+            lose_life.condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::Not {
+                        condition: Box::new(AbilityCondition::current_scope_succeeded()),
+                    },
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::Opponent,
+                    },
+                ],
+            }),
+            "Liliana's decline body fires only on iterations where (a) the parent discard failed AND (b) the iterated player matches `Opponent` — the cross-scope fix (parent `All`, decline `Opponent`)"
+        );
+        assert_eq!(
+            lose_life.player_scope, None,
+            "the body inherits the parent's per-player iteration instead of stamping its own loop"
+        );
+        // The body's recipient is rewritten to ScopedPlayer (subject-only
+        // rebind: Controller → ScopedPlayer applies whichever scope the
+        // decline-tail uses; the `ScopedPlayerMatches` conjunct narrows the
+        // iterations that pass the gate).
+        match &*lose_life.effect {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(*amount, QuantityExpr::Fixed { value: 3 });
+                assert_eq!(
+                    target,
+                    &Some(TargetFilter::ScopedPlayer),
+                    "the body's implicit recipient binds to the per-iteration scoped player"
+                );
+            }
+            other => panic!("expected LoseLife, got {other:?}"),
+        }
+    }
+
     #[test]
     fn strip_player_scope_subject_linked_exile_owner() {
         let (scope, result) =
@@ -31761,73 +32426,172 @@ mod tests {
         assert_eq!(result, "create an X/X token");
     }
 
-    /// CR 109.4 + CR 700.1: a "who [doesn't] control [type]" relative clause
-    /// must be captured into `PlayerFilter::ControlsPermanent`, not dropped
+    /// CR 109.4 + CR 109.5: a "who controls [comparator] [count] [type]" relative
+    /// clause must be captured into `PlayerFilter::ControlsCount`, not dropped
     /// (Thornbow Archer: "each opponent who doesn't control an Elf loses 1 life").
     #[test]
     fn strip_each_player_subject_controls_permanent_clause() {
-        use crate::types::ability::{ControlPresence, PlayerRelation};
+        use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
 
         let (scope, result) =
             strip_each_player_subject("each opponent who doesn't control an Elf loses 1 life");
         assert_eq!(result, "lose 1 life");
         match scope {
-            Some(PlayerFilter::ControlsPermanent {
+            // "doesn't control an Elf" ≡ count == 0 (old `ControlsNone`).
+            Some(PlayerFilter::ControlsCount {
                 relation,
-                presence,
                 filter,
+                comparator,
+                count,
             }) => {
                 assert_eq!(relation, PlayerRelation::Opponent);
-                assert_eq!(presence, ControlPresence::ControlsNone);
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
                 assert!(
                     !matches!(filter, TargetFilter::Any),
                     "Elf filter must be captured, got {filter:?}"
                 );
             }
-            other => panic!("expected ControlsPermanent scope, got {other:?}"),
+            other => panic!("expected ControlsCount scope, got {other:?}"),
         }
 
-        // The affirmative form maps to `ControlPresence::Controls`.
+        // The affirmative form maps to `{ GE, Fixed(1) }` (old `Controls`).
         let (scope, _) =
             strip_each_player_subject("each player who controls a creature draws a card");
-        assert!(matches!(
-            scope,
-            Some(PlayerFilter::ControlsPermanent {
-                relation: PlayerRelation::All,
-                presence: ControlPresence::Controls,
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                comparator,
+                count,
                 ..
-            })
-        ));
+            }) => {
+                assert_eq!(relation, PlayerRelation::All);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected ControlsCount{{GE,Fixed(1)}}, got {other:?}"),
+        }
     }
 
-    /// CR 109.4: building-block coverage for the shared control predicate
-    /// `parse_controls_permanent_object` — the present/absent presence axis, the
-    /// delegated object filter, the consumed-remainder shape, and the
+    /// Migration regression (CR 109.4 + CR 109.5): the presence forms that used
+    /// to be `ControlPresence::Controls` / `ControlsNone` must now land as the
+    /// equivalent `{ GE, Fixed(1) }` / `{ EQ, Fixed(0) }` comparator/count pairs.
+    /// Depopulate ("each player who controls a multicolored creature draws a
+    /// card") is the affirmative class; Thornbow Archer ("each opponent who
+    /// doesn't control an Elf") is the negative class.
+    #[test]
+    fn migration_presence_forms_map_to_comparator_count() {
+        use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
+
+        // Depopulate — affirmative "controls a multicolored creature" → GE/1.
+        let (scope, result) = strip_each_player_subject(
+            "each player who controls a multicolored creature draws a card",
+        );
+        assert_eq!(result, "draw a card");
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                filter,
+                comparator,
+                count,
+            }) => {
+                assert_eq!(relation, PlayerRelation::All);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert!(
+                    !matches!(filter, TargetFilter::Any),
+                    "multicolored creature filter must be captured, got {filter:?}"
+                );
+            }
+            other => panic!("expected ControlsCount{{GE,Fixed(1)}}, got {other:?}"),
+        }
+
+        // Thornbow Archer — negative "doesn't control an Elf" → EQ/0.
+        let (scope, _) =
+            strip_each_player_subject("each opponent who doesn't control an Elf loses 1 life");
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                comparator,
+                count,
+                ..
+            }) => {
+                assert_eq!(relation, PlayerRelation::Opponent);
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
+            }
+            other => panic!("expected ControlsCount{{EQ,Fixed(0)}}, got {other:?}"),
+        }
+    }
+
+    /// CR 109.4 + CR 109.5: building-block coverage for the shared control
+    /// predicate `parse_controls_permanent_object` — the comparator/count pair,
+    /// the delegated object filter, the consumed-remainder shape, and the
     /// `TargetFilter::Any` rejection. This is the core both the subject path
     /// (`strip_controls_permanent_clause`) and the quantity path
     /// (`oracle_quantity.rs` PlayerCount) compose over.
     #[test]
     fn parse_controls_permanent_object_core() {
-        use crate::types::ability::ControlPresence;
+        use crate::types::ability::{Comparator, QuantityExpr, QuantityRef};
 
-        // Affirmative "who controls <object>" + remainder preserved.
+        // Affirmative "who controls <object>" → `{ GE, Fixed(1) }` + remainder
+        // preserved.
         let mut ctx = ParseContext::default();
-        let (presence, filter, remainder) =
+        let (comparator, count, filter, remainder) =
             parse_controls_permanent_object("who controls an artifact loses 1 life", &mut ctx)
                 .expect("affirmative control predicate must parse");
-        assert_eq!(presence, ControlPresence::Controls);
+        assert_eq!(comparator, Comparator::GE);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
         assert!(
             !matches!(filter, TargetFilter::Any),
             "artifact object must be captured, got {filter:?}"
         );
         assert_eq!(remainder.trim_start(), "loses 1 life");
 
-        // Negative "who doesn't control <object>".
+        // Negative "who doesn't control <object>" → `{ EQ, Fixed(0) }`.
         let mut ctx = ParseContext::default();
-        let (presence, _filter, _) =
+        let (comparator, count, _filter, _) =
             parse_controls_permanent_object("who doesn't control a creature", &mut ctx)
                 .expect("negative control predicate must parse");
-        assert_eq!(presence, ControlPresence::ControlsNone);
+        assert_eq!(comparator, Comparator::EQ);
+        assert_eq!(count, QuantityExpr::Fixed { value: 0 });
+
+        // Comparative "who controls more <type> than you" → `{ GT, count }`
+        // where `count` is the controller's own `You`-controlled object count.
+        // The carried `filter` is the BARE type (no controller axis).
+        let mut ctx = ParseContext::default();
+        let (comparator, count, filter, remainder) = parse_controls_permanent_object(
+            "who controls more creatures than you draws a card",
+            &mut ctx,
+        )
+        .expect("comparative control predicate must parse");
+        assert_eq!(comparator, Comparator::GT);
+        match count {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: count_filter,
+                    },
+            } => match count_filter {
+                TargetFilter::Typed(tf) => assert_eq!(
+                    tf.controller,
+                    Some(crate::types::ability::ControllerRef::You),
+                    "comparative count must read the controller's own creatures"
+                ),
+                other => panic!("expected Typed count filter, got {other:?}"),
+            },
+            other => panic!("expected Ref(ObjectCount) count, got {other:?}"),
+        }
+        // The carried filter is bare (no controller axis).
+        match filter {
+            TargetFilter::Typed(tf) => assert_eq!(
+                tf.controller, None,
+                "carried ControlsCount filter must be controller-free, got {:?}",
+                tf.controller
+            ),
+            other => panic!("expected Typed bare filter, got {other:?}"),
+        }
+        assert_eq!(remainder.trim_start(), "draws a card");
 
         // No object after "control" → the all-matching `TargetFilter::Any` is
         // rejected so callers never count every permanent/opponent.
@@ -33733,6 +34497,45 @@ mod tests {
         assert_eq!(d.enters_under, None);
         assert!(!d.enter_tapped);
         assert!(!d.transformed);
+    }
+
+    #[test]
+    fn return_destination_tapped_and_attacking() {
+        let (target_text, dest) = strip_return_destination_ext(
+            "target creature card to the battlefield tapped and attacking",
+        );
+        assert_eq!(target_text, "target creature card");
+        let d = dest.expect("should parse destination");
+        assert_eq!(d.zone, Zone::Battlefield);
+        assert!(d.enter_tapped);
+        assert!(d.enters_attacking);
+        assert!(!d.transformed);
+        assert_eq!(d.enters_under, None);
+    }
+
+    /// CR 508.4: "return target creature card from your graveyard to the
+    /// battlefield tapped and attacking" (Dauntless Avenger / Yore-Tiller
+    /// Nephilim) must lower to `Effect::ChangeZone` with `enters_attacking: true`.
+    #[test]
+    fn effect_return_from_graveyard_tapped_and_attacking() {
+        let e = parse_effect(
+            "return target creature card from your graveyard to the battlefield tapped and attacking",
+        );
+        match e {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                enter_tapped,
+                enters_attacking,
+                ..
+            } => {
+                assert_eq!(origin, Some(Zone::Graveyard));
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(enter_tapped);
+                assert!(enters_attacking);
+            }
+            other => panic!("expected Effect::ChangeZone, got {other:?}"),
+        }
     }
 
     /// Collect all effects in a sub_ability chain into a flat Vec.

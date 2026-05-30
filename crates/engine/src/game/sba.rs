@@ -495,10 +495,14 @@ fn check_zero_toughness(
         })
         .collect();
 
-    for id in to_destroy {
+    for &id in &to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &to_destroy);
 }
 
 /// CR 704.5g / CR 704.5h: A creature with lethal damage (or deathtouch damage) is destroyed.
@@ -532,7 +536,7 @@ fn check_lethal_damage(
 
     // CR 701.19b: Route each destruction through the replacement pipeline
     // so regeneration shields can intercept.
-    for id in to_destroy {
+    for &id in &to_destroy {
         let proposed = ProposedEvent::Destroy {
             object_id: id,
             source: None,
@@ -582,6 +586,12 @@ fn check_lethal_damage(
             }
         }
     }
+    // CR 603.10a + CR 704.3: creatures destroyed by lethal damage in this SBA
+    // check died simultaneously as a single event — record the group so
+    // co-departing dies/LTB observers (Blood Artist) observe each other.
+    // CR 701.19a/b: a creature whose destruction was Prevented (regeneration)
+    // stays on the battlefield, so `departed_subset` excludes it from the group.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &to_destroy));
 }
 
 /// CR 704.5j: A legendary permanent is exempt from the legend rule while an
@@ -936,10 +946,14 @@ fn check_zero_loyalty(
         })
         .collect();
 
-    for id in to_destroy {
+    for &id in &to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &to_destroy);
 }
 
 /// CR 704.5v + CR 310.7: A battle with defense 0 is put into its owner's graveyard,
@@ -979,10 +993,14 @@ fn check_zero_defense(
         })
         .collect();
 
-    for id in to_destroy {
+    for &id in &to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &to_destroy);
 }
 
 /// CR 704.5p + CR 310.9: A battle can't be attached to players or permanents.

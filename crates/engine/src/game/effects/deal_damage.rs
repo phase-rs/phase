@@ -913,18 +913,51 @@ fn collect_matching_players(
                     // for a damage-each-player effect (no parent object target
                     // is in scope); never matches.
                     PlayerFilter::ParentObjectTargetController => false,
-                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
-                    // control [filter]" — candidate satisfies both `relation`
-                    // and the controls/controls-none predicate.
-                    PlayerFilter::ControlsPermanent {
+                    // CR 109.4 + CR 109.5: "each [player class] who controls
+                    // [comparator] [count] [filter]" — candidate satisfies both
+                    // `relation` and the controlled-permanent count comparison.
+                    PlayerFilter::ControlsCount {
                         ref relation,
-                        ref presence,
                         ref filter,
+                        ref comparator,
+                        ref count,
                     } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            count,
+                            source_controller,
+                            source_id,
+                        );
                         crate::game::players::matches_relation(p.id, source_controller, *relation)
-                            && crate::game::effects::player_controls_matching_permanent(
-                                state, p.id, presence, filter, source_id,
+                            && crate::game::effects::player_control_count_compares(
+                                state,
+                                p.id,
+                                filter,
+                                *comparator,
+                                threshold,
+                                source_id,
                             )
+                    }
+                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // whose [scalar attr] [comparator] [value]" — candidate
+                    // satisfies both `relation` and the per-candidate scalar
+                    // comparison. `attr` is read directly off `p`; `value` is
+                    // the controller-relative threshold, resolved once.
+                    PlayerFilter::PlayerAttribute {
+                        ref relation,
+                        ref attr,
+                        ref comparator,
+                        ref value,
+                    } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            value,
+                            source_controller,
+                            source_id,
+                        );
+                        crate::game::players::matches_relation(p.id, source_controller, *relation)
+                            && crate::game::effects::candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
         })
@@ -1042,22 +1075,51 @@ pub fn resolve_each_player(
                     // for a damage-each-player effect (no parent object target
                     // is in scope); never matches.
                     PlayerFilter::ParentObjectTargetController => false,
-                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
-                    // control [filter]" — candidate satisfies both `relation`
-                    // and the controls/controls-none predicate.
-                    PlayerFilter::ControlsPermanent {
+                    // CR 109.4 + CR 109.5: "each [player class] who controls
+                    // [comparator] [count] [filter]" — candidate satisfies both
+                    // `relation` and the controlled-permanent count comparison.
+                    PlayerFilter::ControlsCount {
                         relation,
-                        presence,
                         filter,
+                        comparator,
+                        count,
                     } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            count,
+                            ability.controller,
+                            ability.source_id,
+                        );
                         crate::game::players::matches_relation(p.id, ability.controller, *relation)
-                            && crate::game::effects::player_controls_matching_permanent(
+                            && crate::game::effects::player_control_count_compares(
                                 state,
                                 p.id,
-                                presence,
                                 filter,
+                                *comparator,
+                                threshold,
                                 ability.source_id,
                             )
+                    }
+                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // whose [scalar attr] [comparator] [value]" — candidate
+                    // satisfies both `relation` and the per-candidate scalar
+                    // comparison. `attr` is read directly off `p`; `value` is
+                    // the controller-relative threshold, resolved once.
+                    PlayerFilter::PlayerAttribute {
+                        relation,
+                        attr,
+                        comparator,
+                        value,
+                    } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            value,
+                            ability.controller,
+                            ability.source_id,
+                        );
+                        crate::game::players::matches_relation(p.id, ability.controller, *relation)
+                            && crate::game::effects::candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
         })

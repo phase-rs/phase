@@ -134,7 +134,6 @@ use serde_json::Value;
 /// a legitimate category-1/2/3/4 case may be added; a real regression must be
 /// fixed in the parser instead.
 const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
-    "a-heartfire hero",
     "abattoir ghoul",
     "ad nauseam",
     "alchemist's talent",
@@ -143,7 +142,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "angelic chorus",
     "archdruid's charm",
     "archon of redemption",
-    "aspiring champion",
     "assert perfection",
     "augury adept",
     "avatar destiny",
@@ -204,7 +202,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "energy tap",
     "engulfing slagwurm",
     "erratic explosion",
-    "evereth, viceroy of plunder",
     "exile",
     "explosive revelation",
     "feed the swarm",
@@ -213,15 +210,12 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "fiendlash",
     "fiery encore",
     "flamethrower sonata",
-    "flaming tyrannosaurus",
     "foot chopper",
     "gargantuan gorilla",
     "garruk relentless",
     "garruk, apex predator",
-    "gau, feral youth",
     "gaze of pain",
     "ghastly death tyrant",
-    "giggling skitterspike",
     "goblin crash pilot",
     "goblin sleigh ride",
     "goblin tinkerer",
@@ -233,7 +227,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "grisly spectacle",
     "heal the scars",
     "healing technique",
-    "heartfire hero",
     "hellhole rats",
     "hidetsugu and kairi",
     "hit",
@@ -345,7 +338,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "sin prodder",
     "singe-mind ogre",
     "sister hospitaller",
-    "sly spy",
     "solitude",
     "sorin the mirthless",
     "sorin, grim nemesis",
@@ -460,27 +452,14 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        266,
-        "Expected exactly 266 cards retaining ObjectScope::Anaphoric (the #495 \
-         behavior-neutral floor of 156, minus four cards unlocked by #607's \
-         target-subject DamageAll source wrapper, plus 89 cards from category 4, \
-         plus the UUID-disambiguated Reanimate print key \
-         — the Yuriko/Dark Confidant bare-anaphoric-possessive class \
-         routed onto the Anaphoric arm by `classify_possessive_referent` \
-         — plus 17 category-3 \"pump/tap target creature, then it deals damage \
-         equal to its power\" fight spells newly parsed by the token-then-pump \
-         chain fix, anaphoric on the spell's chosen target creature, plus \
-         Phthisis — destroy-target-creature + LoseLife-equal-to-its-P+T, \
-         category-3 target-spell anaphora, plus Captain Ripley Vance category-1 \
-         trigger-source anaphora, plus Sly Spy category-4 reveal/move anaphora, \
-         plus Thorin, Mountain-King — fresh card data still retains the \
-         category-3 target-creature anaphora tracked by #512); count moved to {}.",
+        258,
+        "Expected exactly 258 cards retaining ObjectScope::Anaphoric. PR #1451 (resolve fall-through dynamic quantities to typed refs) re-scoped 8 dynamic-quantity 'its power' anaphora off the Anaphoric arm onto typed quantity refs (a-heartfire hero, aspiring champion, evereth viceroy of plunder, flaming tyrannosaurus, gau feral youth, giggling skitterspike, heartfire hero, sly spy) -- a correctness improvement, not a regression (each retains its power reference as a typed ref, none Unimplemented). The allowlist last synced at 266 (#1393) and drifted because this tripwire self-skips in CI. count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        266,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 266 cards."
+        258,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 258 cards."
     );
 }
 
