@@ -969,6 +969,42 @@ pub fn evaluate_condition_for_test(
 pub(crate) static FULL_EVALUATE_LAYERS_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+// Test-only placement toggle for the `StaticSourceIndex` rebuild, used to prove
+// the discriminating regression test goes RED on the (buggy) end-of-pass
+// placement and GREEN on the (correct) top-of-pass placement. Production code
+// ALWAYS rebuilds at the top of the pass (this toggle does not exist outside
+// `cfg(test)`). When `false`, the rebuild is deferred to the END of
+// `evaluate_layers` / `apply_layers_incremental` — which leaves the mid-pass
+// gathers reading the previous pass's stale index, exactly the GAP-1 bug.
+//
+// THREAD-LOCAL (not process-global): engine layer resolution is synchronous, so
+// the production code invoked by a test runs on that test's own thread. A
+// thread-local toggle lets the RED discriminating test flip the placement on its
+// OWN thread only — concurrently-scheduled tests (the GREEN counterpart and
+// every other parallel test) read their own default `true` and are unaffected.
+// A process-global `AtomicBool` here raced under cargo's default parallel runner.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REBUILD_STATIC_INDEX_AT_TOP: core::cell::Cell<bool> =
+        const { core::cell::Cell::new(true) };
+}
+
+/// Whether to rebuild the static-source index at the TOP of the pass. Always
+/// `true` in production; togglable only under `cfg(test)` for red→green
+/// discrimination.
+#[cfg(test)]
+#[inline]
+fn rebuild_static_index_at_top() -> bool {
+    REBUILD_STATIC_INDEX_AT_TOP.with(core::cell::Cell::get)
+}
+
+/// Production variant: the rebuild is ALWAYS at the top of the pass.
+#[cfg(not(test))]
+#[inline]
+fn rebuild_static_index_at_top() -> bool {
+    true
+}
+
 pub fn evaluate_layers(state: &mut GameState) {
     #[cfg(test)]
     FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1049,6 +1085,19 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.sync_missing_base_characteristics();
             obj.keywords = obj.base_keywords.clone();
         }
+    }
+
+    // CR 611.2 + CR 613.1: Rebuild the static-effect-source index from the
+    // just-reset base `static_definitions` so the Copy / main gathers below
+    // iterate the current pass's generator set. MUST run AFTER the Step-1 reset
+    // (so the predicate reads base, not stale post-layer, definitions) and
+    // BEFORE the first gather (so the mid-pass consults are fresh — unlike
+    // `TriggerIndex` this index is read INSIDE the pass, so its rebuild is
+    // top-of-pass, not end-of-pass). The `rebuild_static_index_at_top` guard is
+    // ALWAYS true in production; it is togglable only under `cfg(test)` for the
+    // red→green discriminating regression test.
+    if rebuild_static_index_at_top() {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
     }
 
     // Step 2: Apply copy effects first so copied static abilities exist before later layers.
@@ -1218,6 +1267,13 @@ pub fn evaluate_layers(state: &mut GameState) {
     // trigger set — CR 603.2 requires the post-layer view. Destructive
     // rebuild replaces both `by_key` and `unclassified` from scratch.
     crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+
+    // Test-only: the (buggy) end-of-pass placement of the static-source-index
+    // rebuild, exercised only when `rebuild_static_index_at_top()` is toggled
+    // off. Production always rebuilds at the top (above) and never reaches here.
+    if !rebuild_static_index_at_top() {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
 
     // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
     // (Clean / EnteredObjects / Full).
@@ -1592,6 +1648,20 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
         }
     }
 
+    // CR 611.2 + CR 613.1: Rebuild the static-effect-source index before the
+    // incremental gathers. The incremental path only resets `entered_ids` to
+    // base; pre-existing generators keep their already-derived
+    // `static_definitions`, which for a generator still carries its continuous
+    // def — so a full-battlefield rebuild here lists every current generator
+    // (pre-existing + entered). An entered base generator never reaches this
+    // path (`entered_object_blocks_incremental` escalates it to a full eval), so
+    // this is purely a freshness guarantee for the incremental gather. The
+    // `rebuild_static_index_at_top` guard is ALWAYS true in production; togglable
+    // only under `cfg(test)`.
+    if rebuild_static_index_at_top() {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+
     // Step 2: Copy effects first (Layer 1), restricted to entered objects.
     let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
     let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
@@ -1697,6 +1767,11 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
     // CR 603.6a + CR 611.2e: Rebuild the TriggerIndex so the next event scan
     // sees the entered objects' (and any granted) trigger sets.
     crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+
+    // Test-only buggy end-of-pass static-index placement (see `evaluate_layers`).
+    if !rebuild_static_index_at_top() {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
 }
 
 fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<ActiveContinuousEffect> {
@@ -1776,30 +1851,74 @@ fn for_each_static_effect_source(
     state: &GameState,
     mut visit: impl FnMut(&GameState, &crate::game::game_object::GameObject),
 ) {
-    // CR 702.26e: Continuous effects generated by phased-out permanents don't
-    // include anything in their set of affected objects — effectively, a
-    // phased-out permanent contributes no continuous effects during layer
-    // evaluation. Skip phased-out sources here rather than filtering later.
-    for &id in &state.battlefield {
-        if state
-            .objects
-            .get(&id)
-            .is_some_and(|obj| obj.is_phased_out())
-        {
-            continue;
-        }
-        if let Some(obj) = state.objects.get(&id) {
-            visit(state, obj);
-        }
-    }
+    // CR 611.2 + CR 613.1: Iterate the static-effect-source index buckets
+    // instead of scanning the full battlefield / command zone. The index lists
+    // only objects that GENERATE ≥1 continuous effect (rebuilt at the top of
+    // every layer pass — see `static_source_index.rs`), so this loop is
+    // O(generators) rather than O(battlefield). The per-object gates below are
+    // retained verbatim; the index only narrows WHICH ids to look at.
+    //
+    // Defense-in-depth: a never-yet-evaluated `&GameState` (post-deserialize, or
+    // a hand-built test state that never ran a flush — e.g. an off-zone keyword
+    // query against a command-zone emblem before any layer pass) has an empty
+    // index but a non-empty battlefield and/or command zone.
+    // `for_each_static_effect_source` takes `&GameState` and cannot rebuild, so
+    // fall back to a direct battlefield + command scan when BOTH indexed buckets
+    // are empty AND either source zone is non-empty. (Gating only on the
+    // battlefield would miss a command-zone-only emblem board — see
+    // `command_zone_emblem_grants_keyword_to_non_battlefield_card`.)
+    let index = &state.static_source_index;
+    let use_fallback = index.battlefield_sources.is_empty()
+        && index.command_sources.is_empty()
+        && (!state.battlefield.is_empty() || !state.command_zone.is_empty());
 
-    // CR 114.3: Emblems in the command zone have static abilities that affect the game.
-    for &id in &state.command_zone {
-        let Some(obj) = state.objects.get(&id) else {
-            continue;
-        };
-        if obj.is_emblem {
+    if use_fallback {
+        // CR 702.26e: phased-out permanents contribute no continuous effects.
+        for &id in &state.battlefield {
+            if state
+                .objects
+                .get(&id)
+                .is_some_and(|obj| obj.is_phased_out())
+            {
+                continue;
+            }
+            if let Some(obj) = state.objects.get(&id) {
+                visit(state, obj);
+            }
+        }
+        // CR 114.3: command-zone emblems have static abilities that affect the game.
+        for &id in &state.command_zone {
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            if obj.is_emblem {
+                visit(state, obj);
+            }
+        }
+    } else {
+        // CR 702.26e: Continuous effects generated by phased-out permanents don't
+        // include anything in their set of affected objects — skip phased-out
+        // sources here rather than filtering later. The index includes them
+        // (they're in `state.battlefield`); the skip below excludes them.
+        for &id in &index.battlefield_sources {
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            if obj.is_phased_out() {
+                continue;
+            }
             visit(state, obj);
+        }
+        // CR 114.3: Emblems in the command zone have static abilities that affect
+        // the game. The index already filtered to `is_emblem` generators; the
+        // gate is re-asserted here for parity with the fallback path.
+        for &id in &index.command_sources {
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            if obj.is_emblem {
+                visit(state, obj);
+            }
         }
     }
 
@@ -3483,7 +3602,7 @@ mod tests {
         StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
-    use crate::types::game_state::TransientContinuousEffect;
+    use crate::types::game_state::{StaticSourceIndex, TransientContinuousEffect};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -9438,5 +9557,168 @@ mod tests {
                 zone: Zone::Battlefield,
             }
         ));
+    }
+
+    /// Build an anthem-style "creatures you control get +1/+1" continuous-static
+    /// permanent (a generator) on the battlefield for `player`. Sets only
+    /// `static_definitions`; `sync_missing_base_characteristics` (run at the top
+    /// of the Step-1 reset) copies it into `base_static_definitions`, so the
+    /// generator survives the per-pass reset.
+    fn make_anthem(state: &mut GameState, name: &str, player: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = state.next_timestamp();
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        obj.static_definitions.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![
+                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddToughness { value: 1 },
+                ]),
+        );
+        id
+    }
+
+    /// GAP-1 / GAP-B discriminating regression test (FIX B): a SECOND anthem that
+    /// ENTERS the battlefield between layer evaluations must be picked up by the
+    /// static-source index for its own pass.
+    ///
+    /// A PRE-EXISTING generator (anthem A) is seeded so the index is genuinely
+    /// NON-EMPTY after the first `evaluate_layers` — this DISARMS the empty-index
+    /// direct-scan fallback in `for_each_static_effect_source`. A vanilla seed
+    /// would leave the index empty, the fallback would fire, and the entered
+    /// anthem would be seen even on the buggy end-of-pass placement, so the test
+    /// would NOT discriminate (this is exactly the FIX-B requirement).
+    ///
+    /// With the correct TOP-of-pass rebuild, the rebuild at the top of the
+    /// (escalated) full eval includes anthem B before the gather, so BOTH A's and
+    /// B's +1/+1 buffs apply → creature shows +2/+2. On the buggy end-of-pass
+    /// rebuild placement (toggled via `REBUILD_STATIC_INDEX_AT_TOP = false`), the
+    /// non-empty index from the previous pass is stale (missing B) during B's own
+    /// pass, so only A's buff applies → creature shows +1/+1 → the test FAILS.
+    #[test]
+    fn entered_second_anthem_applies_with_preexisting_generator() {
+        let mut state = setup();
+
+        // PRE-EXISTING generator (anthem A) + a creature for the anthems to buff.
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        let creature = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // First full eval: index becomes {A} — NON-EMPTY, fallback disarmed.
+        evaluate_layers(&mut state);
+        assert!(
+            !state.static_source_index.battlefield_sources.is_empty(),
+            "pre-existing anthem A must populate the index so the empty-index \
+             fallback is disarmed (FIX B)"
+        );
+        let after_a = state.objects.get(&creature).unwrap();
+        assert_eq!(after_a.power, Some(3), "anthem A alone gives +1/+1");
+        assert_eq!(after_a.toughness, Some(3));
+
+        // Enter a SECOND anthem B via the real entry path. B is itself a
+        // generator, so `entered_object_blocks_incremental` escalates the flush
+        // to a full `evaluate_layers`, whose top-of-pass rebuild must include B.
+        let b = make_anthem(&mut state, "Anthem B", PlayerId(0));
+        mark_layers_entered(&mut state, b);
+        flush_layers(&mut state);
+
+        // BOTH anthems' buffs must apply: 2/2 base + A(+1/+1) + B(+1/+1) = 4/4.
+        let after_b = state.objects.get(&creature).unwrap();
+        assert_eq!(
+            after_b.power,
+            Some(4),
+            "creature must receive BOTH anthem A's and the just-entered anthem \
+             B's +1/+1 (the entered generator must be in the index for its own \
+             pass — top-of-pass rebuild)"
+        );
+        assert_eq!(after_b.toughness, Some(4));
+    }
+
+    /// FIX-B counterpart: the SAME scenario under the buggy end-of-pass rebuild
+    /// placement MUST fail to apply anthem B's buff, proving the test above
+    /// genuinely discriminates the placement (red on end-of-pass).
+    #[test]
+    fn entered_second_anthem_is_dropped_on_end_of_pass_rebuild() {
+        // The toggle is THREAD-LOCAL, so flipping it affects only THIS test's
+        // thread — concurrently-scheduled parallel tests read their own default
+        // `true` and are unaffected. catch_unwind restores it for cleanliness in
+        // case this thread is reused by a later test on the same worker.
+        REBUILD_STATIC_INDEX_AT_TOP.with(|t| t.set(false));
+        let result = std::panic::catch_unwind(|| {
+            let mut state = setup();
+            make_anthem(&mut state, "Anthem A", PlayerId(0));
+            let creature = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+            evaluate_layers(&mut state);
+            assert!(!state.static_source_index.battlefield_sources.is_empty());
+
+            let b = make_anthem(&mut state, "Anthem B", PlayerId(0));
+            mark_layers_entered(&mut state, b);
+            flush_layers(&mut state);
+            state.objects.get(&creature).unwrap().power
+        });
+        REBUILD_STATIC_INDEX_AT_TOP.with(|t| t.set(true));
+
+        let power = result.expect("scenario should not panic");
+        // On the buggy end-of-pass placement, the stale (non-empty) index is
+        // missing B during B's pass, so only A's +1/+1 applies → 3, NOT 4.
+        assert_eq!(
+            power,
+            Some(3),
+            "end-of-pass placement must DROP the entered anthem B's buff — this \
+             is the bug the top-of-pass rebuild fixes; if this is Some(4) the \
+             test no longer discriminates the placement"
+        );
+    }
+
+    /// Set + order identity: the index-driven gather must produce the same
+    /// `collect_shared_active_continuous_effects` vector (element-for-element) as
+    /// a full battlefield scan, including for a board with an unrelated vanilla
+    /// permanent that the index correctly excludes.
+    #[test]
+    fn index_gather_matches_full_scan_set_and_order() {
+        let mut state = setup();
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        // Unrelated vanilla permanent (NOT a generator) — must not appear as a
+        // source in either path.
+        make_creature(&mut state, "Vanilla", 1, 1, PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        // Index-driven gather (index is populated by the eval above).
+        let indexed = collect_shared_active_continuous_effects(&state);
+
+        // Force the empty-index direct-scan fallback by clearing the index, then
+        // gather again — this exercises the full battlefield + command scan path.
+        state.static_source_index = StaticSourceIndex::default();
+        let full_scan = collect_shared_active_continuous_effects(&state);
+
+        assert_eq!(
+            indexed.len(),
+            full_scan.len(),
+            "index-driven and full-scan gathers must produce the same number of \
+             effects"
+        );
+        for (i, (a, b)) in indexed.iter().zip(full_scan.iter()).enumerate() {
+            assert_eq!(
+                a.source_id, b.source_id,
+                "effect {i}: source_id must match between index and full-scan"
+            );
+            assert_eq!(
+                a.layer, b.layer,
+                "effect {i}: layer must match between index and full-scan"
+            );
+        }
     }
 }

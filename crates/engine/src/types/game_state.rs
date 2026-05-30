@@ -3873,6 +3873,35 @@ pub struct TriggerIndex {
     pub unclassified: smallvec::SmallVec<[ObjectId; 4]>,
 }
 
+/// CR 611.2 + CR 613.1: Candidate pre-filter for `for_each_static_effect_source`.
+/// Holds the ids of objects that GENERATE ≥1 continuous effect for the TWO
+/// `layers_dirty`-covered source categories: battlefield permanents with a
+/// continuous `static_definitions` entry (including `GrantStaticAbility` hosts)
+/// and command-zone emblems. The opt-in-zone / off-zone arm (Incarnation cycle —
+/// Anger/Brawn/Filth/Wonder/Valor, `active_zones`-gated statics functioning from
+/// the graveyard) is INTENTIONALLY NOT indexed: its generator-set changes (e.g.
+/// self-milling an Anger into the graveyard) do not all mark `layers_dirty`
+/// (`zones.rs` marks dirty only on battlefield/hand transitions; mill/effect
+/// movers add no mark), so a `layers_dirty`-gated cache of off-zone generators
+/// would go stale. That arm keeps its live `state.objects` scan in
+/// `for_each_static_effect_source`.
+///
+/// Backed by `im::Vector` so `GameState::clone()` stays O(1) structural share
+/// (and `GameState: Send` is preserved — no `Rc`). Rebuilt at the TOP of
+/// `evaluate_layers` / `apply_layers_incremental` (after the Step-1 base reset,
+/// before the first gather — unlike `TriggerIndex`, this index is consulted
+/// MID-pass, so it must be fresh before the gather) and lazily on first consult
+/// after deserialize via the empty-index direct-scan fallback.
+#[derive(Debug, Clone, Default)]
+pub struct StaticSourceIndex {
+    /// Battlefield generators, in `state.battlefield` order (preserves the
+    /// current gather order; phased-out objects are included here and skipped
+    /// at consult via `is_phased_out()`).
+    pub battlefield_sources: im::Vector<ObjectId>,
+    /// Command-zone emblem generators, in `state.command_zone` order.
+    pub command_sources: im::Vector<ObjectId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub turn_number: u32,
@@ -4026,6 +4055,15 @@ pub struct GameState {
     /// `trigger_definitions` whenever needed.
     #[serde(skip)]
     pub trigger_index: TriggerIndex,
+    /// CR 611.2 + CR 613.1: Derived generator index for the layer gather.
+    /// `#[serde(skip)]` derived state (like `trigger_index`/`layers_dirty`);
+    /// reconstructed from `state.battlefield` + `state.command_zone` +
+    /// per-object `static_definitions` at the top of every layer pass, and
+    /// lazily on first consult after deserialize via the empty-index fallback.
+    /// INTENTIONALLY omitted from `impl PartialEq for GameState` — derived state
+    /// must not break AI-search dedup on semantically-identical positions.
+    #[serde(skip)]
+    pub static_source_index: StaticSourceIndex,
     pub next_timestamp: u64,
     #[serde(skip, default = "PublicStateDirty::all_dirty")]
     pub public_state_dirty: PublicStateDirty,
@@ -5073,6 +5111,7 @@ impl GameState {
             layers_dirty: LayersDirty::full(),
             static_gate_truth: std::collections::HashMap::new(),
             trigger_index: TriggerIndex::default(),
+            static_source_index: StaticSourceIndex::default(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
             state_revision: 0,
