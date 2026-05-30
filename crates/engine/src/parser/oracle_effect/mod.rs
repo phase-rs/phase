@@ -46,14 +46,15 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
-    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, IterationKindBinding,
-    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost,
-    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
-    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    ControlPresence, ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition,
+    DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
+    IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
+    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -5557,12 +5558,15 @@ enum EqualizeVerb {
 fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
     match verb {
         // CR 701.21a: battlefield clause — "lands they control" / "creatures
-        // they control". `filter` carries `controller: You`, rebound to the
-        // iterating player by the `player_scope` driver.
+        // they control". `filter` carries `controller: You`. The sacrifice
+        // `target` and the RIGHT `ControlledByEachPlayer` Min keep `You`; the
+        // LEFT per-player count is re-scoped to `ScopedPlayer` so it reads the
+        // iterating player at the `resolve_ref` seam (CR 109.5) rather than the
+        // caster. See `balance_filter_scoped_player`.
         EqualizeVerb::Sacrifice => {
             let left = QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
-                    filter: filter.clone(),
+                    filter: balance_filter_scoped_player(&filter),
                 },
             };
             let right = QuantityExpr::Ref {
@@ -5624,6 +5628,30 @@ fn balance_filter_you_control(filter: TargetFilter) -> TargetFilter {
             ..tf
         }),
         other => other,
+    }
+}
+
+/// CR 109.5 + CR 608.2c: Re-scope a Balance battlefield filter's controller to
+/// `ScopedPlayer` for the per-player LEFT count operand. "Lands/creatures they
+/// control" names the iterating player, but a quantity sub-expression is read
+/// against the *printed* controller at the `resolve_ref` seam (CR 109.5) — so a
+/// `controller: You` LEFT operand counts the caster's permanents, not the
+/// iterating player's. `ScopedPlayer` resolves via `scoped_player_or_controller`
+/// (reads `ability.scoped_player`, bound per-iteration by the `player_scope`
+/// driver) and is immune to that seam, mirroring the hand clause's already-
+/// correct `HandSize { ScopedPlayer }`. Only the LEFT operand is re-scoped: the
+/// sacrifice `target` keeps `You` (its scope follows `ability.controller`, which
+/// the driver rebinds per player) and the RIGHT `ControlledByEachPlayer` Min
+/// operand keeps `You` (it builds its own per-player context and gates on
+/// `obj.controller == p.id` — `ScopedPlayer` there would collapse to the
+/// iterating player and zero the minimum).
+fn balance_filter_scoped_player(filter: &TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::ScopedPlayer),
+            ..tf.clone()
+        }),
+        other => other.clone(),
     }
 }
 
@@ -15748,19 +15776,67 @@ fn rebind_decline_body_recipients(clause: &mut ParsedEffectClause) {
     }
 }
 
-/// CR 109.4 + CR 700.1: Strip a "who [doesn't] control [type-phrase]" relative
-/// clause that follows an "each opponent"/"each player" subject. Returns the
+/// CR 109.4: Parse the shared "who [doesn't] control [type-phrase]" control
+/// predicate — the present/absent axis plus the controlled-permanent filter.
+/// Returns `(ControlPresence, TargetFilter, remainder)` where `remainder` is the
+/// text after the consumed object sub-phrase, or `None` when no control predicate
+/// is present (or the object resolves to the everything-matching
+/// `TargetFilter::Any`, which must not silently match every permanent).
+///
+/// The object sub-phrase ("an Elf", "a creature with power 4 or greater")
+/// delegates to the shared `parse_type_phrase_with_ctx` combinator — no bespoke
+/// string matching. This is the DRY core shared by the "each opponent who
+/// controls …" subject path (`strip_controls_permanent_clause`) and the "the
+/// number of opponents who control …" quantity path (`oracle_quantity.rs`).
+pub(crate) fn parse_controls_permanent_object<'a>(
+    rest: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(ControlPresence, TargetFilter, &'a str)> {
+    let lower = rest.to_lowercase();
+    // "who controls " / "who doesn't control " — one alt() arm per presence axis.
+    // Both singular ("each opponent who controls") and plural ("opponents who
+    // control") subject-verb agreement forms are accepted: the present/absent
+    // axis is identical regardless of grammatical number. Negative forms are
+    // longest-match-first so "doesn't/does not/don't/do not control" win before
+    // the bare affirmative; "controls " precedes "control " so the singular form
+    // is not split.
+    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
+        preceded(
+            tag("who "),
+            alt((
+                value(ControlPresence::ControlsNone, tag("doesn't control ")),
+                value(ControlPresence::ControlsNone, tag("does not control ")),
+                value(ControlPresence::ControlsNone, tag("don't control ")),
+                value(ControlPresence::ControlsNone, tag("do not control ")),
+                value(ControlPresence::Controls, tag("controls ")),
+                value(ControlPresence::Controls, tag("control ")),
+            )),
+        )
+        .parse(i)
+    })?;
+    // The object sub-phrase is consumed by the shared type-phrase combinator.
+    let (filter, remainder) = super::oracle_target::parse_type_phrase_with_ctx(after_verb, ctx);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some((presence, filter, remainder))
+}
+
+/// CR 109.4: Strip a "who [doesn't] control [type-phrase]" relative clause that
+/// follows an "each opponent"/"each player" subject. Returns the
 /// `PlayerFilter::ControlsPermanent` scope (carrying the base subject's
 /// relation, the present/absent axis, and the controlled-permanent filter) and
 /// the verb-phrase remainder. Returns `None` when no control clause is present.
 ///
-/// The object sub-phrase ("an Elf") delegates to the shared `parse_type_phrase`
-/// combinator — no bespoke string matching.
+/// Delegates the control predicate to the shared
+/// `parse_controls_permanent_object` core; this function adds the subject-path
+/// concerns: deriving the relation from the base subject and enforcing a
+/// non-empty verb-phrase residual.
 fn strip_controls_permanent_clause(
     base: &PlayerFilter,
     rest: &str,
 ) -> Option<(PlayerFilter, String)> {
-    use crate::types::ability::{ControlPresence, PlayerRelation};
+    use crate::types::ability::PlayerRelation;
     // The base subject only contributes its player relation; HighestSpeed and
     // any non-relational base are out of scope for a controls qualifier.
     let relation = match base {
@@ -15768,24 +15844,9 @@ fn strip_controls_permanent_clause(
         PlayerFilter::All => PlayerRelation::All,
         _ => return None,
     };
-    let lower = rest.to_lowercase();
-    // "who controls " / "who doesn't control " — one alt() arm per presence axis.
-    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
-        preceded(
-            tag("who "),
-            alt((
-                value(ControlPresence::ControlsNone, tag("doesn't control ")),
-                value(ControlPresence::ControlsNone, tag("does not control ")),
-                value(ControlPresence::Controls, tag("controls ")),
-            )),
-        )
-        .parse(i)
-    })?;
-    // The object sub-phrase is consumed by the shared type-phrase combinator.
-    let (filter, remainder) = super::oracle_target::parse_type_phrase(after_verb);
-    if matches!(filter, TargetFilter::Any) {
-        return None;
-    }
+    // Match today's no-ctx behaviour for the subject path.
+    let mut ctx = ParseContext::default();
+    let (presence, filter, remainder) = parse_controls_permanent_object(rest, &mut ctx)?;
     let verb_phrase = remainder.trim_start();
     if verb_phrase.is_empty() {
         return None;
@@ -17869,6 +17930,9 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+        }
+        Effect::Scry { count, .. } => {
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
         }
         Effect::Pump {
             power, toughness, ..
@@ -20050,6 +20114,58 @@ mod tests {
                 "sub_ability must not be a counter-spell effect, got {:?}",
                 sub.effect
             );
+        }
+    }
+
+    /// Issue #1424 — The Scarab God upkeep: opponent life loss and scry share
+    /// the zombie-count binding from the trailing where-X clause.
+    #[test]
+    fn scarab_god_upkeep_where_x_binds_zombie_count_to_life_loss_and_scry() {
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, each opponent loses X life and you scry X, where X is the number of Zombies you control.",
+            "The Scarab God",
+        );
+        let execute = def.execute.expect("upkeep execute");
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::Opponent),
+            "each opponent loses … must set player_scope=Opponent"
+        );
+        match &*execute.effect {
+            Effect::LoseLife { amount, .. } => match amount {
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                } => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(tf
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Zombie".to_string())));
+                }
+                other => panic!("expected ObjectCount Zombies, got {other:?}"),
+            },
+            other => panic!("expected LoseLife, got {other:?}"),
+        }
+        let scry = execute.sub_ability.expect("scry sibling");
+        match &*scry.effect {
+            Effect::Scry { count, .. } => match count {
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                } => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(tf
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Zombie".to_string())));
+                }
+                other => panic!("expected ObjectCount Zombies on Scry, got {other:?}"),
+            },
+            other => panic!("expected Scry, got {other:?}"),
         }
     }
 
@@ -31282,6 +31398,48 @@ mod tests {
         ));
     }
 
+    /// CR 109.4: building-block coverage for the shared control predicate
+    /// `parse_controls_permanent_object` — the present/absent presence axis, the
+    /// delegated object filter, the consumed-remainder shape, and the
+    /// `TargetFilter::Any` rejection. This is the core both the subject path
+    /// (`strip_controls_permanent_clause`) and the quantity path
+    /// (`oracle_quantity.rs` PlayerCount) compose over.
+    #[test]
+    fn parse_controls_permanent_object_core() {
+        use crate::types::ability::ControlPresence;
+
+        // Affirmative "who controls <object>" + remainder preserved.
+        let mut ctx = ParseContext::default();
+        let (presence, filter, remainder) =
+            parse_controls_permanent_object("who controls an artifact loses 1 life", &mut ctx)
+                .expect("affirmative control predicate must parse");
+        assert_eq!(presence, ControlPresence::Controls);
+        assert!(
+            !matches!(filter, TargetFilter::Any),
+            "artifact object must be captured, got {filter:?}"
+        );
+        assert_eq!(remainder.trim_start(), "loses 1 life");
+
+        // Negative "who doesn't control <object>".
+        let mut ctx = ParseContext::default();
+        let (presence, _filter, _) =
+            parse_controls_permanent_object("who doesn't control a creature", &mut ctx)
+                .expect("negative control predicate must parse");
+        assert_eq!(presence, ControlPresence::ControlsNone);
+
+        // No object after "control" → the all-matching `TargetFilter::Any` is
+        // rejected so callers never count every permanent/opponent.
+        let mut ctx = ParseContext::default();
+        assert!(
+            parse_controls_permanent_object("who controls", &mut ctx).is_none(),
+            "bare 'who controls' with no object must be rejected"
+        );
+
+        // Missing the "who …" lead → no predicate.
+        let mut ctx = ParseContext::default();
+        assert!(parse_controls_permanent_object("draws a card", &mut ctx).is_none());
+    }
+
     #[test]
     fn effect_goad_target_creature() {
         let e = parse_effect("goad target creature");
@@ -41389,21 +41547,37 @@ mod snapshot_tests {
         let QuantityExpr::Difference { left, right } = count else {
             panic!("sacrifice count must be a Difference, got {count:?}");
         };
-        assert!(matches!(
-            &**left,
-            QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCount { .. }
-            }
-        ));
-        assert!(matches!(
-            &**right,
-            QuantityExpr::Ref {
-                qty: QuantityRef::ControlledByEachPlayer {
-                    aggregate: AggregateFunction::Min,
-                    ..
-                }
-            }
-        ));
+        // CR 109.5: the LEFT per-player count is re-scoped to `ScopedPlayer` so
+        // it reads the iterating player at the `resolve_ref` seam, not the
+        // caster. A `You` LEFT operand is the regression: every player would cut
+        // to the caster's count − min instead of their own.
+        assert!(
+            matches!(
+                &**left,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf)
+                    }
+                } if tf.controller == Some(ControllerRef::ScopedPlayer)
+            ),
+            "LEFT count operand must be ObjectCount scoped to ScopedPlayer, got {left:?}"
+        );
+        // CR 107.1 + CR 608.2e: the RIGHT minimum keeps `You` — it builds its own
+        // per-player context (`from_ability_with_controller(a, p.id)` + the
+        // `obj.controller == p.id` gate). `ScopedPlayer` here would collapse to
+        // the iterating player and zero the cross-player minimum.
+        assert!(
+            matches!(
+                &**right,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ControlledByEachPlayer {
+                        aggregate: AggregateFunction::Min,
+                        filter: TargetFilter::Typed(tf),
+                    }
+                } if tf.controller == Some(ControllerRef::You)
+            ),
+            "RIGHT minimum operand must be ControlledByEachPlayer(Min) scoped to You, got {right:?}"
+        );
     }
 
     /// Assert a `Difference { HandSize(ScopedPlayer), HandSize(AllPlayers Min) }`

@@ -23,6 +23,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
+use crate::parser::oracle_effect::parse_controls_permanent_object;
 use crate::parser::oracle_target::{parse_type_phrase, parse_type_phrase_with_ctx};
 use crate::types::ability::{
     AggregateFunction, ControllerRef, CountScope, DevotionColors, FilterProp, ObjectProperty,
@@ -321,6 +322,32 @@ pub(crate) fn parse_quantity_ref_with_context(
             return Some(QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentDealtCombatDamage,
             });
+        }
+        // CR 109.4: "opponents who control <filter>" / "opponents who don't
+        // control <filter>" → PlayerCount over the opponents satisfying the
+        // shared control predicate. Consume only the population word here, then
+        // hand the "who [doesn't] control <type-phrase>" remainder to the shared
+        // `parse_controls_permanent_object` core (DRY with the "each opponent who
+        // controls …" subject path). Tried before the generic ObjectCount
+        // fall-through so the opponent population — not battlefield permanents —
+        // is counted. (Singular "opponent" is accepted for the grammatically-
+        // degenerate one-opponent phrasing.)
+        if let Ok((predicate_input, _)) =
+            alt((tag::<_, _, OracleError<'_>>("opponents "), tag("opponent "))).parse(rest)
+        {
+            if let Some((presence, filter, remainder)) =
+                parse_controls_permanent_object(predicate_input, ctx)
+            {
+                if remainder.trim().is_empty() {
+                    return Some(QuantityRef::PlayerCount {
+                        filter: PlayerFilter::ControlsPermanent {
+                            relation: PlayerRelation::Opponent,
+                            presence,
+                            filter,
+                        },
+                    });
+                }
+            }
         }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
@@ -1502,7 +1529,7 @@ fn parse_for_each_clause_with_they_controller(
     if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref_with_context(
         clause,
         &ParseContext {
-            relative_player_scope: Some(they_controller),
+            relative_player_scope: Some(they_controller.clone()),
             ..Default::default()
         },
     ) {
@@ -1760,9 +1787,22 @@ fn parse_for_each_clause_with_they_controller(
     }
 
     // "creature you control", "artifact you control", etc.
-    // Use parse_type_phrase (not parse_target) to avoid generating spurious
-    // target-fallback warnings for quantity text that isn't a target clause.
-    let (filter, remainder) = parse_type_phrase(clause);
+    // Use parse_type_phrase_with_ctx (not parse_target) to avoid generating
+    // spurious target-fallback warnings for quantity text that isn't a target
+    // clause.
+    //
+    // CR 109.5 + CR 109.4: thread the relative player scope so "they control"
+    // binds to the iterating/targeted/chosen player rather than collapsing to the
+    // caster. "you control" still resolves to ControllerRef::You inside
+    // parse_type_phrase_with_ctx (its suffix arm is ctx-independent), so The Scarab
+    // God and other caster-relative counts are unchanged. CR 608.2c: the controller
+    // follows instructions in order, so a per-player-scoped count reads the
+    // iterating player.
+    let mut tp_ctx = ParseContext {
+        relative_player_scope: Some(they_controller.clone()),
+        ..Default::default()
+    };
+    let (filter, remainder) = parse_type_phrase_with_ctx(clause, &mut tp_ctx);
     if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
         return Some(QuantityRef::ObjectCount { filter });
     }
@@ -2229,6 +2269,110 @@ mod tests {
         assert!(
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
+        );
+    }
+
+    // A1: "the number of opponents who control <filter>" → PlayerCount over the
+    // opponents satisfying the shared "who controls …" control predicate.
+    #[test]
+    fn parse_quantity_ref_opponents_who_control_artifact() {
+        use crate::types::ability::ControlPresence;
+        let qty = parse_quantity_ref("the number of opponents who control an artifact").unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::ControlsPermanent {
+                        relation: PlayerRelation::Opponent,
+                        presence: ControlPresence::Controls,
+                        filter: TargetFilter::Typed(typed),
+                    },
+            } => {
+                assert_eq!(typed.type_filters, vec![TypeFilter::Artifact]);
+            }
+            other => panic!("Expected PlayerCount{{ControlsPermanent(artifact)}}, got {other:?}"),
+        }
+    }
+
+    // A1 (summon: yojimbo): the controlled-permanent filter carries the
+    // power/toughness comparison parsed by the shared type-phrase combinator.
+    #[test]
+    fn parse_quantity_ref_opponents_who_control_creature_power4() {
+        use crate::types::ability::{ControlPresence, PtStat, PtValueScope};
+        let qty = parse_quantity_ref(
+            "the number of opponents who control a creature with power 4 or greater",
+        )
+        .unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::ControlsPermanent {
+                        relation: PlayerRelation::Opponent,
+                        presence: ControlPresence::Controls,
+                        filter: TargetFilter::Typed(typed),
+                    },
+            } => {
+                assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
+                assert!(
+                    typed.properties.contains(&FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }),
+                    "Expected power>=4 PtComparison, got {:?}",
+                    typed.properties
+                );
+            }
+            other => {
+                panic!("Expected PlayerCount{{ControlsPermanent(creature+pt)}}, got {other:?}")
+            }
+        }
+    }
+
+    // A1 "one plus" path: the Offset arm wraps the inner PlayerCount unchanged
+    // (no dedicated change to the offset path was needed).
+    #[test]
+    fn parse_cda_quantity_one_plus_opponents_who_control_artifact() {
+        use crate::types::ability::ControlPresence;
+        let expr =
+            parse_cda_quantity("one plus the number of opponents who control an artifact").unwrap();
+        match expr {
+            QuantityExpr::Offset { inner, offset } => {
+                assert_eq!(offset, 1);
+                assert!(
+                    matches!(
+                        *inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerCount {
+                                filter: PlayerFilter::ControlsPermanent {
+                                    relation: PlayerRelation::Opponent,
+                                    presence: ControlPresence::Controls,
+                                    ..
+                                },
+                            },
+                        }
+                    ),
+                    "Expected Offset over PlayerCount{{ControlsPermanent}}, got {inner:?}"
+                );
+            }
+            other => panic!("Expected Offset{{+1}}, got {other:?}"),
+        }
+    }
+
+    // A1 negative: with no object after "control", the shared core rejects the
+    // everything-matching `TargetFilter::Any`, so we must NOT emit a
+    // PlayerCount{ControlsPermanent} that would silently match all opponents.
+    #[test]
+    fn parse_quantity_ref_opponents_who_control_no_object_rejected() {
+        let qty = parse_quantity_ref("the number of opponents who control");
+        assert!(
+            !matches!(
+                qty,
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::ControlsPermanent { .. },
+                })
+            ),
+            "Bare 'who control' with no object must not yield ControlsPermanent, got {qty:?}"
         );
     }
 
@@ -3223,6 +3367,74 @@ mod tests {
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
         );
+    }
+
+    /// CR 109.5 + CR 608.2c: "creature they control" inside a "for each [player]"
+    /// clause threads the relative player scope into the `ObjectCount` filter's
+    /// controller. Edit 1b swapped the no-ctx fallback (`parse_type_phrase`) for
+    /// the ctx-aware `parse_type_phrase_with_ctx`. Reverting Edit 1b discards the
+    /// scope, so "they control" collapses to `ControllerRef::You` and this assert
+    /// (ScopedPlayer) fails. Discriminating fail-on-revert guard for the parser fix.
+    #[test]
+    fn for_each_they_control_threads_scoped_player() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let qty = parse_for_each_clause_with_context("creature they control", &ctx).unwrap();
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::ScopedPlayer),
+            "\"they control\" must bind to the iterating player, not the caster"
+        );
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    /// CR 109.4 + CR 115.1: "creature they control" with a `TargetPlayer` relative
+    /// scope (e.g. Burden of Greed's "for each artifact that player controls")
+    /// threads `TargetPlayer` through the fallback. Same fail-on-revert axis as
+    /// `for_each_they_control_threads_scoped_player` but for the targeted-player
+    /// scope.
+    #[test]
+    fn for_each_they_control_threads_target_player() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let qty = parse_for_each_clause_with_context("artifact they control", &ctx).unwrap();
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+    }
+
+    /// CR 109.5: "creature you control" stays bound to `ControllerRef::You` even
+    /// when a relative player scope is present, because the "you control" suffix
+    /// arm is context-independent. Confirms Edit 1b does not disturb caster-relative
+    /// counts (The Scarab God).
+    #[test]
+    fn for_each_you_control_stays_caster_with_scope_present() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let qty = parse_for_each_clause_with_context("creature you control", &ctx).unwrap();
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
     }
 
     #[test]

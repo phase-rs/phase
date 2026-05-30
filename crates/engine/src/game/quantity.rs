@@ -709,7 +709,17 @@ fn resolve_ref(
     // `FilterContext::recipient_id` so recipient-relative filter properties
     // resolve against the per-object recipient bound by the layer evaluator.
     let mut filter_ctx = match ability {
-        Some(a) => FilterContext::from_ability(a),
+        // CR 109.5: "you"/"your" on a triggered ability refer to the ability's
+        // (printed) controller. A quantity is a value sub-expression, not an effect
+        // target: while a `player_scope` iteration rebinds `ability.controller` to
+        // each affected player, "Zombies you control" in the quantity still means the
+        // printed/original controller (The Scarab God upkeep X). CR 608.2c: the
+        // ability's controller follows its instructions. Effect-target resolution
+        // keeps the scoped controller via the bare `from_ability` constructor.
+        Some(a) => FilterContext::from_ability_with_controller(
+            a,
+            a.original_controller.unwrap_or(a.controller),
+        ),
         None => FilterContext::from_source_with_controller(source_id, controller),
     };
     filter_ctx.recipient_id = ctx.recipient;
@@ -4655,6 +4665,240 @@ mod tests {
             Zone::Battlefield,
         );
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
+    }
+
+    /// CR 109.5: "you"/"your" on a triggered ability refer to the printed
+    /// controller of the source object, not the player a `player_scope`
+    /// iteration is temporarily affecting. During each-opponent resolution the
+    /// engine rebinds `ResolvedAbility::controller` to the scoped player while
+    /// preserving the printed controller in `original_controller`. A quantity
+    /// sub-expression ("Zombies you control" on The Scarab God) must read the
+    /// printed controller, so this asserts the count comes from P0 (printed
+    /// caster) even though `controller` has been rebound to P1 (scoped
+    /// opponent). Reverting the `quantity.rs` seam to a bare `from_ability`
+    /// would count P1's creatures (0) and fail this test.
+    #[test]
+    fn resolve_quantity_you_control_uses_original_controller_under_player_scope() {
+        let mut state = GameState::new_two_player(42);
+        // P0 (printed caster) controls 2 creatures.
+        for i in 0..2 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("P0 Creature {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        // P1 (scoped opponent) controls 0 creatures — asymmetric so the seam is
+        // discriminating: a correct fix returns 2, the buggy path returns 0.
+
+        // Source object is controlled by P0.
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Simulate mid-`player_scope` iteration: `controller` has been rebound to
+        // the scoped opponent (P1), but `original_controller` retains the printed
+        // caster (P0).
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.original_controller = Some(PlayerId(0));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+
+        // "creatures you control" resolves against the printed controller (P0 → 2),
+        // not the scoped opponent (P1 → 0).
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 2);
+    }
+
+    /// Build an asymmetric board (P0 = `p0_creatures`, P1 = `p1_creatures`) plus a
+    /// P0-controlled source object. Mirrors the harness shape of
+    /// `resolve_quantity_you_control_uses_original_controller_under_player_scope`
+    /// so the "they control" relative-scope tests are discriminating.
+    fn asymmetric_creature_board(p0_creatures: u32, p1_creatures: u32) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let mut next_card = 1u64;
+        let mut add_creatures = |state: &mut GameState, owner: PlayerId, n: u32| {
+            for i in 0..n {
+                let id = create_object(
+                    state,
+                    CardId(next_card),
+                    owner,
+                    format!("{owner:?} Creature {i}"),
+                    Zone::Battlefield,
+                );
+                next_card += 1;
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+            }
+        };
+        add_creatures(&mut state, PlayerId(0), p0_creatures);
+        add_creatures(&mut state, PlayerId(1), p1_creatures);
+        let source = create_object(
+            &mut state,
+            CardId(next_card),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        (state, source)
+    }
+
+    /// CR 115.10 + CR 608.2c: runtime-seam companion to the parser fix
+    /// (`oracle_quantity::tests::for_each_they_control_threads_scoped_player`).
+    /// Once the parser threads "they control" into a
+    /// `ControllerRef::ScopedPlayer` filter, this verifies the resolver consumes
+    /// it correctly: with `controller` rebound to the scoped opponent (P1) and
+    /// `original_controller` retaining the caster (P0), the `ScopedPlayer` count
+    /// follows `scoped_player` (P1 → 5), NOT the caster's board (P0 → 3). The
+    /// asymmetric board makes the assertion discriminating against any resolver
+    /// regression that read the caster instead.
+    #[test]
+    fn for_each_they_control_scoped_player_counts_iterating_player() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.original_controller = Some(PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                ),
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 5);
+    }
+
+    /// CR 109.4 + CR 115.1: runtime-seam companion to
+    /// `oracle_quantity::tests::for_each_they_control_threads_target_player`. The
+    /// resolver reads a `ControllerRef::TargetPlayer` filter against the first
+    /// `TargetRef::Player` (P1 → 5), NOT the caster (P0 → 3). Covers Burden of
+    /// Greed / Emissary of Despair / Hoard Hauler ("for each [type] that player
+    /// controls").
+    #[test]
+    fn for_each_they_control_target_player_counts_targeted_player() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.original_controller = Some(PlayerId(0));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 5);
+    }
+
+    /// CR 608.2c + CR 109.4: runtime-seam companion for the chosen-player scope.
+    /// The resolver reads a `ControllerRef::ChosenPlayer { index: 0 }` filter
+    /// against `chosen_players[0]` (P1 → 5), NOT the caster (P0 → 3). Covers
+    /// Benevolent Offering's second clause ("for each creature the chosen player
+    /// controls").
+    #[test]
+    fn for_each_they_control_chosen_player_counts_chosen_player() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.original_controller = Some(PlayerId(0));
+        ability.chosen_players = vec![PlayerId(1)];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                ),
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 5);
+    }
+
+    /// CR 109.5: "creatures you control" stays bound to the printed caster (P0 → 3)
+    /// even while `controller` is rebound to the scoped opponent (P1) mid-iteration —
+    /// the complement of `for_each_they_control_scoped_player_counts_iterating_player`,
+    /// confirming the fix doesn't disturb "you control" counts.
+    #[test]
+    fn for_each_you_control_stays_caster_under_player_scope() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.original_controller = Some(PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 3);
     }
 
     #[test]

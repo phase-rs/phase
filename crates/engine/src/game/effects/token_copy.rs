@@ -6,6 +6,7 @@ use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
     TargetRef,
 };
+use crate::types::card_type::SubtypeSet;
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -473,6 +474,45 @@ fn apply_token_modifications(
                     token.base_card_types.subtypes.retain(|s| s != subtype);
                 }
             }
+            // CR 707.9b + CR 613.1d: a copy exception with no "in addition"
+            // carve-out replaces the copied creature subtypes (CR 707.9d). The
+            // wiped set becomes part of the token's copiable values, so apply it
+            // to both live and base subtype lists.
+            ContinuousModification::RemoveAllSubtypes { set } => {
+                let all_creature_types = &state.all_creature_types;
+                let objects = &mut state.objects;
+                if let Some(token) = objects.get_mut(&token_id) {
+                    remove_subtype_set(&mut token.card_types.subtypes, *set, all_creature_types);
+                    remove_subtype_set(
+                        &mut token.base_card_types.subtypes,
+                        *set,
+                        all_creature_types,
+                    );
+                }
+            }
+            // CR 707.9b + CR 613.1e: a copy exception that sets color (no
+            // "in addition to its other colors" carve-out, CR 707.9d) replaces
+            // the copied color. The result becomes part of the token's copiable
+            // values, so set both live and base color.
+            ContinuousModification::SetColor { colors } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.color = colors.clone();
+                    token.base_color = colors.clone();
+                }
+            }
+            // CR 707.9b + CR 613.1e: a copy exception that adds color
+            // ("in addition to its other colors") becomes part of the token's
+            // copiable values without removing the copied color.
+            ContinuousModification::AddColor { color } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    if !token.color.contains(color) {
+                        token.color.push(*color);
+                    }
+                    if !token.base_color.contains(color) {
+                        token.base_color.push(*color);
+                    }
+                }
+            }
             // CR 707.9b: "except it's 1/1" — set base and live P/T so the
             // override persists through layer resets. Used by Offspring
             // (CR 702.175a) and Saw in Half.
@@ -540,6 +580,37 @@ fn apply_token_modifications(
     }
 }
 
+/// CR 205.1a + CR 613.1d: remove every subtype belonging to the given
+/// [`SubtypeSet`] from a token's subtype list. Creature types are recognised
+/// against the game's live `all_creature_types` list (Changeling / set-defined
+/// types are runtime data); every other set has a fixed CR-defined membership.
+fn remove_subtype_set(subtypes: &mut Vec<String>, set: SubtypeSet, all_creature_types: &[String]) {
+    match set {
+        // CR 205.3m: creature types.
+        SubtypeSet::Creature => {
+            subtypes.retain(|s| {
+                !all_creature_types
+                    .iter()
+                    .any(|creature_type| creature_type == s)
+            });
+        }
+        SubtypeSet::Land => subtypes.retain(|s| !crate::types::card_type::is_land_subtype(s)),
+        SubtypeSet::Artifact => {
+            subtypes.retain(|s| !crate::types::card_type::ARTIFACT_SUBTYPES.contains(&s.as_str()))
+        }
+        SubtypeSet::Enchantment => subtypes
+            .retain(|s| !crate::types::card_type::ENCHANTMENT_SUBTYPES.contains(&s.as_str())),
+        SubtypeSet::Planeswalker => subtypes
+            .retain(|s| !crate::types::card_type::PLANESWALKER_SUBTYPES.contains(&s.as_str())),
+        SubtypeSet::Spell => {
+            subtypes.retain(|s| !crate::types::card_type::SPELL_SUBTYPES.contains(&s.as_str()));
+        }
+        SubtypeSet::Battle => {
+            subtypes.retain(|s| !crate::types::card_type::BATTLE_SUBTYPES.contains(&s.as_str()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +625,100 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
+
+    /// CR 707.9b + CR 707.9d: a copy token whose exception sets P/T, replaces
+    /// color, and replaces creature subtypes (The Scarab God shape) stamps each
+    /// characteristic onto both the live and base (copiable) values of the
+    /// synthesized token.
+    #[test]
+    fn copy_token_exceptions_stamp_pt_color_and_subtype() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec![
+            "Human".to_string(),
+            "Soldier".to_string(),
+            "Zombie".to_string(),
+        ];
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Elite Vanguard".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(2);
+            source.base_toughness = Some(1);
+            source.power = Some(2);
+            source.toughness = Some(1);
+            source.base_color = vec![ManaColor::White];
+            source.color = vec![ManaColor::White];
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Human".to_string(), "Soldier".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![
+                    ContinuousModification::SetPower { value: 4 },
+                    ContinuousModification::SetToughness { value: 4 },
+                    ContinuousModification::SetColor {
+                        colors: vec![ManaColor::Black],
+                    },
+                    ContinuousModification::RemoveAllSubtypes {
+                        set: SubtypeSet::Creature,
+                    },
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Zombie".to_string(),
+                    },
+                ],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert_eq!(token.power, Some(4));
+        assert_eq!(token.toughness, Some(4));
+        assert_eq!(token.color, vec![ManaColor::Black]);
+        assert!(token.card_types.subtypes.contains(&"Zombie".to_string()));
+        assert!(!token.card_types.subtypes.contains(&"Human".to_string()));
+        assert!(!token.card_types.subtypes.contains(&"Soldier".to_string()));
+        assert_eq!(token.base_power, Some(4));
+        assert_eq!(token.base_toughness, Some(4));
+        assert_eq!(token.base_color, vec![ManaColor::Black]);
+        assert!(token
+            .base_card_types
+            .subtypes
+            .contains(&"Zombie".to_string()));
+        assert!(!token
+            .base_card_types
+            .subtypes
+            .contains(&"Human".to_string()));
+        assert!(!token
+            .base_card_types
+            .subtypes
+            .contains(&"Soldier".to_string()));
+    }
 
     #[test]
     fn copy_token_of_self_creates_copy() {

@@ -1074,6 +1074,52 @@ mod tests {
         );
     }
 
+    /// Issue #1424 — The Scarab God activated: 4/4 black Zombie copy exceptions.
+    /// CR 707.9d: with no "in addition to its other types" carve-out, color and
+    /// creature subtypes REPLACE the copied values — `SetColor` (not `AddColor`)
+    /// and `RemoveAllSubtypes { Creature }` + `AddType { Creature }`.
+    #[test]
+    fn scarab_god_copy_token_carries_pt_color_and_zombie_modifications() {
+        let effect = try_parse_token(
+            "create a token that's a copy of it, except it's a 4/4 black zombie",
+            "Create a token that's a copy of it, except it's a 4/4 black Zombie.",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(additional_modifications.contains(&ContinuousModification::SetPower { value: 4 }));
+        assert!(
+            additional_modifications.contains(&ContinuousModification::SetToughness { value: 4 })
+        );
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetColor { colors }
+                if colors == &vec![ManaColor::Black]
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature
+            }
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Zombie"
+        )));
+    }
+
     #[test]
     fn copy_token_half_pt_exception_emits_dynamic_modifications() {
         let effect = try_parse_token(
