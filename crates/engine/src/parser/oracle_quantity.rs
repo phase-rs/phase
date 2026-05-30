@@ -370,6 +370,22 @@ pub(crate) fn parse_cda_quantity_with_context(
 ) -> Option<QuantityExpr> {
     let text = text.trim().trim_end_matches('.');
 
+    // CR 107.1a: "half/third/tenth <inner>, rounded up/down" fractional
+    // quantities delivered via a "where X is …" binding or a CDA route through
+    // here (Chainer's Torment, Endless Ranks of the Dead, Ghoulcaller's Harvest,
+    // Imskir Iron-Eater). Delegate to the shared `parse_fraction_rounded`
+    // combinator so every inner the general quantity grammar recognizes
+    // (life totals, "the number of <type> you control", "<type> cards in your
+    // graveyard", possessive refs, …) composes — without this arm the phrase
+    // falls through to `Variable { name: "<whole phrase>" }`, which resolves to 0
+    // at runtime (a silent no-op). Tried first so the leading "half " is consumed
+    // before the single-ref / binary-arithmetic arms below.
+    if let Ok((rest, expr)) = nom_quantity::parse_fraction_rounded(text) {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
+
     // "twice [inner]" or "three times [inner]" → Multiply { factor, inner }
     if let Ok((rest, factor)) = alt((
         value(2i32, tag::<_, _, OracleError<'_>>("twice ")),
@@ -1778,8 +1794,8 @@ fn with_target_player_controller(filter: TargetFilter) -> Option<TargetFilter> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, TypeFilter,
-        TypedFilter,
+        CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope,
+        RoundingMode, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -1842,6 +1858,61 @@ mod tests {
                     && matches!(**right, QuantityExpr::Ref { qty: QuantityRef::Power { scope: ObjectScope::Recipient } })
             ),
             "reversed ordering should still parse to a Difference, got {expr:?}"
+        );
+    }
+
+    /// CR 107.1a: a "where X is half …, rounded …" binding routes through
+    /// `parse_cda_quantity`; before the fractional arm it fell through to
+    /// `Variable { name: "<whole phrase>" }` (resolves to 0). These assert the
+    /// fractional wrapper composes over the general quantity grammar's inner for
+    /// every supported class — life total, "the number of <type> you control",
+    /// and "<type> cards in your graveyard".
+    #[test]
+    fn cda_half_life_total_rounded_up() {
+        // Chainer's Torment: "half your life total, rounded up"
+        assert_eq!(
+            parse_cda_quantity("half your life total, rounded up"),
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Up,
+            }),
+        );
+    }
+
+    #[test]
+    fn cda_half_number_of_artifacts_you_control_rounded_down() {
+        // Imskir Iron-Eater: "half the number of artifacts you control, rounded down"
+        let expr = parse_cda_quantity("half the number of artifacts you control, rounded down");
+        assert!(
+            matches!(
+                expr,
+                Some(QuantityExpr::DivideRounded { ref inner, divisor: 2, rounding: RoundingMode::Down })
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
+            ),
+            "expected DivideRounded{{ Ref(ObjectCount), 2, Down }}, got {expr:?}"
+        );
+    }
+
+    #[test]
+    fn cda_half_creature_cards_in_graveyard_rounded_up() {
+        // Ghoulcaller's Harvest: "half the number of creature cards in your graveyard, rounded up"
+        let expr =
+            parse_cda_quantity("half the number of creature cards in your graveyard, rounded up");
+        assert!(
+            matches!(
+                expr,
+                Some(QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Up,
+                    ..
+                })
+            ),
+            "expected DivideRounded with Up rounding, got {expr:?}"
         );
     }
 

@@ -22,6 +22,7 @@ mod coalition_relic_integration;
 mod combat_celebrant_exert;
 mod council_of_four_nth_per_turn;
 mod cr_annotations;
+mod crossway_troublemakers_attacking_keywords;
 mod cultivate_split_destination;
 mod dalkovan_encampment_attack_trigger;
 mod dark_confidant_upkeep;
