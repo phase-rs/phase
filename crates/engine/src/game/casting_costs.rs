@@ -4989,6 +4989,193 @@ mod tests {
         );
     }
 
+    /// CR 603.10a + CR 601.2h (DEFERRED kicker/target-paused sub-case): when an
+    /// additional sacrifice cost is followed by a deferred target/kicker/modal
+    /// pause, the co-departing observer under-observes. After the sacrifice,
+    /// `finish_pending_cost_or_cast` returns a non-`Priority` `WaitingFor`
+    /// (`TargetSelection` here), so `apply_action` does NOT run
+    /// `run_post_action_pipeline` over the cost-sacrifice `ZoneChanged` events,
+    /// and the producer stamp from `handle_sacrifice_for_cost` is never read in
+    /// this action. The cast then lands in a LATER `apply_action` whose fresh
+    /// `events` vector (engine.rs `let mut events = Vec::new();`) does not carry
+    /// the stamped records. This asserts the CURRENT wrong outcome at the pause
+    /// boundary (the observer observes NONE of the co-sacrificed creatures —
+    /// life stays 20); flip the expectation to 22 once the cross-action seam
+    /// lands (see plan Unit B redesign sketch).
+    #[test]
+    #[ignore = "DEFERRED cross-action seam: when an additional sacrifice cost is \
+                followed by a kicker/target/modal pause, the cost-sacrifice ZoneChanged \
+                events are emitted in the pausing action and gone from the fresh events \
+                vector when the cast lands in a later action — apply_action allocates a \
+                new events Vec per action and only runs run_post_action_pipeline on the \
+                Priority-returning action, so the producer stamp at handle_sacrifice_for_cost \
+                is unreadable. Shares Unit B's cross-action consumption gap. See plan Unit B."]
+    fn cost_paid_multi_sacrifice_kicker_paused_under_observes() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{GainLifePlayer, TargetFilter, TriggerDefinition};
+        use crate::types::phase::Phase;
+        use crate::types::triggers::TriggerMode;
+        use crate::types::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 20;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // A spell whose effect TARGETS (DealDamage to a creature) and whose
+        // target selection is DEFERRED to after costs are paid — so after the
+        // additional sacrifice cost is paid the cast pauses on TargetSelection
+        // (not Priority), and run_post_action_pipeline never scans the
+        // cost-sacrifice events in this action.
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Paused Sacrifice Bolt".to_string(),
+            Zone::Hand,
+        );
+
+        let observer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Blood Artist Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                ))
+                .execute(crate::types::ability::AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: GainLifePlayer::Controller,
+                    },
+                ));
+            obj.trigger_definitions.push(trig.clone());
+            Arc::make_mut(&mut obj.base_trigger_definitions).push(trig);
+        }
+
+        let plain = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&plain).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+
+        // TWO legal damage targets so deferred target selection is AMBIGUOUS and
+        // genuinely pauses on `WaitingFor::TargetSelection` (a single legal target
+        // auto-resolves inline and would land the cast in the same action,
+        // defeating the pause this sentinel models).
+        for (cid, name) in [
+            (CardId(4), "Opposing Bear A"),
+            (CardId(5), "Opposing Bear B"),
+        ] {
+            let victim = create_object(
+                &mut state,
+                cid,
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&victim).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        let mut pending = make_pending(spell);
+        pending.activation_ability_index = None;
+        pending.card_id = CardId(1);
+        pending.origin_zone = Zone::Hand;
+        // Targeted effect with deferred target selection: the cast pauses after
+        // costs are paid (CR 601.2c).
+        pending.ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                damage_source: None,
+            },
+            Vec::new(),
+            spell,
+            PlayerId(0),
+        );
+        pending.deferred_target_selection = true;
+
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        state.waiting_for = WaitingFor::SacrificeForCost {
+            player: PlayerId(0),
+            count: 2,
+            permanents: vec![observer, plain],
+            pending_cast: Box::new(pending),
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![observer, plain],
+            },
+        )
+        .expect("select both creatures to sacrifice as the spell's additional cost");
+
+        // Precondition for the gap: after paying the cost the cast PAUSED on
+        // deferred target selection (two ambiguous legal targets), so this action
+        // returned a non-`Priority` `WaitingFor` and `apply_action` never ran
+        // `run_post_action_pipeline` over the cost-sacrifice `ZoneChanged` events.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::TargetSelection { .. }),
+            "kicker/target-paused sub-case must pause on TargetSelection after the \
+             additional sacrifice cost (got {:?})",
+            state.waiting_for
+        );
+
+        // FIXME(unit-b-seam): the cost-sacrifice events were emitted in THIS
+        // (pausing) action but never scanned, and the cast lands in a LATER action
+        // whose fresh `events` vector no longer carries them — so the producer
+        // stamp at `handle_sacrifice_for_cost` is unreadable and the observer
+        // observes NONE of the co-sacrificed creatures at the pause boundary
+        // (life stays 20). Once the cross-action seam routes the cost-payment
+        // events through the post-cast-resolution collection, the observer fires
+        // once per co-sacrificed creature (itself + the plain bear) — flip to 22.
+        assert_eq!(
+            state.players[0].life, 20,
+            "CURRENT (wrong) outcome: when the cast pauses before Priority the \
+             cost-sacrifice events are never scanned, so the co-departing observer \
+             under-observes (life 20); expected 22 once the cross-action seam lands"
+        );
+    }
+
     #[test]
     fn stamp_controller_controlled_as_cast_uses_quantity_resolver_snapshot() {
         let mut state = GameState::new_two_player(42);
