@@ -760,7 +760,26 @@ fn transient_granted_spell_keywords(
             let StaticMode::CastWithKeyword { keyword } = &definition.mode else {
                 continue;
             };
-            let matches = definition.affected.as_ref().is_none_or(|filter| {
+            // CR 611.2c: the grant is bound to the grantee (outer SpecificPlayer
+            // gate); its lifetime is the stated duration, independent of the
+            // source's presence OR control. Match only the spell's type axis — do
+            // not re-derive "you" from the (possibly stolen/relocated) source
+            // object. `spell_object_matches_filter_from_state` resolves
+            // `ControllerRef::You` against the *current* source controller, which
+            // becomes an opponent if Teferi is stolen before the grantee's next
+            // turn; stripping the controller axis preserves the SORCERY type axis
+            // (and any others) while removing that stale-source dependency. The
+            // spell being evaluated is by construction the grantee's own cast
+            // (`caster` == the bound player), so controller scoping is already
+            // guaranteed by the call context plus the outer gate.
+            let affected = definition.affected.as_ref().map(|filter| {
+                let mut filter = filter.clone();
+                if let TargetFilter::Typed(tf) = &mut filter {
+                    tf.controller = None;
+                }
+                filter
+            });
+            let matches = affected.as_ref().is_none_or(|filter| {
                 super::filter::spell_object_matches_filter_from_state(
                     state,
                     spell_obj,
@@ -27991,6 +28010,76 @@ mod tests {
                 !effective_spell_keyword_kinds(&state, PlayerId(1), p1_sorcery)
                     .contains(&KeywordKind::Flash),
                 "sorcery cast by another player must not gain Flash (player scope)"
+            );
+        }
+
+        /// (g) CR 611.2c regression lock: the grant is bound to the grantee via
+        /// the outer `SpecificPlayer` gate, so it must survive an opponent GAINING
+        /// CONTROL of Teferi (not just Teferi leaving play — that is test (b)).
+        ///
+        /// Before the controller-axis-stripping fix, the inner `Typed { controller:
+        /// You }` filter re-derived "you" from the live source object. Stealing
+        /// Teferi flips `source_obj.controller` to P1, so the `ControllerRef::You`
+        /// check (`caster != source_controller`) fails and the grantee silently
+        /// loses the grant they legitimately still own. CR 611.2c: a rules-modifying
+        /// continuous effect's affected set is fixed at creation and is independent
+        /// of the source's presence OR control.
+        #[test]
+        fn grant_survives_opponent_gaining_control_of_teferi() {
+            let mut state = setup_game_at_main_phase();
+            let teferi = teferi_on_battlefield(&mut state, PlayerId(0));
+            let p0_sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(701));
+            let p1_sorcery = sorcery_in_hand(&mut state, PlayerId(1), CardId(702));
+
+            grant_teferi_flash(&mut state, PlayerId(0), teferi);
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), p0_sorcery),
+                "grant must be live immediately after +1"
+            );
+
+            // Drive a REAL control change through the engine pipeline: P1 gains
+            // control of Teferi via `Effect::GainControl`, which registers a
+            // `SpecificObject`-bound `ChangeController` TCE (controller = P1).
+            // Re-evaluating layers (CR 613.1b, Layer 2) then sets
+            // `state.objects[&teferi].controller = P1`.
+            let steal = ResolvedAbility::new(
+                Effect::GainControl {
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Object(teferi)],
+                teferi,
+                PlayerId(1),
+            );
+            let mut events = Vec::new();
+            // The full effect dispatcher (not the `GenericEffect`-only
+            // `effect::resolve` used by `grant_teferi_flash`) routes
+            // `Effect::GainControl` to `gain_control::resolve`, which registers
+            // the `ChangeController` TCE.
+            crate::game::effects::resolve_effect(&mut state, &steal, &mut events)
+                .expect("steal resolves");
+            crate::game::layers::evaluate_layers(&mut state);
+            assert_eq!(
+                state.objects[&teferi].controller,
+                PlayerId(1),
+                "opponent actually gained control of Teferi"
+            );
+
+            // The grant is the grantee's (P0's) — it must survive the steal.
+            // This FAILS before the fix (inner `You` re-derives to P1) and PASSES
+            // after (controller axis stripped; only the SORCERY type axis matches).
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), p0_sorcery),
+                "player-scoped grant must survive an opponent gaining control of \
+                 the source (CR 611.2c); the inner controller axis must not \
+                 re-derive 'you' from the stolen source"
+            );
+
+            // Sharpening: the thief (P1) does NOT inherit the grant on P1's own
+            // sorceries — the outer `SpecificPlayer { id: P0 }` gate still pins it
+            // to P0, regardless of who now controls Teferi.
+            assert!(
+                !sorcery_has_flash(&state, PlayerId(1), p1_sorcery),
+                "stealing Teferi must not hand the grant to the thief"
             );
         }
     }
