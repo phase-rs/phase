@@ -17,6 +17,8 @@ use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
+use super::oracle_nom::condition::inject_controller_you;
+use super::oracle_nom::duration::parse_cast_snapshot_suffix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
@@ -42,6 +44,33 @@ use crate::types::zones::Zone;
 pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     let mut ctx = ParseContext::default();
     parse_quantity_ref_with_context(text, &mut ctx)
+}
+
+/// CR 119.1 + CR 102.1: "the {highest|lowest} life total among {all players|
+/// players|your opponents}" → LifeTotal{ AllPlayers|Opponent { aggregate } }.
+/// Two independent nom axes (aggregate × population) — not full-string tags.
+/// Life is CR 119 → routes to LifeTotal/PlayerScope, never the CR 208/202
+/// object-property Aggregate (hence placed before that block).
+fn parse_cross_player_life_extremum(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the ").parse(input)?;
+    let (rest, aggregate) = alt((
+        value(AggregateFunction::Max, tag("highest")),
+        value(AggregateFunction::Min, tag("lowest")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" life total among ").parse(rest)?;
+    let (rest, player) = alt((
+        value(
+            PlayerScope::AllPlayers {
+                aggregate,
+                exclude: None,
+            },
+            alt((tag("all players"), tag("players"))),
+        ),
+        value(PlayerScope::Opponent { aggregate }, tag("your opponents")),
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::LifeTotal { player }))
 }
 
 pub(crate) fn parse_quantity_ref_with_context(
@@ -179,6 +208,16 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
+    // CR 119.1 + CR 102.1: cross-player life extremum ("the highest/lowest life
+    // total among …"). Life is CR 119 → must route to LifeTotal/PlayerScope, not
+    // the CR 208/202 object-property Aggregate below — wired first so the
+    // aggregate block can't claim it.
+    if let Ok((rest, qty)) = parse_cross_player_life_extremum(trimmed) {
+        if rest.is_empty() {
+            return Some(qty);
+        }
+    }
+
     // Aggregate patterns: "the greatest X among" / "the total power of"
     if let Ok((rest, (func, prop))) = alt((
         value(
@@ -215,15 +254,53 @@ pub(crate) fn parse_quantity_ref_with_context(
     .parse(trimmed)
     {
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
-        if remainder.trim().is_empty()
-            && !matches!(filter, TargetFilter::Any)
-            && !is_empty_typed_filter(&filter)
-        {
+        // CR 608.2h: present-tense aggregate. Accept a bare empty remainder
+        // (existing no-snapshot behavior) or a trailing cast/activation-time
+        // snapshot suffix ("as you cast this spell") — the suffix is a pure
+        // timing marker that the resolver honors, so it must not block the
+        // filter check.
+        let snapshot_ok = remainder.trim().is_empty()
+            || parse_cast_snapshot_suffix(remainder)
+                .map(|(r, _)| r.trim().is_empty())
+                .unwrap_or(false);
+        if snapshot_ok && !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
             return Some(QuantityRef::Aggregate {
                 function: func,
                 property: prop,
                 filter,
             });
+        }
+
+        // CR 608.2i: past-tense "you controlled" look-back. tag("you control") in
+        // parse_zone_controller has no word boundary and would prefix-match
+        // "you controlled", corrupting the remainder to "led …". Isolate the bare
+        // head via take_until(" you controlled ") BEFORE parse_type_phrase, then
+        // re-inject ControllerRef::You. Reuses the inject_controller_you building
+        // block; same strip-controller-before-type-phrase ordering as
+        // parse_controller_controlled_as_cast_condition
+        // (oracle_effect/conditions.rs:1444).
+        if let Ok((after_head_tag, head_text)) =
+            take_until::<_, _, OracleError<'_>>(" you controlled ").parse(rest)
+        {
+            let (head_filter, head_rem) = parse_type_phrase(head_text);
+            if head_rem.trim().is_empty()
+                && !matches!(head_filter, TargetFilter::Any)
+                && !is_empty_typed_filter(&head_filter)
+            {
+                if let Ok((after_ctrl, _)) =
+                    tag::<_, _, OracleError<'_>>(" you controlled ").parse(after_head_tag)
+                {
+                    if let Ok((rest2, _)) = parse_cast_snapshot_suffix(after_ctrl) {
+                        if rest2.trim().is_empty() {
+                            return Some(QuantityRef::Aggregate {
+                                function: func,
+                                property: prop,
+                                filter: inject_controller_you(head_filter),
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3763,6 +3840,201 @@ mod tests {
             gained,
             QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentGainedLife,
+            }
+        );
+    }
+
+    /// Extract the `controller` of an `Aggregate` filter for snapshot tests.
+    fn aggregate_filter_controller(qty: &QuantityExpr) -> Option<ControllerRef> {
+        match qty {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::Aggregate {
+                        filter: TargetFilter::Typed(tf),
+                        ..
+                    },
+            } => tf.controller.clone(),
+            _ => None,
+        }
+    }
+
+    /// CR 608.2h: present-tense snapshot — "the greatest power among creatures
+    /// you control as you cast this spell" (Monstrous Onslaught). The trailing
+    /// snapshot suffix must not block the Aggregate match, and the filter must
+    /// still carry `ControllerRef::You`.
+    #[test]
+    fn cda_quantity_greatest_power_snapshot_cast_present() {
+        let qty = parse_cda_quantity(
+            "the greatest power among creatures you control as you cast this spell",
+        )
+        .unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            aggregate_filter_controller(&qty),
+            Some(ControllerRef::You),
+            "present-tense snapshot must preserve controller You"
+        );
+    }
+
+    /// CR 608.2h: "as you activate this ability" snapshot variant (Lukka, Bound
+    /// to Ruin).
+    #[test]
+    fn cda_quantity_greatest_power_snapshot_activate_ability() {
+        let qty = parse_cda_quantity(
+            "the greatest power among creatures you control as you activate this ability",
+        )
+        .unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(aggregate_filter_controller(&qty), Some(ControllerRef::You));
+    }
+
+    /// CR 608.2i: past-tense look-back — "the greatest power among creatures you
+    /// controlled as you cast this spell" (Lifestream's Blessing). The
+    /// discriminating ordering test: `take_until(" you controlled ")` must run
+    /// BEFORE parse_type_phrase so the controller is still resolved to You and
+    /// the head filter is "creatures" (not corrupted by "you control"
+    /// prefix-matching "you controlled").
+    #[test]
+    fn cda_quantity_greatest_power_snapshot_past_tense() {
+        let qty = parse_cda_quantity(
+            "the greatest power among creatures you controlled as you cast this spell",
+        )
+        .unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            aggregate_filter_controller(&qty),
+            Some(ControllerRef::You),
+            "past-tense look-back must re-inject controller You via inject_controller_you"
+        );
+    }
+
+    /// Regression: the existing no-snapshot present-tense aggregate must still
+    /// parse unchanged after the snapshot relaxation.
+    #[test]
+    fn cda_quantity_greatest_power_no_snapshot_regression() {
+        let qty = parse_cda_quantity("the greatest power among creatures you control").unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(aggregate_filter_controller(&qty), Some(ControllerRef::You));
+    }
+
+    /// CR 119.1 + CR 102.1: cross-player life extremum → LifeTotal/PlayerScope.
+    /// "highest … among all players" → AllPlayers{Max} (Sorin, Grim Nemesis;
+    /// Arbiter of Knollridge; Scourge inner).
+    #[test]
+    fn cda_quantity_highest_life_total_among_all_players() {
+        let qty = parse_cda_quantity("the highest life total among all players").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
+            }
+        );
+    }
+
+    /// "lowest … among all players" → AllPlayers{Min} (Repay in Kind).
+    #[test]
+    fn cda_quantity_lowest_life_total_among_all_players() {
+        let qty = parse_cda_quantity("the lowest life total among all players").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Min,
+                        exclude: None,
+                    },
+                },
+            }
+        );
+    }
+
+    /// "highest … among your opponents" → Opponent{Max}.
+    #[test]
+    fn cda_quantity_highest_life_total_among_opponents() {
+        let qty = parse_cda_quantity("the highest life total among your opponents").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Max,
+                    },
+                },
+            }
+        );
+    }
+
+    /// "lowest … among your opponents" → Opponent{Min} (Mortal Flesh Is Weak).
+    #[test]
+    fn cda_quantity_lowest_life_total_among_opponents() {
+        let qty = parse_cda_quantity("the lowest life total among your opponents").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Min,
+                    },
+                },
+            }
+        );
+    }
+
+    /// Bare "the highest life total among players" (no "all") → AllPlayers{Max}.
+    /// Confirms the longest-first "all players" / "players" alt ordering.
+    #[test]
+    fn cda_quantity_highest_life_total_among_players_bare() {
+        let qty = parse_cda_quantity("the highest life total among players").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
             }
         );
     }
