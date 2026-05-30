@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -8,6 +8,7 @@ use super::bracket_lists::{BracketLists, BracketSignals};
 use super::legality::{normalize_legalities, CardLegalities, LegalityFormat, LegalityStatus};
 use super::mtgjson::Ruling;
 use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
+use crate::types::card_type::CoreType;
 
 use std::io::BufReader;
 
@@ -40,6 +41,13 @@ pub struct CardDatabase {
     /// `bracket_signals` field. Keyed by lowercased card name. Read by
     /// `bracket_signals_for` at runtime.
     pub(crate) bracket_signals_by_name: HashMap<String, BracketSignals>,
+    /// CR 205.3m: creature subtype vocabulary — the full union of `subtypes`
+    /// across every loaded creature face. Sorted and deduplicated. Seeds
+    /// `GameState::all_creature_types` at game start so consumers like
+    /// `ChoiceType::CreatureType` (Morophon) and `SharesQuality::CreatureType`
+    /// (Coat of Arms, Changeling expansion) see every printed creature type,
+    /// not just the subset present in the loaded decks.
+    pub(crate) creature_type_vocabulary: Vec<String>,
 }
 
 impl CardDatabase {
@@ -102,6 +110,7 @@ impl CardDatabase {
             }
         }
         let name_alias_index = build_name_alias_index(face_index.keys());
+        let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
 
         Self {
             cards: HashMap::new(),
@@ -115,6 +124,7 @@ impl CardDatabase {
             errors: Vec::new(),
             bracket_lists: BracketLists::default(),
             bracket_signals_by_name,
+            creature_type_vocabulary,
         }
     }
 
@@ -215,6 +225,16 @@ impl CardDatabase {
         self.face_index.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// CR 205.3m: Returns the full creature subtype vocabulary derived from
+    /// every loaded creature face. Sorted and deduplicated. Consumers seed
+    /// `GameState::all_creature_types` from this so token-only types
+    /// (Saproling, Golem, etc.) that no creature card in the loaded decks
+    /// shares are still recognized by `SharesQuality::CreatureType`,
+    /// `ChoiceType::CreatureType`, and the Changeling expansion.
+    pub fn creature_type_vocabulary(&self) -> &[String] {
+        &self.creature_type_vocabulary
+    }
+
     /// Returns all card names (title-cased as stored in face data), sorted.
     pub fn card_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
@@ -291,6 +311,24 @@ impl CardDatabase {
         }
         lower
     }
+}
+
+/// CR 205.3m: Union every creature face's `subtypes` into a sorted, deduped
+/// list. A face contributes its subtypes only when its `core_types` includes
+/// `Creature` — non-creature subtypes (artifact types, enchantment types,
+/// land types) are tracked separately and must not leak into this vocabulary.
+pub(crate) fn collect_creature_type_vocabulary<'a>(
+    faces: impl Iterator<Item = &'a CardFace>,
+) -> Vec<String> {
+    let mut types: HashSet<String> = HashSet::new();
+    for face in faces {
+        if face.card_type.core_types.contains(&CoreType::Creature) {
+            types.extend(face.card_type.subtypes.iter().cloned());
+        }
+    }
+    let mut sorted: Vec<String> = types.into_iter().collect();
+    sorted.sort();
+    sorted
 }
 
 pub(crate) fn build_name_alias_index<'a>(
@@ -768,6 +806,114 @@ mod tests {
         assert!(
             sig.efficient_tutor,
             "falls back to bracket_lists for partner pair when export map is empty"
+        );
+    }
+
+    #[test]
+    fn creature_type_vocabulary_unions_subtypes_across_creature_faces() {
+        // CR 205.3m: vocabulary must include subtypes from every creature
+        // face — including "token-only" types like Saproling (#1471) and
+        // types whose cards may not be in any loaded deck like Golem (#1472).
+        // Non-creature faces (Lightning Bolt) must not contribute.
+        let mut map = serde_json::Map::new();
+        for (key, name, types, subs) in [
+            (
+                "saproling token",
+                "Saproling Token",
+                &["Creature"][..],
+                &["Saproling"][..],
+            ),
+            (
+                "walking golem",
+                "Walking Golem",
+                &["Artifact", "Creature"][..],
+                &["Golem"][..],
+            ),
+            (
+                "grizzly bears",
+                "Grizzly Bears",
+                &["Creature"][..],
+                &["Bear"][..],
+            ),
+            (
+                "lightning bolt",
+                "Lightning Bolt",
+                &["Instant"][..],
+                &[][..],
+            ),
+            // Duplicate subtype across faces must dedupe.
+            (
+                "polar bears",
+                "Polar Bears",
+                &["Creature"][..],
+                &["Bear"][..],
+            ),
+        ] {
+            map.insert(
+                key.to_string(),
+                serde_json::json!({
+                    "name": name,
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": {
+                        "supertypes": [],
+                        "core_types": types,
+                        "subtypes": subs,
+                    },
+                    "power": null, "toughness": null, "loyalty": null, "defense": null,
+                    "oracle_text": null, "abilities": [], "triggers": [],
+                    "static_abilities": [], "replacements": [], "keywords": [],
+                }),
+            );
+        }
+        let json = serde_json::Value::Object(map).to_string();
+        let db = CardDatabase::from_json_str(&json).unwrap();
+        let vocab = db.creature_type_vocabulary();
+
+        assert!(
+            vocab.contains(&"Saproling".to_string()),
+            "Saproling must appear (token-only creature type)"
+        );
+        assert!(
+            vocab.contains(&"Golem".to_string()),
+            "Golem must appear (multi-core-type creature)"
+        );
+        assert!(vocab.contains(&"Bear".to_string()));
+        // Sorted.
+        let mut sorted = vocab.to_vec();
+        sorted.sort();
+        assert_eq!(vocab.to_vec(), sorted, "vocabulary must be sorted");
+        // Deduped: "Bear" appears on two faces but only once in the vocab.
+        let bear_count = vocab.iter().filter(|s| *s == "Bear").count();
+        assert_eq!(bear_count, 1, "duplicate subtypes must dedupe");
+    }
+
+    #[test]
+    fn creature_type_vocabulary_excludes_non_creature_subtypes() {
+        // CR 205.3m: only creature faces contribute. A non-creature subtype
+        // attached to a non-creature card (e.g. an Equipment artifact) must
+        // not appear in the creature type vocabulary.
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "swiftfoot boots".to_string(),
+            serde_json::json!({
+                "name": "Swiftfoot Boots",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": [],
+                    "core_types": ["Artifact"],
+                    "subtypes": ["Equipment"],
+                },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+            }),
+        );
+        let json = serde_json::Value::Object(map).to_string();
+        let db = CardDatabase::from_json_str(&json).unwrap();
+        assert!(
+            !db.creature_type_vocabulary()
+                .contains(&"Equipment".to_string()),
+            "Equipment is an artifact subtype, not a creature subtype"
         );
     }
 
