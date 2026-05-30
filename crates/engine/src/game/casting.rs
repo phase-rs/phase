@@ -2734,7 +2734,7 @@ fn apply_all_cost_modifiers(
     // CR 601.2b + CR 601.2f: Cost-floor statics (Trinisphere class) — LAST, after
     // every additive/subtractive modifier so the floor sees the final mana
     // component. While the cost still contains `{X}`, X has mana value 0
-    // (CR 107.3b), so flooring now would over-count the spell once X is paid
+    // (CR 107.3g), so flooring now would over-count the spell once X is paid
     // (CR 601.2b locks in the chosen X *before* the "directly affect the total
     // cost" step of CR 601.2f). Defer the floor for `{X}` costs to
     // `apply_post_x_cost_floor`, run from the ChooseX handler once X is concrete.
@@ -3243,7 +3243,7 @@ fn apply_battlefield_cost_modifiers_inner(
 /// is below the floor, generic mana is added to bring the total to the floor —
 /// colored requirements are never modified, per the Trinisphere reminder text
 /// "Additional mana ... may be paid with any color of mana or colorless mana."
-fn apply_cost_floor(
+pub(super) fn apply_cost_floor(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
@@ -27435,6 +27435,71 @@ mod tests {
             },
             "floor must be deferred while X is symbolic — applying it now would wrongly add {{3}}"
         );
+    }
+
+    /// CR 601.2b + CR 601.2f + CR 601.2h: With a Trinisphere-class floor active,
+    /// the X-announce step must not offer an X whose floored, locked-in cost is
+    /// unpayable. An `{X}{1}` spell with pool = 2 under a `{3}` floor: the bare
+    /// arithmetic formula offers max X = `(2-1)/1 = 1`, but X=1 → `{1}{1}` = `{2}`
+    /// → floored to `{3}`, which a pool of 2 cannot pay. The floor-aware probe
+    /// finds no payable X (X=0 → `{1}` → `{3}` is likewise unpayable from 2), so
+    /// `ChooseXValue.max` must be 0, not 1.
+    ///
+    /// Drives the real cast pipeline via `apply_as_current` + `CastSpell`. This is
+    /// the discriminating test for the floor-aware `max_x_value_excluding` fix:
+    /// pre-fix it would report `max = 1` (and fail this assertion); post-fix it
+    /// reports `max = 0`.
+    #[test]
+    fn x_spell_under_trinisphere_does_not_offer_unpayable_x() {
+        let mut state = setup_game_at_main_phase();
+        add_trinisphere(&mut state, PlayerId(0)); // {3} floor, untapped
+        let spell = create_object(
+            &mut state,
+            CardId(950),
+            PlayerId(0),
+            "Synthetic X Sorcery".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 1,
+            }; // {X}{1}
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2); // pool = 2
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(950),
+                targets: vec![],
+            },
+        )
+        .expect("cast enters ChooseXValue");
+
+        // Pre-fix: ChooseXValue.max == 1 (arithmetic offers an unpayable X=1).
+        // Post-fix: ChooseXValue.max == 0 (X=1's floored {3} is unpayable from pool 2).
+        match result.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(
+                max, 0,
+                "floor-aware max must exclude X=1 (floors to {{3}}, unpayable from pool 2)"
+            ),
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        }
     }
 
     /// CR 601.2b + CR 601.2f: Once X is concretized to a value that brings the

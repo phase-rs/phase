@@ -4105,6 +4105,8 @@ pub(super) fn max_x_value_excluding(
     object_id: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> u32 {
+    use crate::types::statics::StaticMode;
+
     let ManaCost::Cost { shards, generic } = cost else {
         return 0;
     };
@@ -4179,8 +4181,57 @@ pub(super) fn max_x_value_excluding(
     // CR 107.1b: Each `ManaCostShard::X` in the cost contributes `value` generic,
     // so for `{X}{X}` each point of X costs 2 mana. Dividing by `x_count` yields
     // the largest X the caster can actually afford.
-    let remaining = (pool + capacity).saturating_sub(fixed_portion);
-    remaining / x_count
+    let available = pool + capacity;
+    let formula_max = available.saturating_sub(fixed_portion) / x_count;
+
+    // CR 601.2f: A Trinisphere-class cost floor ("this spell costs at least {N}")
+    // is an effect that "directly affect[s] the total cost" and is locked in
+    // after X is chosen (CR 601.2b announces X first; CR 107.3g means symbolic X
+    // has mana value 0, so the floor is deferred until X is concrete). The
+    // arithmetic `formula_max` ignores the floor entirely, so it can offer an X
+    // whose floored, locked-in total is unpayable. CR 601.2h: unpayable costs
+    // can't be paid, so such an X must never be offered. The floor only ever
+    // *increases* a cost (it tops generic mana up to the floor, never reduces),
+    // so `formula_max` is an upper bound on any payable X — the probe never needs
+    // to search above it.
+    //
+    // An object-less X cost (the `max_x_value` public path used by the
+    // resolution-time probe in `effects/pay.rs`) is never a cast-time spell, so
+    // no cast-time floor can apply: return the unfloored bound unchanged.
+    let Some(spell_id) = object_id else {
+        return formula_max;
+    };
+
+    // Fast path: only floor-affected casts pay for the probe. This is an
+    // *existence* check ("could any cost floor apply at all"), not the authoritative
+    // CR 604.1 condition gate — `battlefield_functioning_statics` deliberately does
+    // NOT evaluate `def.condition`, so a tapped/non-functional Trinisphere still
+    // passes this `.any()`. That is correct by design: `apply_cost_floor` (called
+    // inside the probe) re-evaluates each static's condition per CR 601.2f, so a
+    // non-functional floor is correctly skipped there, yielding `formula_max` for
+    // that candidate. The vast majority of games have zero `MinimumCost` statics,
+    // so the hot X-announce / legal-actions path pays only one short-circuiting scan.
+    let floor_active = super::functioning_abilities::battlefield_functioning_statics(state)
+        .any(|(_, def)| matches!(def.mode, StaticMode::MinimumCost { .. }));
+    if !floor_active {
+        return formula_max;
+    }
+
+    // CR 601.2b + CR 601.2f + CR 601.2h: descend from the arithmetic upper bound to
+    // the largest X whose floored, locked-in total is payable. Mirrors the
+    // resolution-time descending probe in `effects/pay.rs` (`max_resolution_mana_x_value`).
+    // The probe consults the single floor authority (`casting::apply_cost_floor`)
+    // rather than re-deriving floor logic; it runs the untargeted channel only,
+    // which is exact for the target-independent `MinimumCost` filters in use today.
+    (0..=formula_max)
+        .rev()
+        .find(|&x| {
+            let mut probe = cost.clone();
+            probe.concretize_x(x);
+            super::casting::apply_cost_floor(state, player, spell_id, &mut probe);
+            probe.mana_value() <= available
+        })
+        .unwrap_or(0)
 }
 
 /// Single authority for transitioning into the payment step of a cast.
