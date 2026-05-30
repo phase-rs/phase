@@ -13824,7 +13824,6 @@ mod tests {
             ("Equip creature token {1}", 1),
             ("Equip legendary creature {3}", 3),
             ("Equip commander {3}", 3),
-            ("Equip {2} or {B}", 2),
         ] {
             let ability = super::try_parse_equip(line).expect("restricted equip should parse");
             assert!(
@@ -13837,6 +13836,31 @@ mod tests {
                 "{line} parsed unexpected cost: {:?}",
                 ability.cost
             );
+        }
+
+        // CR 118.12a: "Equip {2} or {B}" is a disjunctive cost — OneOf([Mana({2}), Mana({B})]).
+        let ability =
+            super::try_parse_equip("Equip {2} or {B}").expect("disjunctive equip should parse");
+        match ability.cost {
+            Some(AbilityCost::OneOf { ref costs }) => {
+                assert_eq!(costs.len(), 2, "expected 2 alternatives, got {:?}", costs);
+                assert!(
+                    matches!(
+                        &costs[0],
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost { generic: 2, .. }
+                        }
+                    ),
+                    "left alternative should be Mana({{2}}), got {:?}",
+                    costs[0]
+                );
+                assert!(
+                    matches!(&costs[1], AbilityCost::Mana { cost: ManaCost::Cost { shards, generic: 0 } } if shards.len() == 1),
+                    "right alternative should be Mana({{B}}), got {:?}",
+                    costs[1]
+                );
+            }
+            other => panic!("Expected OneOf for 'Equip {{2}} or {{B}}', got {:?}", other),
         }
     }
 

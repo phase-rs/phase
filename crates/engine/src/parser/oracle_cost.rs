@@ -27,6 +27,33 @@ use crate::types::zones::Zone;
 /// Returns an AbilityCost (possibly Composite for multi-part costs).
 pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     let text = text.trim();
+    let lower = text.to_lowercase();
+
+    // CR 118.3: Top-level " or " splits the entire cost into alternatives.
+    // E.g., "{3}, {T} or {R}, {T}" → OneOf([Composite([Mana(3), Tap]), Composite([Mana(R), Tap])]).
+    // Must check before comma-splitting so the `or` isn't consumed as part of a segment.
+    // Guard: both sides must contain `{` (mana/tap symbols) to distinguish from
+    // filter phrases like "creature or artifact" inside a Sacrifice cost.
+    if let Ok((_, (before, _after))) = split_once_on(&lower, " or ") {
+        let consumed = before.len();
+        let left_text = &text[..consumed];
+        let right_text = &text[consumed + " or ".len()..];
+        if left_text.contains('{') && right_text.contains('{') {
+            let left = parse_oracle_cost_no_or(left_text);
+            let right = parse_oracle_cost_no_or(right_text);
+            return AbilityCost::OneOf {
+                costs: vec![left, right],
+            };
+        }
+    }
+
+    parse_oracle_cost_no_or(text)
+}
+
+/// Inner cost parser that handles comma-splitting but NOT top-level `or`.
+/// Prevents infinite recursion when parsing each alternative of a OneOf.
+fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
+    let text = text.trim();
 
     // Split on ", " for composite costs
     let parts: Vec<&str> = split_cost_parts(text);
@@ -1766,6 +1793,65 @@ mod tests {
                 assert_eq!(costs[2], AbilityCost::Blight { count: 1 });
             }
             other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    /// CR 118.3: Mirrodin Shard cycle — "{3}, {T} or {R}, {T}" produces
+    /// OneOf([Composite([Mana(3), Tap]), Composite([Mana(R), Tap])]).
+    /// The " or " splits the entire cost into two alternatives.
+    #[test]
+    fn cost_tap_or_mana_granite_shard() {
+        match parse_oracle_cost("{3}, {T} or {R}, {T}") {
+            AbilityCost::OneOf { costs } => {
+                assert_eq!(costs.len(), 2, "expected 2 alternatives, got {:?}", costs);
+                // Left alternative: {3}, {T}
+                match &costs[0] {
+                    AbilityCost::Composite { costs: left } => {
+                        assert_eq!(left.len(), 2);
+                        assert!(matches!(&left[0], AbilityCost::Mana { .. }));
+                        assert_eq!(left[1], AbilityCost::Tap);
+                    }
+                    other => panic!("Expected Composite for left alt, got {:?}", other),
+                }
+                // Right alternative: {R}, {T}
+                match &costs[1] {
+                    AbilityCost::Composite { costs: right } => {
+                        assert_eq!(right.len(), 2);
+                        assert!(matches!(&right[0], AbilityCost::Mana { .. }));
+                        assert_eq!(right[1], AbilityCost::Tap);
+                    }
+                    other => panic!("Expected Composite for right alt, got {:?}", other),
+                }
+            }
+            other => panic!("Expected OneOf, got {:?}", other),
+        }
+    }
+
+    /// Crystal Shard uses blue: "{3}, {T} or {U}, {T}".
+    #[test]
+    fn cost_tap_or_mana_crystal_shard() {
+        match parse_oracle_cost("{3}, {T} or {U}, {T}") {
+            AbilityCost::OneOf { costs } => {
+                assert_eq!(costs.len(), 2);
+                // Left: {3}, {T}
+                assert!(matches!(&costs[0], AbilityCost::Composite { .. }));
+                // Right: {U}, {T}
+                assert!(matches!(&costs[1], AbilityCost::Composite { .. }));
+            }
+            other => panic!("Expected OneOf, got {:?}", other),
+        }
+    }
+
+    /// Standalone "{T} or {G}" — two single-cost alternatives.
+    #[test]
+    fn cost_tap_or_mana_standalone() {
+        match parse_oracle_cost("{T} or {G}") {
+            AbilityCost::OneOf { costs } => {
+                assert_eq!(costs.len(), 2);
+                assert_eq!(costs[0], AbilityCost::Tap);
+                assert!(matches!(&costs[1], AbilityCost::Mana { .. }));
+            }
+            other => panic!("Expected OneOf, got {:?}", other),
         }
     }
 }
