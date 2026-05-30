@@ -306,11 +306,15 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     }
 
     // Collect all creature subtypes for Changeling CDA expansion.
-    // CR 205.3m + CR 308.1: creature subtypes are shared by Creature and
-    // Kindred (legacy Tribal) faces, so all three core types contribute.
-    // This filter must stay in lockstep with `collect_creature_type_vocabulary`
-    // in `database/card_db.rs`.
-    let mut creature_types: HashSet<String> = HashSet::new();
+    // CR 205.2b + CR 205.3m + CR 308.1: creature subtypes are shared by Creature
+    // and Kindred (legacy Tribal) faces. Subtype categories are disjoint, so a
+    // multi-type entry ("Land Creature — Forest Dryad") carries non-creature
+    // subtypes alongside the creature type; subtract any subtype that also
+    // appears on a non-creature entry so land/artifact/enchantment types don't
+    // leak in. This must stay in lockstep with `collect_creature_type_vocabulary`
+    // in `database/card_db.rs` (the db==Some path's corpus seed).
+    let mut creature_candidates: HashSet<String> = HashSet::new();
+    let mut non_creature_subtypes: HashSet<String> = HashSet::new();
     let all_entries = payload
         .player
         .main_deck
@@ -326,14 +330,20 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         );
     for entry in all_entries {
         let core_types = &entry.card.card_type.core_types;
-        if core_types.contains(&crate::types::card_type::CoreType::Creature)
+        let is_creature = core_types.contains(&crate::types::card_type::CoreType::Creature)
             || core_types.contains(&crate::types::card_type::CoreType::Kindred)
-            || core_types.contains(&crate::types::card_type::CoreType::Tribal)
-        {
-            creature_types.extend(entry.card.card_type.subtypes.iter().cloned());
-        }
+            || core_types.contains(&crate::types::card_type::CoreType::Tribal);
+        let bucket = if is_creature {
+            &mut creature_candidates
+        } else {
+            &mut non_creature_subtypes
+        };
+        bucket.extend(entry.card.card_type.subtypes.iter().cloned());
     }
-    let mut sorted: Vec<String> = creature_types.into_iter().collect();
+    let mut sorted: Vec<String> = creature_candidates
+        .difference(&non_creature_subtypes)
+        .cloned()
+        .collect();
     sorted.sort();
     state.all_creature_types = sorted;
 
