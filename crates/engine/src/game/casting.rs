@@ -2341,6 +2341,22 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.113a + CR 118.9: When the caller explicitly opted into Awaken (via
+    // `variant_override = Some(CastingVariant::Awaken)`), read the
+    // `Keyword::Awaken { count, cost }` payload from the hand object. `cost`
+    // substitutes the printed mana cost (mirrors Overload / Bestow); `count` is
+    // the number of +1/+1 counters the resolution rider places (CR 702.113a).
+    // This is the sole awaken-cost substitution site; the standard resolver pays
+    // the substituted cost and no call site inspects the awaken cost.
+    let awaken_payload = if casting_variant == CastingVariant::Awaken {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Awaken { count, cost } => Some((*count, cost.clone())),
+            _ => None,
+        })
+    } else {
+        None
+    };
+    let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from hand. Auto-application is restricted to `Unlimited` sources
     // (Omniscience, Tamiyo emblem); `OncePerTurn` sources (Zaffai) must be opted
@@ -2458,6 +2474,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(evoke_cost)
             .or(overload_cost)
             .or(bestow_cost)
+            .or(awaken_cost)
             .or(effective_escape_cost_for_path)
             .or(effective_harmonize_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
@@ -2557,6 +2574,18 @@ fn prepare_spell_cast_with_variant_override_inner(
     if casting_variant == CastingVariant::Overload {
         if let Some(def) = ability_def.as_mut() {
             super::effects::overload::transform_ability_def(def);
+        }
+    }
+
+    // CR 702.113a: When casting with Awaken, append the awaken rider to the tail
+    // of the spell's ability tree so the printed effect resolves first, then "put
+    // N +1/+1 counters on target land you control; that land becomes a 0/0
+    // Elemental creature with haste; it's still a land." The land target only
+    // exists on the awaken variant (CR 702.113b) — a normal cast leaves the
+    // ability tree untouched and requests no land target.
+    if casting_variant == CastingVariant::Awaken {
+        if let (Some(def), Some((count, _))) = (ability_def.as_mut(), awaken_payload.as_ref()) {
+            super::effects::awaken::append_awaken_rider(def, *count);
         }
     }
 
@@ -3680,6 +3709,60 @@ pub fn handle_overload_cost_choice_with_payment_mode(
                 player,
                 object_id,
                 Some(CastingVariant::Overload),
+            )?;
+            prepared.payment_mode = payment_mode;
+            continue_with_prepared(state, player, prepared, events)
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
+/// CR 702.113a: Handle Awaken cost choice and proceed with casting. For
+/// `AlternativeCastDecision::Alternative`, the cast is prepared with
+/// `CastingVariant::Awaken` — the awaken mana cost substitutes for the printed
+/// cost and `append_awaken_rider` appends the "put N +1/+1 counters on target
+/// land you control; that land becomes a 0/0 Elemental creature with haste"
+/// rider to the tail of the spell's ability tree. The land target then exists
+/// (CR 702.113b). For `Normal`, the cast proceeds normally with no rider and no
+/// land target — the discriminating "normal cast does not awaken" path.
+pub fn handle_awaken_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    handle_awaken_cost_choice_with_payment_mode(
+        state,
+        player,
+        object_id,
+        card_id,
+        decision,
+        CastPaymentMode::Auto,
+        events,
+    )
+}
+
+pub fn handle_awaken_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    use crate::types::actions::AlternativeCastDecision;
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            let mut prepared = prepare_spell_cast_with_variant_override(
+                state,
+                player,
+                object_id,
+                Some(CastingVariant::Awaken),
             )?;
             prepared.payment_mode = payment_mode;
             continue_with_prepared(state, player, prepared, events)
@@ -4895,6 +4978,76 @@ pub fn handle_cast_spell_with_payment_mode(
                     );
                 }
                 // Otherwise (normal-only / no legal target / neither affordable):
+                // fall through to the normal cast path.
+            }
+        }
+    }
+
+    // CR 702.113a: Awaken — when a hand card has `Keyword::Awaken { cost }` and
+    // both the printed cost AND the awaken cost are affordable AND there is at
+    // least one land you control to awaken, present the choice. Auto-skip when
+    // only one path is viable. Mirrors the Overload / Bestow opt-in flow: awaken
+    // is opt-in via `variant_override` so a fall-through proceeds as a normal
+    // (non-awakening) cast.
+    //
+    // CR 601.2c + CR 702.113b: the awaken target (the land you control) only
+    // exists if the awaken cost is paid. If you control no land, the awaken path
+    // would have no legal target, so the only legal cast is the normal path —
+    // fall through without offering the prompt (mirrors Bestow's
+    // `has_legal_creature_target` gate).
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand {
+            if let Some(awaken_cost) = obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Awaken { cost, .. } => Some(cost.clone()),
+                _ => None,
+            }) {
+                // CR 601.2c + CR 702.113b: a land you control must exist for the
+                // awaken spell ability's target to be legal.
+                let land_filter = TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::land()
+                        .controller(crate::types::ability::ControllerRef::You),
+                );
+                let has_legal_land =
+                    !targeting::find_legal_targets(state, &land_filter, player, object_id)
+                        .is_empty();
+                // CR 601.2f + CR 118.9d: affordability and the displayed costs
+                // must reflect active cost modifiers — applied to BOTH the printed
+                // cost and the awaken alternative cost (CR 118.9d).
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let awaken_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, awaken_cost.clone())
+                        .unwrap_or_else(|| awaken_cost.clone());
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                let awaken_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &awaken_cost_eff);
+                if has_legal_land && normal_affordable && awaken_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Awaken,
+                        normal_cost,
+                        alternative_cost: Some(awaken_cost_eff),
+                        alternative_additional_cost: None,
+                    });
+                }
+                if has_legal_land && !normal_affordable && awaken_affordable {
+                    // Only awaken is payable — proceed via the awaken path.
+                    return handle_awaken_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
+                // Otherwise (normal-only / no legal land / neither affordable):
                 // fall through to the normal cast path.
             }
         }

@@ -1431,6 +1431,11 @@ pub enum AlternativeCastKeyword {
     Overload,
     /// CR 702.103a: Spell becomes an Aura with enchant creature (CR 702.103b).
     Bestow,
+    /// CR 702.113a: "If this spell's awaken cost was paid, put N +1/+1 counters
+    /// on target land you control. That land becomes a 0/0 Elemental creature
+    /// with haste. It's still a land." Paying the awaken cost adds the land
+    /// target (CR 702.113b); casting normally adds no target and no rider.
+    Awaken,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -3475,6 +3480,17 @@ pub enum CastingVariant {
     /// battlefield, the type-changing effect ends — it remains as an
     /// enchantment creature (overrides CR 704.5m for bestow Auras).
     Bestow,
+    /// CR 702.113a: Cast from hand via Awaken's alternative cost. The printed
+    /// mana cost is replaced by `Keyword::Awaken { cost }` at cast preparation
+    /// (mirrors `Overload`). A resolution rider is appended to the tail of the
+    /// spell's ability tree (`effects::awaken::append_awaken_rider`): the
+    /// printed effect resolves first, then "put N +1/+1 counters on target land
+    /// you control; that land becomes a 0/0 Elemental creature with haste; it's
+    /// still a land." Per CR 702.113b, the land target only exists on the awaken
+    /// variant — a normal cast appends no rider and requests no land target.
+    /// CR 702.113a: the spell goes to the graveyard normally, so this variant is
+    /// deliberately absent from `exiles_when_leaving_stack_for_any_reason`.
+    Awaken,
 }
 
 impl CastingVariant {

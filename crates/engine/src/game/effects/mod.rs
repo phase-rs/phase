@@ -25,6 +25,7 @@ pub mod additional_phase;
 pub mod amass;
 pub mod animate;
 pub mod attach;
+pub mod awaken;
 pub mod become_copy;
 pub mod become_monarch;
 pub mod blight;
