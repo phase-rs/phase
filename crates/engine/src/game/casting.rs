@@ -2356,6 +2356,21 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.148a + CR 118.9: When the caller explicitly opted into Cleave (via
+    // `variant_override = Some(CastingVariant::Cleave)`), substitute the cleave
+    // mana cost taken from the hand object's `Keyword::Cleave(cost)` payload.
+    // Mirrors the Evoke / Overload / Bestow cost-selection pattern. The
+    // text-changing effect (CR 702.148b → CR 612: remove bracketed text) is
+    // applied separately by `handle_cleave_cost_choice` because it requires a
+    // `&mut GameState` handle and must outlive this immutable-borrow function.
+    let cleave_cost = if casting_variant == CastingVariant::Cleave {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Cleave(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from hand. Auto-application is restricted to `Unlimited` sources
@@ -2475,6 +2490,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(overload_cost)
             .or(bestow_cost)
             .or(awaken_cost)
+            .or(cleave_cost)
             .or(effective_escape_cost_for_path)
             .or(effective_harmonize_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
@@ -3950,6 +3966,149 @@ pub fn handle_bestow_cost_choice_with_payment_mode(
     continue_cast_from_prepared(state, player, object_id, payment_mode, events)
 }
 
+/// CR 702.148a-b + CR 612: Apply the cleave text-changing effect to a hand
+/// object by swapping in the bracket-removed ability set parsed at build time
+/// (`obj.cleave_variant`). All four ability classes are replaced on both the
+/// live and base fields (mirroring `apply_bestow_aura_form`'s dual-field write)
+/// so the swap survives any layer-evaluation reset that anchors on base values.
+///
+/// The pre-swap state is captured into `obj.cleave_form` (a typed marker
+/// mirroring `bestow_form`) so the printed form can be restored two ways: on a
+/// cast-preparation `Err` via `revert_cleave_text_change`, and — critically —
+/// when the spell leaves the stack via `apply_zone_exit_cleanup` (CR 702.148a:
+/// the abilities function only while the spell is on the stack). Returns `false`
+/// (no swap, no marker) if the object carries no `cleave_variant` — the cleave
+/// path is only offered when the variant is present, so `false` here means a
+/// malformed call rather than a normal cast and the caller falls through to a
+/// printed-cost cast.
+fn apply_cleave_text_change(obj: &mut crate::game::game_object::GameObject) -> bool {
+    let Some(variant) = obj.cleave_variant.clone() else {
+        return false;
+    };
+    obj.cleave_form = Some(crate::game::game_object::CleaveFormState {
+        abilities: std::sync::Arc::clone(&obj.abilities),
+        triggers: obj.trigger_definitions.clone(),
+        statics: obj.static_definitions.clone(),
+        replacements: obj.replacement_definitions.clone(),
+        base_abilities: std::sync::Arc::clone(&obj.base_abilities),
+        base_triggers: std::sync::Arc::clone(&obj.base_trigger_definitions),
+        base_statics: std::sync::Arc::clone(&obj.base_static_definitions),
+        base_replacements: std::sync::Arc::clone(&obj.base_replacement_definitions),
+    });
+    // CR 612: the cleave-cost text replaces the spell's printed text. Swap all
+    // four ability classes — only `abilities` differs for the published cleave
+    // cards, but projecting the full set is defensive and future-proof.
+    obj.abilities = std::sync::Arc::new(variant.abilities.clone());
+    obj.trigger_definitions = variant.triggers.clone().into();
+    obj.static_definitions = variant.static_abilities.clone().into();
+    obj.replacement_definitions = variant.replacements.clone().into();
+    obj.base_abilities = std::sync::Arc::new(variant.abilities);
+    obj.base_trigger_definitions = std::sync::Arc::new(variant.triggers);
+    obj.base_static_definitions = std::sync::Arc::new(variant.static_abilities);
+    obj.base_replacement_definitions = std::sync::Arc::new(variant.replacements);
+    true
+}
+
+/// CR 702.148a-b: Restore the printed ability set captured in `obj.cleave_form`
+/// by `apply_cleave_text_change`, clearing the marker. Used on the
+/// cast-preparation `Err` path (so a failed cleave cast leaves the hand object
+/// in its printed form for any retry) and by `apply_zone_exit_cleanup` when the
+/// cleave spell leaves the stack. Idempotent: a no-op if no cleave form is live.
+pub(crate) fn revert_cleave_text_change(obj: &mut crate::game::game_object::GameObject) {
+    let Some(snapshot) = obj.cleave_form.take() else {
+        return;
+    };
+    obj.abilities = snapshot.abilities;
+    obj.trigger_definitions = snapshot.triggers;
+    obj.static_definitions = snapshot.statics;
+    obj.replacement_definitions = snapshot.replacements;
+    obj.base_abilities = snapshot.base_abilities;
+    obj.base_trigger_definitions = snapshot.base_triggers;
+    obj.base_static_definitions = snapshot.base_statics;
+    obj.base_replacement_definitions = snapshot.base_replacements;
+}
+
+/// CR 702.148a-b + CR 612 + CR 118.9: Handle the Cleave cost choice and proceed
+/// with casting. On `AlternativeCastDecision::Alternative`, apply the cleave
+/// text-changing effect to the hand object BEFORE preparing the cast (so
+/// `combined_spell_ability_def` reads the bracket-removed abilities), then
+/// prepare with `CastingVariant::Cleave` (which substitutes the cleave mana cost
+/// for the printed mana cost). On `Normal`, the cast proceeds as the printed
+/// spell with no text change.
+///
+/// Mirrors `handle_bestow_cost_choice_with_payment_mode` for the
+/// object-mutation-before-prepare seam — the Overload in-place transform seam
+/// (which mutates the prepared spell ability after `combined_spell_ability_def`
+/// has already read it) is not usable for cleave because the text change must be
+/// visible to that read.
+pub fn handle_cleave_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    handle_cleave_cost_choice_with_payment_mode(
+        state,
+        player,
+        object_id,
+        card_id,
+        decision,
+        CastPaymentMode::Auto,
+        events,
+    )
+}
+
+pub fn handle_cleave_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    use crate::types::actions::AlternativeCastDecision;
+    // Exhaustive match so adding a third decision variant (e.g., `Decline`)
+    // is a compile error here rather than silently routing through one of
+    // the two existing branches.
+    let alt_path = match decision {
+        AlternativeCastDecision::Alternative => true,
+        AlternativeCastDecision::Normal => false,
+    };
+    if alt_path {
+        // CR 702.148a-b + CR 612: Apply the cleave text-changing effect to the
+        // hand object BEFORE preparing the cast. The pre-swap snapshot is stored
+        // in `obj.cleave_form` so the printed form can be restored if
+        // preparation fails — and, while the spell is on the stack, so the
+        // zone-exit cleanup can revert the text change when the spell leaves the
+        // stack (CR 702.148a).
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            apply_cleave_text_change(obj);
+        }
+        let mut prepared = match prepare_spell_cast_with_variant_override(
+            state,
+            player,
+            object_id,
+            Some(CastingVariant::Cleave),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                // Roll back the cleave text change so the hand object is left
+                // in its printed form for any retry.
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    revert_cleave_text_change(obj);
+                }
+                return Err(e);
+            }
+        };
+        prepared.payment_mode = payment_mode;
+        return continue_with_prepared(state, player, prepared, events);
+    }
+    continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+}
+
 /// CR 702.74a: Handle Evoke cost choice and proceed with casting. On
 /// `AlternativeCastDecision::Alternative`, the cast is prepared with
 /// `CastingVariant::Evoke` (which substitutes the evoke mana cost for the
@@ -4900,6 +5059,62 @@ pub fn handle_cast_spell_with_payment_mode(
                 if !normal_affordable && overload_affordable {
                     // Only overload is payable — proceed via the overload path.
                     return handle_overload_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
+                // Otherwise (normal-only or neither): fall through to normal cast.
+            }
+        }
+    }
+
+    // CR 702.148a + CR 118.9: Cleave — when a hand card has `Keyword::Cleave(cost)`
+    // and a parsed `cleave_variant` (the bracket-removed ability set), present a
+    // choice between the printed mana cost and the cleave cost when both are
+    // affordable. Auto-skip to the cleave path when only the cleave cost is
+    // payable. Mirrors the Overload opt-in flow: cleave is opt-in via
+    // `variant_override` so a fall-through proceeds as a normal (printed-text)
+    // cast. The `cleave_variant.is_some()` gate guards against offering cleave on
+    // an object whose alternate ability set was not parsed.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand && obj.cleave_variant.is_some() {
+            if let Some(cleave_cost) = obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Cleave(cost) => Some(cost.clone()),
+                _ => None,
+            }) {
+                // CR 601.2f + CR 118.9d: affordability and the displayed costs
+                // must reflect active cost modifiers — applied to BOTH the printed
+                // cost and the cleave alternative cost (CR 118.9d).
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let cleave_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, cleave_cost.clone())
+                        .unwrap_or_else(|| cleave_cost.clone());
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                let cleave_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &cleave_cost_eff);
+                if normal_affordable && cleave_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Cleave,
+                        normal_cost,
+                        alternative_cost: Some(cleave_cost_eff),
+                        alternative_additional_cost: None,
+                    });
+                }
+                if !normal_affordable && cleave_affordable {
+                    // Only cleave is payable — proceed via the cleave path.
+                    return handle_cleave_cost_choice_with_payment_mode(
                         state,
                         player,
                         object_id,

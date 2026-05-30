@@ -1546,6 +1546,19 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    // CR 702.73a + CR 205.3 + CR 604.3: "[Subject] {is|are} every creature
+    // type" — sibling of the land type-change dispatcher for the
+    // Changeling-class type grant. Self-reference subjects (`~`) lower to a
+    // CDA that functions in all zones (Mistform Ultimus, Dr. Julius
+    // Jumblemorph). Filter subjects ("Creatures you control are every
+    // creature type" — Maskwood Nexus) are mostly handled upstream by the
+    // `parse_continuous_gets_has` path via `parse_continuous_modifications`;
+    // this is the residual dispatcher that catches the shapes those code
+    // paths don't strip — primarily self-references.
+    if let Some(def) = parse_all_creature_types_grant(&tp, &text) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_subject_continuous_static(&text) {
         return Some(def);
     }
@@ -2590,13 +2603,75 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         } else {
             TriggerCause::Any
         };
-        return Some(
-            StaticDefinition::new(StaticMode::DoubleTriggers { cause })
-                .description(text.to_string()),
-        );
+        // CR 603.2d: Narrow the doubler to triggers from a specific source when
+        // the text names one ("a triggered ability of a Ninja creature you
+        // control"). Without this the `affected` filter is `None` and
+        // `apply_trigger_doubling` doubles every controlled permanent's
+        // triggers, not just the named source's (Splinter, Roaming Throne).
+        let mut def = StaticDefinition::new(StaticMode::DoubleTriggers { cause })
+            .description(text.to_string());
+        if let Some(filter) = parse_doubler_source_filter(tp.lower) {
+            def = def.affected(filter);
+        }
+        return Some(def);
     }
 
     None
+}
+
+/// CR 603.2d: Extract the source-restriction filter from a trigger-doubler's
+/// Oracle text. Trigger doublers name the doubled ability's source as
+/// "a triggered ability of <SOURCE>" — e.g. "a Ninja creature you control"
+/// (Splinter), "another creature you control of the chosen type" (Roaming
+/// Throne), or the unrestricted "a permanent you control" (Panharmonicon-class).
+///
+/// Returns `Some(filter)` only when `<SOURCE>` narrows beyond a bare controlled
+/// permanent (a subtype, a specific core type, or a property such as "another"
+/// / "of the chosen type"). A bare "permanent you control" needs no filter —
+/// `apply_trigger_doubling`'s controller match already enforces control — so
+/// this returns `None`, leaving `affected` unset (Panharmonicon/Isshin/Drivnod).
+fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
+    // The source phrase sits between "a triggered ability of " and the trigger
+    // verb: " to trigger" (cause-form: "...causes a triggered ability of X to
+    // trigger") or " triggers" (source-form: "a triggered ability of X
+    // triggers"). Try " to trigger" first so the cause-form's later " triggers"
+    // ("that ability triggers an additional time") is not mistaken for the
+    // delimiter.
+    let (_, source_phrase, _) = nom_primitives::scan_preceded(lower, |i| {
+        preceded(
+            tag::<_, _, OracleError<'_>>("a triggered ability of "),
+            alt((take_until(" to trigger"), take_until(" triggers"))),
+        )
+        .parse(i)
+    })?;
+
+    // CR 603.2d: `parse_type_phrase` models a single type clause, so a
+    // disjunctive source ("a Shaman or another Wizard you control",
+    // Harmonic Prodigy) parses to only the first disjunct — silently dropping
+    // the remaining disjuncts AND the "you control" scope, yielding a
+    // controller-less `Subtype(Shaman)` that would wrongly double an opponent's
+    // Shaman's triggers. Until `parse_type_phrase` models top-level
+    // disjunctions, bail to `None` on a disjunctive source so the doubler keeps
+    // its controller-scoped "all your triggers" fallback (the pre-existing
+    // behavior) rather than mis-scoping to a single uncontrolled subtype.
+    if nom_primitives::scan_contains(source_phrase, "or ") {
+        return None;
+    }
+
+    let (filter, _) = parse_type_phrase(source_phrase);
+    let TargetFilter::Typed(tf) = &filter else {
+        return None;
+    };
+    // Only narrow when the source carries a restriction beyond a controlled
+    // permanent: `Permanent`/`Card`/`Any` core types add nothing the controller
+    // match doesn't already enforce.
+    let restrictive = tf.type_filters.iter().any(|t| {
+        !matches!(
+            t,
+            TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
+        )
+    }) || !tf.properties.is_empty();
+    restrictive.then_some(filter)
 }
 
 fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
@@ -8916,6 +8991,21 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::AssignDamageFromToughness);
     }
 
+    // CR 702.73a + CR 205.3 + CR 613.1d: Conjunctive "is/are every creature
+    // type" predicate — the Changeling-class type grant when it appears as
+    // one conjunct in an Aura/Equipment compound static ("Enchanted creature
+    // gets +2/+2, has reach, and is every creature type", "Equipped creature
+    // gets +1/+1 and is every creature type"). The top-level grant form
+    // ("Creatures you control are every creature type", "~ is every creature
+    // type") is owned by `parse_all_creature_types_grant` and never reaches
+    // this helper. Both copulas are scanned because subject number drives
+    // verb agreement at the outer parser layer.
+    if nom_primitives::scan_contains(unquoted_lower.as_str(), "is every creature type")
+        || nom_primitives::scan_contains(unquoted_lower.as_str(), "are every creature type")
+    {
+        modifications.push(ContinuousModification::AddAllCreatureTypes);
+    }
+
     // CR 613.4c: Scan for "get +X/+X" / "gets +X/+X" anywhere in the text
     // for dynamic P/T modification (e.g., Craterhoof Behemoth)
     if let Some(dynamic_mods) =
@@ -11844,6 +11934,95 @@ fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
         )),
         _ => None,
     }
+}
+
+/// CR 702.73a + CR 205.3 + CR 604.3 + CR 613.1d: Parse "[subject] {is|are}
+/// every creature type" — the Changeling-class type grant in static form.
+///
+/// Self-reference (`~`) becomes a CDA so the grant functions in all zones
+/// per CR 604.3 (Mistform Ultimus, Dr. Julius Jumblemorph reminder
+/// "even if this card isn't on the battlefield"). Filter subjects produce
+/// a normal battlefield-scoped continuous static for the same predicate.
+///
+/// Most filter-subject cards (e.g. Maskwood Nexus's "Creatures you control
+/// are every creature type") are caught upstream by `parse_continuous_gets_has`
+/// once `parse_continuous_modifications` recognizes the predicate; this
+/// dispatcher catches the residual subject shapes that those code paths
+/// don't strip, plus every self-reference grant.
+///
+/// Returns None when the line's subject doesn't map to a recognized filter
+/// (e.g., "each nonland creature with an everything counter on it" — Omo,
+/// Queen of Vesuva — needs the same counter-filter parsing the land variant
+/// also lacks).
+fn parse_all_creature_types_grant(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    let (subject_tp, rest_tp) = tp
+        .split_around(" is every creature type")
+        .or_else(|| tp.split_around(" are every creature type"))?;
+    // The predicate must terminate the line — only punctuation and trailing
+    // whitespace may remain. Anything else (e.g., a hypothetical "in addition
+    // to ..." extension) is outside the AddAllCreatureTypes contract and
+    // should fall through to other parsers rather than be silently dropped.
+    let tail = rest_tp.lower.trim().trim_end_matches('.').trim();
+    if !tail.is_empty() {
+        return None;
+    }
+    let subject = subject_tp.lower.trim();
+
+    if subject == "~" {
+        // CR 604.3 + CR 604.3a: Self-reference type-defining grant. Meets the
+        // CDA criteria (defines subtypes, printed on the card it affects,
+        // does not affect other objects) and so functions in all zones —
+        // mirroring `synthesize_changeling_cda` for the Changeling keyword.
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+                .cda()
+                .description(text.to_string()),
+        );
+    }
+
+    let affected = parse_creature_type_change_subject(subject)?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+            .description(text.to_string()),
+    )
+}
+
+/// CR 205.3 + CR 613.1d: Map the subject of an "{is|are} every creature
+/// type" static into a TargetFilter restricting which battlefield objects
+/// receive the grant. Sibling of `parse_land_type_change_subject` for the
+/// CR 702.73a creature-type class. Complex filter subjects ("each nonland
+/// creature with an everything counter on it" — Omo) are intentionally not
+/// recognized here; their counter-filter parsing is a separate gap shared
+/// with the land variant.
+fn parse_creature_type_change_subject(subject: &str) -> Option<TargetFilter> {
+    // Combinator dispatch — each subject phrase maps to its TypedFilter
+    // shape. `all_consuming` requires the whole subject to be matched, so a
+    // partial prefix like "creatures" inside "creatures with X" does not
+    // false-positive. "creatures" must come last among the bare-creature
+    // arms so the longer "creatures you control" prefix wins first.
+    all_consuming(alt((
+        map(
+            tag::<_, _, OracleError<'_>>("creatures you control"),
+            |_| TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        ),
+        map(tag("enchanted creature"), |_| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]))
+        }),
+        map(tag("equipped creature"), |_| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
+        }),
+        map(
+            alt((tag("each creature"), tag("all creatures"), tag("creatures"))),
+            |_| TargetFilter::Typed(TypedFilter::creature()),
+        ),
+    )))
+    .parse(subject)
+    .ok()
+    .map(|(_, filter)| filter)
 }
 
 /// CR 604.1: Strip turn-condition suffixes from predicate text.
@@ -18946,6 +19125,99 @@ mod tests {
         }
     }
 
+    // --- CR 702.73a + CR 205.3: "[subject] {is|are} every creature type" ---
+
+    #[test]
+    fn self_ref_every_creature_type_is_cda() {
+        // CR 604.3: Mistform Ultimus / Dr. Julius Jumblemorph — the parenthetical
+        // "(even if this card isn't on the battlefield)" is reminder text that
+        // the static-line parser already strips. The grant must function in
+        // all zones, so the StaticDefinition is flagged as a CDA.
+        let def = parse_static_line("~ is every creature type.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def.characteristic_defining);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddAllCreatureTypes]
+        );
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    }
+
+    #[test]
+    fn creatures_you_control_every_creature_type_maskwood_nexus() {
+        // CR 702.73a + CR 205.3: Maskwood Nexus first sentence. Filter-subject
+        // grant — battlefield-only, not a CDA. Reached via the
+        // `parse_continuous_gets_has` → `parse_continuous_modifications` path
+        // once the "are every creature type" arm recognizes the predicate.
+        let def = parse_static_line("Creatures you control are every creature type.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(!def.characteristic_defining);
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddAllCreatureTypes));
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("Expected Typed creature with you-control, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conjunctive_every_creature_type_arachnoform() {
+        // CR 702.73a + CR 613.1d: Aura compound static — Arachnoform.
+        // "is every creature type" must not be silently dropped from the
+        // modification chain. The +2/+2 and reach modifications are also
+        // preserved.
+        let def = parse_static_line(
+            "Enchanted creature gets +2/+2, has reach, and is every creature type.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
+        assert!(def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddAllCreatureTypes));
+    }
+
+    #[test]
+    fn conjunctive_every_creature_type_runed_stalactite() {
+        // CR 702.73a + CR 613.1d: Equipment compound static — Runed Stalactite.
+        let def =
+            parse_static_line("Equipped creature gets +1/+1 and is every creature type.").unwrap();
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddAllCreatureTypes));
+    }
+
+    #[test]
+    fn parse_continuous_modifications_picks_up_every_creature_type() {
+        // Direct test of the parse_continuous_modifications arm — used by
+        // every conjunctive caller (parse_continuous_gets_has,
+        // parse_subject_continuous_static, parse_typed_you_control).
+        let mods = parse_continuous_modifications("is every creature type");
+        assert!(mods.contains(&ContinuousModification::AddAllCreatureTypes));
+
+        let mods_plural = parse_continuous_modifications("are every creature type");
+        assert!(mods_plural.contains(&ContinuousModification::AddAllCreatureTypes));
+    }
+
     // --- CantCastDuring: turn/phase-scoped casting prohibitions ---
 
     #[test]
@@ -24708,5 +24980,97 @@ mod snapshot_tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// CR 603.2d: Source-restricted trigger doubler (Splinter, Radical Rat).
+    /// "If a triggered ability of a Ninja creature you control triggers, that
+    /// ability triggers an additional time." The cause is unrestricted (`Any`),
+    /// but the doubler's `affected` filter MUST narrow to Ninja creatures the
+    /// controller controls — otherwise every controlled permanent's triggers
+    /// double, not just Ninjas'.
+    #[test]
+    fn parses_splinter_source_restricted_doubler() {
+        let def = parse_static_line(
+            "If a triggered ability of a Ninja creature you control triggers, that ability triggers an additional time.",
+        )
+        .expect("expected DoubleTriggers static for Splinter");
+        assert_eq!(
+            def.mode,
+            StaticMode::DoubleTriggers {
+                cause: TriggerCause::Any
+            }
+        );
+        let affected = def
+            .affected
+            .as_ref()
+            .expect("source-restricted doubler must carry an `affected` filter");
+        match affected {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Ninja".to_string())),
+                    "expected Ninja subtype constraint, got {:?}",
+                    tf.type_filters
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// CR 603.2d: A disjunctive source ("a Shaman or another Wizard you
+    /// control", Harmonic Prodigy) exceeds `parse_type_phrase`'s single-clause
+    /// model. Parsing only the first disjunct would drop "or Wizard" AND the
+    /// "you control" scope, yielding a controller-less `Subtype(Shaman)` that
+    /// doubles an *opponent's* Shaman's triggers. The parser must instead leave
+    /// `affected` unset, falling back to the controller-scoped "all your
+    /// triggers" default (the pre-restriction behavior) rather than mis-scoping.
+    /// Discriminating: without the disjunction guard this parses to
+    /// `affected == Some(Typed { Subtype(Shaman), controller: None })` and fails.
+    #[test]
+    fn harmonic_prodigy_disjunctive_source_falls_back_to_no_filter() {
+        let def = parse_static_line(
+            "If a triggered ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.",
+        )
+        .expect("expected DoubleTriggers static for Harmonic Prodigy");
+        assert_eq!(
+            def.mode,
+            StaticMode::DoubleTriggers {
+                cause: TriggerCause::Any
+            }
+        );
+        assert!(
+            def.affected.is_none(),
+            "disjunctive source must not produce a single-disjunct `affected` \
+             filter (would mis-scope to an uncontrolled Shaman); got {:?}",
+            def.affected
+        );
+    }
+
+    /// CR 603.6a: Panharmonicon's source is the unrestricted "a permanent you
+    /// control" — controller match alone suffices, so `affected` stays `None`.
+    /// Regression guard: the source-filter extraction must NOT populate
+    /// `affected` for a bare controlled-permanent source.
+    #[test]
+    fn panharmonicon_doubler_has_no_source_filter() {
+        let def = parse_static_line(
+            "If an artifact or creature entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+        )
+        .expect("expected DoubleTriggers static for Panharmonicon");
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::DoubleTriggers {
+                    cause: TriggerCause::EntersBattlefield { .. }
+                }
+            ),
+            "expected EntersBattlefield cause, got {:?}",
+            def.mode
+        );
+        assert!(
+            def.affected.is_none(),
+            "bare 'permanent you control' source must leave affected None, got {:?}",
+            def.affected
+        );
     }
 }

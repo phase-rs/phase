@@ -3,6 +3,7 @@ use std::str::FromStr;
 use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
+use crate::parser::oracle_util::{apply_bracket_mode, BracketMode};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
     AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
@@ -14,7 +15,7 @@ use crate::types::ability::{
     RuntimeHandler, SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
-use crate::types::card::{CardFace, CardLayout};
+use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
@@ -27,6 +28,60 @@ use crate::types::zones::Zone;
 // ---------------------------------------------------------------------------
 // Shared helpers for building card faces from MTGJSON data
 // ---------------------------------------------------------------------------
+
+/// CR 702.148a-b + CR 612: Parse a face's Oracle text under Cleave's
+/// text-changing semantics, returning the printed-cost parse and (when the face
+/// has Cleave) the bracket-removed cleave variant.
+///
+/// Single authority for the cleave bracket prep so the real card-data build
+/// pipeline (`build_oracle_face_inner`) and the test scenario harness
+/// (`scenario::build_face_from_oracle`) cannot silently diverge:
+///   * The base parse keeps the bracketed clause but drops the bracket
+///     characters (`BracketMode::KeepContent`) so the printed-cost spell parses
+///     correctly. For non-cleave faces the strip is a no-op (the text never
+///     enters the strip), preserving every other parse — and the strip is GATED
+///     on the face having Cleave so the ~362 planeswalkers using `[+N]`/`[−N]`
+///     loyalty brackets are never corrupted.
+///   * When the face has Cleave, a SECOND parse over the bracket-removed text
+///     (`BracketMode::RemoveSpan`) is stashed in the returned `CleaveVariant`.
+///     The casting flow swaps this onto the stack object when the spell is cast
+///     for its cleave cost. This is a leaf parse — never re-projected, so there
+///     is no cleave recursion.
+pub(crate) fn parse_oracle_with_cleave_brackets(
+    raw_oracle_text: &str,
+    card_name: &str,
+    keyword_names: &[String],
+    types: &[String],
+    subtypes: &[String],
+) -> (
+    crate::parser::oracle::ParsedAbilities,
+    Option<CleaveVariant>,
+) {
+    let has_cleave = keyword_names.iter().any(|n| n == "cleave");
+
+    let base_oracle_text = if has_cleave {
+        apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent)
+    } else {
+        raw_oracle_text.to_string()
+    };
+    let parsed = parse_oracle_text(&base_oracle_text, card_name, keyword_names, types, subtypes);
+
+    let cleave_variant = if has_cleave {
+        let cleave_text = apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan);
+        let cleave_parsed =
+            parse_oracle_text(&cleave_text, card_name, keyword_names, types, subtypes);
+        Some(CleaveVariant {
+            abilities: cleave_parsed.abilities,
+            triggers: cleave_parsed.triggers,
+            static_abilities: cleave_parsed.statics,
+            replacements: cleave_parsed.replacements,
+        })
+    } else {
+        None
+    };
+
+    (parsed, cleave_variant)
+}
 
 /// Internal layout classification from MTGJSON layout strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4228,14 +4283,18 @@ fn build_oracle_face_inner(
             .unwrap_or_default()
     };
 
-    let oracle_text = mtgjson.text.as_deref().unwrap_or("");
+    let raw_oracle_text = mtgjson.text.as_deref().unwrap_or("");
     let face_name = mtgjson.face_name.as_deref().unwrap_or(&mtgjson.name);
 
     let types: Vec<String> = mtgjson.types.clone();
     let subtypes: Vec<String> = mtgjson.subtypes.clone();
 
-    let parsed = parse_oracle_text(
-        oracle_text,
+    // CR 702.148a-b + CR 612: Cleave's text-changing effect removes every
+    // square-bracketed span from the spell's rules text. `parse_oracle_with_cleave_brackets`
+    // is the single authority for the dual (printed-cost / cleave-cost) parse,
+    // shared with the test scenario harness so the two pipelines cannot diverge.
+    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
+        raw_oracle_text,
         face_name,
         &parser_keyword_names,
         &types,
@@ -4261,7 +4320,7 @@ fn build_oracle_face_inner(
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
     // Partner(Generic) via FromStr. Scan Oracle text for the actual partner name.
     if mtgjson_keyword_names.contains(&"partner with".to_string()) {
-        let lower_oracle = oracle_text.to_lowercase();
+        let lower_oracle = raw_oracle_text.to_lowercase();
         if let Some(line) = lower_oracle
             .lines()
             .find(|l| l.starts_with("partner with "))
@@ -4355,6 +4414,7 @@ fn build_oracle_face_inner(
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        cleave_variant,
         color_override,
         color_identity: mtgjson
             .color_identity

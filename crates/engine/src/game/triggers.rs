@@ -3649,7 +3649,7 @@ pub(crate) fn check_trigger_condition(
             // CR 102.1: a controls-a-permanent population predicate is
             // set-valued — it has no single-player "whose turn" semantic.
             // Fail-closed alongside the other set-valued variants.
-            | PlayerFilter::ControlsPermanent { .. }
+            | PlayerFilter::ControlsCount { .. }
             | PlayerFilter::OpponentOtherThanTriggering => false,
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
@@ -15531,6 +15531,122 @@ mod dedup_regression_tests {
         assert_eq!(
             observer_triggers, 1,
             "Panharmonicon must NOT double attack triggers — cause is EntersBattlefield"
+        );
+    }
+
+    /// Helper: install a source-restricted `DoubleTriggers` static
+    /// (Splinter-class) — cause `Any`, narrowed by an `affected` source filter —
+    /// controlled by PlayerId(0).
+    fn install_source_restricted_doubler(
+        state: &mut GameState,
+        affected: TargetFilter,
+    ) -> ObjectId {
+        use crate::types::statics::{StaticMode, TriggerCause};
+        let id = create_object(
+            state,
+            CardId(101),
+            PlayerId(0),
+            "Splinter, Radical Rat".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(StaticMode::DoubleTriggers {
+                cause: TriggerCause::Any,
+            })
+            .affected(affected),
+        );
+        id
+    }
+
+    /// CR 603.2d: Splinter's source filter ("a Ninja creature you control")
+    /// doubles a Ninja source's trigger to 2 instances.
+    #[test]
+    fn splinter_doubles_ninja_source_trigger() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Ninja".to_string());
+        }
+        let _splinter = install_source_restricted_doubler(
+            &mut state,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .subtype("Ninja".to_string())
+                    .controller(ControllerRef::You),
+            ),
+        );
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 2,
+            "Splinter must double a Ninja source's trigger to 2 instances"
+        );
+    }
+
+    /// CR 603.2d: Splinter's source filter must NOT double a non-Ninja source's
+    /// trigger — this is the reported bug (all triggers doubling). With the
+    /// `affected` filter populated, a non-Ninja creature's trigger stays at 1.
+    #[test]
+    fn splinter_does_not_double_non_ninja_source_trigger() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        // Observer is a creature, but NOT a Ninja.
+        state
+            .objects
+            .get_mut(&observer)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let _splinter = install_source_restricted_doubler(
+            &mut state,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .subtype("Ninja".to_string())
+                    .controller(ControllerRef::You),
+            ),
+        );
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 1,
+            "Splinter must NOT double a non-Ninja source's trigger — only Ninja sources qualify"
         );
     }
 

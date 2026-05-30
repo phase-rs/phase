@@ -7,12 +7,11 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::database::synthesis::synthesize_all;
+use crate::database::synthesis::{parse_oracle_with_cleave_brackets, synthesize_all};
 use crate::game::engine::{apply_as_current, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
-use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AdditionalCost, Effect, PtValue, QuantityExpr,
     ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition,
@@ -82,7 +81,14 @@ fn build_face_from_oracle(
         keyword_names
     };
 
-    let parsed = parse_oracle_text(
+    // CR 702.148a-b + CR 612: Route the cleave bracket prep through the SAME
+    // authority the real card-data build pipeline uses
+    // (`parse_oracle_with_cleave_brackets`) so test fixtures exercise the real
+    // cleave flow and the two pipelines cannot silently diverge. The helper
+    // gates the bracket strip on the keyword hints containing "cleave" (the
+    // inline-Oracle analog of MTGJSON reporting the keyword) so loyalty/other
+    // bracket usage is never stripped.
+    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
         oracle_text,
         &obj.name,
         effective_kw_names,
@@ -124,6 +130,7 @@ fn build_face_from_oracle(
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        cleave_variant,
         modal: parsed.modal,
         additional_cost: parsed.additional_cost,
         casting_restrictions: parsed.casting_restrictions,
@@ -1282,6 +1289,9 @@ impl GameRunner {
                 }
                 crate::types::game_state::AlternativeCastKeyword::Awaken => {
                     "AlternativeCastChoice(Awaken)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Cleave => {
+                    "AlternativeCastChoice(Cleave)"
                 }
             },
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",

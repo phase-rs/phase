@@ -1274,6 +1274,60 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         )),
         value((), tag("endures ")),
     ))
+    .or(alt((
+        // CR 608.2c: Anaphoric back-reference subject + continuous-modification
+        // predicate. The subject phrases ("those creatures" / "that creature" /
+        // "those permanents" / "that permanent") reference the targets or
+        // affected objects established by a prior conjunct in the same chain —
+        // e.g. Nalia de'Arnise's "put a +1/+1 counter on each creature you
+        // control and those creatures gain deathtouch until end of turn".
+        // Without this split, the compound stays as one chunk;
+        // `try_split_targeted_compound` bisects it and feeds the conjunct to
+        // the imperative-only `parse_imperative_effect`, which has no
+        // subject-predicate path and emits `Effect::Unimplemented { name:
+        // "those", ... }`. Splitting here routes the conjunct through
+        // `parse_clause_ast` → `try_parse_subject_continuous_clause` so the
+        // keyword grant and its duration land on the sub-clause. Verb agreement
+        // pairs each subject number with its matching continuous predicate:
+        // "gain"/"have"/"lose" are the plural-subject stems, "gains"/"has"/
+        // "loses" are the singular conjugations. Safe to split: an anaphoric
+        // noun phrase followed by a conjugated continuous-modification verb
+        // cannot be a continuation noun phrase.
+        // Plural anaphoric subjects: "those {creatures,permanents,tokens}" +
+        // plural-stem continuous verb. Nested-prefix form (CLAUDE.md "Nest
+        // nom combinators by prefix dispatch") so subject ∈ {3 phrases} and
+        // verb ∈ {gain,get,have,lose} compose without enumerating all 12
+        // tuples, and the overall `alt(...)` arity stays under nom's
+        // 21-tuple limit. The first inner `tag` binds the error type for
+        // the rest of the tree.
+        value(
+            (),
+            (
+                alt((
+                    tag::<_, _, OracleError<'_>>("those creatures "),
+                    tag("those permanents "),
+                    tag("those tokens "),
+                )),
+                alt((tag("gain "), tag("get "), tag("have "), tag("lose "))),
+            ),
+        ),
+        // Singular anaphoric subjects: "that {creature,permanent,token}" +
+        // singular-conjugation continuous verb (gains/gets/has/loses).
+        // Single-token grants ("create one X token, that token gains haste")
+        // are rarer than the plural form but real, so all three subject
+        // nouns are paired with the singular verb set.
+        value(
+            (),
+            (
+                alt((
+                    tag("that creature "),
+                    tag("that permanent "),
+                    tag("that token "),
+                )),
+                alt((tag("gains "), tag("gets "), tag("has "), tag("loses "))),
+            ),
+        ),
+    )))
     .parse(s)
     .is_ok();
     if has_verb_prefix {
@@ -5060,6 +5114,50 @@ mod tests {
             "this creature gets +2/+0 until end of turn"
         ));
         assert!(starts_bare_and_clause("~ gets +2/+0 until end of turn"));
+    }
+
+    /// CR 608.2c: Anaphoric back-reference conjuncts. Nalia de'Arnise's third
+    /// ability is the canonical exemplar — "put a +1/+1 counter on each
+    /// creature you control and those creatures gain deathtouch until end of
+    /// turn". Each plural / singular subject pair must split so the conjunct
+    /// reaches the subject-predicate parser instead of falling through to the
+    /// imperative-only path that produces `Effect::Unimplemented { name:
+    /// "those", ... }`.
+    #[test]
+    fn bare_and_clause_starts_on_anaphoric_continuous_subjects() {
+        assert!(starts_bare_and_clause(
+            "those creatures gain deathtouch until end of turn"
+        ));
+        assert!(starts_bare_and_clause(
+            "those creatures get +1/+1 until end of turn"
+        ));
+        assert!(starts_bare_and_clause("those creatures have flying"));
+        assert!(starts_bare_and_clause("those creatures lose flying"));
+        assert!(starts_bare_and_clause("those permanents gain hexproof"));
+        assert!(starts_bare_and_clause(
+            "that creature gains haste until end of turn"
+        ));
+        assert!(starts_bare_and_clause(
+            "that creature gets +2/+2 until end of turn"
+        ));
+        assert!(starts_bare_and_clause("that creature has lifelink"));
+        assert!(starts_bare_and_clause("that creature loses flying"));
+        assert!(starts_bare_and_clause(
+            "that permanent gains indestructible"
+        ));
+        // Token anaphors — "create N tokens. Those tokens gain haste."
+        assert!(starts_bare_and_clause("those tokens gain haste"));
+        assert!(starts_bare_and_clause(
+            "those tokens get +1/+1 until end of turn"
+        ));
+        assert!(starts_bare_and_clause("those tokens have flying"));
+        assert!(starts_bare_and_clause("those tokens lose flying"));
+        assert!(starts_bare_and_clause("that token gains haste"));
+        assert!(starts_bare_and_clause(
+            "that token gets +1/+0 until end of turn"
+        ));
+        assert!(starts_bare_and_clause("that token has lifelink"));
+        assert!(starts_bare_and_clause("that token loses flying"));
     }
 
     /// CR 702: "The same is true for <keyword list>." — Odric, Lunarch
