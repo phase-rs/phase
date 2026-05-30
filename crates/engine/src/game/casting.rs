@@ -2278,7 +2278,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         None
     };
     let web_slinging_cost = if obj.zone == Zone::Hand {
-        super::keywords::effective_web_slinging_cost(state, object_id)
+        super::keywords::effective_web_slinging_cost(state, player, object_id)
     } else {
         None
     };
@@ -4574,7 +4574,7 @@ pub fn handle_cast_spell_as_web_slinging_with_payment_mode(
         ));
     }
 
-    if super::keywords::effective_web_slinging_cost(state, hand_object).is_none() {
+    if super::keywords::effective_web_slinging_cost(state, player, hand_object).is_none() {
         return Err(EngineError::ActionNotAllowed(
             "Card has no Web-slinging permission".to_string(),
         ));
@@ -15392,6 +15392,127 @@ mod tests {
             g_three, 0,
             "3 creatures controlled (Witherbloom + 2 bears) → generic reduced from 3 to 0 \
              by Affinity granted via Witherbloom's static"
+        );
+    }
+
+    /// CR 702.188a + CR 604.1: Amazing Spider-Man's back face grants web-slinging
+    /// {G}{W}{U} only to legendary, one-or-more-colored spells you cast.
+    /// `effective_web_slinging_cost` must honor the statically GRANTED keyword
+    /// (the card itself never prints web-slinging on the qualifying spells).
+    fn install_amazing_spider_man_grantor(state: &mut GameState) {
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let grantor_id = create_object(
+            state,
+            CardId(7000),
+            PlayerId(0),
+            "Amazing Spider-Man".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&grantor_id).unwrap();
+        // affected: legendary, one-or-more-colored spells you cast (any card type).
+        let affected = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: Some(ControllerRef::You),
+            properties: vec![
+                FilterProp::HasSupertype {
+                    value: Supertype::Legendary,
+                },
+                FilterProp::ColorCount {
+                    comparator: Comparator::GE,
+                    count: 1,
+                },
+            ],
+        });
+        let cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Green,
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+            ],
+            generic: 0,
+        };
+        let def = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::WebSlinging(cost),
+        })
+        .affected(affected);
+        obj.static_definitions = vec![def].into();
+    }
+
+    fn add_hand_card(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+        legendary: bool,
+        colors: Vec<ManaColor>,
+    ) -> ObjectId {
+        let id = create_object(state, card_id, PlayerId(0), name.to_string(), Zone::Hand);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        if legendary {
+            obj.card_types.supertypes.push(Supertype::Legendary);
+        }
+        obj.color = colors;
+        id
+    }
+
+    #[test]
+    fn web_slinging_granted_to_legendary_colored_spell_in_hand() {
+        let mut state = setup_game_at_main_phase();
+        install_amazing_spider_man_grantor(&mut state);
+
+        let qualifying = add_hand_card(
+            &mut state,
+            CardId(7001),
+            "Legendary Multicolor",
+            true,
+            vec![ManaColor::Green, ManaColor::Blue],
+        );
+        let cost =
+            crate::game::keywords::effective_web_slinging_cost(&state, PlayerId(0), qualifying)
+                .expect("granted web-slinging cost must be present");
+        let ManaCost::Cost { shards, generic } = cost else {
+            panic!("expected web-slinging Cost");
+        };
+        assert_eq!(generic, 0);
+        assert!(
+            shards.contains(&ManaCostShard::Green)
+                && shards.contains(&ManaCostShard::White)
+                && shards.contains(&ManaCostShard::Blue),
+            "expected {{G}}{{W}}{{U}} shards, got {shards:?}"
+        );
+    }
+
+    #[test]
+    fn web_slinging_not_granted_to_nonlegendary_colored_spell() {
+        let mut state = setup_game_at_main_phase();
+        install_amazing_spider_man_grantor(&mut state);
+
+        let nonlegendary = add_hand_card(
+            &mut state,
+            CardId(7002),
+            "Plain Multicolor",
+            false,
+            vec![ManaColor::Green, ManaColor::Blue],
+        );
+        assert!(
+            crate::game::keywords::effective_web_slinging_cost(&state, PlayerId(0), nonlegendary)
+                .is_none(),
+            "non-legendary spell must NOT receive granted web-slinging"
+        );
+    }
+
+    #[test]
+    fn web_slinging_not_granted_to_colorless_legendary_spell() {
+        let mut state = setup_game_at_main_phase();
+        install_amazing_spider_man_grantor(&mut state);
+
+        let colorless = add_hand_card(&mut state, CardId(7003), "Colorless Legend", true, vec![]);
+        assert!(
+            crate::game::keywords::effective_web_slinging_cost(&state, PlayerId(0), colorless)
+                .is_none(),
+            "colorless legendary spell must NOT receive granted web-slinging"
         );
     }
 

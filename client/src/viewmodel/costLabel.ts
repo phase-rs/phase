@@ -208,6 +208,7 @@ export function abilityChoiceLabel(
   action: GameAction,
   object: GameObject,
   objects?: Record<ObjectId, GameObject>,
+  webSlingingCosts?: Record<string, ManaCost>,
 ): { label: string; description?: string } {
   // CR 702.190a: Sneak — label identifies which unblocked attacker is
   // returned to pay the Sneak cost. Include the Sneak mana cost from the
@@ -245,11 +246,16 @@ export function abilityChoiceLabel(
   if (action.type === "CastSpellAsWebSlinging") {
     const returnedId = action.data.creature_to_return;
     const returnedName = objects?.[returnedId]?.name ?? `creature #${returnedId}`;
+    // Prefer the engine-derived cost (covers statically-GRANTED web-slinging,
+    // e.g. Amazing Spider-Man); fall back to the printed keyword. The engine
+    // decides which cards qualify — the frontend only formats the ManaCost.
+    const derivedCost = webSlingingCosts?.[String(object.id)];
     const webSlingingKeyword = object.keywords.find(
       (k): k is { WebSlinging: ManaCost } => typeof k === "object" && "WebSlinging" in k,
     );
-    const costSymbols = webSlingingKeyword
-      ? manaCostToShards(webSlingingKeyword.WebSlinging).map((s) => `{${s}}`).join("")
+    const cost = derivedCost ?? webSlingingKeyword?.WebSlinging;
+    const costSymbols = cost
+      ? manaCostToShards(cost).map((s) => `{${s}}`).join("")
       : "";
     const costSuffix = costSymbols ? ` (${costSymbols})` : "";
     return {

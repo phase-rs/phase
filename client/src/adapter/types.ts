@@ -1579,6 +1579,10 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::auras_attached_to_player`.
    */
   auras_attached_to_player?: Record<string, ObjectId[]>;
+  /** CR 702.188a: web-slinging alt-cost for each qualifying card in the viewing player's
+   *  own hand (incl. granted). Keyed by hand ObjectId (string). Mirrors
+   *  engine::game::derived_views::DerivedViews::web_slinging_costs. */
+  web_slinging_costs?: Record<string, ManaCost>;
 }
 
 export interface GameState {

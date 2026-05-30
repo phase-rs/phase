@@ -226,6 +226,14 @@ pub(crate) fn matches_player_scope(
                                     && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
                             })
                     }
+                    // CR 508.6: opponent this player attacked this turn.
+                    PlayerFilter::OpponentAttackedThisTurn => {
+                        p.id != controller
+                            && state
+                                .attacked_defenders_this_turn
+                                .get(&controller)
+                                .is_some_and(|defenders| defenders.contains(&p.id))
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -4622,6 +4630,7 @@ fn scoped_player_matches_filter(
         // game/triggers.rs:3703-3723).
         PlayerFilter::DefendingPlayer
         | PlayerFilter::OpponentDealtCombatDamage
+        | PlayerFilter::OpponentAttackedThisTurn
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }

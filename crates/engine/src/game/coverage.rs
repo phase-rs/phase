@@ -1171,6 +1171,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentDealtCombatDamage => {
             "each opponent who was dealt combat damage this turn"
         }
+        PlayerFilter::OpponentAttackedThisTurn => "each opponent you attacked this turn",
         PlayerFilter::All => "each player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
@@ -5272,6 +5273,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
         PlayerFilter::OpponentDealtCombatDamage => ("OpponentDealtCombatDamage", Handled),
+        PlayerFilter::OpponentAttackedThisTurn => ("OpponentAttackedThisTurn", Handled),
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
         // Previously emitted via Debug formatting; never appeared in the handled set.
         PlayerFilter::Controller => ("Controller", Unhandled),

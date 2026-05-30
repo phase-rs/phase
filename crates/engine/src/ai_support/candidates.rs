@@ -2928,7 +2928,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
                 .unwrap_or_default();
             for hand_id in hand_ids {
-                if keywords::effective_web_slinging_cost(state, hand_id).is_none() {
+                if keywords::effective_web_slinging_cost(state, player, hand_id).is_none() {
                     continue;
                 }
                 let Some(card_id) = state.objects.get(&hand_id).map(|o| o.card_id) else {

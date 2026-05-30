@@ -5327,24 +5327,73 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
                 Some(FilterProp::Cmc { comparator, value })
             },
         );
+        // CR 105.2: trailing "that's one or more colors"/"that's exactly N colors" relative clause → ColorCount.
+        let color_props = if let Some((props, consumed)) =
+            crate::parser::oracle_target::parse_that_clause_suffix(cursor)
+        {
+            cursor = cursor[consumed..].trim_start();
+            props
+        } else {
+            Vec::new()
+        };
         let _ = cursor; // qualifiers are optional; remaining slice is unused
 
+        let mut supertype_props: Vec<FilterProp> = Vec::new();
         let base_filter = if type_part.is_empty() {
             // "Spells you cast" (no type prefix) — applies to all spells
             TargetFilter::Typed(TypedFilter::card())
         } else {
-            // Parse the spell type filter from the prefix
+            // CR 205.4a: peel leading supertype word(s) BEFORE parse_type_phrase, which only
+            // emits HasSupertype for a supertype prefixed before a type word (requires a trailing
+            // space); a bare "legendary" would otherwise be dropped, and an un-peeled prefix would
+            // double-emit. Peel here (emit once) and pass only the remainder to parse_type_phrase.
             let type_prefix_original = tp.original[..marker_pos].trim();
             let lower_prefix = type_prefix_original.to_lowercase();
             let prefix_tp = TextPair::new(type_prefix_original, &lower_prefix);
-            let type_prefix_tp = nom_tag_tp(&prefix_tp, "each ").unwrap_or(prefix_tp);
-            parse_type_phrase(type_prefix_tp.original.trim()).0
+            let prefix_tp = nom_tag_tp(&prefix_tp, "each ").unwrap_or(prefix_tp);
+            let mut peel_lower = prefix_tp.lower;
+            let mut peel_offset = 0usize;
+            while let Ok((rest, supertype)) = nom_target::parse_supertype_word(peel_lower) {
+                // CR 205.4a: parse_supertype_word consumes no boundary by contract, so the
+                // caller must require a word boundary (space, punctuation, or end-of-string)
+                // after the supertype — otherwise a longer word with a supertype prefix
+                // ("snow" in "snowman") would be mis-peeled. A bare trailing supertype
+                // ("legendary") legitimately ends at end-of-string.
+                let at_boundary = rest
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+                if !at_boundary {
+                    break;
+                }
+                supertype_props.push(FilterProp::HasSupertype { value: supertype });
+                // Consume the supertype word plus its trailing whitespace boundary
+                // via nom (space0 — a bare trailing supertype has no following space).
+                let rest = space0::<_, VE<'_>>
+                    .parse(rest)
+                    .map_or(rest, |(after, _)| after);
+                peel_offset += peel_lower.len() - rest.len();
+                peel_lower = rest;
+            }
+            let type_remainder = prefix_tp.original[peel_offset..].trim();
+            if type_remainder.is_empty() {
+                TargetFilter::Typed(TypedFilter::card())
+            } else {
+                parse_type_phrase(type_remainder).0
+            }
         };
+        let mut extra_props = supertype_props;
+        extra_props.extend(color_props);
         // CR-correct affected scope: `apply_spell_keyword_subject_constraints`
         // recurses into `TargetFilter::Or` so compound type prefixes ("instant
         // and sorcery spells you cast have affinity for creatures") preserve
         // each branch instead of collapsing to all spells.
-        let affected = apply_spell_keyword_subject_constraints(base_filter, zone_filter, mv_filter);
+        let affected = apply_spell_keyword_subject_constraints(
+            base_filter,
+            zone_filter,
+            mv_filter,
+            extra_props,
+        );
 
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
             .affected(affected)
@@ -5477,7 +5526,8 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
     } else {
         parse_type_phrase(type_prefix_original).0
     };
-    let affected = apply_spell_keyword_subject_constraints(base_filter, None, mv_filter);
+    let affected =
+        apply_spell_keyword_subject_constraints(base_filter, None, mv_filter, Vec::new());
 
     // Cost gate: only a pure MANA cost grants this static. {0} and {WUBRG} parse
     // to AbilityCost::Mana; non-mana payments (life, discard, free) return a
@@ -5498,6 +5548,7 @@ fn apply_spell_keyword_subject_constraints(
     filter: TargetFilter,
     zone_filter: Option<FilterProp>,
     mv_filter: Option<FilterProp>,
+    extra_props: Vec<FilterProp>,
 ) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
@@ -5508,6 +5559,7 @@ fn apply_spell_keyword_subject_constraints(
             if let Some(prop) = mv_filter {
                 typed.properties.push(prop);
             }
+            typed.properties.extend(extra_props);
             TargetFilter::Typed(typed)
         }
         TargetFilter::Or { filters } => TargetFilter::Or {
@@ -5518,6 +5570,7 @@ fn apply_spell_keyword_subject_constraints(
                         filter,
                         zone_filter.clone(),
                         mv_filter.clone(),
+                        extra_props.clone(),
                     )
                 })
                 .collect(),
@@ -22093,6 +22146,150 @@ mod tests {
                 );
             }
             other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    // --- Group: legendary + colored qualifiers on spell-keyword statics ---
+    // CR 205.4a (supertype) + CR 105.2 (color count). Amazing Spider-Man's back
+    // face grants web-slinging only to "legendary spells … that's one or more
+    // colors"; the affected filter must carry BOTH qualifiers, and the supertype
+    // must be emitted exactly once (no parse_type_phrase double-emit).
+
+    #[test]
+    fn static_legendary_colored_spells_have_web_slinging() {
+        // Amazing Spider-Man (SPM #10), back face.
+        let def = parse_static_line(
+            "Each legendary spell you cast that's one or more colors has web-slinging {G}{W}{U}.",
+        )
+        .unwrap();
+        match &def.mode {
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::WebSlinging(cost),
+            } => {
+                let ManaCost::Cost { shards, generic } = cost else {
+                    panic!("expected {{G}}{{W}}{{U}} Cost, got {cost:?}");
+                };
+                assert_eq!(*generic, 0, "web-slinging cost has no generic mana");
+                use crate::types::mana::ManaCostShard;
+                assert!(
+                    shards.contains(&ManaCostShard::Green)
+                        && shards.contains(&ManaCostShard::White)
+                        && shards.contains(&ManaCostShard::Blue),
+                    "expected G/W/U shards, got {shards:?}"
+                );
+            }
+            other => panic!("expected CastWithKeyword(WebSlinging), got {other:?}"),
+        }
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.properties.contains(&FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    }),
+                    "expected HasSupertype(Legendary), got {:?}",
+                    tf.properties
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::ColorCount {
+                        comparator: Comparator::GE,
+                        count: 1,
+                    }),
+                    "expected ColorCount(GE,1), got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Some(Typed) affected filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_legendary_creature_spells_emit_supertype_once() {
+        // Compound subject: supertype must be emitted exactly once (peel here OR
+        // parse_type_phrase, never both) and the Creature type must be present.
+        let def = parse_static_line("Each legendary creature spell you cast has flash.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                let supertype_count = tf
+                    .properties
+                    .iter()
+                    .filter(|p| {
+                        matches!(
+                            p,
+                            FilterProp::HasSupertype {
+                                value: Supertype::Legendary,
+                            }
+                        )
+                    })
+                    .count();
+                assert_eq!(
+                    supertype_count, 1,
+                    "HasSupertype(Legendary) must appear exactly once, got {:?}",
+                    tf.properties
+                );
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature type filter, got {:?}",
+                    tf.type_filters
+                );
+            }
+            other => panic!("expected Some(Typed) affected filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_exactly_n_color_spells_carry_color_count_eq() {
+        // "exactly three colors" → ColorCount{EQ,3} on the affected filter.
+        // (Threefold Signal's real text grants "replicate {3}", but `replicate`
+        // is not yet a grantable keyword in this parser path — a pre-existing
+        // limitation unrelated to the color-count clause under test. Use a
+        // known-grantable keyword (flash) so the static parses end-to-end while
+        // still exercising the "exactly N colors" branch.)
+        let def = parse_static_line("Each spell you cast that's exactly three colors has flash.")
+            .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(
+                    tf.properties.contains(&FilterProp::ColorCount {
+                        comparator: Comparator::EQ,
+                        count: 3,
+                    }),
+                    "expected ColorCount(EQ,3), got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Some(Typed) affected filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_plain_spells_have_flash_no_qualifier_leak() {
+        // "Spells you cast have flash." — no ColorCount / HasSupertype must leak in.
+        let def = parse_static_line("Spells you cast have flash.").unwrap();
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(
+                    !tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::ColorCount { .. } | FilterProp::HasSupertype { .. }
+                    )),
+                    "no ColorCount/HasSupertype should be present, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Some(Typed) affected filter, got {other:?}"),
         }
     }
 

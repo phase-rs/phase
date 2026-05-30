@@ -879,8 +879,11 @@ fn handle_debug_create_card(
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
     match with_state(|state| {
+        // Single-player WASM: the human is always PlayerId(0). Scope web-slinging
+        // costs to the human's own hand even on this raw/unfiltered path.
         to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
             state,
+            Some(PlayerId(0)),
         ))
     }) {
         Ok(val) => val,
@@ -898,6 +901,7 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
         let filtered = filter_state_for_viewer(state, PlayerId(viewer));
         to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
             &filtered,
+            Some(PlayerId(viewer)),
         ))
     }) {
         Ok(val) => val,

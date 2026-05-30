@@ -4284,6 +4284,14 @@ pub struct GameState {
     pub players_attacked_this_turn: HashSet<PlayerId>,
     #[serde(default)]
     pub attacking_creatures_this_turn: HashMap<PlayerId, u32>,
+    /// CR 508.6 + CR 508.1b: For each attacking player, the set of defending
+    /// players they attacked this turn, accumulated across every combat's
+    /// declare-attackers step (CR 508.5 "defending player": planeswalker/battle
+    /// attacks resolve to controller/protector). Counted by
+    /// `PlayerFilter::OpponentAttackedThisTurn` for "opponents you attacked this
+    /// turn" (Militant Angel).
+    #[serde(default)]
+    pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
     /// CR 500.8 + CR 506.1: Number of combat phases that have begun this turn.
     /// Used by intervening-if triggers that only fire during the first combat phase.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -4956,6 +4964,7 @@ impl GameState {
             players_attacked_this_step: HashSet::new(),
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
+            attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
             creatures_attacked_this_turn: HashSet::new(),
             creatures_blocked_this_turn: HashSet::new(),
@@ -5239,6 +5248,7 @@ impl PartialEq for GameState {
             && self.players_attacked_this_step == other.players_attacked_this_step
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
+            && self.attacked_defenders_this_turn == other.attacked_defenders_this_turn
             && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn

@@ -233,6 +233,15 @@ pub fn record_attackers_declared(
         .attacking_creatures_this_turn
         .entry(state.active_player)
         .or_insert(0) += attacker_count as u32;
+
+    // CR 508.6 + CR 508.5: record the defending players attacked this declaration.
+    // `players_attacked_this_step` already holds this declaration's defenders.
+    let active = state.active_player;
+    state
+        .attacked_defenders_this_turn
+        .entry(active)
+        .or_default()
+        .extend(state.players_attacked_this_step.iter().copied());
 }
 
 pub fn record_discard(state: &mut crate::types::game_state::GameState, player: PlayerId) {

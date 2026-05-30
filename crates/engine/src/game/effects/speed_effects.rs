@@ -66,6 +66,20 @@ fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
+        // CR 508.6: each opponent this player attacked this turn.
+        PlayerFilter::OpponentAttackedThisTurn => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                player.id != controller
+                    && state
+                        .attacked_defenders_this_turn
+                        .get(&controller)
+                        .is_some_and(|defenders| defenders.contains(&player.id))
+            })
+            .map(|player| player.id)
+            .collect(),
         PlayerFilter::All => state
             .players
             .iter()

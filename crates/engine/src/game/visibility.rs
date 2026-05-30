@@ -1405,7 +1405,7 @@ mod tests {
                 1,
                 "viewer {viewer:?} must see the commander-damage entry",
             );
-            let views = derive_views(&filtered);
+            let views = derive_views(&filtered, Some(viewer));
             let from_p0 = views
                 .commander_damage_by_attacker
                 .get(&PlayerId(0))

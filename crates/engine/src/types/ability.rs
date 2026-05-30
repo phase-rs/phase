@@ -3299,6 +3299,12 @@ pub enum PlayerFilter {
     /// "for each opponent that was dealt combat damage this turn" cards
     /// (Tymna the Weaver).
     OpponentDealtCombatDamage,
+    /// CR 508.6: A player has "attacked [a player]" if they declared one or more
+    /// creatures attacking that player. Each opponent the controller attacked this
+    /// turn, resolved against `state.attacked_defenders_this_turn[controller]`.
+    /// Used by "the number of opponents you attacked this turn" (Militant Angel).
+    /// (CR 508.1b: declare-attackers announcement; CR 506.2: active = attacking player.)
+    OpponentAttackedThisTurn,
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.

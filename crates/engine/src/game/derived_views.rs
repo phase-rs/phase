@@ -23,7 +23,10 @@ use crate::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
+use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 /// A single commander-damage badge the HUD renders: which victim received
@@ -115,6 +118,15 @@ pub struct DerivedViews {
     /// — a player with no enchanting Auras simply has no key.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub auras_attached_to_player: BTreeMap<PlayerId, Vec<ObjectId>>,
+
+    /// CR 702.188a + 604.1: web-slinging alt-cost the VIEWING player may pay for each
+    /// qualifying card in their OWN hand (incl. statically-granted web-slinging). Keyed by
+    /// hand ObjectId. Populated ONLY for the `viewer` passed to derive_views and ONLY from
+    /// that viewer's hand — never another player's — so it cannot leak which opponent/AI
+    /// cards qualify, even on the unfiltered get_game_state() path. Empty when no viewer,
+    /// no granting static, or no qualifying card.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub web_slinging_costs: HashMap<ObjectId, ManaCost>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -131,10 +143,10 @@ impl<'a> ClientGameStateRef<'a> {
     /// Wrap a borrowed `GameState` with its derived projections.
     /// Invoke AFTER any viewer-side filtering (e.g. `filter_state_for_player`)
     /// so the derived shape reflects what the viewer will actually see.
-    pub fn wrap(state: &'a GameState) -> Self {
+    pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
         Self {
             state,
-            derived: derive_views(state),
+            derived: derive_views(state, viewer),
         }
     }
 }
@@ -159,7 +171,7 @@ pub struct ClientGameState {
 /// unconditionally for every Commander-format game regardless of who is
 /// viewing. Partner commanders under the same controller each get their
 /// own `CommanderDamageView` entry, not a summed total.
-pub fn derive_views(state: &GameState) -> DerivedViews {
+pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews::default();
 
     // JIT short-circuit: grouping an empty stack is free, but this also
@@ -190,6 +202,30 @@ pub fn derive_views(state: &GameState) -> DerivedViews {
                 .entry(host)
                 .or_default()
                 .push(obj_id);
+        }
+    }
+
+    // CR 702.188a + 604.1: viewer-scoped web-slinging costs (own hand only → leak-proof).
+    if let Some(viewer) = viewer {
+        let has_web_slinging_static =
+            crate::game::functioning_abilities::game_active_statics(state).any(|(_, def)| {
+                matches!(
+                    def.mode,
+                    StaticMode::CastWithKeyword {
+                        keyword: Keyword::WebSlinging(_)
+                    }
+                )
+            });
+        if has_web_slinging_static {
+            if let Some(player) = state.players.iter().find(|p| p.id == viewer) {
+                for &hand_id in player.hand.iter() {
+                    if let Some(cost) =
+                        crate::game::keywords::effective_web_slinging_cost(state, viewer, hand_id)
+                    {
+                        views.web_slinging_costs.insert(hand_id, cost);
+                    }
+                }
+            }
         }
     }
 
@@ -554,7 +590,7 @@ mod tests {
             damage: 21,
         });
 
-        let views = derive_views(&state);
+        let views = derive_views(&state, None);
         assert!(
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
@@ -594,7 +630,7 @@ mod tests {
             damage: 11,
         });
 
-        let views = derive_views(&state);
+        let views = derive_views(&state, None);
         let from_p1 = views
             .commander_damage_by_attacker
             .get(&PlayerId(1))
@@ -645,7 +681,7 @@ mod tests {
             damage: 5,
         });
 
-        let views = derive_views(&state);
+        let views = derive_views(&state, None);
         let from_p1 = views
             .commander_damage_by_attacker
             .get(&PlayerId(1))
@@ -705,7 +741,7 @@ mod tests {
             });
         }
 
-        let views = derive_views(&state);
+        let views = derive_views(&state, None);
         assert_eq!(
             views.stack_display_groups.len(),
             1,
@@ -714,7 +750,7 @@ mod tests {
         assert_eq!(views.stack_display_groups[0].count, 2);
 
         state.stack.clear();
-        let empty = derive_views(&state);
+        let empty = derive_views(&state, None);
         assert!(
             empty.stack_display_groups.is_empty(),
             "empty-stack short-circuit must leave the group vec empty"
@@ -769,7 +805,7 @@ mod tests {
             },
         );
 
-        let views = derive_views(&state);
+        let views = derive_views(&state, None);
         let details = views
             .stack_entry_details
             .get(&spell)
@@ -856,7 +892,7 @@ mod tests {
         });
 
         let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
-        let mut views = derive_views(&filtered);
+        let mut views = derive_views(&filtered, None);
         let details = views
             .stack_entry_details
             .remove(&ObjectId(900))
@@ -895,7 +931,7 @@ mod tests {
             damage: 14,
         });
 
-        let wrapped = ClientGameStateRef::wrap(&state);
+        let wrapped = ClientGameStateRef::wrap(&state, None);
         let json = serde_json::to_string(&wrapped).expect("serialize");
         let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
         let from_p1 = round
@@ -969,7 +1005,7 @@ mod tests {
             .attached_to = Some(AttachTarget::Object(creature));
         // No manual battlefield pushes — `create_object` did it for both.
 
-        let views = derive_views(&state);
+        let views = derive_views(&state, None);
         let p1_auras = views
             .auras_attached_to_player
             .get(&PlayerId(1))
@@ -978,6 +1014,91 @@ mod tests {
         assert!(
             !views.auras_attached_to_player.contains_key(&PlayerId(0)),
             "P0 has no Aura host — must not get an empty entry",
+        );
+    }
+
+    /// CR 702.188a + CR 604.1: web-slinging costs are VIEWER-scoped. P0 controls
+    /// the grantor; both P0 and P1 hold a qualifying spell. `derive_views` for P0
+    /// must surface ONLY P0's card (never P1's, even though the grant is symmetric
+    /// in the abstract) so the unfiltered path can't leak opponent hand contents.
+    /// `derive_views(_, None)` must surface nothing.
+    #[test]
+    fn web_slinging_costs_are_viewer_scoped_and_leak_proof() {
+        use crate::types::ability::{
+            Comparator, ControllerRef, FilterProp, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 7);
+
+        // P0 controls the Amazing Spider-Man grantor static.
+        let grantor = create_object(
+            &mut state,
+            CardId(8000),
+            PlayerId(0),
+            "Amazing Spider-Man".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let affected = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: Some(ControllerRef::You),
+                properties: vec![
+                    FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    },
+                    FilterProp::ColorCount {
+                        comparator: Comparator::GE,
+                        count: 1,
+                    },
+                ],
+            });
+            let cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Green,
+                    ManaCostShard::White,
+                    ManaCostShard::Blue,
+                ],
+                generic: 0,
+            };
+            let def = StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: Keyword::WebSlinging(cost),
+            })
+            .affected(affected);
+            state.objects.get_mut(&grantor).unwrap().static_definitions = vec![def].into();
+        }
+
+        // A qualifying legendary multicolored card in each player's hand.
+        let add_qualifying = |state: &mut GameState, card: CardId, owner: PlayerId| -> ObjectId {
+            let id = create_object(state, card, owner, "Legend".to_string(), Zone::Hand);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.color = vec![ManaColor::Green, ManaColor::Blue];
+            id
+        };
+        let p0_card = add_qualifying(&mut state, CardId(8001), PlayerId(0));
+        let p1_card = add_qualifying(&mut state, CardId(8002), PlayerId(1));
+
+        // Viewer = P0: only P0's card is surfaced.
+        let p0_views = derive_views(&state, Some(PlayerId(0)));
+        assert!(
+            p0_views.web_slinging_costs.contains_key(&p0_card),
+            "P0's own qualifying card must be surfaced for viewer P0"
+        );
+        assert!(
+            !p0_views.web_slinging_costs.contains_key(&p1_card),
+            "P1's card must NOT leak into P0's viewer-scoped web-slinging costs"
+        );
+
+        // No viewer: nothing surfaced.
+        let none_views = derive_views(&state, None);
+        assert!(
+            none_views.web_slinging_costs.is_empty(),
+            "derive_views(_, None) must not populate web-slinging costs"
         );
     }
 }
