@@ -10903,6 +10903,61 @@ mod tests {
         );
     }
 
+    /// CR 406.3 + CR 701.16a + CR 400.7i: Gonti, Canny Acquisitor. "look at the
+    /// top card of that player's library, then exile it face down" must rewrite
+    /// the private `Dig` look step into a face-down `ExileTop` (issue #1316: the
+    /// card was looked at but never left the library), and the follow-on "You may
+    /// play that card for as long as it remains exiled, and mana of any type can
+    /// be spent" grant must bind to the exiled card via the tracked set.
+    #[test]
+    fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control deal combat damage to a player, look at the top card of that player's library, then exile it face down. You may play that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
+            "Gonti, Canny Acquisitor",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: true,
+                }
+            ),
+            "expected face-down ExileTop from the triggering player's library, got: {:?}",
+            execute.effect
+        );
+
+        let grant = execute
+            .sub_ability
+            .as_ref()
+            .expect("the impulse-play grant must chain after the exile");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::Permanent,
+                        mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                        ..
+                    },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    ..
+                }
+            ),
+            "expected PlayFromExile grant bound to the tracked exiled card, got: {:?}",
+            grant.effect
+        );
+    }
+
     #[test]
     fn trigger_upkeep() {
         let def = parse_trigger_line(
@@ -17054,6 +17109,71 @@ mod tests {
             def.constraint,
             Some(TriggerConstraint::OnlyDuringOpponentsTurn)
         );
+    }
+
+    /// CR 513.1 + CR 603.4: Keeper of the Accord — opponent end-step token trigger
+    /// with intervening-if comparing that player's creatures to yours.
+    #[test]
+    fn keeper_of_the_accord_opponent_end_step_creature_token() {
+        let def = parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn)
+        );
+        match def.condition.as_ref() {
+            Some(TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: Comparator::GT,
+                rhs,
+            }) => {
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    } => {
+                        assert_eq!(tf.controller, Some(ControllerRef::ScopedPlayer));
+                    }
+                    other => panic!("expected scoped ObjectCount lhs, got {other:?}"),
+                }
+                match rhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    } => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                    }
+                    other => panic!("expected you-scoped ObjectCount rhs, got {other:?}"),
+                }
+            }
+            other => panic!("expected QuantityComparison intervening-if, got {other:?}"),
+        }
+        assert!(matches!(
+            def.execute.as_ref().map(|a| a.effect.as_ref()),
+            Some(Effect::Token { .. })
+        ));
+    }
+
+    /// CR 513.1 + CR 603.4: Keeper of the Accord — optional Plains search when
+    /// that player controls more lands.
+    #[test]
+    fn keeper_of_the_accord_opponent_end_step_plains_search() {
+        let def = parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more lands than you, you may search your library for a basic Plains card, put it onto the battlefield tapped, then shuffle.",
+            "Keeper of the Accord",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        assert!(def.optional);
+        assert!(def.condition.is_some());
     }
 
     #[test]

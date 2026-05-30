@@ -771,6 +771,11 @@ const SUBTYPE_PLURALS: &[(&str, &str)] = &[
     ("berserkers", "Berserker"),
 ];
 
+/// CR 700.12: An outlaw is an object with the Assassin, Mercenary, Pirate,
+/// Rogue, and/or Warlock creature type. Shared by every parser path that
+/// recognizes the "outlaw[s]" head noun.
+pub const OUTLAW_SUBTYPES: [&str; 5] = ["Assassin", "Mercenary", "Pirate", "Rogue", "Warlock"];
+
 /// Comprehensive list of MTG subtypes (creature types, land types, spell types, etc.).
 /// Case-insensitive matching is done by lowercasing the input.
 /// This covers the standard MTGJSON subtype list plus common Oracle text usage.

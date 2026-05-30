@@ -6,7 +6,7 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
-import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import type { ManaCost, ObjectId } from "../../adapter/types.ts";
@@ -199,15 +199,18 @@ const DrawerCard = memo(function DrawerCard({
   const isReduced = effectiveCost?.type === "Cost" && manaCost.type === "Cost"
     && (effectiveCost.generic < manaCost.generic || effectiveCost.shards.length < manaCost.shards.length);
 
-  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
-    inspectObject(objectId);
-    setPreviewSticky(true);
-  });
+  // Mouse hover (desktop) + long-press (touch) both open the card preview, and
+  // the hook tags the element with `data-card-hover` so usePreviewDismiss's
+  // pointer poll keeps the preview alive while the cursor is over the card.
+  // This is what lets a player read any card in the full-hand modal: the fanned
+  // hand overlaps cards, so the modal is the only place to inspect the ones
+  // hidden behind others — and that inspection must work for mouse and touch.
+  const { handlers, firedRef } = useCardHover(objectId);
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
-      if (longPressFired.current) {
-        longPressFired.current = false;
+      if (firedRef.current) {
+        firedRef.current = false;
         return;
       }
       // Click-mode (sandbox debug interaction) routes the tap to the debug
@@ -226,7 +229,7 @@ const DrawerCard = memo(function DrawerCard({
         setPreviewSticky(true);
       }
     },
-    [objectId, isPlayable, onPlay, onDebugOpen, inspectObject, setPreviewSticky, longPressFired],
+    [objectId, isPlayable, onPlay, onDebugOpen, inspectObject, setPreviewSticky, firedRef],
   );
 
   const glowClass = hasPriority && isPlayable
@@ -237,7 +240,7 @@ const DrawerCard = memo(function DrawerCard({
     <button
       className={`relative aspect-[5/7] w-full overflow-hidden rounded-lg bg-gray-800 ${glowClass}`}
       onClick={handleClick}
-      {...longPressHandlers}
+      {...handlers}
     >
       {src ? (
         <img

@@ -46,14 +46,15 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
-    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, IterationKindBinding,
-    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost,
-    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
-    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    ControlPresence, ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition,
+    DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
+    IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
+    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -11072,7 +11073,22 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
         .parse(lower)
         .is_ok();
 
-    battlefield_recall || hand_recall || copy_token_recall
+    // CR 400.7i + CR 603.7: Play-from-exile grant — "[you may] play/cast {that
+    // card, that spell, it, those cards, them} for as long as {it,that card,...}
+    // remains exiled". The "that card" anaphor refers to the card the preceding
+    // exile published into the tracked set. Gated on the "remains exiled"
+    // duration phrase (the impulse-grant fingerprint) plus a play/cast verb so
+    // it never matches an unrelated "that card" mention. This caller is itself
+    // only consulted when the previous clause is an exile that publishes a
+    // tracked set, so the gate is doubly scoped (Gonti, Canny Acquisitor).
+    let play_from_exile_grant = (scan_contains_phrase(lower, "remains exiled")
+        || scan_contains_phrase(lower, "remain exiled"))
+        && (scan_contains_phrase(lower, "may play")
+            || scan_contains_phrase(lower, "may cast")
+            || tag::<_, _, OracleError<'_>>("play ").parse(lower).is_ok()
+            || tag::<_, _, OracleError<'_>>("cast ").parse(lower).is_ok());
+
+    battlefield_recall || hand_recall || copy_token_recall || play_from_exile_grant
 }
 
 fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
@@ -11183,6 +11199,22 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
                     rewrite_filter_parent_to_tracked_set(affected);
                 }
             }
+        }
+        // CR 603.7 + CR 400.7i: "You may play that card for as long as it
+        // remains exiled" — the "that card" anaphor refers to the card the
+        // preceding exile published into the tracked set. A bare
+        // play-from-exile grant parses with `target: Any` (or `ParentTarget`),
+        // which `grant_permission::resolve` would otherwise bind to the source
+        // object rather than the exiled card. Re-target it to the tracked set so
+        // the permission attaches to the just-exiled card (Gonti, Canny
+        // Acquisitor). Scoped to `PlayFromExile` so non-impulse grants are
+        // untouched.
+        Effect::GrantCastingPermission {
+            target,
+            permission: CastingPermission::PlayFromExile { .. },
+            ..
+        } if matches!(target, TargetFilter::Any | TargetFilter::ParentTarget) => {
+            *target = tracked_set_filter();
         }
         _ => {}
     }
@@ -15717,19 +15749,67 @@ fn rebind_decline_body_recipients(clause: &mut ParsedEffectClause) {
     }
 }
 
-/// CR 109.4 + CR 700.1: Strip a "who [doesn't] control [type-phrase]" relative
-/// clause that follows an "each opponent"/"each player" subject. Returns the
+/// CR 109.4: Parse the shared "who [doesn't] control [type-phrase]" control
+/// predicate — the present/absent axis plus the controlled-permanent filter.
+/// Returns `(ControlPresence, TargetFilter, remainder)` where `remainder` is the
+/// text after the consumed object sub-phrase, or `None` when no control predicate
+/// is present (or the object resolves to the everything-matching
+/// `TargetFilter::Any`, which must not silently match every permanent).
+///
+/// The object sub-phrase ("an Elf", "a creature with power 4 or greater")
+/// delegates to the shared `parse_type_phrase_with_ctx` combinator — no bespoke
+/// string matching. This is the DRY core shared by the "each opponent who
+/// controls …" subject path (`strip_controls_permanent_clause`) and the "the
+/// number of opponents who control …" quantity path (`oracle_quantity.rs`).
+pub(crate) fn parse_controls_permanent_object<'a>(
+    rest: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(ControlPresence, TargetFilter, &'a str)> {
+    let lower = rest.to_lowercase();
+    // "who controls " / "who doesn't control " — one alt() arm per presence axis.
+    // Both singular ("each opponent who controls") and plural ("opponents who
+    // control") subject-verb agreement forms are accepted: the present/absent
+    // axis is identical regardless of grammatical number. Negative forms are
+    // longest-match-first so "doesn't/does not/don't/do not control" win before
+    // the bare affirmative; "controls " precedes "control " so the singular form
+    // is not split.
+    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
+        preceded(
+            tag("who "),
+            alt((
+                value(ControlPresence::ControlsNone, tag("doesn't control ")),
+                value(ControlPresence::ControlsNone, tag("does not control ")),
+                value(ControlPresence::ControlsNone, tag("don't control ")),
+                value(ControlPresence::ControlsNone, tag("do not control ")),
+                value(ControlPresence::Controls, tag("controls ")),
+                value(ControlPresence::Controls, tag("control ")),
+            )),
+        )
+        .parse(i)
+    })?;
+    // The object sub-phrase is consumed by the shared type-phrase combinator.
+    let (filter, remainder) = super::oracle_target::parse_type_phrase_with_ctx(after_verb, ctx);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some((presence, filter, remainder))
+}
+
+/// CR 109.4: Strip a "who [doesn't] control [type-phrase]" relative clause that
+/// follows an "each opponent"/"each player" subject. Returns the
 /// `PlayerFilter::ControlsPermanent` scope (carrying the base subject's
 /// relation, the present/absent axis, and the controlled-permanent filter) and
 /// the verb-phrase remainder. Returns `None` when no control clause is present.
 ///
-/// The object sub-phrase ("an Elf") delegates to the shared `parse_type_phrase`
-/// combinator — no bespoke string matching.
+/// Delegates the control predicate to the shared
+/// `parse_controls_permanent_object` core; this function adds the subject-path
+/// concerns: deriving the relation from the base subject and enforcing a
+/// non-empty verb-phrase residual.
 fn strip_controls_permanent_clause(
     base: &PlayerFilter,
     rest: &str,
 ) -> Option<(PlayerFilter, String)> {
-    use crate::types::ability::{ControlPresence, PlayerRelation};
+    use crate::types::ability::PlayerRelation;
     // The base subject only contributes its player relation; HighestSpeed and
     // any non-relational base are out of scope for a controls qualifier.
     let relation = match base {
@@ -15737,24 +15817,9 @@ fn strip_controls_permanent_clause(
         PlayerFilter::All => PlayerRelation::All,
         _ => return None,
     };
-    let lower = rest.to_lowercase();
-    // "who controls " / "who doesn't control " — one alt() arm per presence axis.
-    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
-        preceded(
-            tag("who "),
-            alt((
-                value(ControlPresence::ControlsNone, tag("doesn't control ")),
-                value(ControlPresence::ControlsNone, tag("does not control ")),
-                value(ControlPresence::Controls, tag("controls ")),
-            )),
-        )
-        .parse(i)
-    })?;
-    // The object sub-phrase is consumed by the shared type-phrase combinator.
-    let (filter, remainder) = super::oracle_target::parse_type_phrase(after_verb);
-    if matches!(filter, TargetFilter::Any) {
-        return None;
-    }
+    // Match today's no-ctx behaviour for the subject path.
+    let mut ctx = ParseContext::default();
+    let (presence, filter, remainder) = parse_controls_permanent_object(rest, &mut ctx)?;
     let verb_phrase = remainder.trim_start();
     if verb_phrase.is_empty() {
         return None;
@@ -17194,7 +17259,17 @@ fn try_parse_damage_with_remainder<'a>(
             .parse(amount_lower.as_str())
             .ok()?;
         let qty_text = amount_text[..before_to.len()].trim();
+        // CR 120.1: The amount of a "deals damage equal to <qty>" clause may be a
+        // dynamic count ("the number of creatures you control" — Ajani, Nacatl
+        // Avenger). Mirror the sibling "damage to <target> equal to <amount>"
+        // branch: try the event-context refs first, then fall back to the general
+        // CDA quantity parser (`the number of … you control`, `your life total`,
+        // …). Without this fallback the phrase degrades to a raw `Variable`, which
+        // resolves to 0 at runtime — the damage silently no-ops.
         let qty = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
+            .or_else(|| {
+                crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)
+            })
             .unwrap_or_else(|| QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: qty_text.to_string(),
@@ -20629,6 +20704,36 @@ mod tests {
                 }
             ),
             "expected source-power DealDamage, got: {:?}",
+            clause.effect
+        );
+    }
+
+    /// CR 120.1: "deals damage equal to <count> to <target>" must resolve the
+    /// dynamic count via the CDA quantity parser, not degrade to a raw
+    /// `Variable` (which resolves to 0 — a silent no-op). Ajani, Nacatl
+    /// Avenger's reflexive trigger ("he deals damage equal to the number of
+    /// creatures you control to any target") is the repro; the "<count> to
+    /// <target>" word order previously skipped the CDA fallback that the
+    /// "<target> equal to <count>" word order already had.
+    #[test]
+    fn damage_equal_to_object_count_resolves_to_object_count_not_variable() {
+        let clause = parse_effect_clause(
+            "~ deals damage equal to the number of creatures you control to any target",
+            &mut ParseContext::default(),
+        );
+
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                }
+            ),
+            "expected ObjectCount-amount DealDamage to Any, got: {:?}",
             clause.effect
         );
     }
@@ -25829,6 +25934,79 @@ mod tests {
             ),
             "Expected ExileTop(Player, 1, face_down=false), got {:?}",
             effect
+        );
+    }
+
+    /// CR 406.3 + CR 701.16a: "look at the top card of <player>'s library, then
+    /// exile it face down" is the Gonti, Canny Acquisitor impulse idiom. The
+    /// private `Dig` look step (CR 701.16a) only inspects the top card; the
+    /// "then exile it face down" clause must rewrite it into a face-down
+    /// `Effect::ExileTop` so the card actually leaves the library (issue #1316).
+    /// Building-block coverage independent of any trigger context — a bare chain
+    /// resolves "that player's library" to `ParentTarget`.
+    #[test]
+    fn look_at_top_then_exile_it_face_down_rewrites_dig_to_exile_top() {
+        let def = parse_effect_chain(
+            "Look at the top card of that player's library, then exile it face down.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: true,
+                }
+            ),
+            "Expected the look-then-exile idiom to lower to a face-down ExileTop, got {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 400.7i + CR 603.7: The Gonti impulse-play grant ("You may play that
+    /// card for as long as it remains exiled, and mana of any type can be spent
+    /// to cast that spell") must bind to the card the preceding face-down
+    /// `ExileTop` published into the tracked set — without it the grant would
+    /// attach `PlayFromExile` to the source object and the exiled card would
+    /// stay unplayable (issue #1316).
+    #[test]
+    fn exile_then_play_from_exile_grant_binds_to_tracked_set() {
+        let def = parse_effect_chain(
+            "Look at the top card of that player's library, then exile it face down. You may play that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    face_down: true,
+                    ..
+                }
+            ),
+            "Expected a face-down ExileTop head, got {:?}",
+            def.effect
+        );
+        let grant = def
+            .sub_ability
+            .as_ref()
+            .expect("the impulse-play grant must chain after the exile");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                        ..
+                    },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    ..
+                }
+            ),
+            "Expected PlayFromExile grant bound to the tracked exiled card, got {:?}",
+            grant.effect
         );
     }
 
@@ -31136,6 +31314,48 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// CR 109.4: building-block coverage for the shared control predicate
+    /// `parse_controls_permanent_object` — the present/absent presence axis, the
+    /// delegated object filter, the consumed-remainder shape, and the
+    /// `TargetFilter::Any` rejection. This is the core both the subject path
+    /// (`strip_controls_permanent_clause`) and the quantity path
+    /// (`oracle_quantity.rs` PlayerCount) compose over.
+    #[test]
+    fn parse_controls_permanent_object_core() {
+        use crate::types::ability::ControlPresence;
+
+        // Affirmative "who controls <object>" + remainder preserved.
+        let mut ctx = ParseContext::default();
+        let (presence, filter, remainder) =
+            parse_controls_permanent_object("who controls an artifact loses 1 life", &mut ctx)
+                .expect("affirmative control predicate must parse");
+        assert_eq!(presence, ControlPresence::Controls);
+        assert!(
+            !matches!(filter, TargetFilter::Any),
+            "artifact object must be captured, got {filter:?}"
+        );
+        assert_eq!(remainder.trim_start(), "loses 1 life");
+
+        // Negative "who doesn't control <object>".
+        let mut ctx = ParseContext::default();
+        let (presence, _filter, _) =
+            parse_controls_permanent_object("who doesn't control a creature", &mut ctx)
+                .expect("negative control predicate must parse");
+        assert_eq!(presence, ControlPresence::ControlsNone);
+
+        // No object after "control" → the all-matching `TargetFilter::Any` is
+        // rejected so callers never count every permanent/opponent.
+        let mut ctx = ParseContext::default();
+        assert!(
+            parse_controls_permanent_object("who controls", &mut ctx).is_none(),
+            "bare 'who controls' with no object must be rejected"
+        );
+
+        // Missing the "who …" lead → no predicate.
+        let mut ctx = ParseContext::default();
+        assert!(parse_controls_permanent_object("draws a card", &mut ctx).is_none());
     }
 
     #[test]

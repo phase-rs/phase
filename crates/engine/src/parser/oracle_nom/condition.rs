@@ -113,6 +113,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
     alt((
         parse_opponent_poison_conditions,
         parse_defending_player_comparison_conditions,
+        parse_that_player_controls_more_comparison,
         parse_no_opponent_comparison_conditions,
         parse_opponent_comparison_conditions,
         parse_life_conditions,
@@ -4492,6 +4493,44 @@ fn parse_there_exists_condition(input: &str) -> OracleResult<'_, StaticCondition
     ))
 }
 
+/// Parse "that player controls more [type] than you" → QuantityComparison.
+///
+/// CR 603.2b + CR 603.4 + CR 102.1: Phase triggers such as Keeper of the Accord
+/// ("At the beginning of each opponent's end step, if that player controls more
+/// creatures than you, ...") compare the active player's battlefield to the
+/// source controller's. `ControllerRef::ScopedPlayer` binds to the event player
+/// at both detection and resolution (`resolve_quantity_for_trigger_check`).
+fn parse_that_player_controls_more_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("that player controls more ").parse(input)?;
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" than you").parse(rest)?;
+    let (rest, _) = tag(" than you").parse(rest)?;
+
+    let (filter, _) = parse_type_phrase(type_text.trim());
+    let scoped_filter = match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(tf.controller(ControllerRef::ScopedPlayer)),
+        other => other,
+    };
+    let you_filter = match parse_type_phrase(type_text.trim()) {
+        (TargetFilter::Typed(tf), _) => TargetFilter::Typed(tf.controller(ControllerRef::You)),
+        (other, _) => other,
+    };
+
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: scoped_filter,
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter: you_filter },
+            },
+        },
+    ))
+}
+
 /// Parse "defending player controls more [type] than you" → QuantityComparison.
 ///
 /// CR 508.1b + CR 603.4: Attack triggers can carry intervening-if clauses
@@ -7457,6 +7496,38 @@ mod tests {
                         qty: QuantityRef::ObjectCount { .. },
                     },
             } => {}
+            other => panic!("expected ObjectCount GT ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// CR 603.2b + CR 603.4: Keeper of the Accord — "that player" is the active
+    /// player whose phase is beginning, not a generic opponent aggregate.
+    #[test]
+    fn test_that_player_controls_more_creatures_than_you() {
+        let (rest, c) =
+            parse_inner_condition("that player controls more creatures than you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(lhs),
+                            },
+                    },
+                comparator: Comparator::GT,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(rhs),
+                            },
+                    },
+            } => {
+                assert_eq!(lhs.controller, Some(ControllerRef::ScopedPlayer));
+                assert_eq!(rhs.controller, Some(ControllerRef::You));
+            }
             other => panic!("expected ObjectCount GT ObjectCount, got {other:?}"),
         }
     }
