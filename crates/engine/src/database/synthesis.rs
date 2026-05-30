@@ -15,7 +15,7 @@ use crate::types::ability::{
     RuntimeHandler, SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
-use crate::types::card::{CardFace, CardLayout};
+use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
@@ -28,6 +28,60 @@ use crate::types::zones::Zone;
 // ---------------------------------------------------------------------------
 // Shared helpers for building card faces from MTGJSON data
 // ---------------------------------------------------------------------------
+
+/// CR 702.148a-b + CR 612: Parse a face's Oracle text under Cleave's
+/// text-changing semantics, returning the printed-cost parse and (when the face
+/// has Cleave) the bracket-removed cleave variant.
+///
+/// Single authority for the cleave bracket prep so the real card-data build
+/// pipeline (`build_oracle_face_inner`) and the test scenario harness
+/// (`scenario::build_face_from_oracle`) cannot silently diverge:
+///   * The base parse keeps the bracketed clause but drops the bracket
+///     characters (`BracketMode::KeepContent`) so the printed-cost spell parses
+///     correctly. For non-cleave faces the strip is a no-op (the text never
+///     enters the strip), preserving every other parse — and the strip is GATED
+///     on the face having Cleave so the ~362 planeswalkers using `[+N]`/`[−N]`
+///     loyalty brackets are never corrupted.
+///   * When the face has Cleave, a SECOND parse over the bracket-removed text
+///     (`BracketMode::RemoveSpan`) is stashed in the returned `CleaveVariant`.
+///     The casting flow swaps this onto the stack object when the spell is cast
+///     for its cleave cost. This is a leaf parse — never re-projected, so there
+///     is no cleave recursion.
+pub(crate) fn parse_oracle_with_cleave_brackets(
+    raw_oracle_text: &str,
+    card_name: &str,
+    keyword_names: &[String],
+    types: &[String],
+    subtypes: &[String],
+) -> (
+    crate::parser::oracle::ParsedAbilities,
+    Option<CleaveVariant>,
+) {
+    let has_cleave = keyword_names.iter().any(|n| n == "cleave");
+
+    let base_oracle_text = if has_cleave {
+        apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent)
+    } else {
+        raw_oracle_text.to_string()
+    };
+    let parsed = parse_oracle_text(&base_oracle_text, card_name, keyword_names, types, subtypes);
+
+    let cleave_variant = if has_cleave {
+        let cleave_text = apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan);
+        let cleave_parsed =
+            parse_oracle_text(&cleave_text, card_name, keyword_names, types, subtypes);
+        Some(CleaveVariant {
+            abilities: cleave_parsed.abilities,
+            triggers: cleave_parsed.triggers,
+            static_abilities: cleave_parsed.statics,
+            replacements: cleave_parsed.replacements,
+        })
+    } else {
+        None
+    };
+
+    (parsed, cleave_variant)
+}
 
 /// Internal layout classification from MTGJSON layout strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4235,59 +4289,17 @@ fn build_oracle_face_inner(
     let types: Vec<String> = mtgjson.types.clone();
     let subtypes: Vec<String> = mtgjson.subtypes.clone();
 
-    // CR 702.148a-b + CR 612: Cleave's second ability is a text-changing effect
-    // that removes every square-bracketed span from the spell's rules text. The
-    // brackets mark the cleave-removable clause within the shared Oracle text.
-    //
-    // The bracket strip is GATED on the face having Cleave — 362 planeswalkers
-    // use `[+N]`/`[−N]`/`[0]` loyalty brackets and an unconditional strip would
-    // corrupt them. MTGJSON reports the `Cleave` keyword for every cleave card,
-    // so the lowercased keyword-name check is a reliable pre-parse gate.
-    let has_cleave = mtgjson_keyword_names.iter().any(|n| n == "cleave");
-
-    // CR 702.148a base text: keep the bracketed clause but drop the bracket
-    // characters so the printed-cost parse is correct (Fierce Retribution's
-    // `[attacking]`, Path of Peril's `[mv≤2]`, Winged Portent's `[with flying]`,
-    // Dig Up's `[basic land]`/`[reveal it,]`). For non-cleave faces this is a
-    // no-op (the text never enters the strip), preserving every other parse.
-    let base_oracle_text = if has_cleave {
-        apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent)
-    } else {
-        raw_oracle_text.to_string()
-    };
-
-    let parsed = parse_oracle_text(
-        &base_oracle_text,
+    // CR 702.148a-b + CR 612: Cleave's text-changing effect removes every
+    // square-bracketed span from the spell's rules text. `parse_oracle_with_cleave_brackets`
+    // is the single authority for the dual (printed-cost / cleave-cost) parse,
+    // shared with the test scenario harness so the two pipelines cannot diverge.
+    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
+        raw_oracle_text,
         face_name,
         &parser_keyword_names,
         &types,
         &subtypes,
     );
-
-    // CR 702.148a-b: When the face has Cleave, run a SECOND parse over the
-    // bracket-removed (cleave-cost) text and stash the resulting ability set in
-    // `cleave_variant`. The casting flow swaps this onto the stack object when
-    // the spell is cast for its cleave cost. This is a leaf parse — the variant
-    // is stored on the face, never re-projected through `synthesize_all`, so
-    // there is no cleave recursion.
-    let cleave_variant = if has_cleave {
-        let cleave_text = apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan);
-        let cleave_parsed = parse_oracle_text(
-            &cleave_text,
-            face_name,
-            &parser_keyword_names,
-            &types,
-            &subtypes,
-        );
-        Some(crate::types::card::CleaveVariant {
-            abilities: cleave_parsed.abilities,
-            triggers: cleave_parsed.triggers,
-            static_abilities: cleave_parsed.statics,
-            replacements: cleave_parsed.replacements,
-        })
-    } else {
-        None
-    };
 
     // Merge keywords extracted from Oracle text with MTGJSON keywords.
     // When the Oracle parser extracts a parameterized keyword (e.g., Morph({2}{B}{G}{U})),

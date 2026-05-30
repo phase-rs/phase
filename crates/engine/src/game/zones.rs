@@ -178,6 +178,29 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
             state.layers_dirty = true;
         }
 
+        // CR 702.148a + CR 612: A cleave spell's text-changing effect functions
+        // only "while a spell with cleave is on the stack." The bracket-removed
+        // ability set is installed on the hand object at cast time and must be
+        // reverted to the printed form when the spell leaves the stack —
+        // whether it resolved (Stack → Graveyard/Exile), was countered, or
+        // fizzled. Without this revert the same object id carries the cleave
+        // (bracket-removed) abilities into the graveyard, and a graveyard→hand
+        // recursion (Regrowth, Eternal Witness) — which reuses the object id
+        // without re-projecting the printed face — would let a later
+        // normal-cost recast resolve with the wrong (cleave) text.
+        //
+        // Gated the same way as bestow (preserve only on → Stack and on
+        // Stack → Battlefield) so the logic is uniform and future-proof, even
+        // though cleave instants/sorceries never resolve onto the battlefield.
+        let preserve_cleave_form = match from {
+            _ if to == Zone::Stack => true,
+            Zone::Stack if to == Zone::Battlefield => true,
+            _ => false,
+        };
+        if !preserve_cleave_form && obj_mut.cleave_form.is_some() {
+            super::casting::revert_cleave_text_change(obj_mut);
+        }
+
         // CR 122.2: Counters cease to exist when an object changes zones.
         obj_mut.counters.clear();
     }

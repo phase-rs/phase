@@ -3883,37 +3883,26 @@ pub fn handle_bestow_cost_choice_with_payment_mode(
     continue_cast_from_prepared(state, player, object_id, payment_mode, events)
 }
 
-/// CR 702.148a-b + CR 612: Snapshot of the four ability classes that the cleave
-/// text-changing swap overwrites, used to revert the object to its printed form
-/// if cast preparation fails (mirrors the bestow `Err`-path revert).
-struct CleaveAbilitySnapshot {
-    abilities: std::sync::Arc<Vec<AbilityDefinition>>,
-    triggers: crate::types::definitions::Definitions<crate::types::ability::TriggerDefinition>,
-    statics: crate::types::definitions::Definitions<StaticDefinition>,
-    replacements:
-        crate::types::definitions::Definitions<crate::types::ability::ReplacementDefinition>,
-    base_abilities: std::sync::Arc<Vec<AbilityDefinition>>,
-    base_triggers: std::sync::Arc<Vec<crate::types::ability::TriggerDefinition>>,
-    base_statics: std::sync::Arc<Vec<StaticDefinition>>,
-    base_replacements: std::sync::Arc<Vec<crate::types::ability::ReplacementDefinition>>,
-}
-
 /// CR 702.148a-b + CR 612: Apply the cleave text-changing effect to a hand
 /// object by swapping in the bracket-removed ability set parsed at build time
 /// (`obj.cleave_variant`). All four ability classes are replaced on both the
 /// live and base fields (mirroring `apply_bestow_aura_form`'s dual-field write)
 /// so the swap survives any layer-evaluation reset that anchors on base values.
 ///
-/// Returns a `CleaveAbilitySnapshot` of the pre-swap state so the caller can
-/// revert on a cast-preparation `Err`. Returns `None` (no swap, no snapshot) if
-/// the object carries no `cleave_variant` — the cleave path is only offered when
-/// the variant is present, so `None` here means a malformed call rather than a
-/// normal cast and the caller falls through to a printed-cost cast.
-fn apply_cleave_text_change(
-    obj: &mut crate::game::game_object::GameObject,
-) -> Option<CleaveAbilitySnapshot> {
-    let variant = obj.cleave_variant.clone()?;
-    let snapshot = CleaveAbilitySnapshot {
+/// The pre-swap state is captured into `obj.cleave_form` (a typed marker
+/// mirroring `bestow_form`) so the printed form can be restored two ways: on a
+/// cast-preparation `Err` via `revert_cleave_text_change`, and — critically —
+/// when the spell leaves the stack via `apply_zone_exit_cleanup` (CR 702.148a:
+/// the abilities function only while the spell is on the stack). Returns `false`
+/// (no swap, no marker) if the object carries no `cleave_variant` — the cleave
+/// path is only offered when the variant is present, so `false` here means a
+/// malformed call rather than a normal cast and the caller falls through to a
+/// printed-cost cast.
+fn apply_cleave_text_change(obj: &mut crate::game::game_object::GameObject) -> bool {
+    let Some(variant) = obj.cleave_variant.clone() else {
+        return false;
+    };
+    obj.cleave_form = Some(crate::game::game_object::CleaveFormState {
         abilities: std::sync::Arc::clone(&obj.abilities),
         triggers: obj.trigger_definitions.clone(),
         statics: obj.static_definitions.clone(),
@@ -3922,7 +3911,7 @@ fn apply_cleave_text_change(
         base_triggers: std::sync::Arc::clone(&obj.base_trigger_definitions),
         base_statics: std::sync::Arc::clone(&obj.base_static_definitions),
         base_replacements: std::sync::Arc::clone(&obj.base_replacement_definitions),
-    };
+    });
     // CR 612: the cleave-cost text replaces the spell's printed text. Swap all
     // four ability classes — only `abilities` differs for the published cleave
     // cards, but projecting the full set is defensive and future-proof.
@@ -3934,16 +3923,18 @@ fn apply_cleave_text_change(
     obj.base_trigger_definitions = std::sync::Arc::new(variant.triggers);
     obj.base_static_definitions = std::sync::Arc::new(variant.static_abilities);
     obj.base_replacement_definitions = std::sync::Arc::new(variant.replacements);
-    Some(snapshot)
+    true
 }
 
-/// CR 702.148a-b: Restore the printed ability set captured by
-/// `apply_cleave_text_change`. Used on the cast-preparation `Err` path so a
-/// failed cleave cast leaves the hand object in its printed form for any retry.
-fn revert_cleave_text_change(
-    obj: &mut crate::game::game_object::GameObject,
-    snapshot: CleaveAbilitySnapshot,
-) {
+/// CR 702.148a-b: Restore the printed ability set captured in `obj.cleave_form`
+/// by `apply_cleave_text_change`, clearing the marker. Used on the
+/// cast-preparation `Err` path (so a failed cleave cast leaves the hand object
+/// in its printed form for any retry) and by `apply_zone_exit_cleanup` when the
+/// cleave spell leaves the stack. Idempotent: a no-op if no cleave form is live.
+pub(crate) fn revert_cleave_text_change(obj: &mut crate::game::game_object::GameObject) {
+    let Some(snapshot) = obj.cleave_form.take() else {
+        return;
+    };
     obj.abilities = snapshot.abilities;
     obj.trigger_definitions = snapshot.triggers;
     obj.static_definitions = snapshot.statics;
@@ -4005,12 +3996,14 @@ pub fn handle_cleave_cost_choice_with_payment_mode(
     };
     if alt_path {
         // CR 702.148a-b + CR 612: Apply the cleave text-changing effect to the
-        // hand object BEFORE preparing the cast, capturing a snapshot so the
-        // printed form can be restored if preparation fails.
-        let snapshot = state
-            .objects
-            .get_mut(&object_id)
-            .and_then(apply_cleave_text_change);
+        // hand object BEFORE preparing the cast. The pre-swap snapshot is stored
+        // in `obj.cleave_form` so the printed form can be restored if
+        // preparation fails — and, while the spell is on the stack, so the
+        // zone-exit cleanup can revert the text change when the spell leaves the
+        // stack (CR 702.148a).
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            apply_cleave_text_change(obj);
+        }
         let mut prepared = match prepare_spell_cast_with_variant_override(
             state,
             player,
@@ -4021,8 +4014,8 @@ pub fn handle_cleave_cost_choice_with_payment_mode(
             Err(e) => {
                 // Roll back the cleave text change so the hand object is left
                 // in its printed form for any retry.
-                if let (Some(snapshot), Some(obj)) = (snapshot, state.objects.get_mut(&object_id)) {
-                    revert_cleave_text_change(obj, snapshot);
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    revert_cleave_text_change(obj);
                 }
                 return Err(e);
             }

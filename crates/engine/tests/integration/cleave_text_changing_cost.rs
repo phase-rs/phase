@@ -476,6 +476,89 @@ fn path_of_peril_cleave_destroys_all_creatures() {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. Zone-change regression (CR 702.148a): a cleave spell's text-changing
+//     effect functions only while the spell is on the stack. After a cleave
+//     cast resolves to the graveyard and the card is returned to hand (Regrowth
+//     / Eternal Witness recursion reuses the same object id without
+//     re-projecting the printed face), a NORMAL-cost recast must resolve with
+//     the PRINTED (bracketed) restriction restored — NOT the leaked
+//     bracket-removed cleave text.
+//
+//     This test FAILS before the zone-exit revert fix (the cleave_form leaks:
+//     the graveyard object keeps the bracket-removed DestroyAll, so the
+//     normal-cost recast's filter carries NO CMC restriction) and PASSES after
+//     (the revert restores the printed CMC<=2 DestroyAll on stack exit).
+// ---------------------------------------------------------------------------
+
+fn path_of_peril_in_hand(scenario: &mut GameScenario) -> ObjectId {
+    cleave_spell_in_hand(
+        scenario,
+        "Path of Peril",
+        PATH_OF_PERIL,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::Black],
+            generic: 4,
+        },
+        true,
+    )
+}
+
+#[test]
+fn path_of_peril_cleave_then_regrowth_recast_restores_printed_cmc_restriction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = path_of_peril_in_hand(&mut scenario);
+    let mut runner = scenario.build();
+    flood_mana(&mut runner);
+
+    // 1. Cast for the CLEAVE cost: the bracket-removed DestroyAll (no CMC) is
+    //    installed on the object and it goes on the stack.
+    cast_with_decision(&mut runner, spell, AlternativeCastDecision::Alternative);
+    let cleave_filter = destroy_all_filter(cast_spell_object(&runner, spell)).clone();
+    assert!(
+        !filter_has_cmc(&cleave_filter),
+        "precondition: cleave-cast object must carry the bracket-removed (no CMC) DestroyAll, got {cleave_filter:?}"
+    );
+
+    // 2. Resolve the sorcery — it leaves the stack for the graveyard.
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Graveyard,
+        "the resolved cleave sorcery must be in the graveyard"
+    );
+
+    // 3. Regrowth-style recursion: return the SAME object id from graveyard to
+    //    hand via `move_to_zone` (the recursion path that does NOT re-project
+    //    the printed face). Per CR 702.148a the cleave text-change must already
+    //    have ended on the stack-exit in step 2.
+    let owner = runner.state().objects[&spell].owner;
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), spell, Zone::Hand, &mut events);
+    assert_eq!(
+        runner.state().objects[&spell].owner,
+        owner,
+        "object identity must be preserved across the graveyard→hand move"
+    );
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Hand,
+        "the card must be back in hand for the recast"
+    );
+
+    // 4. Recast at the PRINTED (normal) mana cost. The printed text must be
+    //    restored: DestroyAll must carry the CMC<=2 restriction again.
+    cast_with_decision(&mut runner, spell, AlternativeCastDecision::Normal);
+    let recast_filter = destroy_all_filter(cast_spell_object(&runner, spell)).clone();
+    assert!(
+        filter_has_cmc(&recast_filter),
+        "CR 702.148a: after a cleave cast resolves and the card returns to hand, \
+         a normal-cost recast must restore the printed CMC<=2 DestroyAll \
+         restriction (the cleave text-change ended on stack exit), got {recast_filter:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 5. Winged Portent: base draw = flyers-you-control; cleave = all creatures.
 // ---------------------------------------------------------------------------
 
