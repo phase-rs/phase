@@ -71,6 +71,8 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
 /// `layers_dirty` for these is defensive — the layer reset/re-derive path is
 /// idempotent when counters already match.
 pub(crate) fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
+    // CR 613.1: Recompute the continuous-effect layer system whenever a
+    // counter change can alter condition-gated effects.
     counter_type.power_toughness_delta().is_some()
         || matches!(
             counter_type,
