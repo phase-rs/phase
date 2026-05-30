@@ -5107,6 +5107,7 @@ mod tests {
 
             const PREFIX_STEPS: usize = 120;
             let mut steps = 0usize;
+            let resolve_start = std::time::Instant::now();
             while !state.stack.is_empty() && steps < PREFIX_STEPS {
                 let mut events = Vec::new();
                 resolve_next(&mut state, &mut events);
@@ -5114,45 +5115,57 @@ mod tests {
                 crate::game::sba::check_state_based_actions(&mut state, &mut events);
                 steps += 1;
             }
+            let resolve_elapsed = resolve_start.elapsed();
             let full_evals = FULL_EVALUATE_LAYERS_COUNT.load(Ordering::Relaxed);
+            eprintln!(
+                "real-board probe: full_evals={full_evals} steps={steps} \
+                 wall_clock={resolve_elapsed:?} ({:.1}ms/step)",
+                resolve_elapsed.as_secs_f64() * 1000.0 / steps.max(1) as f64
+            );
 
             assert!(
                 steps > 20,
                 "prefix must resolve enough steps to discriminate (got {steps})"
             );
-            // IMPORTANT — this particular repro is NOT an O(N) board, and that is
-            // RULES-CORRECT, not a regression. The board carries four board-
+            // CR 611.3a + CR 611.3b — TRUTH-DELTA SHORT-CIRCUIT: full evals on
+            // this repro collapse to NEAR-CONSTANT (measured 4 across 120 steps,
+            // down from ~63 before the short-circuit). The board carries board-
             // population-gated statics (Kruphix `Not(DevotionGE {G/U,7})`,
             // Anger/Brawn land-presence, Grist's source-zone gate). The entries
-            // resolving here are the SIX-LANDS branch of Scute Swarm's landfall:
-            // "create a token that's a copy of Scute Swarm" (CR 707.2 — a copy
-            // takes the copiable mana cost {2}{G}). Each copy-token therefore
-            // carries a GREEN mana symbol, so CR 700.5 devotion to green strictly
-            // INCREASES on every entry and Kruphix's devotion gate genuinely can
-            // flip for the whole recipient set. The entry-aware narrowing MUST
-            // escalate those entries — under-escalating to win a perf bound would
-            // leave pre-existing recipients with stale derived state (CR 611.3a),
-            // the #1 hard-rule violation. So `full_evals` legitimately tracks the
-            // devotion-perturbing entry count (~1 per copy), not a constant.
+            // are the six-lands branch of Scute Swarm's landfall: "create a token
+            // that's a COPY of Scute Swarm" (CR 707.2 — the copy takes the
+            // copiable mana cost {2}{G}), so each copy-token carries a GREEN mana
+            // symbol and CR 700.5 devotion to green strictly INCREASES on every
+            // entry.
             //
-            // The O(N) entry-aware fast-path guarantee (colorless / non-perturbing
-            // entries flip NO gate ⇒ NO escalation) is proven directly and
-            // discriminatingly by the synthetic per-axis dual tests below
-            // (`devotion_gate_colorless_entry_does_not_escalate_and_matches_full`
-            // et al.), which is where that bound belongs. Here we only assert the
-            // weaker invariant that resolution stays bounded (it never DEGRADES
-            // past one full pass per step) and the run completes — the real-board
-            // smoke test that the pipeline still terminates without pathological
-            // re-entry.
+            // Under d9a40be71 every such devotion-perturbing entry escalated to a
+            // full pass (~1 per copy → ~63). But Kruphix's gate is
+            // `Not(DevotionGE 7)`: once green devotion is already >= 7 (it is,
+            // early), the gate TRUTH is stable FALSE and never flips again no
+            // matter how high devotion climbs. The truth-delta short-circuit
+            // recomputes the gate's AFTER truth against the live board and skips
+            // escalation when `before == after` — so devotion-perturbing-but-
+            // non-flipping entries now stay on the incremental fast path. The few
+            // residual full evals are rules-MANDATORY flips (a genuine gate
+            // crossing, e.g. an early devotion edge or a land-presence gate
+            // flipping once) or Axis-1 escalations; they are NOT
+            // under-escalation — `after` is always recomputed authoritatively
+            // from the live board (CR 611.3a), so the short-circuit errs only
+            // toward over-escalation, never stale derived state.
+            //
+            // Bound: `full_evals < steps/4 + 8` proves the near-O(1) collapse
+            // (the measured 4 sits far under 38) while leaving headroom for the
+            // handful of rules-mandatory flips. The per-axis synthetic dual tests
+            // above pin the exact short-circuit / escalation decision per axis.
             assert!(
-                full_evals <= steps,
-                "incremental flush must never exceed one full evaluate_layers per \
-                 resolution step: {full_evals} full passes across {steps} steps \
-                 (stack was {stack_size}). On this repro the entries are {{2}}{{G}} \
-                 Scute Swarm copy-tokens that legitimately perturb Kruphix's green \
-                 devotion gate (CR 700.5 / CR 611.3a), so per-entry escalation is \
-                 rules-mandatory — but a COUNT above `steps` would mean redundant \
-                 re-evaluation, a real regression."
+                full_evals < steps / 4 + 8,
+                "truth-delta short-circuit must keep full evaluate_layers passes \
+                 near-constant: got {full_evals} full passes across {steps} steps \
+                 (stack was {stack_size}). Kruphix's `Not(DevotionGE 7)` gate is \
+                 stable FALSE once devotion >= 7 (CR 700.5 / CR 611.3a), so \
+                 devotion-perturbing copy-token entries must NOT escalate — a count \
+                 anywhere near `steps` would mean the short-circuit regressed back \
+                 to per-entry escalation."
             );
         }
 
@@ -5991,6 +6004,379 @@ mod tests {
                 &normal,
                 &forced,
                 "most-prevalent tally unconditional escalation",
+            );
+        }
+
+        // ====================================================================
+        // Truth-delta short-circuit tests (CR 611.3a + CR 611.3b).
+        //
+        // A source-level (non-recipient-context) population-gated CONTINUOUS
+        // static no longer escalates an incremental flush merely because an
+        // entry perturbs its gate INPUT — it escalates only when the gate TRUTH
+        // flips. Recipient-context gates, magnitude perturbation (Axis 2a), and
+        // key-absent fail-closed all still escalate unconditionally.
+        // ====================================================================
+
+        /// Build a board with a SOURCE-LEVEL `Not(DevotionGE {Green, 7})`-gated
+        /// anthem ("creatures you control get +1/+1 as long as your devotion to
+        /// green is LESS than 7"). The gate is whole-effect on/off (consumed at
+        /// collection, `condition: None` on the active effect) and NON-recipient-
+        /// context (`condition_uses_recipient_context` is false for `DevotionGE`,
+        /// recursed through `Not`). `green_symbols` green mana symbols on the
+        /// anthem source set the controller's baseline devotion (CR 700.5), so the
+        /// caller controls whether a green {G} entry crosses the threshold-7 edge.
+        /// Two pre-existing green creatures are the anthem recipients.
+        fn devotion_gated_anthem_board(green_symbols: usize) -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, StaticCondition, StaticDefinition,
+            };
+            use crate::types::mana::{ManaCost, ManaCostShard};
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(300 + i),
+                    PlayerId(0),
+                    format!("DevBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(310),
+                PlayerId(0),
+                "Devotion-Gated Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            // CR 700.5 + CR 611.3a: source-level gate "devotion to green < 7".
+            sd.condition = Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::DevotionGE {
+                    colors: vec![ManaColor::Green],
+                    threshold: 7,
+                }),
+            });
+            let cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green; green_symbols],
+                generic: 0,
+            };
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+                o.mana_cost = cost.clone();
+                o.base_mana_cost = cost;
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// Add a single green {G}-cost creature entry. Raises green devotion by
+        /// exactly one mana symbol (CR 700.5).
+        fn add_green_devotion_entry(state: &mut GameState, card_id: u64) -> ObjectId {
+            use crate::types::mana::{ManaCost, ManaCostShard};
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                "Green Sprout".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let cost = ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 0,
+                };
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(1);
+                o.base_toughness = Some(1);
+                o.power = Some(1);
+                o.toughness = Some(1);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+                o.mana_cost = cost.clone();
+                o.base_mana_cost = cost;
+            }
+            crate::game::layers::mark_layers_entered(state, id);
+            id
+        }
+
+        /// (a) GATE-STAYS — the truth-delta short-circuit's discriminating case.
+        /// Devotion is already 8 (>= 7), so `Not(DevotionGE 7)` is FALSE (gate
+        /// OFF); a green {G} entry raises devotion to 9 — the gate INPUT is
+        /// perturbed but its TRUTH stays FALSE. Under d9a40be71 the perturbation
+        /// alone forced escalation; the truth-delta short-circuit must now skip
+        /// it. `!escalated` FAILS under d9a40be71, PASSES after. `assert_pt_identical`
+        /// confirms the incremental board (anthem off → base 2/2 recipients)
+        /// matches a forced-full board.
+        #[test]
+        fn source_condition_gate_unchanged_does_not_escalate_and_matches_full() {
+            let (normal, escalated, forced) = flush_entry_and_forced(
+                || devotion_gated_anthem_board(8),
+                |s| add_green_devotion_entry(s, 320),
+            );
+            assert!(
+                !escalated,
+                "green entry perturbs devotion but does not flip the < 7 gate \
+                 (8 → 9, still >= 7) — truth-delta short-circuit must not escalate"
+            );
+            assert_pt_identical(&normal, &forced, "devotion gate unchanged non-escalation");
+        }
+
+        /// (b) GATE-FLIPS — baseline devotion 6 (< 7, gate ON, anthem applies
+        /// +1/+1); a green {G} entry raises devotion to 7, flipping
+        /// `Not(DevotionGE 7)` to FALSE (gate OFF). Every PRE-EXISTING recipient
+        /// loses the buff, so the flush MUST escalate. `escalated` + match-full.
+        #[test]
+        fn source_condition_gate_flip_escalates_and_matches_full() {
+            let (normal, escalated, forced) = flush_entry_and_forced(
+                || devotion_gated_anthem_board(6),
+                |s| add_green_devotion_entry(s, 321),
+            );
+            assert!(
+                escalated,
+                "green entry flips the < 7 gate (6 → 7) OFF — pre-existing \
+                 recipients lose the anthem, must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "devotion gate flip escalation");
+        }
+
+        /// Build a MULTI-AXIS anthem: BOTH a `Devotion`-backed magnitude (Axis 2a,
+        /// population-sensitive) AND a source-level population-gated condition
+        /// (`IsPresent(Creature)`, ON and stable). A green {G} entry perturbs the
+        /// magnitude on PRE-EXISTING creatures, so Axis 2a must escalate FIRST —
+        /// regardless of the condition's stable truth. Pins the multi-axis
+        /// ordering (the truth-delta short-circuit must never suppress a magnitude
+        /// perturbation).
+        fn devotion_magnitude_and_condition_board() -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, DevotionColors, StaticCondition, StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(330 + i),
+                    PlayerId(0),
+                    format!("MultiBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(340),
+                PlayerId(0),
+                "Multi-Axis Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: DevotionColors::Fixed(vec![ManaColor::Green]),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: DevotionColors::Fixed(vec![ManaColor::Green]),
+                        },
+                    },
+                },
+            ];
+            // Source-level population gate, ON (creatures exist) and stable.
+            sd.condition = Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+            });
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (c) MULTI-AXIS — magnitude perturbation always escalates (Axis 2a),
+        /// even though the source-level condition's truth is stable ON. A green
+        /// {G} entry moves green devotion, changing the magnitude applied to
+        /// PRE-EXISTING creatures; the truth-delta short-circuit must NOT
+        /// suppress this. `escalated` + match-full.
+        #[test]
+        fn source_condition_and_magnitude_always_escalates() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(devotion_magnitude_and_condition_board, |s| {
+                    add_green_devotion_entry(s, 341)
+                });
+            assert!(
+                escalated,
+                "magnitude (devotion) perturbation must escalate via Axis 2a \
+                 regardless of the stable source-level condition truth"
+            );
+            assert_pt_identical(&normal, &forced, "multi-axis magnitude escalation");
+        }
+
+        /// Build a RECIPIENT-CONTEXT population-gated anthem (the BLOCKER's
+        /// discriminating guard). The condition is
+        /// `QuantityComparison { ObjectCount { Creature AND Another } GE 3 }` —
+        /// "as long as there are at least 3 OTHER creatures". `FilterProp::Another`
+        /// makes the count recipient-relative (`filter_uses_recipient` true), so
+        /// the gate is RE-EVALUATED PER RECIPIENT (`evaluate_condition_with_recipient`
+        /// threads `recipient` into the count, excluding that recipient) and
+        /// `source_condition_gate_passes` only OVER-approximates it. It is also
+        /// population-sensitive (`ObjectCount`). With 3 pre-existing creatures,
+        /// each recipient sees 2 OTHERS (gate OFF). A 4th creature entry makes
+        /// each PRE-EXISTING recipient see 3 others → its per-recipient gate flips
+        /// ON. A single board-level boolean cannot summarize this, so a
+        /// recipient-context gate must ALWAYS escalate (never short-circuit).
+        /// Ships green-and-stale WITHOUT the recipient-context exclusion.
+        fn recipient_context_count_anthem_board() -> GameState {
+            use crate::types::ability::{
+                Comparator, ContinuousModification, FilterProp, StaticCondition, StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            // Three pre-existing creatures (recipients of the anthem).
+            for i in 0..3 {
+                let id = create_object(
+                    &mut state,
+                    CardId(350 + i),
+                    PlayerId(0),
+                    format!("CountBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(360),
+                PlayerId(0),
+                "Other-Creatures Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            // Recipient-relative count: "creatures other than the recipient".
+            let other_creatures = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::Another],
+                ..Default::default()
+            });
+            sd.condition = Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: other_creatures,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            });
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (d) RECIPIENT-CONTEXT (BLOCKER guard) — a population-gated condition
+        /// whose truth is PER-RECIPIENT must always escalate when perturbed, even
+        /// though `source_condition_gate_passes` would report a single, possibly-
+        /// unchanged board-level value. A 4th creature flips each pre-existing
+        /// recipient's "at least 3 other creatures" gate ON, so escalation is
+        /// mandatory. `escalated` + match-full. This ships green-and-stale WITHOUT
+        /// the recipient-context exclusion (the discriminating BLOCKER guard).
+        #[test]
+        fn recipient_context_population_condition_always_escalates_and_matches_full() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(recipient_context_count_anthem_board, |s| {
+                    add_colorless_creature_entry(s, 361)
+                });
+            assert!(
+                escalated,
+                "recipient-context population gate re-evaluates per recipient — \
+                 a threshold-edge creature entry flips pre-existing recipients' \
+                 gates; must escalate unconditionally (never short-circuit)"
+            );
+            assert_pt_identical(
+                &normal,
+                &forced,
+                "recipient-context unconditional escalation",
+            );
+        }
+
+        /// (e) FAIL-CLOSED KEY-ABSENT — when a source-level population-gated
+        /// static's key is ABSENT from `static_gate_truth` (e.g. the cache was
+        /// never refreshed for it, or it was phased out at the last full eval),
+        /// the consult must FAIL CLOSED and escalate. Prime the board, perturb,
+        /// then clear the cache before consulting `incremental_flush_must_escalate`
+        /// directly — the missing BEFORE truth forces a conservative full pass.
+        #[test]
+        fn absent_gate_key_escalates() {
+            let mut state = devotion_gated_anthem_board(6);
+            flush_layers(&mut state);
+            // A green entry perturbs the < 7 gate (would flip 6 → 7).
+            add_green_devotion_entry(&mut state, 322);
+            let entered_ids: std::collections::HashSet<ObjectId> = match &state.layers_dirty {
+                crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
+                other => panic!("expected EnteredObjects, got {other:?}"),
+            };
+            // Simulate a stale/absent cache: drop every recorded gate truth.
+            state.static_gate_truth.clear();
+            assert!(
+                crate::game::layers::incremental_flush_must_escalate(&state, &entered_ids),
+                "absent gate-truth key must fail closed and escalate (invariant 1)"
             );
         }
 

@@ -19,7 +19,7 @@ use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::game_state::{DayNight, GameState, LayersDirty};
+use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
@@ -1204,6 +1204,13 @@ pub fn evaluate_layers(state: &mut GameState) {
         return;
     }
 
+    // CR 611.3a + CR 611.3b: refresh the source-level enabling-condition truth
+    // cache from this fully-derived board. Placed AFTER the ring-normalization
+    // recursion guard so the re-entrant pass writes the final fixpoint cache
+    // once, and BEFORE `layers_dirty = Clean` so a full eval always leaves a
+    // fresh cache for the next incremental flush's truth-delta consult.
+    refresh_static_gate_truth(state);
+
     // CR 603.6a + CR 611.2e: Layer evaluation just finalized post-layer
     // trigger sets on every battlefield permanent (granted triggers from
     // sliver lords, Changeling, Bramble Sovereign, suppress-triggers statics).
@@ -1358,11 +1365,13 @@ pub(crate) fn incremental_flush_must_escalate(
     // and invisible on the active-effect set. We must inspect the intact
     // `StaticDefinition.condition` on each live source instead.
     //
-    // CR 611.3a: when such a source-level enabling condition depends on board
-    // population, an object entering can flip the condition for the WHOLE recipient
-    // set, changing PRE-EXISTING recipients — so escalate to a full rebuild. The
-    // entry-aware narrowing (built per-source from the visited object, CR 109.5)
-    // skips escalation when no entered object can flip the gate.
+    // CR 611.3a + CR 611.3b: when such a source-level enabling condition depends
+    // on board population, an object entering can flip the condition for the
+    // WHOLE recipient set, changing PRE-EXISTING recipients — so escalate to a
+    // full rebuild. The entry-aware narrowing (built per-source from the visited
+    // object, CR 109.5) skips escalation when no entered object can perturb the
+    // gate; the truth-delta refinement (below) skips escalation even when an
+    // entry perturbs the gate INPUT but does not flip its truth value.
     any_active_static_condition_perturbed_by_entry(state, entered_ids)
 }
 
@@ -1373,12 +1382,32 @@ pub(crate) fn incremental_flush_must_escalate(
 /// but reads the intact pre-collection `condition` field.
 /// O(active-source-count × entered-count); short-circuits on the first match.
 ///
-/// Two-stage test (mirrors Axis 2a): the committed exhaustive classifier
-/// (`static_condition_uses_object_population`, OUTER conjunct, compile-time
-/// tripwire) gates the entry-aware narrowing
-/// (`entered_object_perturbs_static_condition`). CR 109.5: `ctx` is built per
-/// SOURCE object so the condition's "you control" rebinds to the source's
-/// controller, not the entered object's.
+/// Three-stage test:
+///  1. The committed exhaustive classifier
+///     (`static_condition_uses_object_population`, OUTER conjunct, compile-time
+///     tripwire) gates the entry-aware narrowing
+///     (`entered_object_perturbs_static_condition`). CR 109.5: `ctx` is built per
+///     SOURCE object so the condition's "you control" rebinds to the source's
+///     controller, not the entered object's.
+///  2. RECIPIENT-CONTEXT gates (CR 611.3b — the effect applies per recipient)
+///     escalate UNCONDITIONALLY when perturbed: their truth is per-recipient and
+///     cannot be summarized by a single board-level boolean
+///     (`source_condition_gate_passes` only over-approximates them). This
+///     preserves the d9a40be71 behavior for that class.
+///  3. SOURCE-LEVEL gates (CR 611.3a — a single on/off switch consumed at
+///     collection): apply the truth-delta short-circuit. The static's BEFORE
+///     truth was cached at the last full eval in `static_gate_truth`; recompute
+///     AFTER against the live post-entry board. Escalate iff `before != after`.
+///     Key absent (source not present / phased out at the last full eval) ->
+///     fail closed (escalate). Soundness rests on `after` being recomputed
+///     authoritatively from the live board, so the test errs only toward
+///     OVER-escalation, never under (safety theorem hypotheses: Continuous mode,
+///     `!condition_uses_recipient_context`, affected-set + magnitude
+///     population-independent — the latter two are escalated first by Axis 2a).
+///
+/// `def_index` indexes the LIVE post-layer `static_definitions` via
+/// `iter_all().enumerate()` — IDENTICAL indexing to `refresh_static_gate_truth`
+/// (invariant 5), so the cached BEFORE truth aligns with the consulted def.
 fn any_active_static_condition_perturbed_by_entry(
     state: &GameState,
     entered_ids: &HashSet<ObjectId>,
@@ -1389,22 +1418,95 @@ fn any_active_static_condition_perturbed_by_entry(
             return;
         }
         let ctx = FilterContext::from_source(state, obj.id);
-        if obj.static_definitions.iter_all().any(|def| {
-            if def.mode != StaticMode::Continuous {
-                return false;
-            }
-            let Some(condition) = def.condition.as_ref() else {
-                return false;
-            };
-            static_condition_uses_object_population(condition)
-                && entered_ids
-                    .iter()
-                    .any(|id| entered_object_perturbs_static_condition(state, *id, &ctx, condition))
-        }) {
+        if obj
+            .static_definitions
+            .iter_all()
+            .enumerate()
+            .any(|(def_index, def)| {
+                if def.mode != StaticMode::Continuous {
+                    return false;
+                }
+                let Some(condition) = def.condition.as_ref() else {
+                    return false;
+                };
+                if !static_condition_uses_object_population(condition) {
+                    return false;
+                }
+                // CR 611.3b: recipient-context gates re-evaluate per recipient —
+                // a single board-level boolean can't summarize them, so escalate
+                // unconditionally when perturbed (preserve d9a40be71).
+                if condition_uses_recipient_context(condition) {
+                    return entered_ids.iter().any(|id| {
+                        entered_object_perturbs_static_condition(state, *id, &ctx, condition)
+                    });
+                }
+                let perturbed = entered_ids.iter().any(|id| {
+                    entered_object_perturbs_static_condition(state, *id, &ctx, condition)
+                });
+                if !perturbed {
+                    return false;
+                }
+                // CR 611.3a source-level truth-delta. A multi-axis static (gate
+                // ON while magnitude/affected-set also population-sensitive) is
+                // already escalated by Axis 2a above, so reaching here means the
+                // condition is the only population-sensitive axis. Fail closed
+                // when the key is absent (invariant 1: source not present /
+                // phased out at the last full eval).
+                let before = match state.static_gate_truth.get(&StaticGateKey {
+                    source: obj.id,
+                    def_index,
+                }) {
+                    Some(&b) => b,
+                    None => return true,
+                };
+                let after = source_condition_gate_passes(state, condition, obj.controller, obj.id);
+                before != after
+            })
+        {
             found = true;
         }
     });
     found
+}
+
+/// CR 611.3a + CR 611.3b: rewrite the source-level enabling-condition truth
+/// cache from the FULLY-DERIVED board. Walks `for_each_static_effect_source`
+/// (which skips phased-out sources, CR 702.26e), and records the gate truth of
+/// every CONTINUOUS static carrying a NON-recipient-context `Some(condition)`,
+/// keyed by `(source, def_index)` on the LIVE post-layer `static_definitions`
+/// (`iter_all().enumerate()` — identical indexing to the consult; see invariant
+/// 5). Recipient-context conditions are EXCLUDED: their truth is per-recipient,
+/// re-evaluated per recipient via `evaluate_condition_with_recipient`, and
+/// `source_condition_gate_passes` is only an over-approximation for them — so
+/// they are never cached and always escalate.
+///
+/// CR 109.5: the gate's "you"/"your" resolves against the SOURCE's controller.
+/// Cleared and repopulated wholesale (keyset is authoritative only for sources
+/// present + non-phased at this full eval; absence at consult fails closed).
+fn refresh_static_gate_truth(state: &mut GameState) {
+    let mut next: std::collections::HashMap<StaticGateKey, bool> = std::collections::HashMap::new();
+    for_each_static_effect_source(state, |state, obj| {
+        for (def_index, def) in obj.static_definitions.iter_all().enumerate() {
+            if def.mode != StaticMode::Continuous {
+                continue;
+            }
+            let Some(condition) = def.condition.as_ref() else {
+                continue;
+            };
+            if condition_uses_recipient_context(condition) {
+                continue;
+            }
+            let truth = source_condition_gate_passes(state, condition, obj.controller, obj.id);
+            next.insert(
+                StaticGateKey {
+                    source: obj.id,
+                    def_index,
+                },
+                truth,
+            );
+        }
+    });
+    state.static_gate_truth = next;
 }
 
 /// True when the entered object cannot be handled by the incremental fast path

@@ -1239,6 +1239,29 @@ impl LayersDirty {
     }
 }
 
+/// Cache key for the source-level enabling-condition truth of a single
+/// CONTINUOUS static ability, used by the incremental layer-flush
+/// truth-delta short-circuit (`game/layers.rs`).
+///
+/// CR 611.3a + CR 611.3b: a static-ability continuous effect isn't "locked
+/// in"; it applies at all times the source is on the battlefield, re-evaluated
+/// against whatever its text indicates. When an object enters, an incremental
+/// flush re-derives only the entered objects. If a pre-existing source's
+/// population-sensitive, SOURCE-LEVEL (non-recipient-context) enabling
+/// condition would change truth, pre-existing recipients must be re-derived —
+/// so the flush must escalate to a full pass. This key indexes the recorded
+/// BEFORE truth so the consult can compare against a freshly-recomputed AFTER.
+///
+/// `def_index` indexes the LIVE post-layer `static_definitions` vec
+/// (`iter_all().enumerate()`), NOT `base_static_definitions`. The refresh and
+/// the consult both observe the identical live vec for pre-existing sources, so
+/// the index aligns (see invariant 5 in the plan / the consult below).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StaticGateKey {
+    pub source: ObjectId,
+    pub def_index: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublicStateDirty {
     pub all_objects_dirty: bool,
@@ -3978,6 +4001,20 @@ pub struct GameState {
     // serializing the (derived) entered-object set.
     #[serde(skip, default = "LayersDirty::full")]
     pub layers_dirty: LayersDirty,
+    /// CR 611.3a + CR 611.3b: truth of each CONTINUOUS static's SOURCE-LEVEL
+    /// (non-recipient-context) enabling condition as of the last full
+    /// `evaluate_layers`. Read by the incremental-flush truth-delta
+    /// short-circuit to skip escalation when an entry perturbs the gate but
+    /// does not flip it. Recipient-context conditions are NEVER stored here
+    /// (their truth is per-recipient; `source_condition_gate_passes` is only an
+    /// over-approximation for them) and always escalate. Refreshed wholesale
+    /// every full eval (`refresh_static_gate_truth`). `#[serde(skip)]` derived
+    /// state, like `layers_dirty`/`trigger_index`. NOTE: a plain
+    /// `std::collections::HashMap` (not `im`-backed), so it deep-clones on every
+    /// `GameState::clone()` — kept small by storing only source-level-gated
+    /// continuous statics (a small fraction of the board).
+    #[serde(skip)]
+    pub static_gate_truth: std::collections::HashMap<StaticGateKey, bool>,
     /// CR 603.2: Candidate pre-filter for `collect_pending_triggers`. Rebuilt
     /// lazily after deserialize via a sentinel check at the top of the consult
     /// site; rebuilt eagerly at the end of `evaluate_layers` (CR 611.2e) so the
@@ -5031,6 +5068,7 @@ impl GameState {
             pending_spell_resolution: None,
             deferred_entry_events: Vec::new(),
             layers_dirty: LayersDirty::full(),
+            static_gate_truth: std::collections::HashMap::new(),
             trigger_index: TriggerIndex::default(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
@@ -5320,6 +5358,13 @@ impl PartialEq for GameState {
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty
+            // `static_gate_truth` is INTENTIONALLY excluded: unlike
+            // `layers_dirty`/`public_state_dirty` (which encode pending work),
+            // it is pure derived/self-healing state (reconstructed at the next
+            // full eval; implied entirely by objects + battlefield +
+            // static_definitions). Including it would break AI-search dedup on
+            // semantically-identical positions whose caches differ only in
+            // freshness.
             && self.next_timestamp == other.next_timestamp
             && self.public_state_dirty == other.public_state_dirty
             && self.state_revision == other.state_revision
