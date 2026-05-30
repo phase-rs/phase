@@ -18259,6 +18259,14 @@ fn apply_where_x_quantity_expression(
                 },
             })
         }
+        // CR 107.3i: "search ... for up to X ..., where X is …" wraps the X
+        // count in `UpTo`. Recurse into `max` so the defining clause rewrites
+        // the inner `Variable("X")` (Oreskos Explorer's "up to X Plains cards"
+        // must bind X to the where-clause population, not stay at 0). `up_to`
+        // re-asserts the non-nesting invariant.
+        QuantityExpr::UpTo { max } => {
+            QuantityExpr::up_to(apply_where_x_quantity_expression(*max, where_x_expression))
+        }
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
             inner: Box::new(apply_where_x_quantity_expression(
                 *inner,
@@ -18303,6 +18311,15 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
+        // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
+        // is …" binds the search count to the defining clause (Oreskos
+        // Explorer: "search your library for up to X Plains cards, where X is
+        // the number of players who control more lands than you"). The count is
+        // an `UpTo` wrapper whose inner `Variable("X")` is rewritten by the
+        // recursion arm; the where-clause population is a control comparison
+        // (CR 109.4) relative to "you" (CR 109.5).
+        | Effect::SearchLibrary { count: amount, .. }
+        | Effect::Seek { count: amount, .. }
         | Effect::ExileTop { count: amount, .. }
         | Effect::Discover {
             mana_value_limit: amount,
@@ -26590,6 +26607,68 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // CR 107.3i + CR 109.4 + CR 109.5: A "search ... for up to X ..., where X
+    // is the number of {players|opponents} who control more <filter> than you"
+    // clause must bind the `UpTo` search count's inner `Variable("X")` to the
+    // comparative-control population (Oreskos Explorer and every card in the
+    // class), not leave it as a 0-resolving `Variable`. This exercises the
+    // `apply_where_x_effect_expression` → `apply_where_x_quantity_expression`
+    // UpTo recursion that routes the where-clause through the shared
+    // `ControlsCount` quantity combinator.
+    #[test]
+    fn search_up_to_x_where_x_is_players_who_control_more_lands_binds_controls_count() {
+        use crate::types::ability::PlayerRelation;
+        let def = parse_effect_chain_with_context(
+            "Search your library for up to X Plains cards, where X is the number of players who control more lands than you. Reveal those cards, put them into your hand, then shuffle.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+
+        let Effect::SearchLibrary { count, .. } = &*def.effect else {
+            panic!("expected SearchLibrary, got {:?}", def.effect);
+        };
+        let QuantityExpr::UpTo { max } = count else {
+            panic!("expected UpTo count, got {count:?}");
+        };
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::PlayerCount {
+                    filter:
+                        PlayerFilter::ControlsCount {
+                            relation,
+                            filter,
+                            comparator,
+                            count: inner_count,
+                        },
+                },
+        } = max.as_ref()
+        else {
+            panic!("expected UpTo(PlayerCount(ControlsCount)), got {max:?}");
+        };
+        assert_eq!(*relation, PlayerRelation::All);
+        assert_eq!(*comparator, Comparator::GT);
+        let TargetFilter::Typed(bare) = filter else {
+            panic!("expected typed land filter, got {filter:?}");
+        };
+        assert_eq!(bare.type_filters, vec![TypeFilter::Land]);
+        assert_eq!(
+            bare.controller, None,
+            "the compared population's filter must be controller-free"
+        );
+        // The comparison reads the controller's own land count (CR 109.5 "you").
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(you_filter),
+                },
+        } = inner_count.as_ref()
+        else {
+            panic!("expected ObjectCount(you) inner count, got {inner_count:?}");
+        };
+        assert_eq!(you_filter.type_filters, vec![TypeFilter::Land]);
+        assert_eq!(you_filter.controller, Some(ControllerRef::You));
     }
 
     #[test]
