@@ -23,6 +23,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
+use crate::parser::oracle_effect::parse_controls_permanent_object;
 use crate::parser::oracle_target::{parse_type_phrase, parse_type_phrase_with_ctx};
 use crate::types::ability::{
     AggregateFunction, ControllerRef, CountScope, DevotionColors, FilterProp, ObjectProperty,
@@ -321,6 +322,32 @@ pub(crate) fn parse_quantity_ref_with_context(
             return Some(QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentDealtCombatDamage,
             });
+        }
+        // CR 109.4: "opponents who control <filter>" / "opponents who don't
+        // control <filter>" → PlayerCount over the opponents satisfying the
+        // shared control predicate. Consume only the population word here, then
+        // hand the "who [doesn't] control <type-phrase>" remainder to the shared
+        // `parse_controls_permanent_object` core (DRY with the "each opponent who
+        // controls …" subject path). Tried before the generic ObjectCount
+        // fall-through so the opponent population — not battlefield permanents —
+        // is counted. (Singular "opponent" is accepted for the grammatically-
+        // degenerate one-opponent phrasing.)
+        if let Ok((predicate_input, _)) =
+            alt((tag::<_, _, OracleError<'_>>("opponents "), tag("opponent "))).parse(rest)
+        {
+            if let Some((presence, filter, remainder)) =
+                parse_controls_permanent_object(predicate_input, ctx)
+            {
+                if remainder.trim().is_empty() {
+                    return Some(QuantityRef::PlayerCount {
+                        filter: PlayerFilter::ControlsPermanent {
+                            relation: PlayerRelation::Opponent,
+                            presence,
+                            filter,
+                        },
+                    });
+                }
+            }
         }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
@@ -2229,6 +2256,110 @@ mod tests {
         assert!(
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
+        );
+    }
+
+    // A1: "the number of opponents who control <filter>" → PlayerCount over the
+    // opponents satisfying the shared "who controls …" control predicate.
+    #[test]
+    fn parse_quantity_ref_opponents_who_control_artifact() {
+        use crate::types::ability::ControlPresence;
+        let qty = parse_quantity_ref("the number of opponents who control an artifact").unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::ControlsPermanent {
+                        relation: PlayerRelation::Opponent,
+                        presence: ControlPresence::Controls,
+                        filter: TargetFilter::Typed(typed),
+                    },
+            } => {
+                assert_eq!(typed.type_filters, vec![TypeFilter::Artifact]);
+            }
+            other => panic!("Expected PlayerCount{{ControlsPermanent(artifact)}}, got {other:?}"),
+        }
+    }
+
+    // A1 (summon: yojimbo): the controlled-permanent filter carries the
+    // power/toughness comparison parsed by the shared type-phrase combinator.
+    #[test]
+    fn parse_quantity_ref_opponents_who_control_creature_power4() {
+        use crate::types::ability::{ControlPresence, PtStat, PtValueScope};
+        let qty = parse_quantity_ref(
+            "the number of opponents who control a creature with power 4 or greater",
+        )
+        .unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::ControlsPermanent {
+                        relation: PlayerRelation::Opponent,
+                        presence: ControlPresence::Controls,
+                        filter: TargetFilter::Typed(typed),
+                    },
+            } => {
+                assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
+                assert!(
+                    typed.properties.contains(&FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }),
+                    "Expected power>=4 PtComparison, got {:?}",
+                    typed.properties
+                );
+            }
+            other => {
+                panic!("Expected PlayerCount{{ControlsPermanent(creature+pt)}}, got {other:?}")
+            }
+        }
+    }
+
+    // A1 "one plus" path: the Offset arm wraps the inner PlayerCount unchanged
+    // (no dedicated change to the offset path was needed).
+    #[test]
+    fn parse_cda_quantity_one_plus_opponents_who_control_artifact() {
+        use crate::types::ability::ControlPresence;
+        let expr =
+            parse_cda_quantity("one plus the number of opponents who control an artifact").unwrap();
+        match expr {
+            QuantityExpr::Offset { inner, offset } => {
+                assert_eq!(offset, 1);
+                assert!(
+                    matches!(
+                        *inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerCount {
+                                filter: PlayerFilter::ControlsPermanent {
+                                    relation: PlayerRelation::Opponent,
+                                    presence: ControlPresence::Controls,
+                                    ..
+                                },
+                            },
+                        }
+                    ),
+                    "Expected Offset over PlayerCount{{ControlsPermanent}}, got {inner:?}"
+                );
+            }
+            other => panic!("Expected Offset{{+1}}, got {other:?}"),
+        }
+    }
+
+    // A1 negative: with no object after "control", the shared core rejects the
+    // everything-matching `TargetFilter::Any`, so we must NOT emit a
+    // PlayerCount{ControlsPermanent} that would silently match all opponents.
+    #[test]
+    fn parse_quantity_ref_opponents_who_control_no_object_rejected() {
+        let qty = parse_quantity_ref("the number of opponents who control");
+        assert!(
+            !matches!(
+                qty,
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::ControlsPermanent { .. },
+                })
+            ),
+            "Bare 'who control' with no object must not yield ControlsPermanent, got {qty:?}"
         );
     }
 

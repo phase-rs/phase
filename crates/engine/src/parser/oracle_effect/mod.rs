@@ -46,14 +46,15 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
-    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, IterationKindBinding,
-    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost,
-    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
-    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    ControlPresence, ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition,
+    DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
+    IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
+    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -15748,19 +15749,67 @@ fn rebind_decline_body_recipients(clause: &mut ParsedEffectClause) {
     }
 }
 
-/// CR 109.4 + CR 700.1: Strip a "who [doesn't] control [type-phrase]" relative
-/// clause that follows an "each opponent"/"each player" subject. Returns the
+/// CR 109.4: Parse the shared "who [doesn't] control [type-phrase]" control
+/// predicate — the present/absent axis plus the controlled-permanent filter.
+/// Returns `(ControlPresence, TargetFilter, remainder)` where `remainder` is the
+/// text after the consumed object sub-phrase, or `None` when no control predicate
+/// is present (or the object resolves to the everything-matching
+/// `TargetFilter::Any`, which must not silently match every permanent).
+///
+/// The object sub-phrase ("an Elf", "a creature with power 4 or greater")
+/// delegates to the shared `parse_type_phrase_with_ctx` combinator — no bespoke
+/// string matching. This is the DRY core shared by the "each opponent who
+/// controls …" subject path (`strip_controls_permanent_clause`) and the "the
+/// number of opponents who control …" quantity path (`oracle_quantity.rs`).
+pub(crate) fn parse_controls_permanent_object<'a>(
+    rest: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(ControlPresence, TargetFilter, &'a str)> {
+    let lower = rest.to_lowercase();
+    // "who controls " / "who doesn't control " — one alt() arm per presence axis.
+    // Both singular ("each opponent who controls") and plural ("opponents who
+    // control") subject-verb agreement forms are accepted: the present/absent
+    // axis is identical regardless of grammatical number. Negative forms are
+    // longest-match-first so "doesn't/does not/don't/do not control" win before
+    // the bare affirmative; "controls " precedes "control " so the singular form
+    // is not split.
+    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
+        preceded(
+            tag("who "),
+            alt((
+                value(ControlPresence::ControlsNone, tag("doesn't control ")),
+                value(ControlPresence::ControlsNone, tag("does not control ")),
+                value(ControlPresence::ControlsNone, tag("don't control ")),
+                value(ControlPresence::ControlsNone, tag("do not control ")),
+                value(ControlPresence::Controls, tag("controls ")),
+                value(ControlPresence::Controls, tag("control ")),
+            )),
+        )
+        .parse(i)
+    })?;
+    // The object sub-phrase is consumed by the shared type-phrase combinator.
+    let (filter, remainder) = super::oracle_target::parse_type_phrase_with_ctx(after_verb, ctx);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some((presence, filter, remainder))
+}
+
+/// CR 109.4: Strip a "who [doesn't] control [type-phrase]" relative clause that
+/// follows an "each opponent"/"each player" subject. Returns the
 /// `PlayerFilter::ControlsPermanent` scope (carrying the base subject's
 /// relation, the present/absent axis, and the controlled-permanent filter) and
 /// the verb-phrase remainder. Returns `None` when no control clause is present.
 ///
-/// The object sub-phrase ("an Elf") delegates to the shared `parse_type_phrase`
-/// combinator — no bespoke string matching.
+/// Delegates the control predicate to the shared
+/// `parse_controls_permanent_object` core; this function adds the subject-path
+/// concerns: deriving the relation from the base subject and enforcing a
+/// non-empty verb-phrase residual.
 fn strip_controls_permanent_clause(
     base: &PlayerFilter,
     rest: &str,
 ) -> Option<(PlayerFilter, String)> {
-    use crate::types::ability::{ControlPresence, PlayerRelation};
+    use crate::types::ability::PlayerRelation;
     // The base subject only contributes its player relation; HighestSpeed and
     // any non-relational base are out of scope for a controls qualifier.
     let relation = match base {
@@ -15768,24 +15817,9 @@ fn strip_controls_permanent_clause(
         PlayerFilter::All => PlayerRelation::All,
         _ => return None,
     };
-    let lower = rest.to_lowercase();
-    // "who controls " / "who doesn't control " — one alt() arm per presence axis.
-    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
-        preceded(
-            tag("who "),
-            alt((
-                value(ControlPresence::ControlsNone, tag("doesn't control ")),
-                value(ControlPresence::ControlsNone, tag("does not control ")),
-                value(ControlPresence::Controls, tag("controls ")),
-            )),
-        )
-        .parse(i)
-    })?;
-    // The object sub-phrase is consumed by the shared type-phrase combinator.
-    let (filter, remainder) = super::oracle_target::parse_type_phrase(after_verb);
-    if matches!(filter, TargetFilter::Any) {
-        return None;
-    }
+    // Match today's no-ctx behaviour for the subject path.
+    let mut ctx = ParseContext::default();
+    let (presence, filter, remainder) = parse_controls_permanent_object(rest, &mut ctx)?;
     let verb_phrase = remainder.trim_start();
     if verb_phrase.is_empty() {
         return None;
@@ -31280,6 +31314,48 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// CR 109.4: building-block coverage for the shared control predicate
+    /// `parse_controls_permanent_object` — the present/absent presence axis, the
+    /// delegated object filter, the consumed-remainder shape, and the
+    /// `TargetFilter::Any` rejection. This is the core both the subject path
+    /// (`strip_controls_permanent_clause`) and the quantity path
+    /// (`oracle_quantity.rs` PlayerCount) compose over.
+    #[test]
+    fn parse_controls_permanent_object_core() {
+        use crate::types::ability::ControlPresence;
+
+        // Affirmative "who controls <object>" + remainder preserved.
+        let mut ctx = ParseContext::default();
+        let (presence, filter, remainder) =
+            parse_controls_permanent_object("who controls an artifact loses 1 life", &mut ctx)
+                .expect("affirmative control predicate must parse");
+        assert_eq!(presence, ControlPresence::Controls);
+        assert!(
+            !matches!(filter, TargetFilter::Any),
+            "artifact object must be captured, got {filter:?}"
+        );
+        assert_eq!(remainder.trim_start(), "loses 1 life");
+
+        // Negative "who doesn't control <object>".
+        let mut ctx = ParseContext::default();
+        let (presence, _filter, _) =
+            parse_controls_permanent_object("who doesn't control a creature", &mut ctx)
+                .expect("negative control predicate must parse");
+        assert_eq!(presence, ControlPresence::ControlsNone);
+
+        // No object after "control" → the all-matching `TargetFilter::Any` is
+        // rejected so callers never count every permanent/opponent.
+        let mut ctx = ParseContext::default();
+        assert!(
+            parse_controls_permanent_object("who controls", &mut ctx).is_none(),
+            "bare 'who controls' with no object must be rejected"
+        );
+
+        // Missing the "who …" lead → no predicate.
+        let mut ctx = ParseContext::default();
+        assert!(parse_controls_permanent_object("draws a card", &mut ctx).is_none());
     }
 
     #[test]

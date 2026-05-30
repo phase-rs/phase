@@ -1798,6 +1798,30 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 109.4: "that <player> control(s)" relative clause supplying the object
+    // controller — e.g. "permanents you own that your opponents control"
+    // (Zedruu). Placed after `parse_that_clause_suffix` so the quality/combat/
+    // attachment "that …" clauses get first crack, and gated on
+    // `controller.is_none()` so it only fills a controller not already set
+    // (e.g. by an earlier "you control"/"an opponent controls" suffix). The
+    // controller phrase delegates to `parse_controller_suffix`, which routes the
+    // bare "your opponents control"/"an opponent controls" forms through
+    // `nom_filter::parse_zone_controller`. Composes with a preceding "you own"
+    // → `FilterProp::Owned{You}`, yielding the owned-but-opponent-controlled
+    // population.
+    if controller.is_none() {
+        let remaining_that_ctrl = lower[pos..].trim_start();
+        let that_ctrl_offset = lower[pos..].len() - remaining_that_ctrl.len();
+        if let Ok((after_that, _)) =
+            tag::<_, _, OracleError<'_>>("that ").parse(remaining_that_ctrl)
+        {
+            if let Some((ctrl, consumed)) = parse_controller_suffix(after_that, ctx) {
+                controller = Some(ctrl);
+                pos += that_ctrl_offset + "that ".len() + consumed;
+            }
+        }
+    }
+
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
     if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
         properties.extend(zone_props);
@@ -6340,6 +6364,47 @@ mod tests {
                 controller: ControllerRef::You,
             }]))
         );
+    }
+
+    // A2 (Zedruu): "you own" sets `FilterProp::Owned{You}`; the trailing
+    // "that your opponents control" relative clause supplies the object
+    // controller via the new `controller.is_none()`-gated "that <ctrl>" arm,
+    // yielding the owned-but-opponent-controlled population. The full phrase is
+    // consumed (empty remainder).
+    #[test]
+    fn permanents_you_own_that_your_opponents_control() {
+        let (f, rest) = parse_type_phrase("permanents you own that your opponents control");
+        assert_eq!(rest, "");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    }])
+            )
+        );
+    }
+
+    // A2: the same phrase routed through `parse_quantity_ref` yields an
+    // ObjectCount over the owned-but-opponent-controlled population.
+    #[test]
+    fn quantity_ref_permanents_you_own_that_your_opponents_control() {
+        use crate::parser::oracle_quantity::parse_quantity_ref;
+        let qty =
+            parse_quantity_ref("the number of permanents you own that your opponents control");
+        match qty {
+            Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(typed),
+            }) => {
+                assert_eq!(typed.controller, Some(ControllerRef::Opponent));
+                assert!(typed.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }));
+            }
+            other => panic!("Expected ObjectCount{{owned-by-you,opp-controlled}}, got {other:?}"),
+        }
     }
 
     #[test]
