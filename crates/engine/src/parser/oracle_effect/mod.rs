@@ -46,15 +46,14 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
-    ControlPresence, ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition,
-    DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
-    IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
-    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
-    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
-    StepSkipTarget, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    UntilCondition,
+    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
+    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, IterationKindBinding,
+    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost,
+    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
+    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
+    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -15729,10 +15728,11 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
         return (None, text.to_string());
     };
 
-    // CR 109.4 + CR 700.1: A "who [doesn't] control [type-phrase]" relative
-    // clause restricts the player set to those who do (or don't) control a
-    // matching permanent (Thornbow Archer: "each opponent who doesn't control
-    // an Elf loses 1 life"). The clause must be consumed and reflected in the
+    // CR 109.4 + CR 109.5: A "who controls [comparator] [count] [type-phrase]"
+    // relative clause restricts the player set to those whose controlled-permanent
+    // count satisfies the comparison (Thornbow Archer: "each opponent who doesn't
+    // control an Elf loses 1 life"; Heidegger: "each opponent who controls more
+    // creatures than you"). The clause must be consumed and reflected in the
     // scope — silently dropping it over-applies the effect to every player.
     if let Some((controls_scope, after_clause)) = strip_controls_permanent_clause(&scope, rest) {
         let deconjugated = subject::deconjugate_verb(&after_clause);
@@ -15903,12 +15903,25 @@ fn rebind_decline_body_recipients(clause: &mut ParsedEffectClause) {
     }
 }
 
-/// CR 109.4: Parse the shared "who [doesn't] control [type-phrase]" control
-/// predicate — the present/absent axis plus the controlled-permanent filter.
-/// Returns `(ControlPresence, TargetFilter, remainder)` where `remainder` is the
-/// text after the consumed object sub-phrase, or `None` when no control predicate
-/// is present (or the object resolves to the everything-matching
-/// `TargetFilter::Any`, which must not silently match every permanent).
+/// CR 109.4 + CR 109.5: Parse the shared "who controls [comparator] [count]
+/// [type-phrase]" control predicate — the comparison axis (presence or
+/// comparative) plus the controlled-permanent filter.
+/// Returns `(Comparator, QuantityExpr, TargetFilter, remainder)` where
+/// `remainder` is the text after the consumed object sub-phrase, or `None` when
+/// no control predicate is present (or the object resolves to the
+/// everything-matching `TargetFilter::Any`, which must not silently match every
+/// permanent).
+///
+/// Three presence/comparison classes are recognized as a single parameterized
+/// `(Comparator, QuantityExpr)` pair:
+/// - "controls"/"control" → `(GE, Fixed(1))` (at least one matching permanent).
+/// - "doesn't/does not/don't/do not control" → `(EQ, Fixed(0))` (none).
+/// - "controls/control more <type> than you" → `(GT, Ref(ObjectCount {
+///   filter: <type>.controller(You) }))` — strictly more than the effect
+///   controller's own count of the same type (CR 109.5 — "you" is the controller
+///   of the object the ability is on). The carried `filter` is the BARE type
+///   (no controller axis); the per-candidate control relationship is enforced at
+///   runtime by `player_control_count_compares`.
 ///
 /// The object sub-phrase ("an Elf", "a creature with power 4 or greater")
 /// delegates to the shared `parse_type_phrase_with_ctx` combinator — no bespoke
@@ -15918,25 +15931,87 @@ fn rebind_decline_body_recipients(clause: &mut ParsedEffectClause) {
 pub(crate) fn parse_controls_permanent_object<'a>(
     rest: &'a str,
     ctx: &mut ParseContext,
-) -> Option<(ControlPresence, TargetFilter, &'a str)> {
+) -> Option<(Comparator, QuantityExpr, TargetFilter, &'a str)> {
     let lower = rest.to_lowercase();
+    // Comparative form tried FIRST: "who controls more <type> than you".
+    // Mirrors `oracle_nom::condition::parse_that_player_controls_more_comparison`:
+    // consume the verb prefix, then split the original-case remainder on
+    // " than you" so the isolated type text and the trailing remainder both stay
+    // in original case. `split_once_on_lower` is a structural boundary lookup
+    // (permitted), not parsing dispatch.
+    if let Some(((), after_verb)) = nom_on_lower(rest, &lower, |i| {
+        let (i, _) = tag("who ").parse(i)?;
+        let (i, _) = alt((tag("controls more "), tag("control more "))).parse(i)?;
+        Ok((i, ()))
+    }) {
+        let after_verb_lower = after_verb.to_lowercase();
+        if let Some((type_text, comparative_remainder)) =
+            crate::parser::oracle_nom::bridge::split_once_on_lower(
+                after_verb,
+                &after_verb_lower,
+                " than you",
+            )
+        {
+            let (bare_filter, _) = super::oracle_target::parse_type_phrase_with_ctx(type_text, ctx);
+            if matches!(bare_filter, TargetFilter::Any) {
+                return None;
+            }
+            // CR 109.5: the controller's own count uses a `You`-controlled filter.
+            let you_count = match &bare_filter {
+                TargetFilter::Typed(tf) => QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf.clone().controller(ControllerRef::You)),
+                    },
+                },
+                // Non-typed filters cannot carry a controller axis; reject rather
+                // than silently mis-counting.
+                _ => return None,
+            };
+            return Some((
+                Comparator::GT,
+                you_count,
+                bare_filter,
+                comparative_remainder,
+            ));
+        }
+    }
+
     // "who controls " / "who doesn't control " — one alt() arm per presence axis.
     // Both singular ("each opponent who controls") and plural ("opponents who
     // control") subject-verb agreement forms are accepted: the present/absent
     // axis is identical regardless of grammatical number. Negative forms are
     // longest-match-first so "doesn't/does not/don't/do not control" win before
     // the bare affirmative; "controls " precedes "control " so the singular form
-    // is not split.
-    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
+    // is not split. `(GE, Fixed(1))` ≡ old `Controls` (count >= 1);
+    // `(EQ, Fixed(0))` ≡ old `ControlsNone` (count == 0).
+    let ((comparator, count), after_verb) = nom_on_lower(rest, &lower, |i| {
         preceded(
             tag("who "),
             alt((
-                value(ControlPresence::ControlsNone, tag("doesn't control ")),
-                value(ControlPresence::ControlsNone, tag("does not control ")),
-                value(ControlPresence::ControlsNone, tag("don't control ")),
-                value(ControlPresence::ControlsNone, tag("do not control ")),
-                value(ControlPresence::Controls, tag("controls ")),
-                value(ControlPresence::Controls, tag("control ")),
+                value(
+                    (Comparator::EQ, QuantityExpr::Fixed { value: 0 }),
+                    tag("doesn't control "),
+                ),
+                value(
+                    (Comparator::EQ, QuantityExpr::Fixed { value: 0 }),
+                    tag("does not control "),
+                ),
+                value(
+                    (Comparator::EQ, QuantityExpr::Fixed { value: 0 }),
+                    tag("don't control "),
+                ),
+                value(
+                    (Comparator::EQ, QuantityExpr::Fixed { value: 0 }),
+                    tag("do not control "),
+                ),
+                value(
+                    (Comparator::GE, QuantityExpr::Fixed { value: 1 }),
+                    tag("controls "),
+                ),
+                value(
+                    (Comparator::GE, QuantityExpr::Fixed { value: 1 }),
+                    tag("control "),
+                ),
             )),
         )
         .parse(i)
@@ -15946,14 +16021,15 @@ pub(crate) fn parse_controls_permanent_object<'a>(
     if matches!(filter, TargetFilter::Any) {
         return None;
     }
-    Some((presence, filter, remainder))
+    Some((comparator, count, filter, remainder))
 }
 
-/// CR 109.4: Strip a "who [doesn't] control [type-phrase]" relative clause that
-/// follows an "each opponent"/"each player" subject. Returns the
-/// `PlayerFilter::ControlsPermanent` scope (carrying the base subject's
-/// relation, the present/absent axis, and the controlled-permanent filter) and
-/// the verb-phrase remainder. Returns `None` when no control clause is present.
+/// CR 109.4 + CR 109.5: Strip a "who controls [comparator] [count]
+/// [type-phrase]" relative clause that follows an "each opponent"/"each player"
+/// subject. Returns the `PlayerFilter::ControlsCount` scope (carrying the base
+/// subject's relation, the controlled-permanent filter, and the comparator/count
+/// pair) and the verb-phrase remainder. Returns `None` when no control clause is
+/// present.
 ///
 /// Delegates the control predicate to the shared
 /// `parse_controls_permanent_object` core; this function adds the subject-path
@@ -15973,16 +16049,17 @@ fn strip_controls_permanent_clause(
     };
     // Match today's no-ctx behaviour for the subject path.
     let mut ctx = ParseContext::default();
-    let (presence, filter, remainder) = parse_controls_permanent_object(rest, &mut ctx)?;
+    let (comparator, count, filter, remainder) = parse_controls_permanent_object(rest, &mut ctx)?;
     let verb_phrase = remainder.trim_start();
     if verb_phrase.is_empty() {
         return None;
     }
     Some((
-        PlayerFilter::ControlsPermanent {
+        PlayerFilter::ControlsCount {
             relation,
-            presence,
             filter,
+            comparator,
+            count: Box::new(count),
         },
         verb_phrase.to_string(),
     ))
@@ -31552,73 +31629,172 @@ mod tests {
         assert_eq!(result, "create an X/X token");
     }
 
-    /// CR 109.4 + CR 700.1: a "who [doesn't] control [type]" relative clause
-    /// must be captured into `PlayerFilter::ControlsPermanent`, not dropped
+    /// CR 109.4 + CR 109.5: a "who controls [comparator] [count] [type]" relative
+    /// clause must be captured into `PlayerFilter::ControlsCount`, not dropped
     /// (Thornbow Archer: "each opponent who doesn't control an Elf loses 1 life").
     #[test]
     fn strip_each_player_subject_controls_permanent_clause() {
-        use crate::types::ability::{ControlPresence, PlayerRelation};
+        use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
 
         let (scope, result) =
             strip_each_player_subject("each opponent who doesn't control an Elf loses 1 life");
         assert_eq!(result, "lose 1 life");
         match scope {
-            Some(PlayerFilter::ControlsPermanent {
+            // "doesn't control an Elf" ≡ count == 0 (old `ControlsNone`).
+            Some(PlayerFilter::ControlsCount {
                 relation,
-                presence,
                 filter,
+                comparator,
+                count,
             }) => {
                 assert_eq!(relation, PlayerRelation::Opponent);
-                assert_eq!(presence, ControlPresence::ControlsNone);
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
                 assert!(
                     !matches!(filter, TargetFilter::Any),
                     "Elf filter must be captured, got {filter:?}"
                 );
             }
-            other => panic!("expected ControlsPermanent scope, got {other:?}"),
+            other => panic!("expected ControlsCount scope, got {other:?}"),
         }
 
-        // The affirmative form maps to `ControlPresence::Controls`.
+        // The affirmative form maps to `{ GE, Fixed(1) }` (old `Controls`).
         let (scope, _) =
             strip_each_player_subject("each player who controls a creature draws a card");
-        assert!(matches!(
-            scope,
-            Some(PlayerFilter::ControlsPermanent {
-                relation: PlayerRelation::All,
-                presence: ControlPresence::Controls,
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                comparator,
+                count,
                 ..
-            })
-        ));
+            }) => {
+                assert_eq!(relation, PlayerRelation::All);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected ControlsCount{{GE,Fixed(1)}}, got {other:?}"),
+        }
     }
 
-    /// CR 109.4: building-block coverage for the shared control predicate
-    /// `parse_controls_permanent_object` — the present/absent presence axis, the
-    /// delegated object filter, the consumed-remainder shape, and the
+    /// Migration regression (CR 109.4 + CR 109.5): the presence forms that used
+    /// to be `ControlPresence::Controls` / `ControlsNone` must now land as the
+    /// equivalent `{ GE, Fixed(1) }` / `{ EQ, Fixed(0) }` comparator/count pairs.
+    /// Depopulate ("each player who controls a multicolored creature draws a
+    /// card") is the affirmative class; Thornbow Archer ("each opponent who
+    /// doesn't control an Elf") is the negative class.
+    #[test]
+    fn migration_presence_forms_map_to_comparator_count() {
+        use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
+
+        // Depopulate — affirmative "controls a multicolored creature" → GE/1.
+        let (scope, result) = strip_each_player_subject(
+            "each player who controls a multicolored creature draws a card",
+        );
+        assert_eq!(result, "draw a card");
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                filter,
+                comparator,
+                count,
+            }) => {
+                assert_eq!(relation, PlayerRelation::All);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert!(
+                    !matches!(filter, TargetFilter::Any),
+                    "multicolored creature filter must be captured, got {filter:?}"
+                );
+            }
+            other => panic!("expected ControlsCount{{GE,Fixed(1)}}, got {other:?}"),
+        }
+
+        // Thornbow Archer — negative "doesn't control an Elf" → EQ/0.
+        let (scope, _) =
+            strip_each_player_subject("each opponent who doesn't control an Elf loses 1 life");
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                comparator,
+                count,
+                ..
+            }) => {
+                assert_eq!(relation, PlayerRelation::Opponent);
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
+            }
+            other => panic!("expected ControlsCount{{EQ,Fixed(0)}}, got {other:?}"),
+        }
+    }
+
+    /// CR 109.4 + CR 109.5: building-block coverage for the shared control
+    /// predicate `parse_controls_permanent_object` — the comparator/count pair,
+    /// the delegated object filter, the consumed-remainder shape, and the
     /// `TargetFilter::Any` rejection. This is the core both the subject path
     /// (`strip_controls_permanent_clause`) and the quantity path
     /// (`oracle_quantity.rs` PlayerCount) compose over.
     #[test]
     fn parse_controls_permanent_object_core() {
-        use crate::types::ability::ControlPresence;
+        use crate::types::ability::{Comparator, QuantityExpr, QuantityRef};
 
-        // Affirmative "who controls <object>" + remainder preserved.
+        // Affirmative "who controls <object>" → `{ GE, Fixed(1) }` + remainder
+        // preserved.
         let mut ctx = ParseContext::default();
-        let (presence, filter, remainder) =
+        let (comparator, count, filter, remainder) =
             parse_controls_permanent_object("who controls an artifact loses 1 life", &mut ctx)
                 .expect("affirmative control predicate must parse");
-        assert_eq!(presence, ControlPresence::Controls);
+        assert_eq!(comparator, Comparator::GE);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
         assert!(
             !matches!(filter, TargetFilter::Any),
             "artifact object must be captured, got {filter:?}"
         );
         assert_eq!(remainder.trim_start(), "loses 1 life");
 
-        // Negative "who doesn't control <object>".
+        // Negative "who doesn't control <object>" → `{ EQ, Fixed(0) }`.
         let mut ctx = ParseContext::default();
-        let (presence, _filter, _) =
+        let (comparator, count, _filter, _) =
             parse_controls_permanent_object("who doesn't control a creature", &mut ctx)
                 .expect("negative control predicate must parse");
-        assert_eq!(presence, ControlPresence::ControlsNone);
+        assert_eq!(comparator, Comparator::EQ);
+        assert_eq!(count, QuantityExpr::Fixed { value: 0 });
+
+        // Comparative "who controls more <type> than you" → `{ GT, count }`
+        // where `count` is the controller's own `You`-controlled object count.
+        // The carried `filter` is the BARE type (no controller axis).
+        let mut ctx = ParseContext::default();
+        let (comparator, count, filter, remainder) = parse_controls_permanent_object(
+            "who controls more creatures than you draws a card",
+            &mut ctx,
+        )
+        .expect("comparative control predicate must parse");
+        assert_eq!(comparator, Comparator::GT);
+        match count {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: count_filter,
+                    },
+            } => match count_filter {
+                TargetFilter::Typed(tf) => assert_eq!(
+                    tf.controller,
+                    Some(crate::types::ability::ControllerRef::You),
+                    "comparative count must read the controller's own creatures"
+                ),
+                other => panic!("expected Typed count filter, got {other:?}"),
+            },
+            other => panic!("expected Ref(ObjectCount) count, got {other:?}"),
+        }
+        // The carried filter is bare (no controller axis).
+        match filter {
+            TargetFilter::Typed(tf) => assert_eq!(
+                tf.controller, None,
+                "carried ControlsCount filter must be controller-free, got {:?}",
+                tf.controller
+            ),
+            other => panic!("expected Typed bare filter, got {other:?}"),
+        }
+        assert_eq!(remainder.trim_start(), "draws a card");
 
         // No object after "control" → the all-matching `TargetFilter::Any` is
         // rejected so callers never count every permanent/opponent.

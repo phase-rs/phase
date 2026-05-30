@@ -913,17 +913,29 @@ fn collect_matching_players(
                     // for a damage-each-player effect (no parent object target
                     // is in scope); never matches.
                     PlayerFilter::ParentObjectTargetController => false,
-                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
-                    // control [filter]" — candidate satisfies both `relation`
-                    // and the controls/controls-none predicate.
-                    PlayerFilter::ControlsPermanent {
+                    // CR 109.4 + CR 109.5: "each [player class] who controls
+                    // [comparator] [count] [filter]" — candidate satisfies both
+                    // `relation` and the controlled-permanent count comparison.
+                    PlayerFilter::ControlsCount {
                         ref relation,
-                        ref presence,
                         ref filter,
+                        ref comparator,
+                        ref count,
                     } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            count,
+                            source_controller,
+                            source_id,
+                        );
                         crate::game::players::matches_relation(p.id, source_controller, *relation)
-                            && crate::game::effects::player_controls_matching_permanent(
-                                state, p.id, presence, filter, source_id,
+                            && crate::game::effects::player_control_count_compares(
+                                state,
+                                p.id,
+                                filter,
+                                *comparator,
+                                threshold,
+                                source_id,
                             )
                     }
                 }
@@ -1042,20 +1054,28 @@ pub fn resolve_each_player(
                     // for a damage-each-player effect (no parent object target
                     // is in scope); never matches.
                     PlayerFilter::ParentObjectTargetController => false,
-                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
-                    // control [filter]" — candidate satisfies both `relation`
-                    // and the controls/controls-none predicate.
-                    PlayerFilter::ControlsPermanent {
+                    // CR 109.4 + CR 109.5: "each [player class] who controls
+                    // [comparator] [count] [filter]" — candidate satisfies both
+                    // `relation` and the controlled-permanent count comparison.
+                    PlayerFilter::ControlsCount {
                         relation,
-                        presence,
                         filter,
+                        comparator,
+                        count,
                     } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            count,
+                            ability.controller,
+                            ability.source_id,
+                        );
                         crate::game::players::matches_relation(p.id, ability.controller, *relation)
-                            && crate::game::effects::player_controls_matching_permanent(
+                            && crate::game::effects::player_control_count_compares(
                                 state,
                                 p.id,
-                                presence,
                                 filter,
+                                *comparator,
+                                threshold,
                                 ability.source_id,
                             )
                     }

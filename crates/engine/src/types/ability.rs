@@ -3277,19 +3277,6 @@ pub enum PlayerRelation {
     All,
 }
 
-/// CR 109.4: Whether a player's controlled-permanent predicate is satisfied by
-/// the presence or the absence of a matching permanent. A typed two-variant
-/// enum — never a bool — so `PlayerFilter::ControlsPermanent` reads as
-/// self-documenting at every match site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ControlPresence {
-    /// The player controls at least one permanent matching the filter.
-    Controls,
-    /// The player controls no permanent matching the filter.
-    ControlsNone,
-}
-
 /// A filter matching players by game-state conditions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3365,15 +3352,31 @@ pub enum PlayerFilter {
     /// `ControllerRef::ParentTargetController`. Resolved via
     /// `ability_utils::parent_target_controller`.
     ParentObjectTargetController,
-    /// CR 109.4 + CR 700.1: Each player satisfying `relation` who controls
-    /// (`presence = Controls`) or does not control (`presence = ControlsNone`)
-    /// at least one permanent matching `filter`. Covers "each opponent who
-    /// controls an artifact", "each player who doesn't control a creature",
-    /// "each opponent who doesn't control an Elf" (Thornbow Archer), etc.
-    ControlsPermanent {
+    /// CR 109.4 + CR 109.5: Each player satisfying `relation` whose count of
+    /// controlled permanents matching `filter` compares to `count` under
+    /// `comparator`. The control relationship is enforced per-candidate at
+    /// runtime (`obj.controller == candidate`), so `filter` carries no
+    /// controller axis; `count`'s own `ObjectCount` may carry a `You`
+    /// controller (CR 109.5 — "you" is the effect controller) for comparative
+    /// "more X than you" phrasings.
+    ///
+    /// Covers the full presence/comparison class as a single parameterized
+    /// variant:
+    /// - "each opponent who controls an artifact" → `{ GE, Fixed(1) }`
+    ///   (at least one matching permanent).
+    /// - "each opponent who doesn't control an Elf" (Thornbow Archer) →
+    ///   `{ EQ, Fixed(0) }` (no matching permanent).
+    /// - "each player who controls more creatures than you" (Heidegger) →
+    ///   `{ GT, Ref(ObjectCount { filter: <creature>.controller(You) }) }`.
+    ///
+    /// `count` is boxed to break the `QuantityExpr → QuantityRef::PlayerCount →
+    /// PlayerFilter::ControlsCount → QuantityExpr` reference cycle that would
+    /// otherwise give the enum infinite size.
+    ControlsCount {
         relation: PlayerRelation,
-        presence: ControlPresence,
         filter: TargetFilter,
+        comparator: Comparator,
+        count: Box<QuantityExpr>,
     },
 }
 

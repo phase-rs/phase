@@ -1753,7 +1753,7 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
             CastManaSpentMetric::Total | CastManaSpentMetric::DistinctColors => false,
         },
         QuantityRef::PlayerCount {
-            filter: crate::types::ability::PlayerFilter::ControlsPermanent { filter, .. },
+            filter: crate::types::ability::PlayerFilter::ControlsCount { filter, .. },
         } => filter_references_target_creature_quantity(filter),
         _ => false,
     }
