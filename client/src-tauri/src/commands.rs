@@ -6,7 +6,6 @@ use engine::database::CardDatabase;
 use engine::game::deck_loading::PlayerDeckPayload;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
-use engine::types::player::PlayerId;
 use std::collections::HashMap;
 use serde::Serialize;
 use engine::game::derived::derive_display_state;
