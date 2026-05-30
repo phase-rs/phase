@@ -475,6 +475,132 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
     }
 }
 
+/// CR 611.3a: ENTRY-AWARE narrowing for a population-sensitive source-level
+/// enabling CONDITION. `static_condition_uses_object_population` proves a
+/// condition *can* gate on board population; this proves a SPECIFIC entering
+/// object can actually perturb that population input (so the gate might flip for
+/// the whole recipient set).
+///
+/// Monotonicity: reached only for battlefield ENTRIES. An entry only ADDS
+/// objects, so a count/devotion gate only flips by the entered object joining
+/// the population, and `IsPresent` only flips false→true via a matching member.
+/// `ctx` is built from the condition's SOURCE object (CR 109.5 controller
+/// rebinding) by the caller.
+///
+/// EXHAUSTIVE and wildcard-free, mirroring `static_condition_uses_object_population`:
+/// every `false` arm there is `false` here; every `true` arm there is narrowed
+/// to a membership / threshold-perturb test, with conservative `true` where a
+/// precise membership test is awkward (over-escalation is safe).
+fn entered_object_perturbs_static_condition(
+    state: &GameState,
+    entered_id: ObjectId,
+    ctx: &FilterContext<'_>,
+    condition: &StaticCondition,
+) -> bool {
+    match condition {
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            entered_perturbs_static_quantity(state, entered_id, ctx, lhs)
+                || entered_perturbs_static_quantity(state, entered_id, ctx, rhs)
+        }
+        // CR 700.5: devotion gate flips only if the entered object's mana cost
+        // contributes a symbol for one of the gate colors (mirrors the Devotion
+        // magnitude leaf). LOW-1: controller-blind.
+        StaticCondition::DevotionGE { colors, .. } => {
+            state.objects.get(&entered_id).is_some_and(|entered| {
+                crate::game::quantity::entered_object_perturbs_quantity_expr(
+                    state,
+                    entered,
+                    ctx,
+                    &QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Devotion {
+                            colors: crate::types::ability::DevotionColors::Fixed(colors.clone()),
+                        },
+                    },
+                )
+            })
+        }
+        // "you control [filter]" / "a [filter] is on the battlefield". A present
+        // filter flips only via a matching member; an absent filter is an
+        // unqualified presence check — conservatively perturb on any entry.
+        StaticCondition::IsPresent { filter } => match filter {
+            Some(f) => matches_target_filter(state, entered_id, f, ctx),
+            None => true,
+        },
+        // CR 509.1b: defending-player board-count gate — flips via a matching
+        // member entering. (ctx controller is the source's, not the defender's;
+        // membership over-approximates, which is safe.)
+        StaticCondition::DefendingPlayerControls { filter } => {
+            matches_target_filter(state, entered_id, filter, ctx)
+        }
+        // Commander presence — conservatively perturb (a commander entering can
+        // flip it; not worth a precise commander membership test here).
+        StaticCondition::ControlsCommander { .. } => true,
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| entered_object_perturbs_static_condition(state, entered_id, ctx, c)),
+        StaticCondition::Not { condition } => {
+            entered_object_perturbs_static_condition(state, entered_id, ctx, condition)
+        }
+        // Unknown text — conservatively perturb so an unrecognized population gate
+        // can never silently under-escalate.
+        StaticCondition::Unrecognized { .. } => true,
+        // Identical enumeration to the `false` arm of
+        // `static_condition_uses_object_population`: source-local, chosen-
+        // attribute, combat, player-scoped, turn/phase, recipient-context, source
+        // zone, and cast-history gates — none read board population, so an entry
+        // cannot perturb them.
+        StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::None => false,
+    }
+}
+
+/// Bridge: route a condition operand `QuantityExpr` through the quantity
+/// module's entry-aware classifier (resolving the entered object).
+fn entered_perturbs_static_quantity(
+    state: &GameState,
+    entered_id: ObjectId,
+    ctx: &FilterContext<'_>,
+    expr: &QuantityExpr,
+) -> bool {
+    state.objects.get(&entered_id).is_some_and(|entered| {
+        crate::game::quantity::entered_object_perturbs_quantity_expr(state, entered, ctx, expr)
+    })
+}
+
 fn source_condition_gate_passes(
     state: &GameState,
     condition: &StaticCondition,
@@ -1157,7 +1283,10 @@ pub fn flush_layers(state: &mut GameState) {
 ///    object receives its timestamp on zone entry. CR 613.8a: dependency/timestamp
 ///    ordering operates on the live set. This scan is O(active-effect-count), NOT
 ///    O(battlefield).
-fn incremental_flush_must_escalate(state: &GameState, entered_ids: &HashSet<ObjectId>) -> bool {
+pub(crate) fn incremental_flush_must_escalate(
+    state: &GameState,
+    entered_ids: &HashSet<ObjectId>,
+) -> bool {
     // Axis 1 — per-entered preconditions.
     for &id in entered_ids {
         let Some(obj) = state.objects.get(&id) else {
@@ -1170,51 +1299,107 @@ fn incremental_flush_must_escalate(state: &GameState, entered_ids: &HashSet<Obje
         }
     }
 
-    // Axis 2a — magnitude + affected-set over the EXISTING active effect set.
+    // Axis 2a — magnitude + affected-set over the EXISTING active effect set,
+    // NARROWED to entries that actually perturb the population input.
+    //
+    // Two-stage test per effect: the committed exhaustive classifier
+    // (`quantity_expr_uses_object_count` / `affected_filter_uses_object_population`)
+    // is the OUTER conjunct (compile-time tripwire — a future population-reading
+    // variant forces a classification). Then the entry-aware narrowing layer asks
+    // whether any ENTERED object can flip THIS effect's population input.
+    //
+    // CR 109.5: the filter's "you control" must resolve against the EFFECT
+    // SOURCE's controller, not the entered object's — so `ctx` is built per-effect
+    // from `e.source_id` + `e.controller`. Escalation is `classifier(e) &&
+    // any_entered_perturbs(e)`; both required.
     if collect_shared_active_continuous_effects(state)
         .iter()
         .any(|e| {
-            modification_dynamic_quantity(&e.modification)
-                .is_some_and(crate::game::quantity::quantity_expr_uses_object_count)
-                || crate::game::filter::affected_filter_uses_object_population(&e.affected_filter)
+            let magnitude = modification_dynamic_quantity(&e.modification);
+            let magnitude_sensitive =
+                magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
+            let affected_sensitive =
+                crate::game::filter::affected_filter_uses_object_population(&e.affected_filter);
+            if !magnitude_sensitive && !affected_sensitive {
+                return false;
+            }
+            let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
+            entered_ids.iter().any(|id| {
+                let Some(entered) = state.objects.get(id) else {
+                    return false;
+                };
+                (magnitude_sensitive
+                    && magnitude.is_some_and(|expr| {
+                        crate::game::quantity::entered_object_perturbs_quantity_expr(
+                            state, entered, &ctx, expr,
+                        )
+                    }))
+                    || (affected_sensitive
+                        && crate::game::filter::entered_object_perturbs_affected_filter(
+                            state,
+                            *id,
+                            &ctx,
+                            &e.affected_filter,
+                        ))
+            })
         })
     {
         return true;
     }
 
     // Axis 2b — source-level enabling CONDITION over the EXISTING static-ability
-    // sources. The condition axis CANNOT be read off the collected
-    // `ActiveContinuousEffect`s: `active_continuous_effects_from_static_definitions`
-    // evaluates a non-recipient-context (source-level) condition as a gate at
-    // COLLECTION time and stores `condition: None` on the resulting effect (only
-    // recipient-context conditions are retained for per-recipient re-evaluation).
-    // So a board-population gate like "as long as you control N creatures" is
-    // already consumed and invisible on the active-effect set. We must inspect the
-    // intact `StaticDefinition.condition` on each live source instead.
+    // sources, NARROWED to entries that actually perturb the condition. The
+    // condition axis CANNOT be read off the collected `ActiveContinuousEffect`s:
+    // `active_continuous_effects_from_static_definitions` evaluates a
+    // non-recipient-context (source-level) condition as a gate at COLLECTION time
+    // and stores `condition: None` on the resulting effect (only recipient-context
+    // conditions are retained for per-recipient re-evaluation). So a board-
+    // population gate like "as long as you control N creatures" is already consumed
+    // and invisible on the active-effect set. We must inspect the intact
+    // `StaticDefinition.condition` on each live source instead.
     //
     // CR 611.3a: when such a source-level enabling condition depends on board
     // population, an object entering can flip the condition for the WHOLE recipient
-    // set, changing PRE-EXISTING recipients — so escalate to a full rebuild.
-    any_active_static_condition_uses_object_population(state)
+    // set, changing PRE-EXISTING recipients — so escalate to a full rebuild. The
+    // entry-aware narrowing (built per-source from the visited object, CR 109.5)
+    // skips escalation when no entered object can flip the gate.
+    any_active_static_condition_perturbed_by_entry(state, entered_ids)
 }
 
 /// Scan every live static-ability source for a CONTINUOUS `StaticDefinition`
-/// whose enabling `condition` is board-population-dependent. Walks the same
-/// source set as `collect_shared_active_continuous_effects`
-/// (`for_each_static_effect_source`) but reads the intact pre-collection
-/// `condition` field. O(active-source-count); short-circuits on the first match.
-fn any_active_static_condition_uses_object_population(state: &GameState) -> bool {
+/// whose enabling `condition` is board-population-dependent AND that one of the
+/// `entered_ids` actually perturbs. Walks the same source set as
+/// `collect_shared_active_continuous_effects` (`for_each_static_effect_source`)
+/// but reads the intact pre-collection `condition` field.
+/// O(active-source-count × entered-count); short-circuits on the first match.
+///
+/// Two-stage test (mirrors Axis 2a): the committed exhaustive classifier
+/// (`static_condition_uses_object_population`, OUTER conjunct, compile-time
+/// tripwire) gates the entry-aware narrowing
+/// (`entered_object_perturbs_static_condition`). CR 109.5: `ctx` is built per
+/// SOURCE object so the condition's "you control" rebinds to the source's
+/// controller, not the entered object's.
+fn any_active_static_condition_perturbed_by_entry(
+    state: &GameState,
+    entered_ids: &HashSet<ObjectId>,
+) -> bool {
     let mut found = false;
-    for_each_static_effect_source(state, |_state, obj| {
+    for_each_static_effect_source(state, |state, obj| {
         if found {
             return;
         }
+        let ctx = FilterContext::from_source(state, obj.id);
         if obj.static_definitions.iter_all().any(|def| {
-            def.mode == StaticMode::Continuous
-                && def
-                    .condition
-                    .as_ref()
-                    .is_some_and(static_condition_uses_object_population)
+            if def.mode != StaticMode::Continuous {
+                return false;
+            }
+            let Some(condition) = def.condition.as_ref() else {
+                return false;
+            };
+            static_condition_uses_object_population(condition)
+                && entered_ids
+                    .iter()
+                    .any(|id| entered_object_perturbs_static_condition(state, *id, &ctx, condition))
         }) {
             found = true;
         }
@@ -9124,5 +9309,32 @@ mod tests {
              leave the subtype list empty: {:?}",
             c.card_types.subtypes
         );
+    }
+
+    /// CR 113.6c + CR 611.3a: Grist's "as long as ~ isn't on the battlefield"
+    /// parses to `Not(SourceInZone { Battlefield })`. Its truth depends only on
+    /// the SOURCE's own zone, never on board population, so the escalation
+    /// classifier must report it population-INDEPENDENT — the load-bearing fact
+    /// that keeps a colorless-Insect entry off the full-eval path on the real
+    /// Scute board. (The parser side is covered in `oracle_nom::condition`; this
+    /// guards the classifier that consumes the parsed shape.)
+    #[test]
+    fn grist_source_zone_condition_is_not_population_dependent() {
+        let grist = StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceInZone {
+                zone: Zone::Battlefield,
+            }),
+        };
+        assert!(
+            !static_condition_uses_object_population(&grist),
+            "Not(SourceInZone) gates on the source's own zone, not board \
+             population — must not force escalation"
+        );
+        // And the bare affirmative reading is equally population-independent.
+        assert!(!static_condition_uses_object_population(
+            &StaticCondition::SourceInZone {
+                zone: Zone::Battlefield,
+            }
+        ));
     }
 }

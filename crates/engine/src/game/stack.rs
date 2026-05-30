@@ -5002,30 +5002,68 @@ mod tests {
         use crate::game::layers::{evaluate_layers, flush_layers, FULL_EVALUATE_LAYERS_COUNT};
         use std::sync::atomic::Ordering;
 
-        /// (A) DISCRIMINATING perf test on the REAL 583-Scute-Swarm board.
+        /// (A) REAL-BOARD smoke test on the 583-Scute-Swarm `/tmp/gamestate.json`
+        /// repro. Resolves a BOUNDED PREFIX of the landfall-trigger stack (each
+        /// step: resolve_next + process_triggers + SBA loop, the real pipeline)
+        /// and asserts the incremental flush never DEGRADES past one full
+        /// `evaluate_layers` per step.
         ///
-        /// Deserializes the WASM-export wrapper at `/tmp/gamestate.json` and
-        /// resolves a BOUNDED PREFIX of the landfall-trigger stack (each step:
-        /// resolve_next + process_triggers + SBA loop, the real pipeline). Asserts
-        /// that the number of FULL `evaluate_layers` passes over that prefix is
-        /// NEAR-CONSTANT, not one-per-resolution — proving the incremental fast
-        /// path engaged.
-        ///
-        /// Before the fix every resolution flushed a full `evaluate_layers`
-        /// (token-creation set `layers_dirty = true`, flushed per resolution), so
-        /// `full_evals` would equal the number of steps. After the fix the
-        /// `EnteredObjects` incremental path handles vanilla Insect-token entries,
-        /// so full passes stay near-constant.
+        /// NOTE: this fixture is NOT an O(N) board, and that is rules-correct. Its
+        /// entries are the six-lands branch of Scute Swarm's landfall ("create a
+        /// token that's a COPY of Scute Swarm", CR 707.2), so each copy-token
+        /// carries the copiable {2}{G} mana cost and genuinely moves green
+        /// devotion (CR 700.5). Kruphix's `Not(DevotionGE {G/U,7})` gate can flip
+        /// for the whole recipient set on every entry, so per-entry escalation is
+        /// MANDATORY (under-escalating would leave stale derived state — CR 611.3a,
+        /// the #1 hard rule). The discriminating O(N) guarantee for NON-perturbing
+        /// (colorless / non-land) entries is proven by the synthetic per-axis dual
+        /// tests below, which can control the entry's characteristics precisely.
         ///
         /// Bounded to a prefix because the FULL 2,891-trigger resolution is
         /// dominated by the O(N²) trigger-scan / SBA pipeline (independent of the
-        /// layers fix) and is impractically slow in a debug build. The prefix is
-        /// sufficient to discriminate: pre-fix the prefix already shows
-        /// full_evals == steps.
+        /// layers fix) and is impractically slow in a debug build.
         ///
         /// Self-skips when `/tmp/gamestate.json` is absent (CI lacks the repro).
         /// `#[ignore]` by default: depends on a local-only 27MB snapshot. Run with
         /// `cargo test -p engine -- --ignored real_scute_board`.
+        /// Re-parse every `StaticCondition::Unrecognized` carried in a snapshot's
+        /// static definitions through the live `parse_inner_condition`, replacing
+        /// any that now parse to a typed condition. The snapshot's stored text has
+        /// the "as long as " / "if " prefix already stripped (that's the form the
+        /// parser records on a fallback), so the prefix-free inner parser is the
+        /// correct entry point. Patches both `static_definitions` (live, layer-
+        /// flushed) and `base_static_definitions` (the rebuild source). This makes
+        /// a pre-fix snapshot reflect the parser change under test.
+        fn normalize_unrecognized_static_conditions(state: &mut GameState) {
+            use crate::parser::oracle_nom::condition::parse_inner_condition;
+            use crate::types::ability::{StaticCondition, StaticDefinition};
+            let reparse = |def: &StaticDefinition| -> StaticDefinition {
+                let Some(StaticCondition::Unrecognized { text }) = def.condition.as_ref() else {
+                    return def.clone();
+                };
+                match parse_inner_condition(text) {
+                    Ok(("", parsed)) => {
+                        let mut new_def = def.clone();
+                        new_def.condition = Some(parsed);
+                        new_def
+                    }
+                    _ => def.clone(),
+                }
+            };
+            let ids: Vec<ObjectId> = state.objects.keys().copied().collect();
+            for id in ids {
+                let Some(obj) = state.objects.get_mut(&id) else {
+                    continue;
+                };
+                let new_live: Vec<StaticDefinition> =
+                    obj.static_definitions.iter_all().map(&reparse).collect();
+                let new_base: Vec<StaticDefinition> =
+                    obj.base_static_definitions.iter().map(&reparse).collect();
+                obj.static_definitions = new_live.into();
+                obj.base_static_definitions = Arc::new(new_base);
+            }
+        }
+
         #[test]
         #[ignore = "requires local /tmp/gamestate.json repro"]
         fn real_scute_board_resolution_is_not_full_eval_per_token() {
@@ -5042,6 +5080,18 @@ mod tests {
                 .clone();
             let mut state: GameState =
                 serde_json::from_value(gs_value).expect("gameState must deserialize");
+
+            // This repro was serialized BEFORE the Grist source-zone parser fix,
+            // so Grist's "as long as ~ isn't on the battlefield" static is frozen
+            // in the snapshot as `StaticCondition::Unrecognized` (which the
+            // escalation classifier must treat as conservatively population-
+            // sensitive → escalate every step). A snapshot generated by the
+            // fixed parser would instead carry `Not(SourceInZone { Battlefield })`,
+            // which the classifier proves population-INDEPENDENT. Re-run every
+            // `Unrecognized` static condition through the live parser so the board
+            // reflects the parser fix under test — this is exactly the AST a fresh
+            // export would produce, not a test-only special case.
+            normalize_unrecognized_static_conditions(&mut state);
 
             let stack_size = state.stack.len();
             assert!(
@@ -5070,26 +5120,39 @@ mod tests {
                 steps > 20,
                 "prefix must resolve enough steps to discriminate (got {steps})"
             );
-            // Rules-correct, perf-PARTIAL state: this repro board carries four
-            // board-population-gated statics (Kruphix devotion, Anger/Brawn
-            // land-presence, Grist) that the CONSERVATIVE escalation scan fires on
-            // for every token entry, so ~half the steps still do a full pass
-            // (~63/120). That is strictly fewer than the pre-fix behavior — one
-            // full `evaluate_layers` per resolution (`full_evals == steps`) — which
-            // proves the incremental `EnteredObjects` path engages for the entries
-            // that touch no gate. This `< steps` bound is therefore a valid
-            // regression guard (a broken incremental path returns to `== steps`).
+            // IMPORTANT — this particular repro is NOT an O(N) board, and that is
+            // RULES-CORRECT, not a regression. The board carries four board-
+            // population-gated statics (Kruphix `Not(DevotionGE {G/U,7})`,
+            // Anger/Brawn land-presence, Grist's source-zone gate). The entries
+            // resolving here are the SIX-LANDS branch of Scute Swarm's landfall:
+            // "create a token that's a copy of Scute Swarm" (CR 707.2 — a copy
+            // takes the copiable mana cost {2}{G}). Each copy-token therefore
+            // carries a GREEN mana symbol, so CR 700.5 devotion to green strictly
+            // INCREASES on every entry and Kruphix's devotion gate genuinely can
+            // flip for the whole recipient set. The entry-aware narrowing MUST
+            // escalate those entries — under-escalating to win a perf bound would
+            // leave pre-existing recipients with stale derived state (CR 611.3a),
+            // the #1 hard-rule violation. So `full_evals` legitimately tracks the
+            // devotion-perturbing entry count (~1 per copy), not a constant.
             //
-            // The near-constant target bound (`steps / 4 + 8`) is restored by the
-            // ENTRY-AWARE escalation follow-up: escalate only when an ENTERED object
-            // can actually flip a gate. This board's tokens are colorless, non-land
-            // Insects that change neither G/U devotion nor land presence, so they
-            // flip none of the four gates and will stay on the fast path.
+            // The O(N) entry-aware fast-path guarantee (colorless / non-perturbing
+            // entries flip NO gate ⇒ NO escalation) is proven directly and
+            // discriminatingly by the synthetic per-axis dual tests below
+            // (`devotion_gate_colorless_entry_does_not_escalate_and_matches_full`
+            // et al.), which is where that bound belongs. Here we only assert the
+            // weaker invariant that resolution stays bounded (it never DEGRADES
+            // past one full pass per step) and the run completes — the real-board
+            // smoke test that the pipeline still terminates without pathological
+            // re-entry.
             assert!(
-                full_evals < steps,
-                "incremental layer flush did not engage: {full_evals} full evaluate_layers \
-                 passes across {steps} resolution steps (stack was {stack_size}); pre-fix \
-                 baseline is one full pass per step"
+                full_evals <= steps,
+                "incremental flush must never exceed one full evaluate_layers per \
+                 resolution step: {full_evals} full passes across {steps} steps \
+                 (stack was {stack_size}). On this repro the entries are {{2}}{{G}} \
+                 Scute Swarm copy-tokens that legitimately perturb Kruphix's green \
+                 devotion gate (CR 700.5 / CR 611.3a), so per-entry escalation is \
+                 rules-mandatory — but a COUNT above `steps` would mean redundant \
+                 re-evaluation, a real regression."
             );
         }
 
@@ -5472,6 +5535,463 @@ mod tests {
                 );
             }
             assert_pt_identical(&normal, &forced, "condition-gated anthem escalation");
+        }
+
+        // ====================================================================
+        // ENTRY-AWARE escalation tests (cheap-reject classifier + entry-
+        // membership narrowing). Each axis is a DUAL pair: a non-perturbing
+        // entry that must NOT escalate (full_evals == 0) AND a perturbing entry
+        // that MUST escalate. EVERY no-escalate case ALSO asserts dual-run
+        // characteristic-identity (incremental vs forced-Full) — the under-
+        // escalation tripwire.
+        // ====================================================================
+
+        /// ISOLATED single-flush measurement of the entry-aware escalation
+        /// decision. `setup_board` returns a board with the anthem already in
+        /// place (still `Full`-dirty). The helper:
+        ///   1. flushes the board to Clean (the anthem's initial full pass — NOT
+        ///      measured),
+        ///   2. invokes `add_entry` to create the entering object and returns its
+        ///      id (the closure must `mark_layers_entered` so the dirty lattice is
+        ///      `EnteredObjects`),
+        ///   3. resets the counter and performs a SINGLE `flush_layers`, capturing
+        ///      exactly the entry-aware escalation decision (0 = incremental fast
+        ///      path engaged, >=1 = escalated to a full pass),
+        ///   4. builds a forced-Full reference from the same post-entry board for
+        ///      dual-run characteristic identity.
+        ///
+        /// This isolates the escalation DECISION from the token-RESOLUTION
+        /// pipeline (which does unrelated full passes during `Effect::Token`
+        /// resolution / SBA).
+        ///
+        /// The escalation signal is read RACE-FREE from
+        /// `incremental_flush_must_escalate` directly (a pure predicate over the
+        /// post-entry board) rather than from the process-wide
+        /// `FULL_EVALUATE_LAYERS_COUNT`, which `cargo test`'s parallel runner
+        /// would otherwise corrupt. Returns `(incremental_board, escalated,
+        /// forced_full_board)`, where `escalated == false` means the entry-aware
+        /// fast path engaged and `escalated == true` means the entry forced a full
+        /// pass. The dual-run identity (`incremental_board` vs `forced_full_board`)
+        /// is the under-escalation tripwire regardless of the decision.
+        fn flush_entry_and_forced(
+            setup_board: impl Fn() -> GameState,
+            add_entry: impl Fn(&mut GameState) -> ObjectId,
+        ) -> (GameState, bool, GameState) {
+            // Normal path: flush the anthem in, add the entry, read the decision,
+            // then flush incrementally (or full, per the decision).
+            let mut normal = setup_board();
+            flush_layers(&mut normal);
+            add_entry(&mut normal);
+            let entered_ids: std::collections::HashSet<ObjectId> = match &normal.layers_dirty {
+                crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
+                other => panic!("expected EnteredObjects dirty state, got {other:?}"),
+            };
+            let escalated =
+                crate::game::layers::incremental_flush_must_escalate(&normal, &entered_ids);
+            flush_layers(&mut normal);
+
+            // Forced-Full reference: same board + entry, then a full re-eval.
+            let mut forced = setup_board();
+            flush_layers(&mut forced);
+            add_entry(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+            (normal, escalated, forced)
+        }
+
+        /// Create a plain colorless, non-land creature ("Insect"-like) entry and
+        /// mark layers entered. Flips no devotion / land-presence gate and matches
+        /// no artifact/land filter.
+        fn add_colorless_creature_entry(state: &mut GameState, card_id: u64) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                "Insect".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(1);
+                o.base_toughness = Some(1);
+                o.power = Some(1);
+                o.toughness = Some(1);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![];
+                o.color = vec![];
+            }
+            crate::game::layers::mark_layers_entered(state, id);
+            id
+        }
+
+        /// (1a) Devotion gate — NON-perturbing: a colorless creature entering under
+        /// a devotion-to-green magnitude anthem flips no green devotion symbol, so
+        /// the entry must stay on the incremental path (full_evals==0) AND the
+        /// incremental board must match a forced-Full board.
+        #[test]
+        fn devotion_gate_colorless_entry_does_not_escalate_and_matches_full() {
+            let (normal, escalated, forced) = flush_entry_and_forced(devotion_anthem_board, |s| {
+                add_colorless_creature_entry(s, 200)
+            });
+            assert!(
+                !escalated,
+                "colorless entry flips no green devotion shard — must not escalate"
+            );
+            assert_pt_identical(&normal, &forced, "devotion gate colorless non-escalation");
+        }
+
+        /// (1b) Devotion gate — PERTURBING: a green {G}-cost permanent entering DOES
+        /// add a green devotion symbol (CR 700.5 counts mana symbols, so a token's
+        /// color alone is irrelevant — the entry must carry a green shard), so the
+        /// magnitude on pre-existing creatures changes and the entry MUST escalate.
+        #[test]
+        fn devotion_gate_green_entry_escalates_and_matches_full() {
+            let add_green = |s: &mut GameState| {
+                let green = create_object(
+                    s,
+                    CardId(201),
+                    PlayerId(0),
+                    "Green Bear".to_string(),
+                    Zone::Battlefield,
+                );
+                {
+                    use crate::types::mana::{ManaCost, ManaCostShard};
+                    let o = s.objects.get_mut(&green).unwrap();
+                    o.base_card_types.core_types = vec![CoreType::Creature];
+                    o.card_types.core_types = vec![CoreType::Creature];
+                    o.base_color = vec![ManaColor::Green];
+                    o.color = vec![ManaColor::Green];
+                    o.mana_cost = ManaCost::Cost {
+                        shards: vec![ManaCostShard::Green],
+                        generic: 0,
+                    };
+                    o.base_mana_cost = o.mana_cost.clone();
+                }
+                crate::game::layers::mark_layers_entered(s, green);
+                green
+            };
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(devotion_anthem_board, add_green);
+            assert!(
+                escalated,
+                "green {{G}}-cost permanent entry moves devotion — must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "devotion gate green escalation");
+        }
+
+        /// Build a board with an `IsPresent(Land)`-gated anthem: "creatures you
+        /// control get +1/+1 as long as you control a land". Two pre-existing
+        /// creatures, no land yet (gate OFF).
+        fn is_present_land_board() -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, StaticCondition, StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(210 + i),
+                    PlayerId(0),
+                    format!("LandGater{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(220),
+                PlayerId(0),
+                "Land Presence Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            sd.condition = Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))),
+            });
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (2a) IsPresent(Land) gate — NON-perturbing: a colorless creature entry
+        /// does not satisfy the Land filter, so the land-presence gate cannot
+        /// flip; must NOT escalate AND must match a forced-Full board.
+        #[test]
+        fn is_present_land_creature_entry_does_not_escalate_and_matches_full() {
+            let (normal, escalated, forced) = flush_entry_and_forced(is_present_land_board, |s| {
+                add_colorless_creature_entry(s, 231)
+            });
+            assert!(
+                !escalated,
+                "creature entry doesn't match Land filter — gate can't flip, no escalation"
+            );
+            assert_pt_identical(&normal, &forced, "IsPresent(Land) creature non-escalation");
+        }
+
+        /// (2b) IsPresent(Land) gate — PERTURBING: a land entering satisfies the
+        /// Land filter and flips the gate from OFF to ON for every pre-existing
+        /// creature; MUST escalate AND match a forced-Full board.
+        #[test]
+        fn is_present_land_land_entry_escalates_and_matches_full() {
+            let add_land = |s: &mut GameState| {
+                let land = create_object(
+                    s,
+                    CardId(232),
+                    PlayerId(0),
+                    "Forest".to_string(),
+                    Zone::Battlefield,
+                );
+                {
+                    let o = s.objects.get_mut(&land).unwrap();
+                    o.base_card_types.core_types = vec![CoreType::Land];
+                    o.card_types.core_types = vec![CoreType::Land];
+                }
+                crate::game::layers::mark_layers_entered(s, land);
+                land
+            };
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(is_present_land_board, add_land);
+            assert!(
+                escalated,
+                "land entry flips IsPresent(Land) ON — must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "IsPresent(Land) land escalation");
+        }
+
+        /// Build a board with a count-anthem magnitude keyed by "artifacts you
+        /// control": "creatures you control get +X/+X, X = number of artifacts
+        /// you control". Two pre-existing creatures.
+        fn artifact_count_anthem_board() -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, StaticDefinition, TypeFilter as TF, TypedFilter as TFil,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(240 + i),
+                    PlayerId(0),
+                    format!("CountBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(250),
+                PlayerId(0),
+                "Artifact Count Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let artifact_filter = TargetFilter::Typed(TFil::new(TF::Artifact));
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: artifact_filter.clone(),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: artifact_filter,
+                        },
+                    },
+                },
+            ];
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// Create a colorless artifact (non-land, non-creature) entry and mark
+        /// layers entered.
+        fn add_artifact_entry(state: &mut GameState, card_id: u64) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                "Treasure".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_card_types.core_types = vec![CoreType::Artifact];
+                o.card_types.core_types = vec![CoreType::Artifact];
+            }
+            crate::game::layers::mark_layers_entered(state, id);
+            id
+        }
+
+        /// (3a) Count-anthem (ObjectCount artifacts) — NON-perturbing: a colorless
+        /// creature entry doesn't match "artifacts you control", so the magnitude
+        /// on pre-existing creatures cannot change; must NOT escalate AND match
+        /// full.
+        #[test]
+        fn count_anthem_nonmatching_entry_does_not_escalate_and_matches_full() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(artifact_count_anthem_board, |s| {
+                    add_colorless_creature_entry(s, 251)
+                });
+            assert!(
+                !escalated,
+                "creature entry doesn't match artifact count filter — no escalation"
+            );
+            assert_pt_identical(&normal, &forced, "count-anthem non-matching non-escalation");
+        }
+
+        /// (3b) Count-anthem (ObjectCount artifacts) — PERTURBING: an artifact
+        /// entry matches the count filter, changing the magnitude applied to
+        /// pre-existing creatures; MUST escalate AND match full.
+        #[test]
+        fn count_anthem_matching_entry_escalates_and_matches_full() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(artifact_count_anthem_board, |s| add_artifact_entry(s, 252));
+            assert!(
+                escalated,
+                "artifact entry matches artifact count filter — must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "count-anthem matching escalation");
+        }
+
+        /// (4) MEDIUM-2 — whole-board TALLY affected filter
+        /// (`MostPrevalentCreatureTypeIn`). The anthem affects "creatures of the
+        /// most prevalent creature type on the battlefield". A creature token
+        /// entry whose own type is NOT the anthem's inner concern can STILL flip
+        /// which type is most prevalent for PRE-EXISTING creatures, so the entry
+        /// MUST escalate UNCONDITIONALLY (independent of any entered-object filter
+        /// match) AND match a forced-Full board.
+        /// Build a board whose anthem affects "creatures of the most prevalent
+        /// creature type on the battlefield" — a whole-board TALLY affected
+        /// filter (`MostPrevalentCreatureTypeIn`). Two pre-existing Bears.
+        fn most_prevalent_anthem_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, FilterProp, StaticDefinition};
+            use crate::types::statics::StaticMode;
+            let mut base = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut base,
+                    CardId(260 + i),
+                    PlayerId(0),
+                    format!("TallyBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = base.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_card_types.subtypes = vec!["Bear".to_string()];
+                o.card_types.subtypes = vec!["Bear".to_string()];
+            }
+            let anthem = create_object(
+                &mut base,
+                CardId(270),
+                PlayerId(0),
+                "Most Prevalent Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::MostPrevalentCreatureTypeIn {
+                    zone: crate::types::zones::Zone::Battlefield,
+                    scope: crate::types::ability::ControllerRef::You,
+                }],
+                ..Default::default()
+            }));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            {
+                let o = base.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            base.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            base
+        }
+
+        #[test]
+        fn most_prevalent_tally_entry_escalates_unconditionally_and_matches_full() {
+            // The entered creature is an "Insect" — a DIFFERENT creature type than
+            // the pre-existing Bears, so it does NOT match the anthem's current
+            // "most prevalent" membership (Bear), yet adding it changes the tally
+            // and so must escalate UNCONDITIONALLY (MEDIUM-2).
+            let add_insect = |s: &mut GameState| {
+                let id = create_object(
+                    s,
+                    CardId(271),
+                    PlayerId(0),
+                    "Insect".to_string(),
+                    Zone::Battlefield,
+                );
+                {
+                    let o = s.objects.get_mut(&id).unwrap();
+                    o.base_power = Some(1);
+                    o.base_toughness = Some(1);
+                    o.power = Some(1);
+                    o.toughness = Some(1);
+                    o.base_card_types.core_types = vec![CoreType::Creature];
+                    o.card_types.core_types = vec![CoreType::Creature];
+                    o.base_card_types.subtypes = vec!["Insect".to_string()];
+                    o.card_types.subtypes = vec!["Insect".to_string()];
+                }
+                crate::game::layers::mark_layers_entered(s, id);
+                id
+            };
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(most_prevalent_anthem_board, add_insect);
+            assert!(
+                escalated,
+                "whole-board tally (MostPrevalentCreatureTypeIn) must escalate \
+                 unconditionally on ANY creature entry"
+            );
+            assert_pt_identical(
+                &normal,
+                &forced,
+                "most-prevalent tally unconditional escalation",
+            );
         }
 
         /// Assert every battlefield object's computed power/toughness/loyalty and

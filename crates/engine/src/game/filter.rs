@@ -195,6 +195,208 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
     }
 }
 
+/// CR 611.3a: ENTRY-AWARE narrowing for a population-sensitive AFFECTED FILTER.
+/// `affected_filter_uses_object_population` proves an effect's affected set *can*
+/// read board population; this proves a SPECIFIC entering object can actually
+/// perturb that population input (so a pre-existing recipient's membership might
+/// change).
+///
+/// Monotonicity: reached only for battlefield ENTRIES. An entry only ADDS to the
+/// board, so the only way it changes a population-derived affected set is if the
+/// entered object joins the population the set is computed over — EXCEPT for
+/// whole-board TALLY props (most-prevalent / name-matches), which can flip a
+/// pre-existing object's membership regardless of whether the entered object
+/// matches any inner filter; those escalate unconditionally (MEDIUM-2).
+///
+/// `ctx` is built from the EFFECT SOURCE (CR 109.5 controller rebinding) by the
+/// caller. Mirrors the structural recursion of
+/// `affected_filter_uses_object_population`.
+pub(crate) fn entered_object_perturbs_affected_filter(
+    state: &GameState,
+    entered_id: ObjectId,
+    ctx: &FilterContext<'_>,
+    filter: &TargetFilter,
+) -> bool {
+    match filter {
+        TargetFilter::Not { filter: inner } => {
+            entered_object_perturbs_affected_filter(state, entered_id, ctx, inner)
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|f| entered_object_perturbs_affected_filter(state, entered_id, ctx, f)),
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
+            .iter()
+            .any(|p| entered_object_perturbs_filter_prop(state, entered_id, ctx, p)),
+        // Identical enumeration to the `false` arm of
+        // `affected_filter_uses_object_population`: these references resolve to a
+        // fixed object/player, a specific zone, or a tracked ledger — never
+        // whole-board population — so the classifier proved them non-population
+        // and an entry cannot perturb them.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::OriginalController
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// CR 611.3a: entry-membership leaf for `entered_object_perturbs_affected_filter`.
+/// EXHAUSTIVE and wildcard-free, mirroring `filter_prop_uses_object_population`:
+/// every `false` arm there is `false` here; every `true` arm there is narrowed
+/// here to a membership / threshold-perturb test — EXCEPT the whole-board tally
+/// props, which escalate unconditionally.
+fn entered_object_perturbs_filter_prop(
+    state: &GameState,
+    entered_id: ObjectId,
+    ctx: &FilterContext<'_>,
+    prop: &FilterProp,
+) -> bool {
+    match prop {
+        // Whole-board tally — any entry can flip a pre-existing object's
+        // membership; the entered-object filter match is irrelevant, escalate
+        // unconditionally (MEDIUM-2). CR 205.3m (creature types — the tally
+        // counts creatures by their shared subtype lists), CR 201.2 (name
+        // matches any permanent).
+        FilterProp::MostPrevalentCreatureTypeIn { .. } => true,
+        FilterProp::NameMatchesAnyPermanent { .. } => true,
+        // The entered object's name joins the comparison set, so any entry
+        // matching the inner filter changes the "different name than each X"
+        // membership for pre-existing objects. No inner filter ⇒ conservatively
+        // perturb.
+        FilterProp::DifferentNameFrom { filter } => {
+            matches_target_filter(state, entered_id, filter, ctx)
+        }
+        // CR 603.4: the reference set is battlefield-derived only when a
+        // reference filter is present (classifier returns false for `None`). The
+        // `None` arm is therefore unreachable here, but enumerated as `false`
+        // for exhaustiveness rather than `unreachable!`.
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_ref()
+            .is_some_and(|f| matches_target_filter(state, entered_id, f, ctx)),
+        // Embedded thresholds: perturbed iff the entered object can perturb the
+        // threshold expression's population input.
+        FilterProp::Counters { count, .. } => {
+            entered_perturbs_quantity(state, entered_id, ctx, count)
+        }
+        FilterProp::Cmc { value, .. } => entered_perturbs_quantity(state, entered_id, ctx, value),
+        FilterProp::PtComparison { value, .. } => {
+            entered_perturbs_quantity(state, entered_id, ctx, value)
+        }
+        FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|p| entered_object_perturbs_filter_prop(state, entered_id, ctx, p)),
+        // Identical enumeration to the leaf-false arm of
+        // `filter_prop_uses_object_population` — candidate-local, stack-relative,
+        // single-object, or threshold-free, so a board entry cannot perturb them.
+        FilterProp::CanEnchant { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::ColorCount { .. }
+        | FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::Attacking
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::Unblocked
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::IsChosenLandOrNonlandKind
+        | FilterProp::HasSingleTarget
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::ToughnessGTPower
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::FaceDown
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::AttackingController
+        | FilterProp::IsCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
+/// Bridge: route an embedded threshold `QuantityExpr` through the quantity
+/// module's entry-aware classifier. The entered object is resolved to its
+/// `GameObject` (it has just entered, so it must exist); a missing object can't
+/// perturb anything.
+fn entered_perturbs_quantity(
+    state: &GameState,
+    entered_id: ObjectId,
+    ctx: &FilterContext<'_>,
+    expr: &QuantityExpr,
+) -> bool {
+    state.objects.get(&entered_id).is_some_and(|entered| {
+        crate::game::quantity::entered_object_perturbs_quantity_expr(state, entered, ctx, expr)
+    })
+}
+
 /// CR 608.2c: Resolve contextual parent-target exclusions before a mass-effect scan.
 ///
 /// This intentionally supports only `Not(ParentTarget)` inside composite filters.
@@ -2475,7 +2677,7 @@ fn matches_filter_prop(
                 .any(|s| s.eq_ignore_ascii_case(chosen)),
             None => false,
         },
-        // CR 205.3m + CR 701.23a: Object's creature type ties for highest count
+        // CR 205.3m: Object's creature type ties for highest count
         // among creature cards in the named player's named zone. Scope picks
         // the player whose zone is inspected; `Opponent` falls back to the
         // candidate object's owner (search-context invariant — the candidate
@@ -3262,7 +3464,7 @@ fn object_shares_quality_with_reference_filter(
     })
 }
 
-/// CR 205.3m + CR 701.23a: Compute the creature subtypes tied for highest
+/// CR 205.3m: Compute the creature subtypes tied for highest
 /// occurrence among creature cards in `owner`'s `zone`. CR 205.3m defines
 /// the creature-subtype set being counted. A `Changeling` (CR 702.73a)
 /// creature counts toward every creature type, matching how the keyword
