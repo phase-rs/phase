@@ -879,6 +879,85 @@ pub fn handle_discard_for_mana_ability(
     advance_mana_ability_activation(state, updated, events)
 }
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(test)]
+static MANA_READINESS_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// CR 602.5 + CR 605.3a: True iff this mana ability is activatable right now
+/// using only non-simulating, recursion-free gates — the simulation-free prefix
+/// of `activate_mana_ability`. Single authority shared by the
+/// `can_activate_mana_ability_now` pre-clone gate and the `batch_eligible_siblings`
+/// sibling filter, so both agree on readiness without each cloning + recursing
+/// the whole game state (the O(N!) cause when N batchable sources are present).
+fn mana_ability_ready_without_simulation(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+) -> bool {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return false;
+    };
+    // CR 701.35a: Detained permanents' activated abilities can't be activated.
+    if !obj.detained_by.is_empty() {
+        return false;
+    }
+    // CR 602.2a: Only the controller may activate the ability.
+    if obj.controller != player {
+        return false;
+    }
+    // Zone gate — battlefield by default, honoring Hand/Graveyard mana abilities.
+    let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
+    if obj.zone != required_zone {
+        return false;
+    }
+    // CR 106.12 + CR 602.5a: A tap-cost mana ability requires an untapped source.
+    // Gated on has_tap_component so no-tap sacrifice altars stay activatable while tapped.
+    if mana_sources::has_tap_component(&ability_def.cost) && obj.tapped {
+        return false;
+    }
+    // CR 302.6 + CR 602.5a: a {T}-cost mana ability on a creature that hasn't been
+    // controlled since the start of its controller's most recent turn can't be
+    // activated (haste / CanActivateAbilitiesAsThoughHaste lift it via the shared predicate).
+    if mana_sources::has_tap_component(&ability_def.cost)
+        && super::restrictions::summoning_sick_for_tap_ability(state, obj)
+    {
+        return false;
+    }
+    // CR 602.5: CantBeActivated (City of Solitude class) blocks activation.
+    if super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def) {
+        return false;
+    }
+    // CR 602.5 + CR 117.1b: CantActivateDuring blocks activation this turn.
+    if super::casting::is_blocked_by_cant_activate_during(state, player, ability_def) {
+        return false;
+    }
+    // CR 604 + CR 605.3b: Static activation restrictions must currently hold.
+    if super::restrictions::check_activation_restrictions(
+        state,
+        player,
+        source_id,
+        ability_index,
+        &ability_def.activation_restrictions,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    // CR 605.3a + CR 601.2h: The mana sub-cost (pool + choice-of-object) must be
+    // currently payable. is_payable_for_mana_ability's Mana arm uses auto_tap with
+    // require_current_payability=false, so it does not recurse here.
+    if let Some(cost) = &ability_def.cost {
+        if !cost.is_payable_for_mana_ability(state, player, source_id) {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn can_activate_mana_ability_now(
     state: &GameState,
     player: PlayerId,
@@ -886,24 +965,12 @@ pub fn can_activate_mana_ability_now(
     ability_index: usize,
     ability_def: &AbilityDefinition,
 ) -> bool {
-    // CR 701.35a: Detained permanents' activated abilities can't be activated
-    // (mana abilities are activated abilities).
-    if state
-        .objects
-        .get(&source_id)
-        .is_some_and(|obj| !obj.detained_by.is_empty())
+    #[cfg(test)]
+    MANA_READINESS_CALLS.fetch_add(1, Ordering::Relaxed);
+
+    if !mana_ability_ready_without_simulation(state, player, source_id, ability_index, ability_def)
     {
         return false;
-    }
-    // CR 605.3a + CR 601.2h: Mana abilities pay their cost at activation
-    // time ("unpayable costs can't be paid"). Gate on pool affordability +
-    // choice-of-object eligibility before simulating — this surfaces filter
-    // lands as un-activatable when the player has no {W/U}-style mana
-    // available.
-    if let Some(cost) = &ability_def.cost {
-        if !cost.is_payable_for_mana_ability(state, player, source_id) {
-            return false;
-        }
     }
     let mut simulated = state.clone();
     activate_mana_ability(
@@ -1830,10 +1897,11 @@ fn cost_component_choice_free(cost: &AbilityCost) -> bool {
 /// CR 605.3a: The controller's *other* permanents that could be activated for
 /// the same `SingleColor` mana choice — identical ability definition, choice-
 /// free cost, and currently activatable (untapped, on the battlefield, not
-/// summoning-sick, via the shared `activatable_mana_options` gate). These are
-/// the sources `GameAction::ChooseManaColor` may bulk-activate with the chosen
-/// color. `exclude` is the just-activated source (already cost-paid, so omitted).
-/// Sorted by id for deterministic ordering across the WASM/multiplayer boundary.
+/// summoning-sick, via the shared `mana_ability_ready_without_simulation` gate).
+/// These are the sources `GameAction::ChooseManaColor` may bulk-activate with the
+/// chosen color. `exclude` is the just-activated source (already cost-paid, so
+/// omitted). Sorted by id for deterministic ordering across the WASM/multiplayer
+/// boundary.
 fn batch_eligible_siblings(
     state: &GameState,
     player: PlayerId,
@@ -1853,7 +1921,16 @@ fn batch_eligible_siblings(
         .collect();
     let mut siblings: Vec<ObjectId> = candidates
         .into_iter()
-        .filter(|&id| !mana_sources::activatable_mana_options(state, id, player).is_empty())
+        .filter(|&id| {
+            state.objects.get(&id).is_some_and(|obj| {
+                obj.abilities
+                    .iter()
+                    .position(|ability| ability == ability_def)
+                    .is_some_and(|index| {
+                        mana_ability_ready_without_simulation(state, player, id, index, ability_def)
+                    })
+            })
+        })
         .collect();
     siblings.sort_unstable_by_key(|id| id.0);
     siblings
@@ -3375,6 +3452,47 @@ mod tests {
         id
     }
 
+    /// Build a creature with a pure `{T}: Add one mana of any color` ability at
+    /// index 0. Unlike `make_any_color_treasure`, the Creature core type makes it
+    /// subject to the CR 302.6 summoning-sickness gate, so `summoning_sick`
+    /// controls whether the `{T}` mana ability is currently ready.
+    fn make_tap_any_color_creature(
+        state: &mut GameState,
+        card: u64,
+        player: PlayerId,
+        summoning_sick: bool,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            player,
+            "Mana Dork".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = summoning_sick;
+        }
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: ManaColor::ALL.to_vec(),
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def);
+        id
+    }
+
     /// CR 605.3a: One color choice with `count = N` activates the tapped source
     /// plus `N - 1` identical, choice-free twins — `N` mana of the chosen color,
     /// `N` sources sacrificed, and a per-source tap each twin (the events a
@@ -3440,6 +3558,102 @@ mod tests {
             .filter(|e| matches!(e, GameEvent::PermanentTapped { .. }))
             .count();
         assert_eq!(twin_taps, 2, "two twins tapped during the bulk activation");
+    }
+
+    /// CR 605.3a: Activating one of `N` identical batchable Treasures must compute
+    /// the sibling set in linear time. Pre-fix, `batch_eligible_siblings` filtered
+    /// each candidate through `activatable_mana_options`, which cloned + simulated +
+    /// recursed `can_activate_mana_ability_now`, giving O(N!) readiness calls. The
+    /// single-authority non-simulating predicate caps the count at O(N).
+    #[test]
+    fn bulk_treasure_activation_is_linear_not_factorial() {
+        const N: usize = 6;
+        let mut state = GameState::new_two_player(42);
+        let ids: Vec<ObjectId> = (0..N)
+            .map(|i| {
+                make_any_color_treasure(
+                    &mut state,
+                    9200 + i as u64,
+                    PlayerId(0),
+                    ManaColor::ALL.to_vec(),
+                )
+            })
+            .collect();
+
+        MANA_READINESS_CALLS.store(0, Ordering::Relaxed);
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: ids[0],
+                ability_index: 0,
+            },
+        )
+        .expect("Treasure should activate into a color prompt");
+
+        // O(N!) pre-fix blows far past this; O(N) post-fix stays well under it.
+        assert!(
+            MANA_READINESS_CALLS.load(Ordering::Relaxed) <= 4 * N,
+            "readiness calls must be linear in N (got {}, bound {})",
+            MANA_READINESS_CALLS.load(Ordering::Relaxed),
+            4 * N
+        );
+
+        let WaitingFor::ChooseManaColor {
+            context: ManaChoiceContext::ManaAbility(pending),
+            ..
+        } = &result.waiting_for
+        else {
+            panic!("expected ChooseManaColor, got {:?}", result.waiting_for);
+        };
+        assert_eq!(
+            pending.batch_siblings,
+            ids[1..].to_vec(),
+            "the other five Treasures are batchable twins"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Red),
+                count: N as u32,
+            },
+        )
+        .expect("bulk color choice should resolve");
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Red),
+            N,
+            "all six Treasures each produced one red"
+        );
+    }
+
+    /// CR 302.6 / CR 702.10: A summoning-sick creature's `{T}` mana ability is not a
+    /// batch sibling, but granting Haste lifts the gate so the twin batches again.
+    #[test]
+    fn batch_excludes_summoning_sick_tap_mana_creature() {
+        let mut state = GameState::new_two_player(42);
+        let ready = make_tap_any_color_creature(&mut state, 9600, PlayerId(0), false);
+        let sick = make_tap_any_color_creature(&mut state, 9601, PlayerId(0), true);
+        let def = state.objects.get(&ready).unwrap().abilities[0].clone();
+
+        // CR 302.6: summoning-sick {T} mana creature is NOT a batch sibling.
+        let siblings = batch_eligible_siblings(&state, PlayerId(0), ready, &def);
+        assert!(
+            !siblings.contains(&sick),
+            "summoning-sick {{T}} mana creature must not batch (CR 302.6)"
+        );
+
+        // CR 702.10: Haste lifts the gate → the twin becomes a valid sibling.
+        state
+            .objects
+            .get_mut(&sick)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Haste);
+        let siblings = batch_eligible_siblings(&state, PlayerId(0), ready, &def);
+        assert!(
+            siblings.contains(&sick),
+            "a hasty {{T}} mana creature IS a batch sibling (CR 702.10)"
+        );
     }
 
     /// CR 605.3a: A count larger than the available sources is rejected before
