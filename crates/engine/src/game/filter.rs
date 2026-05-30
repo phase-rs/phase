@@ -399,12 +399,16 @@ pub fn matches_target_filter_on_damage_record_source(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
+    // CR 608.2i + CR 608.2h: reconstruct the synthetic source with its
+    // damage-time zone (Stack for a spell, Battlefield for a permanent) so a
+    // zone-discriminating look-back source filter evaluates correctly instead
+    // of against an assumed battlefield.
     let mut obj = GameObject::new(
         record.source_id,
         CardId(0),
         record.source_owner,
         record.source_name.clone(),
-        Zone::Battlefield,
+        record.source_zone,
     );
     obj.controller = record.source_controller_snapshot;
     obj.power = record.source_power;
@@ -3529,7 +3533,7 @@ mod tests {
 
         // Push the historical record, then simulate regeneration (CR 120.6:
         // "All damage marked on a permanent is removed when it regenerates").
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: damage_source,
             source_controller: PlayerId(1),
             target: TargetRef::Object(creature),

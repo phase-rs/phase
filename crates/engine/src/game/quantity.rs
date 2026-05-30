@@ -2807,9 +2807,10 @@ pub(crate) fn compute_party_size(state: &GameState, player: PlayerId) -> i32 {
 /// damage this turn (relative to `controller`'s opponents) when a
 /// `damage_dealt_this_turn` record targets it with `is_combat = true` AND its
 /// source matches `source`. `source = None` accepts any source (Tymna the
-/// Weaver); `source = Some(Any)` short-circuits to true; otherwise (CR 120.9)
-/// the record's CR 608.2i look-back source snapshot is matched against the
-/// filter, so the source's qualities are evaluated as of damage time.
+/// Weaver); otherwise (CR 120.9) the record's CR 608.2i look-back source
+/// snapshot is matched against the filter (`TargetFilter::Any` matching every
+/// source via the matcher), so the source's qualities are evaluated as of
+/// damage time.
 pub(crate) fn opponent_dealt_combat_damage_matches(
     state: &GameState,
     player: PlayerId,
@@ -2826,10 +2827,10 @@ pub(crate) fn opponent_dealt_combat_damage_matches(
             && matches!(r.target, TargetRef::Player(pid) if pid == player)
             && match source {
                 None => true,
-                Some(f) => {
-                    matches!(**f, TargetFilter::Any)
-                        || matches_target_filter_on_damage_record_source(state, r, f, &ctx)
-                }
+                // The matcher delegates to `filter_inner_for_object`, which
+                // already returns `true` for `TargetFilter::Any` (CR 120.9), so
+                // no separate short-circuit is needed here.
+                Some(f) => matches_target_filter_on_damage_record_source(state, r, f, &ctx),
             }
     })
 }
@@ -4299,7 +4300,7 @@ mod tests {
             "Opposing Source".to_string(),
             Zone::Battlefield,
         );
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: damage_source,
             source_controller: PlayerId(1),
             target: TargetRef::Object(source),
@@ -4445,7 +4446,7 @@ mod tests {
         // CR 608.2i: the source-controller snapshot captures P0 at damage time;
         // the source-side filter now matches against this snapshot, not the live
         // object's controller (which changes below).
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: damage_source,
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
@@ -4498,7 +4499,7 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: damage_source,
             source_controller: PlayerId(0),
             target: TargetRef::Object(target),
@@ -5422,7 +5423,7 @@ mod tests {
         let mut state = GameState::new(FormatConfig::commander(), 3, 42);
         // Player 1 was dealt combat damage; player 2 was dealt non-combat
         // damage; player 0 (controller) is excluded by the Opponent guard.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(99),
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
@@ -5431,7 +5432,7 @@ mod tests {
             is_combat: true,
             ..Default::default()
         });
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(99),
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(2)),
@@ -5441,7 +5442,7 @@ mod tests {
             ..Default::default()
         });
         // Self-damage record must not count as an "opponent dealt combat damage".
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(99),
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(0)),
@@ -5490,7 +5491,7 @@ mod tests {
             Zone::Battlefield,
         );
         // The live object's subtype at damage time IS Dragon; record the snapshot.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: dragon,
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
@@ -5529,7 +5530,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let ability_source = ObjectId(50);
         // Record 1: combat damage to opponent from a Dragon that IS the ability source.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ability_source,
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
@@ -5571,6 +5572,71 @@ mod tests {
             count(TargetFilter::SelfRef),
             1,
             "record source IS the ability source → SelfRef matches"
+        );
+    }
+
+    /// CR 608.2i + CR 120.9: A look-back source filter that discriminates on
+    /// the source's *zone* must evaluate against the zone recorded at damage
+    /// time, not an assumed battlefield. Non-combat damage from an instant
+    /// originates on the Stack (CR 608.2b), so an `InZone { Battlefield }`
+    /// ("by a permanent") source filter must NOT match a Stack-sourced record,
+    /// while an `InZone { Stack }` filter must. This is discriminating: under
+    /// the prior hardcoded `Zone::Battlefield` reconstruction the Battlefield
+    /// filter would wrongly match.
+    #[test]
+    fn damage_dealt_this_turn_source_filter_respects_snapshot_zone() {
+        let mut state = GameState::new_two_player(42);
+        // An instant spell on the Stack deals 3 non-combat damage to player 1.
+        let instant = ObjectId(70);
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: instant,
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 3,
+            is_combat: false,
+            source_name: "Lightning Bolt".to_string(),
+            source_core_types: vec![CoreType::Instant],
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            // The spell lives on the Stack while it deals damage.
+            source_zone: Zone::Stack,
+            ..Default::default()
+        });
+
+        let count = |source: TargetFilter| {
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn {
+                        source: Box::new(source),
+                        target: Box::new(TargetFilter::Any),
+                        aggregate: AggregateFunction::Sum,
+                        group_by: None,
+                    },
+                },
+                PlayerId(0),
+                instant,
+            )
+        };
+
+        let on_battlefield =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }]));
+        let on_stack = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::InZone { zone: Zone::Stack }]),
+        );
+
+        assert_eq!(
+            count(on_battlefield),
+            0,
+            "Stack-sourced damage must NOT match an on-battlefield source filter"
+        );
+        assert_eq!(
+            count(on_stack),
+            3,
+            "Stack-sourced damage matches an on-stack source filter"
         );
     }
 

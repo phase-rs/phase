@@ -552,6 +552,20 @@ pub struct DamageRecord {
     pub source_controller_snapshot: PlayerId,
     #[serde(default)]
     pub source_owner: PlayerId,
+    /// CR 608.2i + CR 608.2h: the source's zone at damage time. Non-combat
+    /// damage from a spell originates from the Stack, so a zone-discriminating
+    /// look-back source filter ("by a permanent") must evaluate against the
+    /// recorded zone, not an assumed battlefield. Defaults to `Battlefield`
+    /// (the common combat-damage case) for legacy records and test fixtures.
+    #[serde(default = "default_source_zone")]
+    pub source_zone: Zone,
+}
+
+/// CR 608.2i: Default damage-source zone. Combat damage — the overwhelmingly
+/// common recorded case — comes from the battlefield, so legacy serialized
+/// records and `..Default::default()` test fixtures default to it.
+fn default_source_zone() -> Zone {
+    Zone::Battlefield
 }
 
 impl Default for DamageRecord {
@@ -579,6 +593,7 @@ impl Default for DamageRecord {
             source_mana_value: 0,
             source_controller_snapshot: PlayerId(0),
             source_owner: PlayerId(0),
+            source_zone: Zone::Battlefield,
         }
     }
 }
@@ -4391,8 +4406,11 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub battlefield_entries_this_turn: Vec<BattlefieldEntryRecord>,
     /// CR 120.1: Damage records this turn for "was dealt damage by" condition queries.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub damage_dealt_this_turn: Vec<DamageRecord>,
+    /// Backed by `im::Vector` so `GameState::clone()` structurally shares the
+    /// `DamageRecord` snapshots (each holds a `String` + several `Vec`s) instead
+    /// of deep-copying them on the AI-search hot path.
+    #[serde(default)]
+    pub damage_dealt_this_turn: im::Vector<DamageRecord>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -5038,7 +5056,7 @@ impl GameState {
             sacrificed_permanents_this_turn: Vec::new(),
             zone_changes_this_turn: Vec::new(),
             battlefield_entries_this_turn: Vec::new(),
-            damage_dealt_this_turn: Vec::new(),
+            damage_dealt_this_turn: im::Vector::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),

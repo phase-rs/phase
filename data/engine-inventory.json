@@ -1745,7 +1745,7 @@
     },
     "AlternativeCastKeyword": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1500,
+      "line": 1515,
       "doc": "CR 118.9: Identifies which keyword ability granted an alternative casting cost so the `WaitingFor::AlternativeCastChoice` dispatcher can route to the keyword-specific post-payment handler. The four keywords share a single player decision shape (printed cost vs. alternative cost) but diverge in post-payment semantics — this enum keeps the prompt unified while preserving CR fidelity at resolution.  Adding a new alternative-cost keyword (e.g., Madness CR 702.35a, Spectacle CR 702.137a) is a compile error at every dispatch site until handled.",
       "cr_refs": [
         "CR 118.9",
@@ -1755,7 +1755,7 @@
       "variants": [
         {
           "name": "Warp",
-          "line": 1502,
+          "line": 1517,
           "kind": "unit",
           "field_names": [],
           "doc": "Custom Warp keyword — exile-at-end-step rider; no CR section.",
@@ -1763,7 +1763,7 @@
         },
         {
           "name": "Evoke",
-          "line": 1505,
+          "line": 1520,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent was cast for its evoke cost (CR 702.74b).",
@@ -1774,7 +1774,7 @@
         },
         {
           "name": "Overload",
-          "line": 1507,
+          "line": 1522,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.96a: Spell's text changes \"target\" to \"each\" (CR 702.96b-c).",
@@ -1785,7 +1785,7 @@
         },
         {
           "name": "Bestow",
-          "line": 1509,
+          "line": 1524,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.103a: Spell becomes an Aura with enchant creature (CR 702.103b).",
@@ -1796,7 +1796,7 @@
         },
         {
           "name": "Awaken",
-          "line": 1514,
+          "line": 1529,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.113a: \"If this spell's awaken cost was paid, put N +1/+1 counters on target land you control. That land becomes a 0/0 Elemental creature with haste. It's still a land.\" Paying the awaken cost adds the land target (CR 702.113b); casting normally adds no target and no rider.",
@@ -1807,7 +1807,7 @@
         },
         {
           "name": "Cleave",
-          "line": 1517,
+          "line": 1532,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.148a-b + CR 612: Paying the cleave cost removes every square-bracketed span from the spell's text (a text-changing effect).",
@@ -1921,13 +1921,13 @@
     },
     "AutoPassMode": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 3320,
+      "line": 3335,
       "doc": "What the engine stores for auto-pass (includes captured state).",
       "cr_refs": [],
       "variants": [
         {
           "name": "UntilStackEmpty",
-          "line": 3323,
+          "line": 3338,
           "kind": "struct",
           "field_names": [
             "initial_stack_len"
@@ -1937,7 +1937,7 @@
         },
         {
           "name": "UntilEndOfTurn",
-          "line": 3327,
+          "line": 3342,
           "kind": "unit",
           "field_names": [],
           "doc": "Auto-pass through priority/combat stops until the flagged player's next turn starts. Interrupted by opponent stack activity (MTGA-style) or when the current phase matches the player's entry in `GameState::phase_stops`.",
@@ -1948,13 +1948,13 @@
     },
     "AutoPassRequest": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 3312,
+      "line": 3327,
       "doc": "What the frontend requests for auto-pass (no internal state).  Phase stops that should interrupt `UntilEndOfTurn` are a separate per-player preference on `GameState::phase_stops`, managed via `GameAction::SetPhaseStops`. Keeping them out of the request preserves a single source of truth and lets the preference change mid-session without requiring a new auto-pass request.",
       "cr_refs": [],
       "variants": [
         {
           "name": "UntilStackEmpty",
-          "line": 3313,
+          "line": 3328,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -1962,7 +1962,7 @@
         },
         {
           "name": "UntilEndOfTurn",
-          "line": 3314,
+          "line": 3329,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -2515,7 +2515,7 @@
     },
     "CastPaymentMode": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 892,
+      "line": 907,
       "doc": "CR 601.2g-h: Whether the engine may auto-pay an unambiguous spell mana cost or must pause after announcement so the player can activate mana abilities manually before committing payment.",
       "cr_refs": [
         "CR 601.2g"
@@ -2523,7 +2523,7 @@
       "variants": [
         {
           "name": "Auto",
-          "line": 894,
+          "line": 909,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -2531,7 +2531,7 @@
         },
         {
           "name": "Manual",
-          "line": 895,
+          "line": 910,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -3026,13 +3026,13 @@
     },
     "CastingVariant": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 3405,
+      "line": 3420,
       "doc": "How a spell was cast — determines zone routing and post-resolution behavior. Replaces individual boolean flags (cast_as_adventure, cast_as_warp) with a single enum that captures the casting context.",
       "cr_refs": [],
       "variants": [
         {
           "name": "Normal",
-          "line": 3408,
+          "line": 3423,
           "kind": "unit",
           "field_names": [],
           "doc": "Normal spell cast — no special resolution behavior.",
@@ -3040,7 +3040,7 @@
         },
         {
           "name": "Adventure",
-          "line": 3411,
+          "line": 3426,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 715.4: Cast as the Adventure half. On resolution, exiled with AdventureCreature permission and creature face restored.",
@@ -3050,7 +3050,7 @@
         },
         {
           "name": "Omen",
-          "line": 3414,
+          "line": 3429,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 720.3d / CR 720.4: Cast as the Omen half. On resolution, shuffled into its owner's library with normal characteristics restored.",
@@ -3061,7 +3061,7 @@
         },
         {
           "name": "Warp",
-          "line": 3417,
+          "line": 3432,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.185a: Cast via Warp alternative cost from hand. On resolution, creates a delayed trigger to exile at end step with WarpExile permission.",
@@ -3071,7 +3071,7 @@
         },
         {
           "name": "Escape",
-          "line": 3420,
+          "line": 3435,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.138: Cast from graveyard via Escape. On resolution, goes to appropriate zone normally (unlike Flashback which exiles).",
@@ -3081,7 +3081,7 @@
         },
         {
           "name": "Retrace",
-          "line": 3423,
+          "line": 3438,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.81a: Cast from graveyard via Retrace by discarding a land card as an additional cost. Resolution uses normal spell routing.",
@@ -3091,7 +3091,7 @@
         },
         {
           "name": "Harmonize",
-          "line": 3426,
+          "line": 3441,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.180a: Cast from graveyard for harmonize cost. On resolution, exiled instead of going anywhere else (unlike Escape which returns to graveyard).",
@@ -3101,7 +3101,7 @@
         },
         {
           "name": "Flashback",
-          "line": 3429,
+          "line": 3444,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.34a: Cast from graveyard for flashback cost. On resolution (or whenever leaving the stack for any reason), exiled instead of going anywhere else.",
@@ -3111,7 +3111,7 @@
         },
         {
           "name": "Aftermath",
-          "line": 3432,
+          "line": 3447,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.127a: Cast an aftermath half of a split card from a graveyard. If it was cast from a graveyard, exile it any time it leaves the stack.",
@@ -3121,7 +3121,7 @@
         },
         {
           "name": "GraveyardPermission",
-          "line": 3436,
+          "line": 3451,
           "kind": "struct",
           "field_names": [
             "source",
@@ -3137,7 +3137,7 @@
         },
         {
           "name": "HandPermission",
-          "line": 3462,
+          "line": 3477,
           "kind": "struct",
           "field_names": [
             "source",
@@ -3152,7 +3152,7 @@
         },
         {
           "name": "ExilePermission",
-          "line": 3478,
+          "line": 3493,
           "kind": "struct",
           "field_names": [
             "source",
@@ -3168,7 +3168,7 @@
         },
         {
           "name": "Sneak",
-          "line": 3495,
+          "line": 3510,
           "kind": "struct",
           "field_names": [
             "returned_creature",
@@ -3182,7 +3182,7 @@
         },
         {
           "name": "WebSlinging",
-          "line": 3504,
+          "line": 3519,
           "kind": "struct",
           "field_names": [
             "returned_creature"
@@ -3194,7 +3194,7 @@
         },
         {
           "name": "Miracle",
-          "line": 3511,
+          "line": 3526,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.94a: Cast from hand via Miracle's alternative cost after revealing the card as the first card drawn this turn. The granting keyword carries the miracle mana cost, which `prepare_spell_cast_with_variant_override` substitutes for the printed mana cost. The keyword's `ManaCost` payload is read at preparation time rather than stored here because `prepare_spell_cast` already reads `obj.keywords` for analogous paths.",
@@ -3204,7 +3204,7 @@
         },
         {
           "name": "Madness",
-          "line": 3514,
+          "line": 3529,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.35a: Cast from exile via Madness after the discard replacement exiled the card and its madness triggered ability resolved.",
@@ -3214,7 +3214,7 @@
         },
         {
           "name": "Evoke",
-          "line": 3518,
+          "line": 3533,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.74a: Cast from hand via Evoke's alternative cost. On resolution, the permanent enters tagged with `CastVariantPaid::Evoke`, which fires the synthesized intervening-if ETB sacrifice trigger.",
@@ -3224,7 +3224,7 @@
         },
         {
           "name": "Suspend",
-          "line": 3525,
+          "line": 3540,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.62a: Cast from exile via Suspend's \"play it without paying its mana cost\" trigger after the last time counter was removed. On resolution of the resulting permanent, the stack handler tags `CastVariantPaid::Suspend` and — for creature spells — installs a transient continuous \"has haste\" effect that lasts as long as the resolution-time controller still controls the permanent.",
@@ -3234,7 +3234,7 @@
         },
         {
           "name": "Plot",
-          "line": 3532,
+          "line": 3547,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.170d: Cast from exile via the Plot \"cast without paying its mana cost\" permission during the owner's main phase on a turn after the card was plotted. Detected at cast preparation when the exile-zone source has a `CastingPermission::Plotted { turn_plotted }` and the current turn is strictly greater than `turn_plotted`. Zeroes the mana cost and routes through the normal cast pipeline; no special resolution-time behavior.",
@@ -3244,7 +3244,7 @@
         },
         {
           "name": "Foretell",
-          "line": 3539,
+          "line": 3554,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.143a-c: Cast from exile via a foretold card's foretell cost on a turn after it was foretold. Detected at cast preparation when the exile-zone source has a `CastingPermission::Foretold { .. }`. The permission supplies the alternative mana cost; stack finalization tags the source with `CastVariantPaid::Foretell` so \"if this spell was foretold\" clauses can evaluate while the spell resolves.",
@@ -3254,7 +3254,7 @@
         },
         {
           "name": "Overload",
-          "line": 3549,
+          "line": 3564,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.96a-c: Cast from hand via Overload's alternative cost. The printed mana cost is replaced by `Keyword::Overload(cost)` at cast preparation (mirrors `Evoke`/`Warp`). Per CR 702.96b, every \"target\" in the spell's text is replaced by \"each\" — applied as a cast-time transformation of the spell's ability tree (`Destroy`→`DestroyAll`, `Pump`→`PumpAll`, `DealDamage`→`DamageAll`, `Tap`→`TapAll`, `Bounce`→`ChangeZoneAll`). Per CR 702.96c, the resulting spell has no targets, so target selection is naturally skipped because the transformed effects carry no `TargetRef` slots.",
@@ -3266,7 +3266,7 @@
         },
         {
           "name": "Bestow",
-          "line": 3564,
+          "line": 3579,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.103a-b: Cast from hand via Bestow's alternative cost. The printed mana cost is replaced by `Keyword::Bestow(cost)` at cast preparation; the spell becomes an Aura with `enchant creature` while on the stack and as the resulting permanent (until it becomes unattached, per CR 702.103f). The type-changing mutation is applied directly to the stack object (mirroring `swap_to_alternative_spell_face` for Adventure/Omen) — Layers cannot be used here because they only apply to battlefield/hand objects, not stack objects.  Per CR 702.103e: if the target is illegal at resolution, the type-changing effect ends and the spell resolves as a creature spell. Per CR 702.103f: when a bestowed Aura becomes unattached on the battlefield, the type-changing effect ends — it remains as an enchantment creature (overrides CR 704.5m for bestow Auras).",
@@ -3279,7 +3279,7 @@
         },
         {
           "name": "Awaken",
-          "line": 3575,
+          "line": 3590,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.113a: Cast from hand via Awaken's alternative cost. The printed mana cost is replaced by `Keyword::Awaken { cost }` at cast preparation (mirrors `Overload`). A resolution rider is appended to the tail of the spell's ability tree (`effects::awaken::append_awaken_rider`): the printed effect resolves first, then \"put N +1/+1 counters on target land you control; that land becomes a 0/0 Elemental creature with haste; it's still a land.\" Per CR 702.113b, the land target only exists on the awaken variant — a normal cast appends no rider and requests no land target. CR 702.113a: the spell goes to the graveyard normally, so this variant is deliberately absent from `exiles_when_leaving_stack_for_any_reason`.",
@@ -3290,7 +3290,7 @@
         },
         {
           "name": "Cleave",
-          "line": 3586,
+          "line": 3601,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 702.148a-b + CR 612: Cast from hand via Cleave's alternative cost (CR 118.9). The printed mana cost is replaced by `Keyword::Cleave(cost)` at cast preparation (mirrors `Evoke`/`Overload`). Per CR 702.148a, paying the cleave cost is a text-changing effect (CR 612) that removes every square-bracketed span from the spell's rules text. The bracket-removed ability set is parsed at build time into `CardFace::cleave_variant` and swapped onto the stack object before preparation (mirroring the Bestow object-mutation-before-prepare seam). Resolution routing matches a normal spell — there is no on-resolve special behavior, so the spell goes to its owner's graveyard like any instant/sorcery.",
@@ -3831,13 +3831,13 @@
     },
     "CollectEvidenceResume": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1014,
+      "line": 1029,
       "doc": "",
       "cr_refs": [],
       "variants": [
         {
           "name": "Casting",
-          "line": 1015,
+          "line": 1030,
           "kind": "struct",
           "field_names": [
             "pending_cast"
@@ -3847,7 +3847,7 @@
         },
         {
           "name": "Effect",
-          "line": 1018,
+          "line": 1033,
           "kind": "struct",
           "field_names": [
             "pending_ability"
@@ -3860,7 +3860,7 @@
     },
     "CombatDamageAssignmentMode": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 2964,
+      "line": 2979,
       "doc": "CR 510.1c: Optional combat-damage assignment mode for attackers with text like \"you may have this creature assign its combat damage as though it weren't blocked.\"",
       "cr_refs": [
         "CR 510.1c"
@@ -3868,7 +3868,7 @@
       "variants": [
         {
           "name": "Normal",
-          "line": 2966,
+          "line": 2981,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -3876,7 +3876,7 @@
         },
         {
           "name": "AsThoughUnblocked",
-          "line": 2967,
+          "line": 2982,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -3958,7 +3958,7 @@
     },
     "CombatTaxContext": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1215,
+      "line": 1230,
       "doc": "CR 508.1d + CR 509.1c: Which combat step a `WaitingFor::CombatTaxPayment` belongs to.  Drives the resume branch after the tax decision — on accept, the engine submits the stored attacker / blocker declaration; on decline, the engine filters the taxed creatures out of that declaration and submits the remainder.",
       "cr_refs": [
         "CR 508.1d",
@@ -3967,7 +3967,7 @@
       "variants": [
         {
           "name": "Attacking",
-          "line": 1216,
+          "line": 1231,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -3975,7 +3975,7 @@
         },
         {
           "name": "Blocking",
-          "line": 1217,
+          "line": 1232,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -3986,7 +3986,7 @@
     },
     "CombatTaxPending": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1225,
+      "line": 1240,
       "doc": "CR 508.1d + CR 509.1c: The declaration that is paused awaiting a combat-tax decision. Keyed by `CombatTaxContext` — the engine resumes the matching variant on `GameAction::PayCombatTax`.",
       "cr_refs": [
         "CR 508.1d",
@@ -3995,7 +3995,7 @@
       "variants": [
         {
           "name": "Attack",
-          "line": 1226,
+          "line": 1241,
           "kind": "struct",
           "field_names": [
             "attacks"
@@ -4005,7 +4005,7 @@
         },
         {
           "name": "Block",
-          "line": 1229,
+          "line": 1244,
           "kind": "struct",
           "field_names": [
             "assignments"
@@ -6392,7 +6392,7 @@
     },
     "DistributionUnit": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 2983,
+      "line": 2998,
       "doc": "CR 601.2d: What is being distributed (damage, counters, life).",
       "cr_refs": [
         "CR 601.2d"
@@ -6400,7 +6400,7 @@
       "variants": [
         {
           "name": "Damage",
-          "line": 2984,
+          "line": 2999,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -6408,7 +6408,7 @@
         },
         {
           "name": "EvenSplitDamage",
-          "line": 2987,
+          "line": 3002,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 601.2d: Even split — engine auto-computes `total / num_targets` (rounded down). No player choice needed; bypasses `WaitingFor::DistributeAmong`.",
@@ -6418,7 +6418,7 @@
         },
         {
           "name": "Counters",
-          "line": 2988,
+          "line": 3003,
           "kind": "tuple",
           "field_names": [],
           "doc": "",
@@ -6426,7 +6426,7 @@
         },
         {
           "name": "Life",
-          "line": 2989,
+          "line": 3004,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -10536,7 +10536,7 @@
     },
     "ExileLinkKind": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 616,
+      "line": 631,
       "doc": "CR 607.2a + CR 406.6: Tracks the link between an exiling source and the exiled card. When the source leaves the battlefield, the exiled card returns (CR 610.3a).",
       "cr_refs": [
         "CR 406.6",
@@ -10546,7 +10546,7 @@
       "variants": [
         {
           "name": "UntilSourceLeaves",
-          "line": 618,
+          "line": 633,
           "kind": "struct",
           "field_names": [
             "return_zone"
@@ -10558,7 +10558,7 @@
         },
         {
           "name": "TrackedBySource",
-          "line": 620,
+          "line": 635,
           "kind": "unit",
           "field_names": [],
           "doc": "Track cards \"exiled with\" a source without creating an automatic return.",
@@ -10566,7 +10566,7 @@
         },
         {
           "name": "ParadigmSource",
-          "line": 629,
+          "line": 644,
           "kind": "struct",
           "field_names": [
             "player"
@@ -13292,14 +13292,15 @@
           "kind": "struct",
           "field_names": [
             "player_id",
-            "source_ids"
+            "source_amounts",
+            "total_damage"
           ],
           "doc": "",
           "cr_refs": []
         },
         {
           "name": "PlayerEliminated",
-          "line": 442,
+          "line": 464,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13309,7 +13310,7 @@
         },
         {
           "name": "CrimeCommitted",
-          "line": 445,
+          "line": 467,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13319,7 +13320,7 @@
         },
         {
           "name": "Cycled",
-          "line": 448,
+          "line": 470,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13330,7 +13331,7 @@
         },
         {
           "name": "PlayerPerformedAction",
-          "line": 452,
+          "line": 474,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13341,7 +13342,7 @@
         },
         {
           "name": "Regenerated",
-          "line": 457,
+          "line": 479,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13353,7 +13354,7 @@
         },
         {
           "name": "CreatureSuspected",
-          "line": 461,
+          "line": 483,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13365,7 +13366,7 @@
         },
         {
           "name": "Detained",
-          "line": 468,
+          "line": 490,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13377,7 +13378,7 @@
         },
         {
           "name": "BecamePrepared",
-          "line": 474,
+          "line": 496,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13389,7 +13390,7 @@
         },
         {
           "name": "BecameUnprepared",
-          "line": 480,
+          "line": 502,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13401,7 +13402,7 @@
         },
         {
           "name": "CaseSolved",
-          "line": 484,
+          "line": 506,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -13413,7 +13414,7 @@
         },
         {
           "name": "ClassLevelGained",
-          "line": 488,
+          "line": 510,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13426,7 +13427,7 @@
         },
         {
           "name": "MonarchChanged",
-          "line": 493,
+          "line": 515,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13438,7 +13439,7 @@
         },
         {
           "name": "CityBlessingGained",
-          "line": 497,
+          "line": 519,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13450,7 +13451,7 @@
         },
         {
           "name": "DieRolled",
-          "line": 501,
+          "line": 523,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13464,7 +13465,7 @@
         },
         {
           "name": "CoinFlipped",
-          "line": 507,
+          "line": 529,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13477,7 +13478,7 @@
         },
         {
           "name": "RingTemptsYou",
-          "line": 512,
+          "line": 534,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13489,7 +13490,7 @@
         },
         {
           "name": "RoomEntered",
-          "line": 516,
+          "line": 538,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13504,7 +13505,7 @@
         },
         {
           "name": "RoomDoorUnlocked",
-          "line": 523,
+          "line": 545,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13519,7 +13520,7 @@
         },
         {
           "name": "BecomesPlotted",
-          "line": 530,
+          "line": 552,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13532,7 +13533,7 @@
         },
         {
           "name": "DungeonCompleted",
-          "line": 535,
+          "line": 557,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13545,7 +13546,7 @@
         },
         {
           "name": "InitiativeTaken",
-          "line": 540,
+          "line": 562,
           "kind": "struct",
           "field_names": [
             "player_id"
@@ -13557,7 +13558,7 @@
         },
         {
           "name": "Firebend",
-          "line": 544,
+          "line": 566,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13568,7 +13569,7 @@
         },
         {
           "name": "Airbend",
-          "line": 549,
+          "line": 571,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13579,7 +13580,7 @@
         },
         {
           "name": "Earthbend",
-          "line": 554,
+          "line": 576,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13590,7 +13591,7 @@
         },
         {
           "name": "Waterbend",
-          "line": 559,
+          "line": 581,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13601,7 +13602,7 @@
         },
         {
           "name": "CompanionRevealed",
-          "line": 564,
+          "line": 586,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13614,7 +13615,7 @@
         },
         {
           "name": "CompanionMovedToHand",
-          "line": 569,
+          "line": 591,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13627,7 +13628,7 @@
         },
         {
           "name": "NinjutsuActivated",
-          "line": 576,
+          "line": 598,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13640,7 +13641,7 @@
         },
         {
           "name": "KeywordAbilityActivated",
-          "line": 586,
+          "line": 608,
           "kind": "struct",
           "field_names": [
             "ability_tag",
@@ -13657,7 +13658,7 @@
         },
         {
           "name": "CreatureExploited",
-          "line": 594,
+          "line": 616,
           "kind": "struct",
           "field_names": [
             "exploiter",
@@ -13670,7 +13671,7 @@
         },
         {
           "name": "EnergyChanged",
-          "line": 599,
+          "line": 621,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13683,7 +13684,7 @@
         },
         {
           "name": "SpeedChanged",
-          "line": 604,
+          "line": 626,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13697,7 +13698,7 @@
         },
         {
           "name": "PlayerCounterChanged",
-          "line": 610,
+          "line": 632,
           "kind": "struct",
           "field_names": [
             "player",
@@ -13711,7 +13712,7 @@
         },
         {
           "name": "ManaExpended",
-          "line": 616,
+          "line": 638,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13725,7 +13726,7 @@
         },
         {
           "name": "Clash",
-          "line": 622,
+          "line": 644,
           "kind": "struct",
           "field_names": [
             "controller",
@@ -13741,7 +13742,7 @@
         },
         {
           "name": "VoteCast",
-          "line": 633,
+          "line": 655,
           "kind": "struct",
           "field_names": [
             "voter",
@@ -13755,7 +13756,7 @@
         },
         {
           "name": "VoteResolved",
-          "line": 641,
+          "line": 663,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -13768,7 +13769,7 @@
         },
         {
           "name": "PowerToughnessChanged",
-          "line": 647,
+          "line": 669,
           "kind": "struct",
           "field_names": [
             "object_id",
@@ -13782,7 +13783,7 @@
         },
         {
           "name": "CascadeMissed",
-          "line": 658,
+          "line": 680,
           "kind": "struct",
           "field_names": [
             "controller",
@@ -13796,7 +13797,7 @@
         },
         {
           "name": "DebugActionUsed",
-          "line": 666,
+          "line": 688,
           "kind": "struct",
           "field_names": [
             "player_id",
@@ -13807,7 +13808,7 @@
         },
         {
           "name": "DebugPermissionGranted",
-          "line": 672,
+          "line": 694,
           "kind": "struct",
           "field_names": [
             "host",
@@ -13818,7 +13819,7 @@
         },
         {
           "name": "DebugPermissionRevoked",
-          "line": 677,
+          "line": 699,
           "kind": "struct",
           "field_names": [
             "host",
@@ -17537,13 +17538,13 @@
     },
     "ManaAbilityResume": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1024,
+      "line": 1039,
       "doc": "",
       "cr_refs": [],
       "variants": [
         {
           "name": "Priority",
-          "line": 1025,
+          "line": 1040,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -17551,7 +17552,7 @@
         },
         {
           "name": "ManaPayment",
-          "line": 1026,
+          "line": 1041,
           "kind": "struct",
           "field_names": [
             "convoke_mode"
@@ -17561,7 +17562,7 @@
         },
         {
           "name": "UnlessPayment",
-          "line": 1030,
+          "line": 1045,
           "kind": "struct",
           "field_names": [
             "cost",
@@ -17578,7 +17579,7 @@
     },
     "ManaChoice": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1096,
+      "line": 1111,
       "doc": "CR 608.2d + CR 605.3b: Player's answer to a `ManaChoicePrompt`, carried by `GameAction::ChooseManaColor`. Shape mirrors the prompt variant.",
       "cr_refs": [
         "CR 605.3b",
@@ -17587,7 +17588,7 @@
       "variants": [
         {
           "name": "SingleColor",
-          "line": 1097,
+          "line": 1112,
           "kind": "tuple",
           "field_names": [],
           "doc": "",
@@ -17595,7 +17596,7 @@
         },
         {
           "name": "Combination",
-          "line": 1098,
+          "line": 1113,
           "kind": "tuple",
           "field_names": [],
           "doc": "",
@@ -17606,7 +17607,7 @@
     },
     "ManaChoiceContext": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1106,
+      "line": 1121,
       "doc": "CR 106.3 + CR 608.2d + CR 605.3b: What resumes after a mana-color choice. Mana abilities and resolving spell/ability effects share the same prompt and response action, but resume through different rules paths.",
       "cr_refs": [
         "CR 106.3",
@@ -17616,7 +17617,7 @@
       "variants": [
         {
           "name": "ManaAbility",
-          "line": 1107,
+          "line": 1122,
           "kind": "tuple",
           "field_names": [],
           "doc": "",
@@ -17624,7 +17625,7 @@
         },
         {
           "name": "ResolvingEffect",
-          "line": 1108,
+          "line": 1123,
           "kind": "tuple",
           "field_names": [],
           "doc": "",
@@ -17635,7 +17636,7 @@
     },
     "ManaChoicePrompt": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1079,
+      "line": 1094,
       "doc": "CR 608.2d + CR 605.3b: The shape of the prompt surfaced via `WaitingFor::ChooseManaColor`. Typed enum rather than a bool discriminator: the continuation logic is identical (validate choice → produce mana → resume), only the option set differs.",
       "cr_refs": [
         "CR 605.3b",
@@ -17644,7 +17645,7 @@
       "variants": [
         {
           "name": "SingleColor",
-          "line": 1082,
+          "line": 1097,
           "kind": "struct",
           "field_names": [
             "options"
@@ -17654,7 +17655,7 @@
         },
         {
           "name": "Combination",
-          "line": 1084,
+          "line": 1099,
           "kind": "struct",
           "field_names": [
             "options"
@@ -17664,7 +17665,7 @@
         },
         {
           "name": "AnyCombination",
-          "line": 1086,
+          "line": 1101,
           "kind": "struct",
           "field_names": [
             "count",
@@ -19180,7 +19181,7 @@
     },
     "OpeningHandBottomReason": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1381,
+      "line": 1396,
       "doc": "CR 103.5 / TL:R 906.6a: Why a player is bottoming cards from an opening hand before the normal mulligan-decision step.",
       "cr_refs": [
         "CR 103.5"
@@ -19188,7 +19189,7 @@
       "variants": [
         {
           "name": "TinyLeadersMultiCommander",
-          "line": 1382,
+          "line": 1397,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -19263,7 +19264,7 @@
     },
     "OutsideGameChoiceSource": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1331,
+      "line": 1346,
       "doc": "CR 400.11 + CR 406.3: A discriminated source for one outside-game selection. Sideboard entries (the wishboard pool) and face-up exile cards (the Karn / Coax wishboard return pool) are surfaced through one choice list so the caster picks across both pools in a single decision.  The size delta between the two variants (`Sideboard` carries a full `CardFace` so the UI can render the wishboard card without a sideboard lookup; `FaceUpExile` holds only an `ObjectId`) is intentional — `OutsideGameChoiceEntry` lists are short-lived (one entry per offered candidate while a single `WaitingFor::OutsideGameChoice` is active) and never collected by the million, so the asymmetry doesn't warrant boxing every CardFace through a heap indirection.",
       "cr_refs": [
         "CR 400.11",
@@ -19272,7 +19273,7 @@
       "variants": [
         {
           "name": "Sideboard",
-          "line": 1333,
+          "line": 1348,
           "kind": "struct",
           "field_names": [
             "sideboard_index",
@@ -19285,7 +19286,7 @@
         },
         {
           "name": "FaceUpExile",
-          "line": 1338,
+          "line": 1353,
           "kind": "struct",
           "field_names": [
             "object_id"
@@ -20110,7 +20111,7 @@
     },
     "PayableResource": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 2997,
+      "line": 3012,
       "doc": "CR 107.14 + CR 118.8: Resource that can be paid in a \"pay any amount of X\" prompt. Typed so the same `WaitingFor::PayAmountChoice` variant generalizes to future classes (energy, life, mana) without re-introducing boolean flags.",
       "cr_refs": [
         "CR 107.14",
@@ -20119,7 +20120,7 @@
       "variants": [
         {
           "name": "Energy",
-          "line": 2999,
+          "line": 3014,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 107.14: Pay any amount of `{E}` — removes N energy counters from the player.",
@@ -20129,7 +20130,7 @@
         },
         {
           "name": "ManaGeneric",
-          "line": 3001,
+          "line": 3016,
           "kind": "struct",
           "field_names": [
             "per_x"
@@ -20448,7 +20449,7 @@
     },
     "PileSide": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1468,
+      "line": 1483,
       "doc": "CR 700.3: Identifies one of the two piles produced by a `SeparateIntoPiles` partition. Typed rather than `bool` so the `GameAction::ChoosePile` payload and the engine handler share a self-documenting domain and the parser/AI cannot accidentally swap pile semantics. Pile A is the partitioner's chosen subset; pile B is `eligible \\ pile_a`.",
       "cr_refs": [
         "CR 700.3"
@@ -20456,7 +20457,7 @@
       "variants": [
         {
           "name": "A",
-          "line": 1469,
+          "line": 1484,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -20464,7 +20465,7 @@
         },
         {
           "name": "B",
-          "line": 1470,
+          "line": 1485,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -21049,7 +21050,7 @@
     },
     "ProductionOverride": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1062,
+      "line": 1077,
       "doc": "CR 605.3b + CR 106.1a: A pre-resolved choice that short-circuits the normal `ChooseManaColor` prompt. Auto-tap sets this when the cost-payment planner has already determined the exact mana to produce; manual activation leaves it `None` so the player is prompted.  Typed enum (never a bool): `SingleColor` covers the one-color-repeated variants (`AnyOneColor`, `ChoiceAmongExiledColors`), while `Combination` carries the full pre-chosen multi-mana sequence for fixed combinations (`ChoiceAmongCombinations`) and free per-slot choices (`AnyCombination`).",
       "cr_refs": [
         "CR 106.1a",
@@ -21058,7 +21059,7 @@
       "variants": [
         {
           "name": "SingleColor",
-          "line": 1066,
+          "line": 1081,
           "kind": "tuple",
           "field_names": [],
           "doc": "The caller picked a single color; every unit of mana the ability produces becomes this color (mirrors the pre-widening `Option<ManaType>` semantics).",
@@ -21066,7 +21067,7 @@
         },
         {
           "name": "Combination",
-          "line": 1069,
+          "line": 1084,
           "kind": "tuple",
           "field_names": [],
           "doc": "The caller picked one complete mana sequence; the ability produces exactly these mana types in order.",
@@ -23641,7 +23642,7 @@
     },
     "RetargetScope": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 3014,
+      "line": 3029,
       "doc": "CR 115.7: Scope of retargeting — single target, all targets, or forced.",
       "cr_refs": [
         "CR 115.7"
@@ -23649,7 +23650,7 @@
       "variants": [
         {
           "name": "Single",
-          "line": 3015,
+          "line": 3030,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -23657,7 +23658,7 @@
         },
         {
           "name": "All",
-          "line": 3016,
+          "line": 3031,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -23665,7 +23666,7 @@
         },
         {
           "name": "ForcedTo",
-          "line": 3017,
+          "line": 3032,
           "kind": "tuple",
           "field_names": [],
           "doc": "",
@@ -23780,7 +23781,7 @@
     },
     "ShardChoice": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1258,
+      "line": 1273,
       "doc": "CR 107.4f + CR 601.2f: The caster's resolved choice for one Phyrexian shard.",
       "cr_refs": [
         "CR 107.4f",
@@ -23789,7 +23790,7 @@
       "variants": [
         {
           "name": "PayMana",
-          "line": 1260,
+          "line": 1275,
           "kind": "unit",
           "field_names": [],
           "doc": "Pay one mana of the shard's color (or either component color for hybrid-Phyrexian).",
@@ -23797,7 +23798,7 @@
         },
         {
           "name": "PayLife",
-          "line": 1262,
+          "line": 1277,
           "kind": "unit",
           "field_names": [],
           "doc": "Pay 2 life.",
@@ -23808,7 +23809,7 @@
     },
     "ShardOptions": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1246,
+      "line": 1261,
       "doc": "CR 107.4f + CR 601.2h: Which legal payments a single Phyrexian shard offers to the caster. Computed from the mana pool state (Phyrexian color availability) combined with the caster's life total and CantLoseLife status (CR 118.3 + CR 119.8).  The engine pauses at `WaitingFor::PhyrexianPayment` whenever any shard would deduct life — both `ManaOrLife` (player explicitly picks mana vs life) and `LifeOnly` (life is the only remaining payment route; player confirms or cancels via `CancelCast`). Only `ManaOnly` shards auto-resolve without surfacing the prompt, since they have no life consequence (issue #704: silent life deduction violated CR 601.2h's right to refuse the cast).",
       "cr_refs": [
         "CR 107.4f",
@@ -23819,7 +23820,7 @@
       "variants": [
         {
           "name": "ManaOrLife",
-          "line": 1248,
+          "line": 1263,
           "kind": "unit",
           "field_names": [],
           "doc": "Both mana and 2 life are legal payments; player must choose.",
@@ -23827,7 +23828,7 @@
         },
         {
           "name": "ManaOnly",
-          "line": 1250,
+          "line": 1265,
           "kind": "unit",
           "field_names": [],
           "doc": "Only mana is legal (insufficient life or CR 119.8 CantLoseLife lock).",
@@ -23837,7 +23838,7 @@
         },
         {
           "name": "LifeOnly",
-          "line": 1252,
+          "line": 1267,
           "kind": "unit",
           "field_names": [],
           "doc": "Only 2 life is legal (no mana of the shard's color available, given restrictions).",
@@ -24173,13 +24174,13 @@
     },
     "StackEntryKind": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 3622,
+      "line": 3637,
       "doc": "",
       "cr_refs": [],
       "variants": [
         {
           "name": "Spell",
-          "line": 3623,
+          "line": 3638,
           "kind": "struct",
           "field_names": [
             "card_id",
@@ -24192,7 +24193,7 @@
         },
         {
           "name": "ActivatedAbility",
-          "line": 3637,
+          "line": 3652,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -24203,7 +24204,7 @@
         },
         {
           "name": "TriggeredAbility",
-          "line": 3641,
+          "line": 3656,
           "kind": "struct",
           "field_names": [
             "source_id",
@@ -24219,7 +24220,7 @@
         },
         {
           "name": "KeywordAction",
-          "line": 3677,
+          "line": 3692,
           "kind": "struct",
           "field_names": [
             "action"
@@ -26461,13 +26462,13 @@
     },
     "TargetSelectionConstraint": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1202,
+      "line": 1217,
       "doc": "",
       "cr_refs": [],
       "variants": [
         {
           "name": "DifferentTargetPlayers",
-          "line": 1203,
+          "line": 1218,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -26475,7 +26476,7 @@
         },
         {
           "name": "DifferentObjectControllers",
-          "line": 1205,
+          "line": 1220,
           "kind": "unit",
           "field_names": [],
           "doc": "CR 115.1 + CR 601.2c: Object targets must be controlled by different players.",
@@ -29763,7 +29764,7 @@
     },
     "VoteActor": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1443,
+      "line": 1458,
       "doc": "CR 101.4 + CR 608.2 (Battlebond friend-or-foe keyword action — no explicit CR section): The \"who acts\" semantic for a `WaitingFor::VoteChoice` step.  * `SubjectActs` — the player named by `player` casts the vote for   themselves. Classic Council's-dilemma (CR 701.38) is exclusively this   case: each voter acts on their own behalf and APNAP iteration changes   both subject and actor together. * `Delegated(actor)` — a fixed `actor` casts every vote on behalf of the   cycling subjects. The Battlebond friend-or-foe spell controller pins   themselves here so `player` cycles through every player in APNAP order   while authorization stays with the controller.  Stored on `WaitingFor::VoteChoice` instead of `Option<PlayerId>` so the \"is this delegated?\" discriminator is a named sum type with a meaningful pair of variant names, not a boolean-flavored optional. Callers route through [`VoteActor::resolve`] to get the authorized submitter without branching at every call site.",
       "cr_refs": [
         "CR 101.4",
@@ -29773,7 +29774,7 @@
       "variants": [
         {
           "name": "SubjectActs",
-          "line": 1444,
+          "line": 1459,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -29781,7 +29782,7 @@
         },
         {
           "name": "Delegated",
-          "line": 1445,
+          "line": 1460,
           "kind": "tuple",
           "field_names": [],
           "doc": "",
@@ -29835,13 +29836,13 @@
     },
     "WaitingFor": {
       "file": "crates/engine/src/types/game_state.rs",
-      "line": 1531,
+      "line": 1546,
       "doc": "",
       "cr_refs": [],
       "variants": [
         {
           "name": "Priority",
-          "line": 1532,
+          "line": 1547,
           "kind": "struct",
           "field_names": [
             "player"
@@ -29851,7 +29852,7 @@
         },
         {
           "name": "MulliganDecision",
-          "line": 1548,
+          "line": 1563,
           "kind": "struct",
           "field_names": [
             "pending",
@@ -29866,7 +29867,7 @@
         },
         {
           "name": "MulliganBottomCards",
-          "line": 1561,
+          "line": 1576,
           "kind": "struct",
           "field_names": [
             "pending"
@@ -29878,7 +29879,7 @@
         },
         {
           "name": "OpeningHandBottomCards",
-          "line": 1567,
+          "line": 1582,
           "kind": "struct",
           "field_names": [
             "pending",
@@ -29889,7 +29890,7 @@
         },
         {
           "name": "ManaPayment",
-          "line": 1571,
+          "line": 1586,
           "kind": "struct",
           "field_names": [
             "player",
@@ -29900,7 +29901,7 @@
         },
         {
           "name": "ChooseXValue",
-          "line": 1589,
+          "line": 1604,
           "kind": "struct",
           "field_names": [
             "player",
@@ -29917,7 +29918,7 @@
         },
         {
           "name": "TargetSelection",
-          "line": 1598,
+          "line": 1613,
           "kind": "struct",
           "field_names": [
             "player",
@@ -29930,7 +29931,7 @@
         },
         {
           "name": "DeclareAttackers",
-          "line": 1605,
+          "line": 1620,
           "kind": "struct",
           "field_names": [
             "player",
@@ -29942,7 +29943,7 @@
         },
         {
           "name": "DeclareBlockers",
-          "line": 1611,
+          "line": 1626,
           "kind": "struct",
           "field_names": [
             "player",
@@ -29955,7 +29956,7 @@
         },
         {
           "name": "UntapChoice",
-          "line": 1627,
+          "line": 1642,
           "kind": "struct",
           "field_names": [
             "player",
@@ -29969,7 +29970,7 @@
         },
         {
           "name": "ExertChoice",
-          "line": 1639,
+          "line": 1654,
           "kind": "struct",
           "field_names": [
             "player",
@@ -29984,7 +29985,7 @@
         },
         {
           "name": "GameOver",
-          "line": 1645,
+          "line": 1660,
           "kind": "struct",
           "field_names": [
             "winner"
@@ -29994,7 +29995,7 @@
         },
         {
           "name": "ReplacementChoice",
-          "line": 1648,
+          "line": 1663,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30006,7 +30007,7 @@
         },
         {
           "name": "OrderTriggers",
-          "line": 1661,
+          "line": 1676,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30021,7 +30022,7 @@
         },
         {
           "name": "CopyTargetChoice",
-          "line": 1667,
+          "line": 1682,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30036,7 +30037,7 @@
         },
         {
           "name": "ExploreChoice",
-          "line": 1677,
+          "line": 1692,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30052,7 +30053,7 @@
         },
         {
           "name": "ReturnAsAuraTarget",
-          "line": 1699,
+          "line": 1714,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30075,7 +30076,7 @@
         },
         {
           "name": "EquipTarget",
-          "line": 1716,
+          "line": 1731,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30087,7 +30088,7 @@
         },
         {
           "name": "CrewVehicle",
-          "line": 1722,
+          "line": 1737,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30102,7 +30103,7 @@
         },
         {
           "name": "StationTarget",
-          "line": 1733,
+          "line": 1748,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30116,7 +30117,7 @@
         },
         {
           "name": "SaddleMount",
-          "line": 1741,
+          "line": 1756,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30131,7 +30132,7 @@
         },
         {
           "name": "ScryChoice",
-          "line": 1749,
+          "line": 1764,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30142,7 +30143,7 @@
         },
         {
           "name": "DigChoice",
-          "line": 1754,
+          "line": 1769,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30162,7 +30163,7 @@
         },
         {
           "name": "SurveilChoice",
-          "line": 1778,
+          "line": 1793,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30173,7 +30174,7 @@
         },
         {
           "name": "RevealChoice",
-          "line": 1782,
+          "line": 1797,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30187,7 +30188,7 @@
         },
         {
           "name": "SearchChoice",
-          "line": 1801,
+          "line": 1816,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30203,7 +30204,7 @@
         },
         {
           "name": "SearchPartitionChoice",
-          "line": 1835,
+          "line": 1850,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30222,7 +30223,7 @@
         },
         {
           "name": "OutsideGameChoice",
-          "line": 1848,
+          "line": 1863,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30241,7 +30242,7 @@
         },
         {
           "name": "ChooseFromZoneChoice",
-          "line": 1862,
+          "line": 1877,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30258,7 +30259,7 @@
         },
         {
           "name": "ChooseOneOfBranch",
-          "line": 1874,
+          "line": 1889,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30277,7 +30278,7 @@
         },
         {
           "name": "ConniveDiscard",
-          "line": 1892,
+          "line": 1907,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30293,7 +30294,7 @@
         },
         {
           "name": "DiscardChoice",
-          "line": 1901,
+          "line": 1916,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30311,7 +30312,7 @@
         },
         {
           "name": "EffectZoneChoice",
-          "line": 1917,
+          "line": 1932,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30338,7 +30339,7 @@
         },
         {
           "name": "DrawnThisTurnTopdeckChoice",
-          "line": 1970,
+          "line": 1985,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30353,7 +30354,7 @@
         },
         {
           "name": "LearnChoice",
-          "line": 1980,
+          "line": 1995,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30366,7 +30367,7 @@
         },
         {
           "name": "ManifestDreadChoice",
-          "line": 1986,
+          "line": 2001,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30379,7 +30380,7 @@
         },
         {
           "name": "TriggerTargetSelection",
-          "line": 1990,
+          "line": 2005,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30394,7 +30395,7 @@
         },
         {
           "name": "BetweenGamesSideboard",
-          "line": 2004,
+          "line": 2019,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30406,7 +30407,7 @@
         },
         {
           "name": "BetweenGamesChoosePlayDraw",
-          "line": 2009,
+          "line": 2024,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30418,7 +30419,7 @@
         },
         {
           "name": "NamedChoice",
-          "line": 2015,
+          "line": 2030,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30431,7 +30432,7 @@
         },
         {
           "name": "DamageSourceChoice",
-          "line": 2025,
+          "line": 2040,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30445,7 +30446,7 @@
         },
         {
           "name": "ModeChoice",
-          "line": 2031,
+          "line": 2046,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30457,7 +30458,7 @@
         },
         {
           "name": "DiscardToHandSize",
-          "line": 2037,
+          "line": 2052,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30469,7 +30470,7 @@
         },
         {
           "name": "OptionalCostChoice",
-          "line": 2045,
+          "line": 2060,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30482,7 +30483,7 @@
         },
         {
           "name": "DefilerPayment",
-          "line": 2057,
+          "line": 2072,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30497,7 +30498,7 @@
         },
         {
           "name": "AdventureCastChoice",
-          "line": 2067,
+          "line": 2082,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30512,7 +30513,7 @@
         },
         {
           "name": "ModalFaceChoice",
-          "line": 2084,
+          "line": 2099,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30528,7 +30529,7 @@
         },
         {
           "name": "AlternativeCastChoice",
-          "line": 2107,
+          "line": 2122,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30554,7 +30555,7 @@
         },
         {
           "name": "CastingVariantChoice",
-          "line": 2139,
+          "line": 2154,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30570,7 +30571,7 @@
         },
         {
           "name": "ChoosePermanentTypeSlot",
-          "line": 2151,
+          "line": 2166,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30587,7 +30588,7 @@
         },
         {
           "name": "MultiTargetSelection",
-          "line": 2162,
+          "line": 2177,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30603,7 +30604,7 @@
         },
         {
           "name": "AbilityModeChoice",
-          "line": 2173,
+          "line": 2188,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30620,7 +30621,7 @@
         },
         {
           "name": "OptionalEffectChoice",
-          "line": 2196,
+          "line": 2211,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30635,7 +30636,7 @@
         },
         {
           "name": "PairChoice",
-          "line": 2207,
+          "line": 2222,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30650,7 +30651,7 @@
         },
         {
           "name": "TributeChoice",
-          "line": 2218,
+          "line": 2233,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30665,7 +30666,7 @@
         },
         {
           "name": "MiracleReveal",
-          "line": 2230,
+          "line": 2245,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30680,7 +30681,7 @@
         },
         {
           "name": "MiracleCastOffer",
-          "line": 2240,
+          "line": 2255,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30695,7 +30696,7 @@
         },
         {
           "name": "MadnessCastOffer",
-          "line": 2249,
+          "line": 2264,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30709,7 +30710,7 @@
         },
         {
           "name": "OpponentMayChoice",
-          "line": 2256,
+          "line": 2271,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30725,7 +30726,7 @@
         },
         {
           "name": "UnlessPayment",
-          "line": 2269,
+          "line": 2284,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30743,7 +30744,7 @@
         },
         {
           "name": "UnlessPaymentChooseCost",
-          "line": 2303,
+          "line": 2318,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30761,7 +30762,7 @@
         },
         {
           "name": "WardDiscardChoice",
-          "line": 2333,
+          "line": 2348,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30775,7 +30776,7 @@
         },
         {
           "name": "WardSacrificeChoice",
-          "line": 2341,
+          "line": 2356,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30790,7 +30791,7 @@
         },
         {
           "name": "UnlessBounceChoice",
-          "line": 2352,
+          "line": 2367,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30805,7 +30806,7 @@
         },
         {
           "name": "ChooseRingBearer",
-          "line": 2360,
+          "line": 2375,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30818,7 +30819,7 @@
         },
         {
           "name": "ChooseDungeon",
-          "line": 2365,
+          "line": 2380,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30831,7 +30832,7 @@
         },
         {
           "name": "ChooseDungeonRoom",
-          "line": 2370,
+          "line": 2385,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30846,7 +30847,7 @@
         },
         {
           "name": "DiscardForCost",
-          "line": 2378,
+          "line": 2393,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30861,7 +30862,7 @@
         },
         {
           "name": "SacrificeForCost",
-          "line": 2388,
+          "line": 2403,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30878,7 +30879,7 @@
         },
         {
           "name": "ReturnToHandForCost",
-          "line": 2401,
+          "line": 2416,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30894,7 +30895,7 @@
         },
         {
           "name": "ActivationCostOneOfChoice",
-          "line": 2411,
+          "line": 2426,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30908,7 +30909,7 @@
         },
         {
           "name": "RemoveCounterForCost",
-          "line": 2418,
+          "line": 2433,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30926,7 +30927,7 @@
         },
         {
           "name": "BlightChoice",
-          "line": 2428,
+          "line": 2443,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30939,7 +30940,7 @@
         },
         {
           "name": "TapCreaturesForSpellCost",
-          "line": 2439,
+          "line": 2454,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30955,7 +30956,7 @@
         },
         {
           "name": "BeholdForCost",
-          "line": 2447,
+          "line": 2462,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30969,7 +30970,7 @@
         },
         {
           "name": "TapCreaturesForManaAbility",
-          "line": 2455,
+          "line": 2470,
           "kind": "struct",
           "field_names": [
             "player",
@@ -30985,7 +30986,7 @@
         },
         {
           "name": "DiscardForManaAbility",
-          "line": 2462,
+          "line": 2477,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31001,7 +31002,7 @@
         },
         {
           "name": "ExileForManaAbility",
-          "line": 2472,
+          "line": 2487,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31019,7 +31020,7 @@
         },
         {
           "name": "SacrificeForManaAbility",
-          "line": 2484,
+          "line": 2499,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31036,7 +31037,7 @@
         },
         {
           "name": "PayManaAbilityMana",
-          "line": 2500,
+          "line": 2515,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31052,7 +31053,7 @@
         },
         {
           "name": "ChooseManaColor",
-          "line": 2510,
+          "line": 2525,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31068,7 +31069,7 @@
         },
         {
           "name": "ExileForCost",
-          "line": 2523,
+          "line": 2538,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31087,7 +31088,7 @@
         },
         {
           "name": "CollectEvidenceChoice",
-          "line": 2538,
+          "line": 2553,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31103,7 +31104,7 @@
         },
         {
           "name": "HarmonizeTapChoice",
-          "line": 2547,
+          "line": 2562,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31120,7 +31121,7 @@
         },
         {
           "name": "DiscoverChoice",
-          "line": 2555,
+          "line": 2570,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31134,7 +31135,7 @@
         },
         {
           "name": "RevealUntilKeptChoice",
-          "line": 2567,
+          "line": 2582,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31155,7 +31156,7 @@
         },
         {
           "name": "RepeatDecision",
-          "line": 2588,
+          "line": 2603,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31169,7 +31170,7 @@
         },
         {
           "name": "CascadeChoice",
-          "line": 2598,
+          "line": 2613,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31184,7 +31185,7 @@
         },
         {
           "name": "TopOrBottomChoice",
-          "line": 2614,
+          "line": 2629,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31197,7 +31198,7 @@
         },
         {
           "name": "ParadigmCastOffer",
-          "line": 2623,
+          "line": 2638,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31210,7 +31211,7 @@
         },
         {
           "name": "PopulateChoice",
-          "line": 2628,
+          "line": 2643,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31224,7 +31225,7 @@
         },
         {
           "name": "ClashCardPlacement",
-          "line": 2636,
+          "line": 2651,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31238,7 +31239,7 @@
         },
         {
           "name": "VoteChoice",
-          "line": 2647,
+          "line": 2662,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31260,7 +31261,7 @@
         },
         {
           "name": "SeparatePilesPartition",
-          "line": 2706,
+          "line": 2721,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31281,7 +31282,7 @@
         },
         {
           "name": "SeparatePilesChoice",
-          "line": 2736,
+          "line": 2751,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31298,7 +31299,7 @@
         },
         {
           "name": "CompanionReveal",
-          "line": 2751,
+          "line": 2766,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31311,7 +31312,7 @@
         },
         {
           "name": "ChooseLegend",
-          "line": 2758,
+          "line": 2773,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31325,7 +31326,7 @@
         },
         {
           "name": "CommanderZoneChoice",
-          "line": 2767,
+          "line": 2782,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31339,7 +31340,7 @@
         },
         {
           "name": "BattleProtectorChoice",
-          "line": 2778,
+          "line": 2793,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31355,7 +31356,7 @@
         },
         {
           "name": "ProliferateChoice",
-          "line": 2785,
+          "line": 2800,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31368,7 +31369,7 @@
         },
         {
           "name": "ChooseObjectsSelection",
-          "line": 2795,
+          "line": 2810,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31382,7 +31383,7 @@
         },
         {
           "name": "CategoryChoice",
-          "line": 2808,
+          "line": 2823,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31402,7 +31403,7 @@
         },
         {
           "name": "CopyRetarget",
-          "line": 2831,
+          "line": 2846,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31417,7 +31418,7 @@
         },
         {
           "name": "AssignCombatDamage",
-          "line": 2841,
+          "line": 2856,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31439,7 +31440,7 @@
         },
         {
           "name": "DistributeAmong",
-          "line": 2865,
+          "line": 2880,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31454,7 +31455,7 @@
         },
         {
           "name": "MoveCountersDistribution",
-          "line": 2873,
+          "line": 2888,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31472,7 +31473,7 @@
         },
         {
           "name": "PayAmountChoice",
-          "line": 2887,
+          "line": 2902,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31490,7 +31491,7 @@
         },
         {
           "name": "RetargetChoice",
-          "line": 2900,
+          "line": 2915,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31506,7 +31507,7 @@
         },
         {
           "name": "CombatTaxPayment",
-          "line": 2922,
+          "line": 2937,
           "kind": "struct",
           "field_names": [
             "player",
@@ -31526,7 +31527,7 @@
         },
         {
           "name": "PhyrexianPayment",
-          "line": 2940,
+          "line": 2955,
           "kind": "struct",
           "field_names": [
             "player",

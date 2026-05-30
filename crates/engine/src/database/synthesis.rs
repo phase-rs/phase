@@ -11537,7 +11537,7 @@ mod bloodthirst_runtime_tests {
 
         let mut state = setup_state_with_priority(PlayerId(0));
         // Record direct damage to opponent (PlayerId(1)) earlier this turn.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999), // any source; CR 702.54a doesn't care
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
@@ -11636,7 +11636,7 @@ mod bloodthirst_runtime_tests {
 
         let mut state = setup_state_with_priority(PlayerId(0));
         let source_id = create_damage_source(&mut state, PlayerId(0));
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id,
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
@@ -11675,7 +11675,7 @@ mod bloodthirst_runtime_tests {
 
         // After the permanent has entered, record damage to the opponent.
         // This must NOT retroactively add counters.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999),
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
@@ -11718,7 +11718,7 @@ mod bloodthirst_runtime_tests {
 
         // Damage dealt to the SECOND opponent (PlayerId(2)) — not the
         // primary opponent (PlayerId(1)). Bloodthirst still triggers.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999),
             source_controller: PlayerId(0),
             target: TargetRef::Player(third_player),
@@ -11752,7 +11752,7 @@ mod bloodthirst_runtime_tests {
 
         let mut state = setup_state_with_priority(PlayerId(0));
         // Condition satisfied: an opponent was damaged earlier this turn.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999),
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
@@ -11806,7 +11806,7 @@ mod bloodthirst_runtime_tests {
 
         let mut state = setup_state_with_priority(PlayerId(0));
         // Turn 1: opponent took damage.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999),
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),

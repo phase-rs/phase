@@ -6003,7 +6003,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.insert(ObjectId(20), victim);
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(10),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(20)),
@@ -6047,7 +6047,7 @@ mod tests {
         );
         victim.controller = PlayerId(0);
         state.objects.insert(ObjectId(20), victim);
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(10),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(20)),
@@ -6096,7 +6096,7 @@ mod tests {
         state.objects.insert(ObjectId(30), victim);
         state.objects.get_mut(&ObjectId(10)).unwrap().attached_to =
             Some(AttachTarget::Object(ObjectId(20)));
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(20),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(30)),
@@ -6159,7 +6159,7 @@ mod tests {
         state.objects.insert(victim_id, victim);
 
         // Record damage with the Dragon characteristics captured at damage time.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: dragon_id,
             source_controller: PlayerId(0),
             target: TargetRef::Object(victim_id),

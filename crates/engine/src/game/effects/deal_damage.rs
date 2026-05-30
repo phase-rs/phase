@@ -486,17 +486,12 @@ pub(crate) fn apply_damage_after_replacement(
             target_controller,
             amount: actual_amount,
             is_combat,
-            source_name: String::new(),
-            source_core_types: Vec::new(),
-            source_subtypes: Vec::new(),
-            source_supertypes: Vec::new(),
-            source_keywords: Vec::new(),
-            source_power: None,
-            source_toughness: None,
-            source_colors: Vec::new(),
-            source_mana_value: 0,
+            // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
+            // overwrites these when the source still exists; the empty/default
+            // tail (Default::default()) covers the source-already-gone case.
             source_controller_snapshot: ctx.controller,
             source_owner: ctx.controller,
+            ..Default::default()
         };
         if let Some(obj) = src {
             record.source_name = obj.name.clone();
@@ -510,8 +505,12 @@ pub(crate) fn apply_damage_after_replacement(
             record.source_mana_value = obj.mana_cost.mana_value();
             record.source_controller_snapshot = obj.controller;
             record.source_owner = obj.owner;
+            // CR 608.2i: snapshot the source's zone (Stack for a spell,
+            // Battlefield for a permanent) so a zone-discriminating look-back
+            // source filter evaluates against the zone as it was at damage time.
+            record.source_zone = obj.zone;
         }
-        state.damage_dealt_this_turn.push(record);
+        state.damage_dealt_this_turn.push_back(record);
     }
 
     // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to damage dealt.
