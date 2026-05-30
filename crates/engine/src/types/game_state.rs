@@ -4923,6 +4923,14 @@ impl GameState {
             .collect()
     }
 
+    /// CR 508.6: True if `attacker` declared one or more creatures attacking
+    /// `defender` this turn (reads the per-turn attacked-defenders ledger).
+    pub fn has_attacked(&self, attacker: PlayerId, defender: PlayerId) -> bool {
+        self.attacked_defenders_this_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
         let players: Vec<Player> = (0..player_count)

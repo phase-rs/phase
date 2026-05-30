@@ -67,13 +67,7 @@ fn players_for_filter(
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
-            .filter(|player| {
-                player.id != controller
-                    && state
-                        .attacked_defenders_this_turn
-                        .get(&controller)
-                        .is_some_and(|defenders| defenders.contains(&player.id))
-            })
+            .filter(|player| player.id != controller && state.has_attacked(controller, player.id))
             .map(|player| player.id)
             .collect(),
         PlayerFilter::All => state

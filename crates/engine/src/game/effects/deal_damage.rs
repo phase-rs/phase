@@ -899,11 +899,7 @@ fn collect_matching_players(
                     }
                     // CR 508.6: opponent this player attacked this turn.
                     PlayerFilter::OpponentAttackedThisTurn => {
-                        p.id != source_controller
-                            && state
-                                .attacked_defenders_this_turn
-                                .get(&source_controller)
-                                .is_some_and(|defenders| defenders.contains(&p.id))
+                        p.id != source_controller && state.has_attacked(source_controller, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -1070,11 +1066,7 @@ pub fn resolve_each_player(
                     }
                     // CR 508.6: opponent this player attacked this turn.
                     PlayerFilter::OpponentAttackedThisTurn => {
-                        p.id != ability.controller
-                            && state
-                                .attacked_defenders_this_turn
-                                .get(&ability.controller)
-                                .is_some_and(|defenders| defenders.contains(&p.id))
+                        p.id != ability.controller && state.has_attacked(ability.controller, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state

@@ -227,11 +227,7 @@ pub(crate) fn matches_player_scope(
                     }
                     // CR 508.6: opponent this player attacked this turn.
                     PlayerFilter::OpponentAttackedThisTurn => {
-                        p.id != controller
-                            && state
-                                .attacked_defenders_this_turn
-                                .get(&controller)
-                                .is_some_and(|defenders| defenders.contains(&p.id))
+                        p.id != controller && state.has_attacked(controller, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
