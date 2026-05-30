@@ -3926,6 +3926,27 @@ fn resolve_chain_body(
                         effect_context_object.as_ref(),
                     );
                     resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
+                } else if let Some(ref next) = sub.sub_ability {
+                    // CR 608.2c: A separate-sentence sibling after the gated sub is
+                    // the next independent instruction ("...in the order written")
+                    // and resolves regardless of the gate's failure (Wernog clause 3
+                    // "You investigate X times" after the per-opponent decline gate).
+                    // Mirrors the optional-decline handler's SequentialSibling check.
+                    // Predicate is `next.sub_link` (the sibling's link to the gated
+                    // sub), NOT `sub.sub_link` (the gated sub's link to its parent =
+                    // ContinuationStep).
+                    if next.sub_link == SubAbilityLink::SequentialSibling {
+                        let mut next_resolved = next.as_ref().clone();
+                        if next_resolved.targets.is_empty() && !ability.targets.is_empty() {
+                            next_resolved.targets = ability.targets.clone();
+                        }
+                        apply_parent_chain_context(
+                            &mut next_resolved,
+                            ability,
+                            effect_context_object.as_ref(),
+                        );
+                        resolve_ability_chain(state, &next_resolved, events, depth + 1)?;
+                    }
                 }
                 return Ok(());
             }

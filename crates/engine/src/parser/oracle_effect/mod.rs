@@ -13322,6 +13322,41 @@ pub(crate) fn parse_effect_chain_ir(
                     ],
                 };
                 (body, Some(condition), DeclineDispatch::SubjectOnly)
+            } else if let Some((_scope, body)) = strip_each_scope_who_doesnt_subject(&text) {
+                // CR 118.12 + CR 608.2d + CR 109.5: subject-only OPTIONAL-decline
+                // tail (Wernog, Rider's Chaplain: "each opponent may investigate.
+                // Each opponent who doesn't loses 1 life."). Inverse of the
+                // `who can't` arm above; the parent is OPTIONAL ("may"), so the
+                // gate is Not{effect_performed()} (the CR 118.12 "doesn't" branch
+                // reading OptionalEffectPerformed), NOT Not{current_scope_succeeded()}.
+                //
+                // CR 608.2e: retarget the preceding Sentence boundary → Then so
+                // the body lowers as a within-action ContinuationStep — a
+                // SequentialSibling would resolve even when the opponent ACCEPTS
+                // (the current bug). Do NOT stamp `player_scope`: the body inherits
+                // the parent's Opponent iteration via sub_ability attachment;
+                // stamping it would start a nested fan-out and reset the
+                // per-iteration flag. Parallel to the `who can't` arm above.
+                //
+                // Uses the BARE `Not{effect_performed()}` (no
+                // `And{Not, ScopedPlayerMatches}` wrapper) to match the proven
+                // prepositional `doesn't` arm (`strip_for_each_opponent_who_doesnt`)
+                // exactly and hit the runtime decline fast-path. Dropping the
+                // ScopedPlayerMatches conjunct is rules-correct for the same-scope
+                // Wernog class: parent and decline both iterate `Opponent`, so the
+                // scope conjunct would be a trivial no-op (CR 109.5).
+                if let Some(prev) = clauses.last_mut() {
+                    if prev.boundary == Some(ClauseBoundary::Sentence) {
+                        prev.boundary = Some(ClauseBoundary::Then);
+                    }
+                }
+                (
+                    body,
+                    Some(AbilityCondition::Not {
+                        condition: Box::new(AbilityCondition::effect_performed()),
+                    }),
+                    DeclineDispatch::SubjectOnly,
+                )
             } else {
                 (text, condition, DeclineDispatch::None)
             };
@@ -15917,6 +15952,18 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
         // a defensive escape.
         tag("who can't"),
         tag("who cannot"),
+        // CR 118.12 + CR 608.2c: Reserve the relative-clause shape "who
+        // doesn't" / "who does not" for the Wernog-class subject-only
+        // OPTIONAL-decline tail dispatcher (`strip_each_scope_who_doesnt_subject`
+        // in `parse_effect_clause_inner`). This guard runs AFTER the
+        // `strip_controls_permanent_clause` consumer above, which
+        // already absorbs the "who doesn't control <type>" static-board shape
+        // (Thornbow Archer → ControlsCount) because that combinator requires a
+        // "control " verb after "doesn't". So a bare "who doesn't loses 1 life"
+        // (no "control") reaches here and must survive as `(None, full_text)`
+        // for the dispatcher — ordering invariant, not a defensive escape.
+        tag("who doesn't"),
+        tag("who does not"),
     ))
     .parse(rest_lower.as_str())
     .is_ok()
@@ -15971,6 +16018,36 @@ fn strip_each_scope_who_cant_subject(text: &str) -> Option<(PlayerFilter, String
         ))
         .parse(i)?;
         let (i, _) = alt((tag("can't"), tag("cannot"))).parse(i)?;
+        let (i, _) = preceded(opt(tag(",")), opt(multispace1)).parse(i)?;
+        Ok((i, scope))
+    })
+    .map(|(scope, rest)| (scope, rest.to_string()))
+}
+
+/// CR 118.12 + CR 608.2d + CR 109.5: Strip a leading "each <scope> who doesn't /
+/// does not, <body>" subject-only OPTIONAL-decline tail. Returns the player scope
+/// and the body text. The body's recipient (e.g. LoseLife.target) must be
+/// rewritten Controller → ScopedPlayer by the caller; the body's condition must
+/// be stamped Not { effect_performed() } (the CR 118.12 "doesn't" branch reading
+/// OptionalEffectPerformed); the preceding clause's boundary must be retargeted
+/// Sentence → Then. Caller responsibilities — this combinator only does subject +
+/// scope detection.
+///
+/// PARALLEL INVERSE to `strip_each_scope_who_cant_subject` (subject-only +
+/// mandatory-impossible): this fills the subject-only + optional-decline cell of
+/// the 2×2 decline matrix (Wernog, Rider's Chaplain: "each opponent may
+/// investigate. Each opponent who doesn't loses 1 life."). Matches ONLY
+/// doesn't/does not; the can't/cannot arm stays with `strip_each_scope_who_cant_subject`.
+fn strip_each_scope_who_doesnt_subject(text: &str) -> Option<(PlayerFilter, String)> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |i| {
+        let (i, scope) = alt((
+            value(PlayerFilter::Opponent, tag("each other player who ")),
+            value(PlayerFilter::Opponent, tag("each opponent who ")),
+            value(PlayerFilter::All, tag("each player who ")),
+        ))
+        .parse(i)?;
+        let (i, _) = alt((tag("doesn't"), tag("does not"))).parse(i)?;
         let (i, _) = preceded(opt(tag(",")), opt(multispace1)).parse(i)?;
         Ok((i, scope))
     })
@@ -33703,6 +33780,98 @@ mod tests {
             ),
             other => panic!("expected Draw, got {other:?}"),
         }
+    }
+
+    /// CR 118.12 + CR 608.2d + CR 109.5: Wernog, Rider's Chaplain — subject-only
+    /// OPTIONAL-decline tail. "each opponent may investigate. Each opponent who
+    /// doesn't loses 1 life. You investigate." must lower clause 2 as a
+    /// `Not{effect_performed()}`-gated `ContinuationStep` sub-ability of the
+    /// optional `Effect::Investigate` (player_scope: Opponent), NOT as the
+    /// previous unconditional `SequentialSibling`. The body's life-loss recipient
+    /// is rebound `Controller → ScopedPlayer` by
+    /// `rebind_subject_only_body_recipient`.
+    #[test]
+    fn wernog_subject_only_who_doesnt_lowers_optional_decline_gate() {
+        use crate::types::ability::SubAbilityLink;
+        let def = parse_effect_chain(
+            "each opponent may investigate. Each opponent who doesn't loses 1 life. \
+             You investigate.",
+            AbilityKind::Spell,
+        );
+        // Root: each opponent's OPTIONAL investigate — player_scope: Opponent.
+        assert!(matches!(*def.effect, Effect::Investigate));
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the optional investigate iterates per opponent"
+        );
+        assert!(
+            def.optional,
+            "\"each opponent may investigate\" is optional"
+        );
+
+        // Clause 2 sub-ability: LoseLife, gated on Not{IfYouDo}, ContinuationStep.
+        let lose_life = def
+            .sub_ability
+            .as_ref()
+            .expect("the optional investigate chains to the decline body");
+        assert_eq!(
+            lose_life.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed())
+            }),
+            "the decline body runs only for an opponent who did NOT investigate"
+        );
+        assert_eq!(
+            lose_life.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "must be a within-action ContinuationStep, NOT the old unconditional \
+             SequentialSibling"
+        );
+        assert_eq!(
+            lose_life.player_scope, None,
+            "the body inherits player_scope from the parent — it does not set its own"
+        );
+        match &*lose_life.effect {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(*amount, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(
+                    target.as_ref(),
+                    Some(&TargetFilter::ScopedPlayer),
+                    "the declining opponent loses the life (rebound Controller → ScopedPlayer)"
+                );
+            }
+            other => panic!("expected LoseLife, got {other:?}"),
+        }
+    }
+
+    /// CR 109.4 + CR 109.5: Thornbow no-regression invariant. "each opponent who
+    /// doesn't control an Elf loses 1 life" is a STATIC-BOARD shape consumed by
+    /// `strip_controls_permanent_clause` (→ `ControlsCount`), NOT a decline gate.
+    /// The new `who doesn't` guard/dispatcher must NOT intercept it: the clause
+    /// must carry `condition: None` (no decline gate) and a `ControlsCount`-scoped
+    /// player_scope. Locks the ordering invariant — `strip_controls_permanent_clause`
+    /// runs BEFORE the `who doesn't` guard.
+    #[test]
+    fn each_opponent_who_doesnt_control_type_is_controls_count_not_decline_gate() {
+        let def = parse_effect_chain(
+            "each opponent who doesn't control an Elf loses 1 life",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::LoseLife { .. }),
+            "expected a LoseLife effect, got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.condition, None,
+            "a controls-count board filter is NOT a decline gate — condition must be None"
+        );
+        assert!(
+            matches!(def.player_scope, Some(PlayerFilter::ControlsCount { .. })),
+            "expected a ControlsCount-scoped subject, got {:?}",
+            def.player_scope
+        );
     }
 
     /// CR 101.3 + CR 608.2c + CR 118.12: Refurbished Familiar / Aclazotz,
